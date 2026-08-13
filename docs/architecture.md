@@ -115,6 +115,34 @@ Rules to formalize in `TB-G01`:
 - identical provider events must be idempotent;
 - session identity must not use PID as the canonical key.
 
+### TB-G01 core model
+
+The core is intentionally open to new providers: `AgentProvider` is a checked,
+opaque provider identifier rather than a closed enum. `AgentSessionKey` is the
+pair of that identifier and a non-empty native session ID. Provider adapters
+own any translation from their raw event types before they create these values.
+
+An `AgentEvidence` carries the session key, a checked provider-neutral source
+identity, authority, confidence, `SystemTime` observation time, a stable
+tie-break key, and a `StatePatch`. A patch field is exactly one of
+`Unchanged`, `Set(value)`, or `Clear`; clear resets only its own axis to the
+documented neutral value (`Ready`, `None`, or `Normal`).
+
+`BackendCapabilities` describes which of the three axes a backend may assert
+at which authority levels. It is a declaration, not proof of a state change.
+No backend implementation or provider event name is represented in the core.
+
+Reconciliation keeps one independently provenanced winner per axis. A
+candidate cannot replace a winner when it is older or lower authority. Among
+candidates that are neither older nor weaker, the winner is selected in this
+order: newer observation time, higher authority, higher confidence,
+lexicographically greater normalized source identity, lexicographically
+greater tie-break key, then the ordered patch action/value. The final patch
+ordering handles a malformed duplicate tie-break without relying on arrival or
+collection iteration order. The core is deterministic for a given normalized
+evidence stream; adapters remain responsible for providing stable timestamps
+and tie-break keys.
+
 ## 7. Session identity
 
 Canonical session identity is:
