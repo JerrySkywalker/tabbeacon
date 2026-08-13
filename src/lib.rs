@@ -1,4 +1,4 @@
-//! Provider-neutral core boundary for TabBeacon.
+//! Provider-neutral core boundary for `TabBeacon`.
 //!
 //! Runtime behavior is intentionally not implemented in the repository bootstrap.
 
