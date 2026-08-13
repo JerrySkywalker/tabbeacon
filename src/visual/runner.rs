@@ -199,10 +199,14 @@ fn observe_replay(
         );
         return Ok(());
     };
-    if target.window_has_keyboard_focus != Some(true) {
+    if !target
+        .activation
+        .as_ref()
+        .is_some_and(|activation| activation.set_foreground)
+    {
         observation.record_capture_blocked(
             &replay.case.fixture_name,
-            "owned Terminal window was not UIA-keyboard-focused; visibility-dependent capture refused",
+            "owned Terminal window did not confirm foreground activation; visibility-dependent capture refused",
         );
         return Ok(());
     }

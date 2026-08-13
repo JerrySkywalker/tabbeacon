@@ -106,10 +106,13 @@ image, or evidence-path types.
 
 The initial `uiautomation-gdi-visible-screen-rectangle` capture backend is
 explicitly visibility-dependent. It captures only the UIA bounds of the
-positively owned test window after the harness has established that it is
-foreground and unoccluded. Failure to establish that condition is a capture
-preflight blocker, not a color or animation failure. The capture trait permits
-a later empirically justified Windows replacement without changing oracle or
+positively owned test window after the harness has established foreground
+activation and target continuity. Windows Terminal may report keyboard focus
+on a child element rather than its top-level UIA Window, so that diagnostic is
+recorded but is not mistaken for a foreground failure. Failure to establish
+the owned foreground condition, or any capture error, is a capture-preflight
+blocker rather than a color or animation failure. The capture trait permits a
+later empirically justified Windows replacement without changing oracle or
 evidence semantics.
 
 ## Deterministic oracle rules

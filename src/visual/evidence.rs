@@ -145,8 +145,10 @@ pub struct UiaDump {
     pub tab_bounds: Option<ScreenRect>,
     /// Native window handle rendered as a diagnostic string, if available.
     pub native_window_handle: Option<String>,
-    /// Whether UIA reported that the owned window had keyboard focus when it
-    /// was resolved. A visibility-dependent capture requires this to be true.
+    /// Whether UIA reported keyboard focus on the top-level owned window when
+    /// it was resolved. Windows Terminal can retain focus in a child element,
+    /// so this is diagnostic only; capture relies on the recorded successful
+    /// owned-window foreground activation.
     pub window_has_keyboard_focus: Option<bool>,
     /// Result of the narrowly-scoped owned-window activation attempted before
     /// visibility-dependent capture. `None` means no activation was attempted.
