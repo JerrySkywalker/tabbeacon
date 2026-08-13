@@ -391,7 +391,7 @@ impl EvidenceWriter {
             tree.update(file.bytes.to_string().as_bytes());
             tree.update([0]);
             tree.update(file.sha256.as_bytes());
-            tree.update([b'\n']);
+            tree.update(*b"\n");
         }
         let integrity = EvidenceIntegrity {
             algorithm: "SHA-256".to_owned(),

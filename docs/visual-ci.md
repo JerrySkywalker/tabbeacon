@@ -39,6 +39,11 @@ Capture several frames over a bounded interval and crop the progress/icon ROI. `
 
 Sample a tab-background ROI that excludes text/icons and evaluate a tolerance range (RGB/HSV or equivalent). Do not require full-window golden-pixel equality.
 
+The harness maps UIA tab bounds into the owned `PrintWindow` frame using that
+specific window/frame dimension ratio. It does not apply a global DPI multiplier
+blindly: Windows may expose either logical or physical UIA bounds for a given
+Terminal window, while the captured pixel buffer is always frame-relative.
+
 ## Environment contract
 
 Real visual CI requires:
