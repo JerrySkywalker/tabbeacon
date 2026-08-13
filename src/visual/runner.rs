@@ -182,7 +182,10 @@ fn observe_replay(
             observation.record_target(writer, replay, &initial_target)?;
             observation.record_capture_blocked(
                 &replay.case.fixture_name,
-                format!("owned-window activation lost its UIA target: {error}"),
+                format!(
+                    "owned-window activation lost its UIA target after foreground={} focus={}: {error}",
+                    activation.set_foreground, activation.set_focus
+                ),
             );
             return Ok(());
         }

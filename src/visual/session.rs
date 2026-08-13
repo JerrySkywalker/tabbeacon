@@ -30,7 +30,11 @@ impl Default for TerminalTestSessionLauncher {
         Self {
             requested_size: (100, 30),
             requested_position: (80, 80),
-            hold_millis: 3_000,
+            // A capture needs initial UIA discovery, owned-window activation,
+            // focus re-observation, and three bounded frames. Keep the child
+            // alive long enough for that sequence while retaining deterministic
+            // reset-and-exit cleanup.
+            hold_millis: 10_000,
         }
     }
 }

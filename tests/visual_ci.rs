@@ -8,8 +8,8 @@ use tabbeacon::visual::{
     ColorClassification, ColorSemantic, ColorTolerance, DesktopPreflight, EvidenceBundle,
     EvidenceManifest, EvidenceWriter, FailureCategory, FixtureDriver, MachineEnvironment,
     PreflightBlocker, PreflightProbe, Rgb, RgbaFrame, Roi, ScreenRect, SessionKind, UiaDump,
-    VisualDisposition, VisualError, assess_animation, classify_color, color_metrics, frame_delta,
-    matches_baseline, select_background_roi,
+    VisualDisposition, VisualError, WindowActivation, assess_animation, classify_color,
+    color_metrics, frame_delta, matches_baseline, select_background_roi,
 };
 
 fn frame(width: u32, height: u32, color: Rgb) -> RgbaFrame {
@@ -289,7 +289,10 @@ fn evidence_writer_refuses_overwrite_and_writes_only_owned_bundle_files() {
             tab_bounds: None,
             native_window_handle: None,
             window_has_keyboard_focus: None,
-            activation: None,
+            activation: Some(WindowActivation {
+                set_foreground: true,
+                set_focus: true,
+            }),
             detail: "synthetic".to_owned(),
         },
         color_metrics: Vec::new(),
@@ -302,6 +305,9 @@ fn evidence_writer_refuses_overwrite_and_writes_only_owned_bundle_files() {
         .expect("writes lossless owned PNG");
     assert!(writer.directory().join("manifest.json").is_file());
     assert!(writer.directory().join("tab-working.png").is_file());
+    let uia = std::fs::read_to_string(writer.directory().join("uia.json"))
+        .expect("owned UIA evidence reads");
+    assert!(uia.contains("set_foreground"));
     assert!(matches!(
         EvidenceWriter::create(&root, "TB03TEST-0002"),
         Err(VisualError::EvidenceDirectoryExists(_))
