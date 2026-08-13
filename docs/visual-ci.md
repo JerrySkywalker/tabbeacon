@@ -120,11 +120,12 @@ changing oracle or evidence semantics.
 
 ## Deterministic oracle rules
 
-Color uses an interior target-tab ROI and records sample count, fixed-point RGB
-mean, median, and per-channel variance. Non-default G02 colors are classified
-by a documented Euclidean mean tolerance plus a variance limit that rejects
-text/icon/border-contaminated samples. Ready and reset are compared against a
-same-run default baseline rather than a theme-specific hard-coded RGB value.
+Color uses deterministic upper/lower interior tab-background strip candidates
+and records sample count, fixed-point RGB mean, median, and per-channel
+variance. Non-default G02 colors are classified by a documented Euclidean mean
+tolerance plus a variance limit that rejects text/icon/border-contaminated
+samples. Ready and reset are compared against a same-run default baseline
+rather than a theme-specific hard-coded RGB value.
 
 Animation compares only a bounded progress/icon ROI across successive frames.
 It records changed-pixel ratio and mean absolute RGB component delta. A pair

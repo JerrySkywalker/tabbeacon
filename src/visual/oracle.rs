@@ -229,9 +229,9 @@ pub fn matches_baseline(
             <= tolerance.max_mean_distance_milli_squared
 }
 
-/// Selects the least-dispersed deterministic interior tile from a target tab.
-/// This avoids assuming that one fixed coordinate is always free of title text,
-/// icons, close controls, or borders.
+/// Selects the least-dispersed deterministic interior background strip from a
+/// target tab. Upper and lower strips avoid title text, progress icons, close
+/// controls, and borders without assuming one fixed coordinate is always free.
 ///
 /// # Errors
 ///
@@ -242,23 +242,29 @@ pub fn select_background_roi(frame: &RgbaFrame, tab: Roi) -> VisualResult<(Roi, 
         .clip(frame.width(), frame.height())
         .ok_or(VisualError::InvalidRoi)?;
     let horizontal_margin = (tab.width / 10).max(1);
-    let vertical_margin = (tab.height / 5).max(1);
+    let vertical_margin = (tab.height / 8).max(1);
     let inner_width = tab.width.saturating_sub(horizontal_margin * 2);
-    let inner_height = tab.height.saturating_sub(vertical_margin * 2);
-    if inner_width < 4 || inner_height == 0 {
+    let strip_height = (tab.height / 8).clamp(1, 16);
+    if inner_width < 4 || tab.height <= vertical_margin.saturating_add(strip_height) {
         return Err(VisualError::InvalidRoi);
     }
 
     let tile_width = (inner_width / 4).max(1);
     let mut candidates = Vec::new();
-    for column in 0..4_u32 {
-        let x = tab.x + horizontal_margin + column * tile_width;
-        let right = (x + tile_width).min(tab.x + tab.width - horizontal_margin);
-        if right > x {
-            let roi = Roi::new(x, tab.y + vertical_margin, right - x, inner_height);
-            let metrics = color_metrics(frame, roi)?;
-            let score = metrics.variance.red + metrics.variance.green + metrics.variance.blue;
-            candidates.push((score, roi, metrics));
+    let rows = [
+        tab.y + vertical_margin,
+        tab.y + tab.height - vertical_margin - strip_height,
+    ];
+    for y in rows {
+        for column in 0..4_u32 {
+            let x = tab.x + horizontal_margin + column * tile_width;
+            let right = (x + tile_width).min(tab.x + tab.width - horizontal_margin);
+            if right > x {
+                let roi = Roi::new(x, y, right - x, strip_height);
+                let metrics = color_metrics(frame, roi)?;
+                let score = metrics.variance.red + metrics.variance.green + metrics.variance.blue;
+                candidates.push((score, roi, metrics));
+            }
         }
     }
     candidates
