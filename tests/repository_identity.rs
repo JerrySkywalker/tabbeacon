@@ -165,7 +165,10 @@ fn ordinary_repository_resolves_from_nested_cwd_without_project_writes() {
     );
     assert_eq!(resolved.display_name.as_str(), "tabbeacon");
     assert_eq!(resolved.alias.as_str(), "T");
-    assert_eq!(resolved.worktree_root, repo);
+    assert_eq!(
+        fs::canonicalize(&resolved.worktree_root).expect("discovered root canonicalizes"),
+        fs::canonicalize(&repo).expect("expected root canonicalizes")
+    );
     assert!(git(&resolved.worktree_root, &["status", "--porcelain"]).is_empty());
 }
 
