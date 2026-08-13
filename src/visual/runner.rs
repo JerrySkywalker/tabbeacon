@@ -290,12 +290,12 @@ impl Observation {
     fn new(preflight: DesktopPreflight, exact_head: bool) -> Self {
         let mut lanes = LaneDisposition::default();
         lanes.observe_preflight(preflight.disposition);
-        let assertions = vec![AssertionResult {
-            kind: AssertionKind::Preflight,
-            disposition: preflight.disposition,
-            fixture: None,
-            detail: preflight.detail.clone(),
-        }];
+        let assertions = vec![AssertionResult::new(
+            AssertionKind::Preflight,
+            preflight.disposition,
+            None,
+            preflight.detail.clone(),
+        )];
         Self {
             assertions,
             preflight,
@@ -308,38 +308,38 @@ impl Observation {
     }
 
     fn record_exact_head(&mut self, expected: &str, checked_out: &str, exact: bool) {
-        self.assertions.push(AssertionResult {
-            kind: AssertionKind::ExactHead,
-            disposition: if exact {
+        self.assertions.push(AssertionResult::new(
+            AssertionKind::ExactHead,
+            if exact {
                 VisualDisposition::Pass
             } else {
                 VisualDisposition::Fail
             },
-            fixture: None,
-            detail: format!("expected={expected} checked_out={checked_out}"),
-        });
+            None,
+            format!("expected={expected} checked_out={checked_out}"),
+        ));
     }
 
     fn record_uia_blocked(&mut self, fixture: &str, detail: String) {
         self.saw_non_pass = true;
         self.lanes.observe_uia(VisualDisposition::Blocked);
-        self.assertions.push(AssertionResult {
-            kind: AssertionKind::UiaTarget,
-            disposition: VisualDisposition::Blocked,
-            fixture: Some(fixture.to_owned()),
+        self.assertions.push(AssertionResult::new(
+            AssertionKind::UiaTarget,
+            VisualDisposition::Blocked,
+            Some(fixture.to_owned()),
             detail,
-        });
+        ));
     }
 
     fn record_uia_failure(&mut self, fixture: &str, detail: String) {
         self.saw_non_pass = true;
         self.lanes.observe_uia(VisualDisposition::Fail);
-        self.assertions.push(AssertionResult {
-            kind: AssertionKind::UiaTarget,
-            disposition: VisualDisposition::Fail,
-            fixture: Some(fixture.to_owned()),
+        self.assertions.push(AssertionResult::new(
+            AssertionKind::UiaTarget,
+            VisualDisposition::Fail,
+            Some(fixture.to_owned()),
             detail,
-        });
+        ));
     }
 
     fn record_target(
@@ -351,12 +351,12 @@ impl Observation {
         self.uia = target.clone();
         writer.write_json_document(&format!("uia-{}.json", replay.case.fixture_name), target)?;
         self.lanes.observe_uia(VisualDisposition::Pass);
-        self.assertions.push(AssertionResult {
-            kind: AssertionKind::UiaTarget,
-            disposition: VisualDisposition::Pass,
-            fixture: Some(replay.case.fixture_name.clone()),
-            detail: "owned Windows Terminal window and exact tab resolved through UIA".to_owned(),
-        });
+        self.assertions.push(AssertionResult::new(
+            AssertionKind::UiaTarget,
+            VisualDisposition::Pass,
+            Some(replay.case.fixture_name.clone()),
+            "owned Windows Terminal window and exact tab resolved through UIA".to_owned(),
+        ));
         let disposition = if target.tab_name == replay.case.expected_title {
             VisualDisposition::Pass
         } else {
@@ -364,15 +364,15 @@ impl Observation {
         };
         self.saw_non_pass |= !matches!(disposition, VisualDisposition::Pass);
         self.lanes.observe_title(disposition);
-        self.assertions.push(AssertionResult {
-            kind: AssertionKind::Title,
+        self.assertions.push(AssertionResult::new(
+            AssertionKind::Title,
             disposition,
-            fixture: Some(replay.case.fixture_name.clone()),
-            detail: format!(
+            Some(replay.case.fixture_name.clone()),
+            format!(
                 "expected_title={}; uia_title={}",
                 replay.case.expected_title, target.tab_name
             ),
-        });
+        ));
         Ok(())
     }
 
@@ -386,12 +386,12 @@ impl Observation {
 
     fn record_capture_pass(&mut self, fixture: &str, backend: &str) {
         self.lanes.observe_capture(VisualDisposition::Pass);
-        self.assertions.push(AssertionResult {
-            kind: AssertionKind::Capture,
-            disposition: VisualDisposition::Pass,
-            fixture: Some(fixture.to_owned()),
-            detail: backend.to_owned(),
-        });
+        self.assertions.push(AssertionResult::new(
+            AssertionKind::Capture,
+            VisualDisposition::Pass,
+            Some(fixture.to_owned()),
+            backend.to_owned(),
+        ));
     }
 
     fn record_color(&mut self, replay: &super::FixtureReplay, roi: Roi, metrics: ColorMetrics) {
@@ -408,12 +408,12 @@ impl Observation {
         }
         self.saw_non_pass |= !matches!(disposition, VisualDisposition::Pass);
         self.lanes.observe_color(disposition);
-        self.assertions.push(AssertionResult {
-            kind: AssertionKind::Color,
+        self.assertions.push(AssertionResult::new(
+            AssertionKind::Color,
             disposition,
-            fixture: Some(replay.case.fixture_name.clone()),
-            detail: format!("roi={roi:?}; metrics={metrics:?}"),
-        });
+            Some(replay.case.fixture_name.clone()),
+            format!("roi={roi:?}; metrics={metrics:?}"),
+        ));
         self.metrics
             .push((replay.case.fixture_name.clone(), metrics));
     }
@@ -432,12 +432,12 @@ impl Observation {
         };
         self.saw_non_pass |= !matches!(disposition, VisualDisposition::Pass);
         self.lanes.observe_animation(disposition);
-        self.assertions.push(AssertionResult {
-            kind: AssertionKind::Animation,
+        self.assertions.push(AssertionResult::new(
+            AssertionKind::Animation,
             disposition,
-            fixture: Some(fixture.to_owned()),
-            detail: format!("outcome={outcome:?}; deltas={deltas:?}"),
-        });
+            Some(fixture.to_owned()),
+            format!("outcome={outcome:?}; deltas={deltas:?}"),
+        ));
     }
 
     fn finalize_preflight(&mut self, base_probe: PreflightProbe) {
@@ -452,6 +452,18 @@ impl Observation {
             _ => self.preflight.clone(),
         };
         self.lanes.preflight = Some(self.preflight.disposition);
+        if let Some(assertion) = self
+            .assertions
+            .iter_mut()
+            .find(|assertion| matches!(assertion.kind, AssertionKind::Preflight))
+        {
+            *assertion = AssertionResult::new(
+                AssertionKind::Preflight,
+                self.preflight.disposition,
+                None,
+                self.preflight.detail.clone(),
+            );
+        }
     }
 
     fn disposition(&self, exact_head: bool) -> VisualDisposition {
@@ -595,12 +607,12 @@ fn capture_blocked_preflight() -> DesktopPreflight {
 }
 
 fn capture_blocked_assertion(fixture: &str, detail: &str) -> AssertionResult {
-    AssertionResult {
-        kind: AssertionKind::Capture,
-        disposition: VisualDisposition::Blocked,
-        fixture: Some(fixture.to_owned()),
-        detail: detail.to_owned(),
-    }
+    AssertionResult::new(
+        AssertionKind::Capture,
+        VisualDisposition::Blocked,
+        Some(fixture.to_owned()),
+        detail.to_owned(),
+    )
 }
 
 fn empty_uia_dump() -> UiaDump {

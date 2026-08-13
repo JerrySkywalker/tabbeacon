@@ -35,6 +35,24 @@ pub enum AssertionKind {
     Cleanup,
 }
 
+/// Root failure classification required by the repository quality gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FailureCategory {
+    /// The presentation behavior itself disagreed with the contract.
+    ProductCodeDefect,
+    /// The visual test/harness contract could not exercise its own target.
+    TestDefect,
+    /// Desktop, runner, UIA, or capture prerequisites were unavailable.
+    RunnerEnvironmentDefect,
+    /// An external service or dependency prevented observation.
+    ExternalDependency,
+    /// Expected, checked-out, or evidence SHA identity was inconsistent.
+    EvidenceMismatch,
+    /// Observation was insufficient to classify more specifically.
+    Unproven,
+}
+
 /// One machine-verifiable assertion outcome.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssertionResult {
@@ -42,10 +60,53 @@ pub struct AssertionResult {
     pub kind: AssertionKind,
     /// Explicit evidence disposition.
     pub disposition: VisualDisposition,
+    /// Failure classification when the disposition is not `PASS`.
+    pub failure_category: Option<FailureCategory>,
     /// Stable fixture name, if applicable.
     pub fixture: Option<String>,
     /// Non-sensitive diagnostic detail.
     pub detail: String,
+}
+
+impl AssertionResult {
+    /// Creates an assertion with deterministic repository-gate classification.
+    #[must_use]
+    pub fn new(
+        kind: AssertionKind,
+        disposition: VisualDisposition,
+        fixture: Option<String>,
+        detail: String,
+    ) -> Self {
+        Self {
+            kind,
+            disposition,
+            failure_category: failure_category(kind, disposition),
+            fixture,
+            detail,
+        }
+    }
+}
+
+fn failure_category(
+    kind: AssertionKind,
+    disposition: VisualDisposition,
+) -> Option<FailureCategory> {
+    if matches!(disposition, VisualDisposition::Pass) {
+        return None;
+    }
+    if matches!(disposition, VisualDisposition::Unproven) {
+        return Some(FailureCategory::Unproven);
+    }
+    match kind {
+        AssertionKind::ExactHead => Some(FailureCategory::EvidenceMismatch),
+        AssertionKind::Preflight | AssertionKind::UiaTarget | AssertionKind::Capture => {
+            Some(FailureCategory::RunnerEnvironmentDefect)
+        }
+        AssertionKind::Title | AssertionKind::Color | AssertionKind::Animation => {
+            Some(FailureCategory::ProductCodeDefect)
+        }
+        AssertionKind::Cleanup => Some(FailureCategory::TestDefect),
+    }
 }
 
 /// Sanitized environment information that may be retained in visual evidence.

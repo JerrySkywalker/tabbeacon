@@ -79,6 +79,12 @@ A capture failure is not a product-color failure. Distinguish:
 
 If the environment cannot provide trustworthy pixels, the visual result is `BLOCKED`/`UNPROVEN`, not PASS.
 
+Each structured assertion also carries a failure category where applicable:
+`PRODUCT_CODE_DEFECT`, `TEST_DEFECT`, `RUNNER_ENVIRONMENT_DEFECT`,
+`EXTERNAL_DEPENDENCY`, `EVIDENCE_MISMATCH`, or `UNPROVEN`. Exact-head
+disagreement is always `EVIDENCE_MISMATCH`; desktop, UIA target, and capture
+preconditions are `RUNNER_ENVIRONMENT_DEFECT`, not product color failures.
+
 ## TB-G03 implementation boundary
 
 The visual infrastructure is above the G02 presentation system under test:

@@ -22,6 +22,12 @@ After checkout it asserts the checked-out Git `HEAD` is exactly
 `expected_sha`. The visual harness independently refuses a visual PASS unless
 its expected, checked-out, and visual evidence heads are equal.
 
+The implementation is `.github/workflows/visual-ci.yml`. It has only a
+`workflow_dispatch` trigger, requires the dispatch ref to be `main`, requires
+the repository owner as actor, validates the same-repository
+`refs/heads/<head_branch>` through `git ls-remote`, then performs an exact-SHA
+checkout. It never has a `pull_request` or `pull_request_target` trigger.
+
 ## Rejected designs
 
 - No self-hosted visual job runs on ordinary `pull_request` events.

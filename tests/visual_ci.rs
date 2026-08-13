@@ -6,9 +6,10 @@ use std::{
 use tabbeacon::visual::{
     AnimationOutcome, AnimationThreshold, AssertionKind, AssertionResult, Availability,
     ColorClassification, ColorSemantic, ColorTolerance, DesktopPreflight, EvidenceBundle,
-    EvidenceManifest, EvidenceWriter, MachineEnvironment, PreflightBlocker, PreflightProbe, Rgb,
-    RgbaFrame, Roi, ScreenRect, SessionKind, UiaDump, VisualDisposition, VisualError,
-    assess_animation, classify_color, color_metrics, frame_delta, matches_baseline,
+    EvidenceManifest, EvidenceWriter, FailureCategory, FixtureDriver, MachineEnvironment,
+    PreflightBlocker, PreflightProbe, Rgb, RgbaFrame, Roi, ScreenRect, SessionKind, UiaDump,
+    VisualDisposition, VisualError, assess_animation, classify_color, color_metrics, frame_delta,
+    matches_baseline, select_background_roi,
 };
 
 fn frame(width: u32, height: u32, color: Rgb) -> RgbaFrame {
@@ -118,6 +119,28 @@ fn ready_and_reset_use_same_run_default_baseline() {
 }
 
 #[test]
+fn background_roi_selection_avoids_a_high_variance_text_like_tile() {
+    let green = Rgb::new(0x2e, 0xcc, 0x71);
+    let mut pixels = frame(12, 4, green).pixels().to_vec();
+    for y in 1..3 {
+        let offset = usize::try_from((y * 12 + 1) * 4).expect("small synthetic offset");
+        pixels[offset..offset + 3].copy_from_slice(&[255, 255, 255]);
+    }
+    let source = RgbaFrame::new(12, 4, pixels).expect("valid synthetic frame");
+    let (roi, metrics) = select_background_roi(&source, Roi::new(0, 0, 12, 4))
+        .expect("an interior background tile is available");
+    assert!(roi.x > 1);
+    assert_eq!(
+        metrics.variance,
+        tabbeacon::visual::RgbVariance {
+            red: 0,
+            green: 0,
+            blue: 0
+        }
+    );
+}
+
+#[test]
 fn animation_oracle_accepts_substantial_roi_motion() {
     let first = frame(10, 4, Rgb::new(0, 0, 0));
     let mut pixels = first.pixels().to_vec();
@@ -190,6 +213,30 @@ fn preflight_distinguishes_environment_blockers_from_assertions() {
 }
 
 #[test]
+fn assertion_results_classify_exact_head_and_capture_failures() {
+    let mismatch = AssertionResult::new(
+        AssertionKind::ExactHead,
+        VisualDisposition::Fail,
+        None,
+        "wrong SHA".to_owned(),
+    );
+    assert_eq!(
+        mismatch.failure_category,
+        Some(FailureCategory::EvidenceMismatch)
+    );
+    let capture = AssertionResult::new(
+        AssertionKind::Capture,
+        VisualDisposition::Blocked,
+        Some("working".to_owned()),
+        "window occluded".to_owned(),
+    );
+    assert_eq!(
+        capture.failure_category,
+        Some(FailureCategory::RunnerEnvironmentDefect)
+    );
+}
+
+#[test]
 fn evidence_manifest_serializes_and_requires_exact_visual_head_for_pass() {
     let pass_manifest = manifest(VisualDisposition::Pass, Some(&"a".repeat(40)));
     pass_manifest
@@ -202,6 +249,16 @@ fn evidence_manifest_serializes_and_requires_exact_visual_head_for_pass() {
     let mismatch = manifest(VisualDisposition::Pass, Some(&"b".repeat(40)));
     assert!(matches!(
         mismatch.validate_exact_heads_for_pass(),
+        Err(VisualError::ExactHeadMismatch { .. })
+    ));
+    let invalid_sha = EvidenceManifest {
+        expected_head: "not-a-sha".to_owned(),
+        checked_out_head: "not-a-sha".to_owned(),
+        visual_head: Some("not-a-sha".to_owned()),
+        ..manifest(VisualDisposition::Pass, Some(&"a".repeat(40)))
+    };
+    assert!(matches!(
+        invalid_sha.validate_exact_heads_for_pass(),
         Err(VisualError::ExactHeadMismatch { .. })
     ));
 }
@@ -218,12 +275,12 @@ fn evidence_writer_refuses_overwrite_and_writes_only_owned_bundle_files() {
     let writer = EvidenceWriter::create(&root, "TB03TEST-0002").expect("fresh owned evidence dir");
     let bundle = EvidenceBundle {
         manifest: manifest(VisualDisposition::Blocked, None),
-        assertions: vec![AssertionResult {
-            kind: AssertionKind::Capture,
-            disposition: VisualDisposition::Blocked,
-            fixture: Some("working".to_owned()),
-            detail: "synthetic capture blocker".to_owned(),
-        }],
+        assertions: vec![AssertionResult::new(
+            AssertionKind::Capture,
+            VisualDisposition::Blocked,
+            Some("working".to_owned()),
+            "synthetic capture blocker".to_owned(),
+        )],
         environment: environment(),
         uia: UiaDump {
             window_name: "owned-window".to_owned(),
@@ -248,4 +305,25 @@ fn evidence_writer_refuses_overwrite_and_writes_only_owned_bundle_files() {
         EvidenceWriter::create(&root, "TB03TEST-0002"),
         Err(VisualError::EvidenceDirectoryExists(_))
     ));
+    assert!(matches!(
+        writer.write_png("tab-working", &frame(2, 2, Rgb::new(1, 2, 3))),
+        Err(VisualError::EvidenceArtifactExists(_))
+    ));
+}
+
+#[test]
+fn fixture_driver_uses_a_unique_title_without_changing_g02_semantics() {
+    let driver = FixtureDriver::default();
+    let cases = driver.all_cases("TB03TEST-unique").expect("safe run token");
+    assert_eq!(cases.len(), 10);
+    assert!(cases.iter().all(|case| {
+        case.case
+            .expected_title
+            .starts_with("TB03-TB03TEST-unique-")
+    }));
+    assert!(cases.iter().all(|case| !case.vt_bytes.is_empty()));
+    let reset = driver
+        .reset("TB03TEST-unique")
+        .expect("reset fixture exists");
+    assert_eq!(reset.case.fixture_name, "reset");
 }

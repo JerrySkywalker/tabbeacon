@@ -64,7 +64,7 @@ impl TerminalTestSessionLauncher {
         let size = format!("{},{}", self.requested_size.0, self.requested_size.1);
         Command::new("wt.exe")
             .args(["-w", &window_name, "--pos", &position, "--size", &size])
-            .args(["new-tab", "--title", &replay.case.expected_title])
+            .arg("new-tab")
             .arg(fixture_executable)
             .args([
                 "emit",

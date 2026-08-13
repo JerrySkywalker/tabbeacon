@@ -246,8 +246,10 @@ EvidenceWriter
 
 The G03 fixture child renders the existing typed G02 action through the
 production renderer, holds the visual state for a bounded interval, then emits
-the G02 reset action before it exits. The launcher neither controls existing
-Terminal windows nor closes a process it cannot prove it owns.
+the G02 reset action before it exits. The launcher intentionally does not pass
+a Windows Terminal `--title` override: UIA can resolve the unique token only
+after the production G02 VT bytes set it. The launcher neither controls
+existing Terminal windows nor closes a process it cannot prove it owns.
 
 UIA supplies the semantic tab-title assertion and target geometry. The first
 capture backend uses a safe Windows GDI screenshot adapter over the UIA-owned

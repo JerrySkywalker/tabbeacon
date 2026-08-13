@@ -14,14 +14,14 @@ mod preflight;
 pub use error::{VisualError, VisualResult};
 pub use evidence::{
     AssertionKind, AssertionResult, EvidenceBundle, EvidenceManifest, EvidenceWriter,
-    MachineEnvironment, UiaDump,
+    FailureCategory, MachineEnvironment, UiaDump,
 };
 pub use fixture::{FixtureDriver, FixtureReplay, VisualTestCase};
 pub use image::{Rgb, RgbaFrame, Roi, ScreenRect};
 pub use oracle::{
     AnimationOutcome, AnimationThreshold, ColorClassification, ColorMetrics, ColorSemantic,
-    ColorTolerance, FrameDeltaMetrics, assess_animation, classify_color, color_metrics,
-    frame_delta, matches_baseline, select_background_roi,
+    ColorTolerance, FrameDeltaMetrics, RgbMilli, RgbVariance, assess_animation, classify_color,
+    color_metrics, frame_delta, matches_baseline, select_background_roi,
 };
 pub use preflight::{
     Availability, DesktopPreflight, PreflightBlocker, PreflightProbe, SessionKind,

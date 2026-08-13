@@ -1,0 +1,119 @@
+name: Visual CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact 40-character candidate SHA in this repository
+        required: true
+        type: string
+      head_branch:
+        description: In-repository branch whose refs/heads value must equal expected_sha
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  windows-terminal-visual:
+    name: Windows Terminal / Interactive / Exact Head
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.actor == github.repository_owner
+    runs-on: [self-hosted, windows, tabbeacon-visual]
+    timeout-minutes: 30
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      HEAD_BRANCH: ${{ inputs.head_branch }}
+    steps:
+      - name: Admit trusted in-repository candidate ref
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            throw "Trusted visual workflow must be sourced from main; ref=$env:GITHUB_REF"
+          }
+          if ($env:GITHUB_ACTOR -ne $env:GITHUB_REPOSITORY_OWNER) {
+            throw "Visual workflow actor is not the repository owner: $env:GITHUB_ACTOR"
+          }
+          if ($env:EXPECTED_SHA -notmatch '^[0-9a-f]{40}$') {
+            throw "expected_sha must be a lowercase 40-character SHA: $env:EXPECTED_SHA"
+          }
+          if (
+            $env:HEAD_BRANCH -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$' -or
+            $env:HEAD_BRANCH.Contains('..') -or
+            $env:HEAD_BRANCH.EndsWith('/') -or
+            $env:HEAD_BRANCH.StartsWith('-')
+          ) {
+            throw "Unsafe head_branch input: $env:HEAD_BRANCH"
+          }
+          $remote = "https://github.com/$env:GITHUB_REPOSITORY.git"
+          $lines = @(& git ls-remote --exit-code $remote "refs/heads/$env:HEAD_BRANCH")
+          if ($LASTEXITCODE -ne 0 -or $lines.Count -ne 1) {
+            throw "Trusted in-repository branch ref was not found exactly once: refs/heads/$env:HEAD_BRANCH"
+          }
+          $parts = $lines[0] -split "`t", 2
+          if ($parts.Count -ne 2 -or $parts[0] -ne $env:EXPECTED_SHA -or $parts[1] -ne "refs/heads/$env:HEAD_BRANCH") {
+            throw "Candidate ref mismatch: expected=$env:EXPECTED_SHA observed=$($lines[0])"
+          }
+          "TRUSTED_REF=PASS expected_sha=$env:EXPECTED_SHA head_branch=$env:HEAD_BRANCH"
+
+      - name: Checkout admitted exact candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Assert exact checkout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:EXPECTED_SHA) {
+            throw "Exact-head mismatch after checkout: expected=$env:EXPECTED_SHA actual=$actual"
+          }
+          "CHECKED_OUT_HEAD=$actual"
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+          rustup override set 1.97.1
+          rustc --version
+          cargo --version
+
+      - name: Run classified visual harness
+        id: visual
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $runId = "GHA-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          pwsh -NoProfile -File ./scripts/visual/run-trusted-visual.ps1 `
+            -ExpectedHead $env:EXPECTED_SHA `
+            -HeadBranch $env:HEAD_BRANCH `
+            -RunId $runId `
+            -EvidenceRoot artifacts/visual
+          $visualExit = $LASTEXITCODE
+          "VISUAL_EXIT_CODE=$visualExit" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          if ($visualExit -eq 78) {
+            "VISUAL_CI=BLOCKED" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            exit 78
+          }
+          if ($visualExit -ne 0) {
+            "VISUAL_CI=FAIL_OR_UNPROVEN" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            exit $visualExit
+          }
+          "VISUAL_CI=PASS" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Upload owned visual evidence only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tabbeacon-visual-${{ inputs.expected_sha }}
+          path: artifacts/visual
+          if-no-files-found: warn
+          retention-days: 14
