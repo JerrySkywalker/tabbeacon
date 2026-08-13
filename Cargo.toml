@@ -16,6 +16,18 @@ path = "src/lib.rs"
 name = "tabbeacon"
 path = "src/main.rs"
 
+[[bin]]
+name = "tabbeacon-visual-fixture"
+path = "src/bin/tabbeacon-visual-fixture.rs"
+
+[dependencies]
+png = "0.18.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[target.'cfg(windows)'.dependencies]
+uiautomation = { version = "0.25.0", features = ["screenshot"] }
+
 [lints.rust]
 unsafe_code = "forbid"
 

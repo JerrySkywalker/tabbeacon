@@ -78,3 +78,58 @@ A capture failure is not a product-color failure. Distinguish:
 - runner/session precondition failure.
 
 If the environment cannot provide trustworthy pixels, the visual result is `BLOCKED`/`UNPROVEN`, not PASS.
+
+## TB-G03 implementation boundary
+
+The visual infrastructure is above the G02 presentation system under test:
+
+```text
+VisualTestCase -> FixtureDriver -> TerminalTestSession -> TargetLocator
+    -> CaptureBackend -> CapturedFrame -> VisualOracle -> AssertionResult
+    -> EvidenceWriter
+```
+
+The fixture driver adds only a unique, G02-title-policy-sanitized run token to
+an existing provider-free fixture. It does not change the fixture's semantic
+state, presentation priority, palette, or VT bytes. UI Automation is read-only
+verification, never product control; `src/core` has no UIA, HWND, image, or
+evidence-path types.
+
+The initial `uiautomation-gdi-visible-screen-rectangle` capture backend is
+explicitly visibility-dependent. It captures only the UIA bounds of the
+positively owned test window after the harness has established that it is
+foreground and unoccluded. Failure to establish that condition is a capture
+preflight blocker, not a color or animation failure. The capture trait permits
+a later empirically justified Windows replacement without changing oracle or
+evidence semantics.
+
+## Deterministic oracle rules
+
+Color uses an interior target-tab ROI and records sample count, fixed-point RGB
+mean, median, and per-channel variance. Non-default G02 colors are classified
+by a documented Euclidean mean tolerance plus a variance limit that rejects
+text/icon/border-contaminated samples. Ready and reset are compared against a
+same-run default baseline rather than a theme-specific hard-coded RGB value.
+
+Animation compares only a bounded progress/icon ROI across successive frames.
+It records changed-pixel ratio and mean absolute RGB component delta. A pair
+must cross both tested thresholds to be `ANIMATION_PRESENT`; stationary frames,
+sub-threshold noise, insufficient frames, inconsistent dimensions, and blocked
+capture remain distinct outcomes.
+
+## Dependencies
+
+TB-G03 adds only the following direct dependencies:
+
+- `uiautomation` 0.25.0, Apache-2.0: maintained safe Rust UIA client plus its
+  optional GDI screenshot adapter. The standard library has no Windows UIA or
+  GDI abstraction, and this keeps project code compatible with the repository's
+  `unsafe_code = "forbid"` policy.
+- `serde` 1.0.229 and `serde_json` 1.0.151, both MIT OR Apache-2.0: stable,
+  typed deterministic evidence serialization. The standard library has no JSON
+  serializer/deserializer.
+- `png` 0.18.1, MIT OR Apache-2.0: lossless RGBA evidence encoding. The
+  standard library has no PNG encoder.
+
+No dependency is used for provider integration, UI control/injection, OCR,
+whole-image golden comparison, or a cross-platform screenshot product feature.
