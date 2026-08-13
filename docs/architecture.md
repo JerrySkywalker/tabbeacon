@@ -180,6 +180,32 @@ reset_policy
 
 Raw provider strings must never be concatenated directly into terminal control sequences.
 
+### TB-G02 presentation model
+
+The G02 policy accepts a `SemanticPresentationInput`: the orthogonal
+`Phase`/`Attention`/`Health` values plus an opaque title. A helper creates this
+input from a `SessionSnapshot`; deterministic fixtures construct it directly
+without a provider. The policy produces either `PresentationAction::Apply` with
+a typed `VisualState`, or `PresentationAction::Reset` for ordinary ended
+sessions. Failed, interrupted, warning, and attention evidence retain the
+normative priority over an ended phase; an ended session with no higher-priority
+semantic state resets instead of being represented as ready.
+
+`VisualState` stores a typed sanitized title, a semantic tab color, and a
+progress semantic. `Question` and `Approval` remain distinct semantic colors
+even when the default palette intentionally maps both to yellow. `Reset`
+explicitly clears progress and the dynamic frame color while retaining a safe
+title update.
+
+The title type replaces all Unicode control characters before rendering and
+limits output to a fixed number of Unicode scalar values, using an ellipsis for
+truncation. Only this sanitized type reaches the renderer. The Windows Terminal
+renderer uses static OSC/CSI envelopes with ST terminators: OSC `0` for title,
+OSC `9;4` for progress, and OSC `4`/`104` at frame-background color-table index
+`264` for dynamic tab/frame color. The frame-color sequence is capability
+gated: without that capability, the exact title and progress bytes remain and
+only color bytes are omitted.
+
 ## 10. Windows Terminal backend
 
 The first terminal backend uses terminal-native control sequences for:
