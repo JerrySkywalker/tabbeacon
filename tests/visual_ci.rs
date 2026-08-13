@@ -303,8 +303,37 @@ fn evidence_writer_refuses_overwrite_and_writes_only_owned_bundle_files() {
     writer
         .write_png("tab-working", &frame(2, 2, Rgb::new(1, 2, 3)))
         .expect("writes lossless owned PNG");
+    let integrity = writer
+        .write_integrity_manifest()
+        .expect("writes deterministic owned evidence integrity");
     assert!(writer.directory().join("manifest.json").is_file());
     assert!(writer.directory().join("tab-working.png").is_file());
+    assert!(writer.directory().join("integrity.json").is_file());
+    assert_eq!(integrity.algorithm, "SHA-256");
+    assert_eq!(integrity.tree_sha256.len(), 64);
+    let names = integrity
+        .files
+        .iter()
+        .map(|file| file.name.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "assertions.json",
+            "color-metrics.json",
+            "environment.json",
+            "manifest.json",
+            "tab-working.png",
+            "uia.json",
+        ]
+    );
+    let integrity_json = std::fs::read_to_string(writer.directory().join("integrity.json"))
+        .expect("owned integrity evidence reads");
+    assert!(integrity_json.contains(&integrity.tree_sha256));
+    assert!(matches!(
+        writer.write_integrity_manifest(),
+        Err(VisualError::EvidenceArtifactExists(_))
+    ));
     let uia = std::fs::read_to_string(writer.directory().join("uia.json"))
         .expect("owned UIA evidence reads");
     assert!(uia.contains("set_foreground"));

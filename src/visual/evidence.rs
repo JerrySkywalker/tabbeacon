@@ -7,6 +7,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::{
     ColorMetrics, DesktopPreflight, RgbaFrame, ScreenRect, VisualDisposition, VisualError,
@@ -240,6 +241,32 @@ pub struct EvidenceBundle {
     pub color_metrics: Vec<(String, ColorMetrics)>,
 }
 
+/// SHA-256 digest for one owned evidence artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceFileDigest {
+    /// Flat, safe filename relative to the evidence directory.
+    pub name: String,
+    /// Exact artifact byte count.
+    pub bytes: u64,
+    /// Lowercase SHA-256 hex digest of the artifact bytes.
+    pub sha256: String,
+}
+
+/// Deterministic integrity record for an evidence directory.
+///
+/// `integrity.json` is deliberately excluded from `files`: it contains the
+/// digest record itself. `tree_sha256` is SHA-256 over sorted
+/// `name`, byte-count, and content-digest records separated by NUL bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceIntegrity {
+    /// Digest algorithm used for every entry and the tree record.
+    pub algorithm: String,
+    /// Every pre-existing regular artifact in deterministic filename order.
+    pub files: Vec<EvidenceFileDigest>,
+    /// Lowercase SHA-256 of the deterministic artifact-record sequence.
+    pub tree_sha256: String,
+}
+
 impl EvidenceBundle {
     /// Validates that a claimed PASS has both exact heads and PASS assertions.
     ///
@@ -315,6 +342,66 @@ impl EvidenceWriter {
         self.write_json("color-metrics.json", &bundle.color_metrics)
     }
 
+    /// Writes the final deterministic integrity record for all prior artifacts.
+    ///
+    /// Call this only after every evidence PNG and JSON artifact is written.
+    /// The generated `integrity.json` is intentionally excluded from its own
+    /// tree to avoid a self-referential digest.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the owned directory contains anything other than
+    /// regular, safe, flat files or if `integrity.json` already exists.
+    pub fn write_integrity_manifest(&self) -> VisualResult<EvidenceIntegrity> {
+        let integrity_path = self.directory.join("integrity.json");
+        if integrity_path.exists() {
+            return Err(VisualError::EvidenceArtifactExists(integrity_path));
+        }
+
+        let mut files = Vec::new();
+        for entry in fs::read_dir(&self.directory)? {
+            let entry = entry?;
+            let file_type = entry.file_type()?;
+            if !file_type.is_file() {
+                return Err(VisualError::Platform(
+                    "owned evidence directory contains a non-file artifact".to_owned(),
+                ));
+            }
+            let name = entry.file_name().into_string().map_err(|_| {
+                VisualError::InvalidIdentifier("non-Unicode evidence filename".to_owned())
+            })?;
+            if !is_safe_component(&name) || name == "integrity.json" {
+                return Err(VisualError::InvalidIdentifier(name));
+            }
+            let bytes = fs::read(entry.path())?;
+            files.push(EvidenceFileDigest {
+                name,
+                bytes: u64::try_from(bytes.len()).map_err(|_| {
+                    VisualError::Platform("evidence file length exceeds u64".to_owned())
+                })?,
+                sha256: hex_sha256(&bytes),
+            });
+        }
+        files.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+
+        let mut tree = Sha256::new();
+        for file in &files {
+            tree.update(file.name.as_bytes());
+            tree.update([0]);
+            tree.update(file.bytes.to_string().as_bytes());
+            tree.update([0]);
+            tree.update(file.sha256.as_bytes());
+            tree.update([b'\n']);
+        }
+        let integrity = EvidenceIntegrity {
+            algorithm: "SHA-256".to_owned(),
+            files,
+            tree_sha256: format!("{:x}", tree.finalize()),
+        };
+        self.write_json("integrity.json", &integrity)?;
+        Ok(integrity)
+    }
+
     /// Writes a named JSON diagnostic within this owned evidence directory.
     ///
     /// # Errors
@@ -385,6 +472,10 @@ impl EvidenceWriter {
         };
         Ok(self.directory.join(filename))
     }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn is_safe_component(value: &str) -> bool {

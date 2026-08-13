@@ -67,7 +67,8 @@ function Write-TabBeaconJson {
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
     $temporary = Join-Path $parent ('.' + [IO.Path]::GetFileName($Path) + '.' + [guid]::NewGuid().ToString('N') + '.tmp')
     try {
-        $Value | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $temporary -Encoding utf8NoBOM
+        $json = $Value | ConvertTo-Json -Depth 8
+        [IO.File]::WriteAllText($temporary, $json, [Text.UTF8Encoding]::new($false))
         Move-Item -LiteralPath $temporary -Destination $Path -Force
     } finally {
         if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
@@ -119,6 +120,21 @@ function Wait-TabBeaconRunnerOnline {
     return $null
 }
 
+function Wait-TabBeaconRunnerOffline {
+    param(
+        [Parameter(Mandatory = $true)][string]$RunnerName,
+        [int]$TimeoutSeconds = 60
+    )
+
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $matches = @(Get-TabBeaconRepositoryRunner $RunnerName)
+        if ($matches.Count -eq 1 -and $matches[0].status -eq 'offline') { return $matches[0] }
+        Start-Sleep -Seconds 1
+    } while ([DateTime]::UtcNow -lt $deadline)
+    return $null
+}
+
 function Get-TabBeaconRunnerVersion {
     param([Parameter(Mandatory = $true)][string]$RunnerRoot)
 
@@ -144,6 +160,6 @@ function Write-TabBeaconRedactedLog {
         if (-not [string]::IsNullOrEmpty($SensitiveValue)) { $line = $line.Replace($SensitiveValue, '[REDACTED]') }
         $line
     }
-    $redacted | Set-Content -LiteralPath $path -Encoding utf8NoBOM
+    [IO.File]::WriteAllLines($path, [string[]]$redacted, [Text.UTF8Encoding]::new($false))
     return $path
 }

@@ -47,6 +47,8 @@ pub struct LiveVisualRunSummary {
     pub visual_head: Option<String>,
     /// Owned evidence directory.
     pub evidence_path: PathBuf,
+    /// SHA-256 over deterministic evidence artifact records.
+    pub evidence_tree_sha256: String,
     /// Preflight lane disposition.
     pub preflight: VisualDisposition,
     /// UIA target-resolution lane disposition.
@@ -131,12 +133,14 @@ pub fn run_live(request: &LiveVisualRunRequest) -> VisualResult<LiveVisualRunSum
         color_metrics: observation.metrics,
     };
     writer.write_bundle(&bundle)?;
+    let integrity = writer.write_integrity_manifest()?;
     Ok(LiveVisualRunSummary {
         disposition: final_disposition,
         expected_head: request.expected_head.clone(),
         checked_out_head,
         visual_head,
         evidence_path: writer.directory().to_path_buf(),
+        evidence_tree_sha256: integrity.tree_sha256,
         preflight: observation.preflight.disposition,
         uia: observation.lanes.uia(),
         capture: observation.lanes.capture(),

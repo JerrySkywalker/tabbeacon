@@ -34,7 +34,8 @@ pwsh -NoProfile -File .\scripts\visual-runner\uninstall.ps1 -Execute
 ```
 
 Bootstrap downloads the official current `actions/runner` Windows x64 archive,
-verifies it against that release's `hashes.txt`, obtains a short-lived
+verifies it against the release API's SHA-256 digest (or the legacy
+`hashes.txt` asset when required), obtains a short-lived
 repository registration token with `gh api`, configures the runner, then
 forgets the token. The token is never echoed, logged, committed, or stored in
 TabBeacon metadata. The GitHub runner's own scoped listener credential remains
@@ -47,7 +48,8 @@ runner listener under the marker-proven root. It temporarily calls
 while that host is alive, then resets the request on exit. This does not change
 power plans, lock policy, autologon, security controls, or system settings.
 `stop.ps1` asks only that owned host to stop and waits boundedly. It never
-stops ambiguous listener processes. `uninstall.ps1` is dry-run by default and
+stops ambiguous listener processes. It also waits for GitHub to report the
+same runner offline before another start is permitted. `uninstall.ps1` is dry-run by default and
 requires both the ownership marker and an offline host before it requests an
 ephemeral remove token and deletes the exact owned root.
 

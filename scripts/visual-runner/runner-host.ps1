@@ -15,9 +15,9 @@ public static class TabBeaconExecutionState {
 '@
 }
 
-$continuous = 0x80000000
-$systemRequired = 0x00000001
-$displayRequired = 0x00000002
+$continuous = [Convert]::ToUInt32('80000000', 16)
+$systemRequired = [uint32]0x00000001
+$displayRequired = [uint32]0x00000002
 $listener = $null
 try {
     [void][TabBeaconExecutionState]::SetThreadExecutionState($continuous -bor $systemRequired -bor $displayRequired)

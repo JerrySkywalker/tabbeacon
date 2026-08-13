@@ -32,16 +32,22 @@ if ($existingRemote.Count -ne 0) { throw "Refusing to replace an existing remote
 $release = gh api repos/actions/runner/releases/latest | ConvertFrom-Json
 $archive = @($release.assets | Where-Object { $_.name -match '^actions-runner-win-x64-[0-9.]+\.zip$' }) | Select-Object -First 1
 $hashes = @($release.assets | Where-Object { $_.name -eq 'hashes.txt' }) | Select-Object -First 1
-if ($null -eq $archive -or $null -eq $hashes) { throw 'Official actions/runner release did not expose the required Windows x64 archive and hashes.txt' }
+if ($null -eq $archive) { throw 'Official actions/runner release did not expose the required Windows x64 archive' }
 
 $archivePath = Join-Path $RunnerRoot $archive.name
 $hashPath = Join-Path $RunnerRoot 'hashes.txt'
 try {
     Invoke-WebRequest -Uri $archive.browser_download_url -OutFile $archivePath
-    Invoke-WebRequest -Uri $hashes.browser_download_url -OutFile $hashPath
-    $expectedHash = (Get-Content -LiteralPath $hashPath | Where-Object { $_ -match ([regex]::Escape($archive.name) + '$') } | Select-Object -First 1).Split(' ', [StringSplitOptions]::RemoveEmptyEntries)[0]
+    $expectedHash = $null
+    if (-not [string]::IsNullOrWhiteSpace($archive.digest) -and $archive.digest -match '^sha256:([0-9a-fA-F]{64})$') {
+        $expectedHash = $Matches[1]
+    } elseif ($null -ne $hashes) {
+        Invoke-WebRequest -Uri $hashes.browser_download_url -OutFile $hashPath
+        $hashLine = Get-Content -LiteralPath $hashPath | Where-Object { $_ -match ([regex]::Escape($archive.name) + '$') } | Select-Object -First 1
+        if ($null -ne $hashLine) { $expectedHash = $hashLine.Split(' ', [StringSplitOptions]::RemoveEmptyEntries)[0] }
+    }
     $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash
-    if ([string]::IsNullOrWhiteSpace($expectedHash) -or -not $actualHash.Equals($expectedHash, [StringComparison]::OrdinalIgnoreCase)) { throw "Runner archive SHA-256 mismatch for $($archive.name)" }
+    if ([string]::IsNullOrWhiteSpace($expectedHash) -or -not $actualHash.Equals($expectedHash, [StringComparison]::OrdinalIgnoreCase)) { throw "Runner archive SHA-256 mismatch or was unavailable for $($archive.name)" }
     Expand-Archive -LiteralPath $archivePath -DestinationPath $RunnerRoot -Force
 } finally {
     if (Test-Path -LiteralPath $archivePath) { Remove-Item -LiteralPath $archivePath -Force }

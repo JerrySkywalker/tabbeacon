@@ -150,6 +150,9 @@ TB-G03 adds only the following direct dependencies:
   serializer/deserializer.
 - `png` 0.18.1, MIT OR Apache-2.0: lossless RGBA evidence encoding. The
   standard library has no PNG encoder.
+- `sha2` 0.10.9, MIT OR Apache-2.0: deterministic SHA-256 artifact and
+  evidence-tree integrity records. The standard library has no SHA-256
+  implementation.
 
 No dependency is used for provider integration, UI control/injection, OCR,
 whole-image golden comparison, or a cross-platform screenshot product feature.
@@ -176,8 +179,11 @@ classified nonzero exit for `BLOCKED`, `UNPROVEN`, and `FAIL`. Evidence is
 always confined to a newly created `<evidence-root>/<run-id>` directory; it
 refuses an existing run directory or artifact name rather than overwriting it.
 
-The runner writes `manifest.json`, `assertions.json`, `environment.json`, and
-`uia.json`, plus target-only UIA diagnostics and, when trusted capture executes,
-full-window, tab, ROI PNGs and per-fixture color/frame-delta metrics. The
-environment record intentionally excludes user terminal text, environment
-variables, tokens, credentials, and unrelated window screenshots.
+The runner writes `manifest.json`, `assertions.json`, `environment.json`,
+`uia.json`, and a final `integrity.json`, plus target-only UIA diagnostics and,
+when trusted capture executes, full-window, tab, ROI PNGs and per-fixture
+color/frame-delta metrics. `integrity.json` is a sorted SHA-256 digest list and
+tree hash for every other regular artifact; it intentionally excludes itself to
+avoid a self-referential digest. The environment record intentionally excludes
+user terminal text, environment variables, tokens, credentials, and unrelated
+window screenshots.
