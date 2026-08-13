@@ -30,6 +30,14 @@ impl WindowsUiaLocator {
             .and_then(|automation| automation.get_root_element())
             .is_ok()
     }
+
+    /// Returns the UIA desktop geometry when the interactive root is readable.
+    #[must_use]
+    pub fn desktop_geometry() -> Option<ScreenRect> {
+        let automation = UIAutomation::new().ok()?;
+        let root = automation.get_root_element().ok()?;
+        screen_rect(root.get_bounding_rectangle().ok()?)
+    }
 }
 
 impl TargetLocator for WindowsUiaLocator {
@@ -61,6 +69,7 @@ impl TargetLocator for WindowsUiaLocator {
                 .get_native_window_handle()
                 .map(|handle| handle.to_string())
                 .ok(),
+            window_has_keyboard_focus: window.has_keyboard_focus().ok(),
             detail:
                 "resolved only the run-token-matched Windows Terminal window and exact fixture tab"
                     .to_owned(),

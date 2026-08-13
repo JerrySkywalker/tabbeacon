@@ -30,7 +30,7 @@ impl Default for TerminalTestSessionLauncher {
         Self {
             requested_size: (100, 30),
             requested_position: (80, 80),
-            hold_millis: 12_000,
+            hold_millis: 3_000,
         }
     }
 }

@@ -21,7 +21,7 @@ pub use image::{Rgb, RgbaFrame, Roi, ScreenRect};
 pub use oracle::{
     AnimationOutcome, AnimationThreshold, ColorClassification, ColorMetrics, ColorSemantic,
     ColorTolerance, FrameDeltaMetrics, assess_animation, classify_color, color_metrics,
-    frame_delta, matches_baseline,
+    frame_delta, matches_baseline, select_background_roi,
 };
 pub use preflight::{
     Availability, DesktopPreflight, PreflightBlocker, PreflightProbe, SessionKind,
@@ -31,6 +31,17 @@ pub use preflight::{
 #[cfg(windows)]
 pub mod capture;
 #[cfg(windows)]
+pub mod runner;
+#[cfg(windows)]
 pub mod session;
 #[cfg(windows)]
 pub mod uia;
+
+#[cfg(windows)]
+pub use capture::{CaptureBackend, UiaGdiCaptureBackend};
+#[cfg(windows)]
+pub use runner::{LiveVisualRunRequest, LiveVisualRunSummary};
+#[cfg(windows)]
+pub use session::{TerminalTestSession, TerminalTestSessionLauncher};
+#[cfg(windows)]
+pub use uia::{TargetLocator, WindowsUiaLocator};

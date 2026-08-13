@@ -133,3 +133,31 @@ TB-G03 adds only the following direct dependencies:
 
 No dependency is used for provider integration, UI control/injection, OCR,
 whole-image golden comparison, or a cross-platform screenshot product feature.
+
+## Local harness
+
+The dedicated G03 binary has two modes. `emit` is the child launched inside an
+owned Windows Terminal tab; it renders a named G02 fixture, waits for a bounded
+interval, then writes the existing G02 reset action. `run` is the outer harness
+and must be given an exact checked-out SHA, a unique safe run ID, and a fresh
+owned evidence root:
+
+```text
+cargo run --locked --bin tabbeacon-visual-fixture -- run \
+  --expected-head <40-lowercase-sha> \
+  --run-id TB03-<unique-token> \
+  --evidence-root target/visual-evidence \
+  [--fixture working]
+```
+
+Without `--fixture`, it replays the complete G02 fixture set. A `PASS` summary
+requires `EXPECTED_HEAD == CHECKED_OUT_HEAD == VISUAL_HEAD`; the binary uses a
+classified nonzero exit for `BLOCKED`, `UNPROVEN`, and `FAIL`. Evidence is
+always confined to a newly created `<evidence-root>/<run-id>` directory; it
+refuses an existing run directory or artifact name rather than overwriting it.
+
+The runner writes `manifest.json`, `assertions.json`, `environment.json`, and
+`uia.json`, plus target-only UIA diagnostics and, when trusted capture executes,
+full-window, tab, ROI PNGs and per-fixture color/frame-delta metrics. The
+environment record intentionally excludes user terminal text, environment
+variables, tokens, credentials, and unrelated window screenshots.

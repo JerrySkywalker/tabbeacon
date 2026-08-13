@@ -8,7 +8,10 @@ use std::{
 
 use tabbeacon::{
     presentation::presentation_fixture,
-    visual::{FixtureDriver, VisualError, VisualResult},
+    visual::{
+        FixtureDriver, LiveVisualRunRequest, VisualDisposition, VisualError, VisualResult,
+        runner::run_live,
+    },
 };
 
 fn main() {
@@ -21,11 +24,16 @@ fn main() {
 
 fn run(arguments: &[String]) -> VisualResult<()> {
     let command = arguments.first().map(String::as_str).unwrap_or_default();
-    if command != "emit" {
-        return Err(VisualError::Platform(
-            "expected `emit --fixture <name> --run-id <id> --hold-ms <milliseconds>`".to_owned(),
-        ));
+    match command {
+        "emit" => emit(arguments),
+        "run" => run_live_harness(arguments),
+        _ => Err(VisualError::Platform(
+            "expected `emit` or `run` visual fixture subcommand".to_owned(),
+        )),
     }
+}
+
+fn emit(arguments: &[String]) -> VisualResult<()> {
     let fixture_name = argument_value(arguments, "--fixture")?;
     let run_id = argument_value(arguments, "--run-id")?;
     let hold_millis = argument_value(arguments, "--hold-ms")?
@@ -47,6 +55,33 @@ fn run(arguments: &[String]) -> VisualResult<()> {
     Ok(())
 }
 
+fn run_live_harness(arguments: &[String]) -> VisualResult<()> {
+    let expected_head = argument_value(arguments, "--expected-head")?;
+    let run_id = argument_value(arguments, "--run-id")?;
+    let evidence_root = argument_value(arguments, "--evidence-root")?;
+    let fixture_name = optional_argument_value(arguments, "--fixture");
+    let summary = run_live(&LiveVisualRunRequest {
+        expected_head,
+        run_id,
+        evidence_root: evidence_root.into(),
+        fixture_name,
+    })?;
+    println!(
+        "{}",
+        serde_json::to_string(&summary).map_err(VisualError::Json)?
+    );
+    let exit_code = match summary.disposition {
+        VisualDisposition::Pass => 0,
+        VisualDisposition::Blocked => 78,
+        VisualDisposition::Unproven => 3,
+        VisualDisposition::Fail => 2,
+    };
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
 fn argument_value(arguments: &[String], flag: &str) -> VisualResult<String> {
     let position = arguments
         .iter()
@@ -56,4 +91,12 @@ fn argument_value(arguments: &[String], flag: &str) -> VisualResult<String> {
         .get(position + 1)
         .cloned()
         .ok_or_else(|| VisualError::Platform(format!("missing value for {flag}")))
+}
+
+fn optional_argument_value(arguments: &[String], flag: &str) -> Option<String> {
+    arguments
+        .iter()
+        .position(|argument| argument == flag)
+        .and_then(|position| arguments.get(position + 1))
+        .cloned()
 }

@@ -222,3 +222,38 @@ The tab-color mechanism is treated as a Windows Terminal capability with gracefu
 v0.1 production integration uses global Codex hooks because it preserves direct `codex` launch and fail-open behavior.
 
 The app-server backend is an experimental fidelity track. It may provide richer warning/failure/interruption semantics, but it must not become a hidden wrapper/remote-launch dependency without a later ADR and evidence that zero-workflow-change/fail-open invariants are preserved.
+
+## 12. TB-G03 visual verification infrastructure
+
+Visual verification is test infrastructure above the presentation system under
+test, not a provider or terminal-control feature:
+
+```text
+G02 deterministic fixture
+        ↓
+FixtureDriver (unique safe test title)
+        ↓
+TerminalTestSession (owned WT window)
+        ↓
+TargetLocator (read-only UIA)
+        ↓
+CaptureBackend (owned-window pixels)
+        ↓
+VisualOracle (title/color/animation)
+        ↓
+EvidenceWriter
+```
+
+The G03 fixture child renders the existing typed G02 action through the
+production renderer, holds the visual state for a bounded interval, then emits
+the G02 reset action before it exits. The launcher neither controls existing
+Terminal windows nor closes a process it cannot prove it owns.
+
+UIA supplies the semantic tab-title assertion and target geometry. The first
+capture backend uses a safe Windows GDI screenshot adapter over the UIA-owned
+window rectangle, so it is deliberately visibility-dependent: it runs only
+after UIA reports that the unique test window is keyboard-focused. Loss of that
+precondition is a classified visual-environment blocker, never an inferred
+presentation failure. The pure oracle, ROI selection, fixed-point color
+metrics, animation deltas, evidence model, and exact-head check have no UIA
+or provider dependency.

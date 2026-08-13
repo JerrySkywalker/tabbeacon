@@ -31,6 +31,8 @@ pub enum VisualError {
     InvalidIdentifier(String),
     /// An evidence directory already exists and must not be overwritten.
     EvidenceDirectoryExists(PathBuf),
+    /// An individual artifact already exists and must not be overwritten.
+    EvidenceArtifactExists(PathBuf),
     /// The expected, checked-out, and visual heads are not equal.
     ExactHeadMismatch {
         /// Expected candidate SHA.
@@ -74,6 +76,13 @@ impl fmt::Display for VisualError {
                 write!(
                     formatter,
                     "evidence directory already exists: {}",
+                    path.display()
+                )
+            }
+            Self::EvidenceArtifactExists(path) => {
+                write!(
+                    formatter,
+                    "evidence artifact already exists: {}",
                     path.display()
                 )
             }

@@ -231,6 +231,7 @@ fn evidence_writer_refuses_overwrite_and_writes_only_owned_bundle_files() {
             window_bounds: None,
             tab_bounds: None,
             native_window_handle: None,
+            window_has_keyboard_focus: None,
             detail: "synthetic".to_owned(),
         },
         color_metrics: Vec::new(),

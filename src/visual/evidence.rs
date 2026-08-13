@@ -2,7 +2,7 @@
 
 use std::{
     fs::{self, File},
-    io::BufWriter,
+    io::{BufWriter, Write},
     path::{Path, PathBuf},
 };
 
@@ -84,6 +84,9 @@ pub struct UiaDump {
     pub tab_bounds: Option<ScreenRect>,
     /// Native window handle rendered as a diagnostic string, if available.
     pub native_window_handle: Option<String>,
+    /// Whether UIA reported that the owned window had keyboard focus when it
+    /// was resolved. A visibility-dependent capture requires this to be true.
+    pub window_has_keyboard_focus: Option<bool>,
     /// Compact diagnostic notes; never a full desktop traversal.
     pub detail: String,
 }
@@ -130,7 +133,12 @@ impl EvidenceManifest {
             .visual_head
             .as_deref()
             .is_some_and(|visual| visual == self.expected_head);
-        if self.checked_out_head == self.expected_head && visual_matches {
+        if is_exact_sha(&self.expected_head)
+            && is_exact_sha(&self.checked_out_head)
+            && self.visual_head.as_deref().is_some_and(is_exact_sha)
+            && self.checked_out_head == self.expected_head
+            && visual_matches
+        {
             Ok(())
         } else {
             Err(VisualError::ExactHeadMismatch {
@@ -232,6 +240,16 @@ impl EvidenceWriter {
         self.write_json("color-metrics.json", &bundle.color_metrics)
     }
 
+    /// Writes a named JSON diagnostic within this owned evidence directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an identifier, serialization, or filesystem error without
+    /// writing outside the owned directory or overwriting an existing artifact.
+    pub fn write_json_document<T: Serialize>(&self, name: &str, value: &T) -> VisualResult<()> {
+        self.write_json(name, value)
+    }
+
     /// Writes a lossless RGBA PNG under a validated evidence artifact name.
     ///
     /// # Errors
@@ -240,7 +258,7 @@ impl EvidenceWriter {
     /// the owned evidence directory.
     pub fn write_png(&self, name: &str, frame: &RgbaFrame) -> VisualResult<PathBuf> {
         let path = self.artifact_path(name, "png")?;
-        let file = File::create(&path)?;
+        let file = Self::create_new_file(&path)?;
         let writer = BufWriter::new(file);
         let mut encoder = png::Encoder::new(writer, frame.width(), frame.height());
         encoder.set_color(png::ColorType::Rgba);
@@ -254,8 +272,23 @@ impl EvidenceWriter {
     fn write_json<T: Serialize>(&self, name: &str, value: &T) -> VisualResult<()> {
         let path = self.artifact_path(name, "json")?;
         let bytes = serde_json::to_vec_pretty(value)?;
-        fs::write(path, bytes)?;
+        let mut file = Self::create_new_file(&path)?;
+        file.write_all(&bytes)?;
         Ok(())
+    }
+
+    fn create_new_file(path: &Path) -> VisualResult<File> {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(file) => Ok(file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(VisualError::EvidenceArtifactExists(path.to_path_buf()))
+            }
+            Err(error) => Err(VisualError::Io(error)),
+        }
     }
 
     fn artifact_path(&self, name: &str, extension: &str) -> VisualResult<PathBuf> {
@@ -285,4 +318,11 @@ fn is_safe_component(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn is_exact_sha(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }

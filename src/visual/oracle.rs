@@ -229,6 +229,45 @@ pub fn matches_baseline(
             <= tolerance.max_mean_distance_milli_squared
 }
 
+/// Selects the least-dispersed deterministic interior tile from a target tab.
+/// This avoids assuming that one fixed coordinate is always free of title text,
+/// icons, close controls, or borders.
+///
+/// # Errors
+///
+/// Returns [`VisualError::InvalidRoi`] when the target tab cannot provide any
+/// non-border interior sample tile.
+pub fn select_background_roi(frame: &RgbaFrame, tab: Roi) -> VisualResult<(Roi, ColorMetrics)> {
+    let tab = tab
+        .clip(frame.width(), frame.height())
+        .ok_or(VisualError::InvalidRoi)?;
+    let horizontal_margin = (tab.width / 10).max(1);
+    let vertical_margin = (tab.height / 5).max(1);
+    let inner_width = tab.width.saturating_sub(horizontal_margin * 2);
+    let inner_height = tab.height.saturating_sub(vertical_margin * 2);
+    if inner_width < 4 || inner_height == 0 {
+        return Err(VisualError::InvalidRoi);
+    }
+
+    let tile_width = (inner_width / 4).max(1);
+    let mut candidates = Vec::new();
+    for column in 0..4_u32 {
+        let x = tab.x + horizontal_margin + column * tile_width;
+        let right = (x + tile_width).min(tab.x + tab.width - horizontal_margin);
+        if right > x {
+            let roi = Roi::new(x, tab.y + vertical_margin, right - x, inner_height);
+            let metrics = color_metrics(frame, roi)?;
+            let score = metrics.variance.red + metrics.variance.green + metrics.variance.blue;
+            candidates.push((score, roi, metrics));
+        }
+    }
+    candidates
+        .into_iter()
+        .min_by_key(|(score, roi, _)| (*score, roi.x, roi.y, roi.width, roi.height))
+        .map(|(_, roi, metrics)| (roi, metrics))
+        .ok_or(VisualError::InvalidRoi)
+}
+
 /// Deterministic metrics comparing two equally sized RGBA frames.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrameDeltaMetrics {
