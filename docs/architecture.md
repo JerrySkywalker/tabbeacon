@@ -159,12 +159,26 @@ Repository identity is local and offline-first.
 
 Preferred evidence order:
 
-1. local Git remote identity (for example normalized origin URL);
-2. another suitable local remote;
-3. local Git common-dir/root identity;
-4. cwd basename fallback.
+1. a usable locally configured `origin` URL;
+2. another usable local remote, ordered by remote name and URL;
+3. a digest of the repository's sorted local root commits;
+4. for an unborn repository only, a digest of the local Git common-dir path.
 
-The abbreviation engine allocates a stable local key. Collision handling expands new assignments without unnecessarily renaming existing keys.
+Discovery uses only a closed set of local Git metadata commands and supports
+ordinary repositories and linked worktrees. Common HTTPS, SSH URL, and SCP-like
+SSH forms normalize to a scheme- and user-neutral host/path key without DNS or
+provider access. A remote-backed reclone therefore retains identity; a
+committed originless repository retains identity across a move. An unborn,
+originless repository has no content identity yet, so its fallback is path-local
+until stronger evidence appears.
+
+The abbreviation policy tokenizes separator and camel-case boundaries, then
+emits deterministic readable expansions followed by stable hash candidates.
+The machine-local alias registry serializes first assignment under a process
+lock and atomically publishes digest-named immutable generations. Existing
+assignments never change merely because a new collision appears. Generated
+state lives in the per-user TabBeacon application-state directory, never in the
+repository or dotfiles.
 
 ## 9. Presentation contract
 

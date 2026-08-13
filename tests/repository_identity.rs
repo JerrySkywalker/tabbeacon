@@ -89,6 +89,60 @@ fn add_remote(repo: &Path, name: &str, url: &str) {
     git(repo, &["remote", "add", name, url]);
 }
 
+fn compile_offline_git_probe(root: &TestRoot) -> PathBuf {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("offline_git_probe.rs");
+    let executable = root.child(if cfg!(windows) {
+        "offline-git-probe.exe"
+    } else {
+        "offline-git-probe"
+    });
+    let compiler = env::var_os("RUSTC").map_or_else(|| "rustc".into(), PathBuf::from);
+    let output = Command::new(compiler)
+        .args(["--edition=2024"])
+        .arg(source)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .expect("offline Git probe compiler starts");
+    assert!(
+        output.status.success(),
+        "offline Git probe failed to compile: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    executable
+}
+
+#[test]
+fn discovery_executes_only_the_admitted_local_git_command_set() {
+    let root = TestRoot::new("git-command-audit");
+    let repo = root.child("repo");
+    fs::create_dir_all(&repo).expect("probe repository directory is created");
+    let probe = compile_offline_git_probe(&root);
+    let discovered = RepositoryDiscovery::with_git_executable(probe)
+        .discover(&repo)
+        .expect("probe discovery succeeds");
+    assert_eq!(discovered.worktree_root, repo);
+    let audit = fs::read_to_string(root.child("git-command-audit.log"))
+        .expect("probe command audit exists");
+    assert_eq!(
+        audit.lines().collect::<Vec<_>>(),
+        [
+            "rev-parse\t--path-format=absolute\t--show-toplevel\t--absolute-git-dir\t--git-common-dir",
+            "config\t--local\t--null\t--get-regexp\t^remote\\..*\\.url$",
+            "rev-list\t--max-parents=0\t--all",
+        ]
+    );
+    assert!(
+        audit
+            .to_ascii_lowercase()
+            .split_whitespace()
+            .all(|word| !matches!(word, "fetch" | "pull" | "push" | "ls-remote" | "clone"))
+    );
+}
+
 #[test]
 fn ordinary_repository_resolves_from_nested_cwd_without_project_writes() {
     let root = TestRoot::new("ordinary");
@@ -265,6 +319,23 @@ fn abbreviation_collision_expands_only_the_newcomer_and_has_hash_fallback() {
             .find(|candidate| candidate.as_str().contains('-'))
             .expect("hash fallback repeats")
     );
+
+    let single_token = RepositoryDisplayName::new("x").expect("valid single-token name");
+    let single_first = CanonicalRepositoryIdentity::new("remote:example/single-first")
+        .expect("valid single-token identity");
+    let single_second = CanonicalRepositoryIdentity::new("remote:example/single-second")
+        .expect("valid colliding identity");
+    assert_eq!(
+        registry
+            .resolve(&single_first, &single_token)
+            .expect("base single-token alias")
+            .as_str(),
+        "X"
+    );
+    let assigned_hash = registry
+        .resolve(&single_second, &single_token)
+        .expect("hash fallback is assigned after readable exhaustion");
+    assert!(assigned_hash.as_str().starts_with("X-"));
 }
 
 #[test]
