@@ -148,8 +148,20 @@ pub struct UiaDump {
     /// Whether UIA reported that the owned window had keyboard focus when it
     /// was resolved. A visibility-dependent capture requires this to be true.
     pub window_has_keyboard_focus: Option<bool>,
+    /// Result of the narrowly-scoped owned-window activation attempted before
+    /// visibility-dependent capture. `None` means no activation was attempted.
+    pub activation: Option<WindowActivation>,
     /// Compact diagnostic notes; never a full desktop traversal.
     pub detail: String,
+}
+
+/// Auditable result of activating only the UIA-correlated fixture window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowActivation {
+    /// Whether Windows accepted the foreground request for the owned window.
+    pub set_foreground: bool,
+    /// Whether UI Automation accepted the focus request for the owned window.
+    pub set_focus: bool,
 }
 
 /// Exact-head and environment identity for one visual evidence directory.

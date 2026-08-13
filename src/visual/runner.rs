@@ -158,13 +158,36 @@ fn observe_replay(
         return Ok(());
     }
     let locator = WindowsUiaLocator;
-    let target = match locate_with_retry(locator, run_id, &replay.case.expected_title) {
+    let initial_target = match locate_with_retry(locator, run_id, &replay.case.expected_title) {
         Ok(target) => target,
         Err(error) => {
             observation.record_uia_failure(&replay.case.fixture_name, error.to_string());
             return Ok(());
         }
     };
+    let activation = match locator.activate_owned_window(run_id, &replay.case.expected_title) {
+        Ok(activation) => activation,
+        Err(error) => {
+            observation.record_target(writer, replay, &initial_target)?;
+            observation.record_capture_blocked(
+                &replay.case.fixture_name,
+                format!("owned-window activation was refused: {error}"),
+            );
+            return Ok(());
+        }
+    };
+    let mut target = match locate_focused_with_retry(locator, run_id, &replay.case.expected_title) {
+        Ok(target) => target,
+        Err(error) => {
+            observation.record_target(writer, replay, &initial_target)?;
+            observation.record_capture_blocked(
+                &replay.case.fixture_name,
+                format!("owned-window activation lost its UIA target: {error}"),
+            );
+            return Ok(());
+        }
+    };
+    target.activation = Some(activation);
     observation.record_target(writer, replay, &target)?;
     let Some((window_bounds, tab_bounds)) = capture_bounds(&target) else {
         observation.record_capture_blocked(
@@ -521,6 +544,34 @@ fn locate_with_retry(
     }))
 }
 
+fn locate_focused_with_retry(
+    locator: WindowsUiaLocator,
+    run_id: &str,
+    expected_title: &str,
+) -> VisualResult<UiaDump> {
+    let mut last_target = None;
+    let mut last_error = None;
+    for _ in 0..10 {
+        match locator.locate(run_id, expected_title) {
+            Ok(target) => {
+                if target.window_has_keyboard_focus == Some(true) {
+                    return Ok(target);
+                }
+                last_target = Some(target);
+            }
+            Err(error) => last_error = Some(error),
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+    last_target.ok_or_else(|| {
+        last_error.unwrap_or_else(|| {
+            VisualError::Platform(
+                "owned Windows Terminal target did not reappear after activation".to_owned(),
+            )
+        })
+    })
+}
+
 fn capture_frames(
     backend: &impl CaptureBackend,
     rect: ScreenRect,
@@ -623,6 +674,7 @@ fn empty_uia_dump() -> UiaDump {
         tab_bounds: None,
         native_window_handle: None,
         window_has_keyboard_focus: None,
+        activation: None,
         detail: "no owned UIA target was resolved".to_owned(),
     }
 }

@@ -14,7 +14,7 @@ mod preflight;
 pub use error::{VisualError, VisualResult};
 pub use evidence::{
     AssertionKind, AssertionResult, EvidenceBundle, EvidenceManifest, EvidenceWriter,
-    FailureCategory, MachineEnvironment, UiaDump,
+    FailureCategory, MachineEnvironment, UiaDump, WindowActivation,
 };
 pub use fixture::{FixtureDriver, FixtureReplay, VisualTestCase};
 pub use image::{Rgb, RgbaFrame, Roi, ScreenRect};

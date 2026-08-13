@@ -97,9 +97,12 @@ VisualTestCase -> FixtureDriver -> TerminalTestSession -> TargetLocator
 
 The fixture driver adds only a unique, G02-title-policy-sanitized run token to
 an existing provider-free fixture. It does not change the fixture's semantic
-state, presentation priority, palette, or VT bytes. UI Automation is read-only
-verification, never product control; `src/core` has no UIA, HWND, image, or
-evidence-path types.
+state, presentation priority, palette, or VT bytes. UI Automation is
+verification-only for product behavior; the G03R harness may use its maintained
+Windows foreground/focus wrapper only after exact run-token/title correlation
+to make the owned fixture window capture-visible. It never sends input, changes
+Terminal settings, or targets another window. `src/core` has no UIA, HWND,
+image, or evidence-path types.
 
 The initial `uiautomation-gdi-visible-screen-rectangle` capture backend is
 explicitly visibility-dependent. It captures only the UIA bounds of the

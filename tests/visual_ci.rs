@@ -289,6 +289,7 @@ fn evidence_writer_refuses_overwrite_and_writes_only_owned_bundle_files() {
             tab_bounds: None,
             native_window_handle: None,
             window_has_keyboard_focus: None,
+            activation: None,
             detail: "synthetic".to_owned(),
         },
         color_metrics: Vec::new(),
