@@ -40,11 +40,18 @@ checkout. It never has a `pull_request` or `pull_request_target` trigger.
 
 ## Operational boundary
 
-This goal does not register, install, label, or reconfigure a self-hosted
-runner. Until the owner provides an approved interactive Windows Terminal
-runner with the workflow label, the remote visual lane is `BLOCKED`. Hosted
-Windows code CI and local synthetic tests remain useful but cannot be promoted
-to visual PASS.
+`TB-G03R` may provision exactly one dedicated marker-owned, user-session
+runner for this repository through [`visual-runner.md`](visual-runner.md). It
+uses the label `tabbeacon-visual` plus GitHub's standard Windows/x64 labels,
+but the workflow also verifies its exact name and rejects Session 0 before
+candidate checkout. It is not installed as a service or scheduled task, and it
+does not change lock/security/power policy. Ambiguous existing listeners and
+unmarked roots remain untouched.
+
+Until the trusted dispatcher is present on `main` and that runner is online in
+an interactive desktop session, the remote visual lane remains `BLOCKED`.
+Hosted Windows code CI and local synthetic tests remain useful but cannot be
+promoted to visual PASS.
 
 The runner uploads only its dedicated TabBeacon evidence directory. That
 directory contains captures of the positively owned test Terminal window, not
