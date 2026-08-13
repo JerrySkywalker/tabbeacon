@@ -72,7 +72,7 @@ pub struct LiveVisualRunSummary {
 /// classified summary rather than being converted into product failures.
 pub fn run_live(request: &LiveVisualRunRequest) -> VisualResult<LiveVisualRunSummary> {
     let checked_out_head = checked_out_head()?;
-    let (environment, base_probe) = inspect_environment();
+    let (environment, base_probe, dpi) = inspect_environment();
     let driver = FixtureDriver::default();
     let replays = selected_replays(&driver, request)?;
     let fixture_names = replays
@@ -99,6 +99,7 @@ pub fn run_live(request: &LiveVisualRunRequest) -> VisualResult<LiveVisualRunSum
                 &fixture_executable,
                 &request.run_id,
                 replay,
+                dpi,
                 &mut observation,
             )?;
         }
@@ -150,6 +151,7 @@ fn observe_replay(
     fixture_executable: &Path,
     run_id: &str,
     replay: &super::FixtureReplay,
+    dpi: u32,
     observation: &mut Observation,
 ) -> VisualResult<()> {
     let launcher = TerminalTestSessionLauncher::default();
@@ -210,7 +212,7 @@ fn observe_replay(
         );
         return Ok(());
     }
-    observe_capture(writer, replay, window_bounds, tab_bounds, observation)
+    observe_capture(writer, replay, window_bounds, tab_bounds, dpi, observation)
 }
 
 fn observe_capture(
@@ -218,6 +220,7 @@ fn observe_capture(
     replay: &super::FixtureReplay,
     window_bounds: ScreenRect,
     tab_bounds: ScreenRect,
+    dpi: u32,
     observation: &mut Observation,
 ) -> VisualResult<()> {
     let capture_backend = UiaGdiCaptureBackend;
@@ -232,7 +235,7 @@ fn observe_capture(
         .first()
         .cloned()
         .ok_or_else(|| VisualError::Platform("capture returned no frames".to_owned()))?;
-    let tab_roi = relative_roi(window_bounds, tab_bounds, &first_frame)?;
+    let tab_roi = relative_roi(window_bounds, tab_bounds, &first_frame, dpi)?;
     write_capture_images(writer, replay, &first_frame, tab_roi)?;
     observation.record_capture_pass(&replay.case.fixture_name, capture_backend.name());
     observe_color(writer, replay, &first_frame, tab_roi, observation)?;
@@ -425,17 +428,19 @@ impl Observation {
     }
 
     fn record_color(&mut self, replay: &super::FixtureReplay, roi: Roi, metrics: ColorMetrics) {
-        let disposition = evaluate_color(
-            replay.case.expected_color,
-            &metrics,
-            self.baseline.as_ref(),
-            ColorTolerance::default(),
-        );
-        if matches!(replay.case.expected_color, ColorSemantic::Default)
-            && replay.case.fixture_name == "ready"
-        {
+        let is_ready_baseline = matches!(replay.case.expected_color, ColorSemantic::Default)
+            && replay.case.fixture_name == "ready";
+        let disposition = if is_ready_baseline {
             self.baseline = Some(metrics.clone());
-        }
+            VisualDisposition::Pass
+        } else {
+            evaluate_color(
+                replay.case.expected_color,
+                &metrics,
+                self.baseline.as_ref(),
+                ColorTolerance::default(),
+            )
+        };
         self.saw_non_pass |= !matches!(disposition, VisualDisposition::Pass);
         self.lanes.observe_color(disposition);
         self.assertions.push(AssertionResult::new(
@@ -594,27 +599,50 @@ fn capture_frames(
     Ok(frames)
 }
 
-fn relative_roi(window: ScreenRect, tab: ScreenRect, frame: &RgbaFrame) -> VisualResult<Roi> {
-    let x = tab
+fn relative_roi(
+    window: ScreenRect,
+    tab: ScreenRect,
+    frame: &RgbaFrame,
+    dpi: u32,
+) -> VisualResult<Roi> {
+    const BASE_DPI: u32 = 96;
+    let relative_left = tab
         .left
         .checked_sub(window.left)
-        .and_then(|value| u32::try_from(value).ok())
         .ok_or(VisualError::InvalidRoi)?;
-    let y = tab
+    let relative_top = tab
         .top
         .checked_sub(window.top)
-        .and_then(|value| u32::try_from(value).ok())
         .ok_or(VisualError::InvalidRoi)?;
-    Roi::new(x, y, tab.width, tab.height)
+    let x = scale_child_coordinate(relative_left, dpi, BASE_DPI).ok_or(VisualError::InvalidRoi)?;
+    let y = scale_child_coordinate(relative_top, dpi, BASE_DPI).ok_or(VisualError::InvalidRoi)?;
+    let width = scale_child_extent(tab.width, dpi, BASE_DPI).ok_or(VisualError::InvalidRoi)?;
+    let height = scale_child_extent(tab.height, dpi, BASE_DPI).ok_or(VisualError::InvalidRoi)?;
+    Roi::new(x, y, width, height)
         .clip(frame.width(), frame.height())
         .ok_or(VisualError::InvalidRoi)
 }
 
+fn scale_child_coordinate(value: i32, dpi: u32, base_dpi: u32) -> Option<u32> {
+    let value = u32::try_from(value).ok()?;
+    scale_child_extent(value, dpi, base_dpi)
+}
+
+fn scale_child_extent(value: u32, dpi: u32, base_dpi: u32) -> Option<u32> {
+    let dpi = dpi.max(base_dpi);
+    let scaled = u64::from(value)
+        .checked_mul(u64::from(dpi))?
+        .checked_add(u64::from(base_dpi / 2))?
+        .checked_div(u64::from(base_dpi))?;
+    u32::try_from(scaled).ok()
+}
+
 fn progress_roi(tab: Roi) -> VisualResult<Roi> {
-    let x = tab.x.saturating_add(4);
-    let y = tab.y.saturating_add(4);
-    let width = tab.width.saturating_sub(8).min(36);
-    let height = tab.height.saturating_sub(8);
+    let size = tab.height.clamp(16, 64) / 2;
+    let x = tab.x.saturating_add(tab.height / 2);
+    let y = tab.y.saturating_add(tab.height.saturating_sub(size) / 2);
+    let width = size;
+    let height = size;
     (width > 0 && height > 0)
         .then_some(Roi::new(x, y, width, height))
         .ok_or(VisualError::InvalidRoi)
@@ -699,12 +727,13 @@ fn checked_out_head() -> VisualResult<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn inspect_environment() -> (MachineEnvironment, PreflightProbe) {
+fn inspect_environment() -> (MachineEnvironment, PreflightProbe, u32) {
     let (session_id, session_kind) = process_session();
     let terminal_available = Command::new("wt.exe").arg("--version").output().is_ok();
     let uia_available = WindowsUiaLocator::is_available();
     let desktop_available = matches!(session_kind, SessionKind::Interactive) && uia_available;
     let desktop_geometry = WindowsUiaLocator::desktop_geometry();
+    let dpi = reported_dpi();
     let environment = MachineEnvironment {
         machine: env::var("COMPUTERNAME").unwrap_or_else(|_| "UNAVAILABLE".to_owned()),
         windows_version: powershell_value(
@@ -720,9 +749,7 @@ fn inspect_environment() -> (MachineEnvironment, PreflightProbe) {
         } else {
             "UIA desktop root unavailable or noninteractive session".to_owned()
         },
-        dpi_scaling: powershell_value(
-            "(Get-ItemProperty 'HKCU:\\Control Panel\\Desktop\\WindowMetrics' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty AppliedDPI)",
-        ),
+        dpi_scaling: dpi.to_string(),
         display_geometry: desktop_geometry,
         rust_toolchain: command_value("rustc", &["--version"]),
     };
@@ -733,7 +760,17 @@ fn inspect_environment() -> (MachineEnvironment, PreflightProbe) {
         uia: availability(uia_available),
         capture: Availability::Unknown,
     };
-    (environment, probe)
+    (environment, probe, dpi)
+}
+
+fn reported_dpi() -> u32 {
+    powershell_value(
+        "(Get-ItemProperty 'HKCU:\\Control Panel\\Desktop\\WindowMetrics' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty AppliedDPI)",
+    )
+    .parse::<u32>()
+    .ok()
+    .filter(|dpi| *dpi >= 96)
+    .unwrap_or(96)
 }
 
 fn process_session() -> (String, SessionKind) {
@@ -901,5 +938,33 @@ fn merge(target: &mut Option<VisualDisposition>, incoming: VisualDisposition) {
     };
     if rank(incoming) >= rank(current) {
         *target = Some(incoming);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::visual::Rgb;
+
+    use super::{RgbaFrame, Roi, ScreenRect, progress_roi, relative_roi};
+
+    #[test]
+    fn dpi_scaled_tab_roi_uses_window_relative_physical_pixels() {
+        let frame = RgbaFrame::solid(746, 483, Rgb::new(0, 0, 0)).expect("valid frame");
+        let roi = relative_roi(
+            ScreenRect::new(34, 40, 746, 483),
+            ScreenRect::new(44, 49, 248, 32),
+            &frame,
+            192,
+        )
+        .expect("DPI-scaled tab is inside window frame");
+        assert_eq!(roi, Roi::new(20, 18, 496, 64));
+    }
+
+    #[test]
+    fn progress_roi_selects_a_bounded_icon_square_inside_tab() {
+        assert_eq!(
+            progress_roi(Roi::new(20, 18, 496, 64)).expect("sufficient tab geometry"),
+            Roi::new(52, 34, 32, 32)
+        );
     }
 }
