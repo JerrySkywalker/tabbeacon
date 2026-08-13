@@ -212,21 +212,21 @@ fn observe_replay(
         );
         return Ok(());
     }
-    let Some(native_handle) = target.native_window_handle.as_deref() else {
-        observation.record_capture_blocked(
-            &replay.case.fixture_name,
-            "UIA did not provide an owned native window handle",
-        );
-        return Ok(());
-    };
-    let capture_target = match OwnedWindowCaptureTarget::new(native_handle, window_bounds) {
+    let capture_target = match OwnedWindowCaptureTarget::new(&target.window_name, window_bounds) {
         Ok(target) => target,
         Err(error) => {
             observation.record_capture_blocked(&replay.case.fixture_name, error.to_string());
             return Ok(());
         }
     };
-    observe_capture(writer, replay, capture_target, tab_bounds, dpi, observation)
+    observe_capture(
+        writer,
+        replay,
+        &capture_target,
+        tab_bounds,
+        dpi,
+        observation,
+    )
 }
 
 fn activate_with_retry(
@@ -254,7 +254,7 @@ fn activate_with_retry(
 fn observe_capture(
     writer: &EvidenceWriter,
     replay: &super::FixtureReplay,
-    capture_target: OwnedWindowCaptureTarget,
+    capture_target: &OwnedWindowCaptureTarget,
     tab_bounds: ScreenRect,
     dpi: u32,
     observation: &mut Observation,
@@ -622,7 +622,7 @@ fn locate_focused_with_retry(
 
 fn capture_frames(
     backend: &impl CaptureBackend,
-    target: OwnedWindowCaptureTarget,
+    target: &OwnedWindowCaptureTarget,
     count: usize,
 ) -> VisualResult<Vec<RgbaFrame>> {
     let mut frames = Vec::with_capacity(count);

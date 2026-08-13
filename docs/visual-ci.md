@@ -105,11 +105,12 @@ Terminal settings, or targets another window. `src/core` has no UIA, HWND,
 image, or evidence-path types.
 
 The primary backend is `win-screenshot-printwindow-full-owned-window`, a
-window-only `PrintWindow(PW_RENDERFULLCONTENT)` capture of the admitted native
-HWND. It does not desktop-copy the UIA rectangle, so transparent Terminal
-backgrounds cannot pull pixels from a browser or another desktop window into
-the evidence. The harness establishes owned foreground activation and target
-continuity before capture. Windows Terminal may report keyboard focus on a
+window-only `PrintWindow(PW_RENDERFULLCONTENT)` capture of the HWND resolved
+through the admitted exact UIA window title. It does not desktop-copy the UIA
+rectangle, so transparent Terminal backgrounds cannot pull pixels from a
+browser or another desktop window into the evidence. The harness establishes
+owned foreground activation and target continuity before capture. Windows
+Terminal may report keyboard focus on a
 child element rather than its top-level UIA Window, so that diagnostic is
 recorded but is not mistaken for a foreground failure. Failure to establish
 the owned foreground condition, missing handle, or any capture error is a
