@@ -44,6 +44,11 @@ specific window/frame dimension ratio. It does not apply a global DPI multiplier
 blindly: Windows may expose either logical or physical UIA bounds for a given
 Terminal window, while the captured pixel buffer is always frame-relative.
 
+Target discovery has a bounded six-second window before the harness reports a
+classified UIA-target failure. This covers normal Terminal creation latency
+without turning a missing owned tab into an unbounded wait or an unrelated-window
+lookup.
+
 ## Environment contract
 
 Real visual CI requires:

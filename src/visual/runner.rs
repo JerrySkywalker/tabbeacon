@@ -573,16 +573,20 @@ fn locate_with_retry(
     run_id: &str,
     expected_title: &str,
 ) -> VisualResult<UiaDump> {
+    const TARGET_DISCOVERY_ATTEMPTS: usize = 30;
+    const TARGET_DISCOVERY_INTERVAL: Duration = Duration::from_millis(200);
     let mut last_error = None;
-    for _ in 0..15 {
+    for _ in 0..TARGET_DISCOVERY_ATTEMPTS {
         match locator.locate(run_id, expected_title) {
             Ok(target) => return Ok(target),
             Err(error) => last_error = Some(error),
         }
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(TARGET_DISCOVERY_INTERVAL);
     }
     Err(last_error.unwrap_or_else(|| {
-        VisualError::Platform("UIA target did not appear within bounded retry interval".to_owned())
+        VisualError::Platform(format!(
+            "UIA target did not appear within {TARGET_DISCOVERY_ATTEMPTS} bounded discovery attempts"
+        ))
     }))
 }
 
