@@ -167,7 +167,7 @@ fn observe_replay(
             return Ok(());
         }
     };
-    let activation = match locator.activate_owned_window(run_id, &replay.case.expected_title) {
+    let activation = match activate_with_retry(locator, run_id, &replay.case.expected_title) {
         Ok(activation) => activation,
         Err(error) => {
             observation.record_target(writer, replay, &initial_target)?;
@@ -227,6 +227,28 @@ fn observe_replay(
         }
     };
     observe_capture(writer, replay, capture_target, tab_bounds, dpi, observation)
+}
+
+fn activate_with_retry(
+    locator: WindowsUiaLocator,
+    run_id: &str,
+    expected_title: &str,
+) -> VisualResult<super::WindowActivation> {
+    let mut last_activation = None;
+    let mut last_error = None;
+    for _ in 0..5 {
+        match locator.activate_owned_window(run_id, expected_title) {
+            Ok(activation) if activation.set_foreground => return Ok(activation),
+            Ok(activation) => last_activation = Some(activation),
+            Err(error) => last_error = Some(error),
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    last_activation.ok_or_else(|| {
+        last_error.unwrap_or_else(|| {
+            VisualError::Platform("owned-window activation produced no observation".to_owned())
+        })
+    })
 }
 
 fn observe_capture(
