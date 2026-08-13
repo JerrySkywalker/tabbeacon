@@ -1,0 +1,13 @@
+/target/
+/.idea/
+/.vscode/
+*.swp
+*.swo
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+
+# Local TabBeacon runtime state must never be committed.
+/.tabbeacon-local/
+/tests/output/

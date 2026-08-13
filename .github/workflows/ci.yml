@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  RUST_TOOLCHAIN: 1.97.1
+
+jobs:
+  windows-hosted:
+    name: Windows / Hosted / Exact Head
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      EXPECTED_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Checkout exact candidate head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Assert exact checkout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:EXPECTED_SHA) {
+            throw "Exact-head mismatch: expected=$env:EXPECTED_SHA actual=$actual"
+          }
+          "CODE_HEAD=$actual"
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --component rustfmt,clippy
+          rustup override set $env:RUST_TOOLCHAIN
+          rustc --version
+          cargo --version
+          rustfmt --version
+          cargo clippy --version
+
+      - name: Run repository quality gate
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File ./scripts/ci/run-local-ci.ps1 -ExpectedHead $env:EXPECTED_SHA
