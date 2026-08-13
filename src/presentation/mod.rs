@@ -419,10 +419,27 @@ impl PresentationFixtureCase {
         SemanticPresentationInput::new(self.phase, self.attention, self.health, self.title)
     }
 
+    /// Returns this provider-free fixture input with a caller-owned title.
+    ///
+    /// G03 uses this narrow seam to correlate one dedicated Windows Terminal
+    /// test tab. It does not alter the fixture's phase, attention, health,
+    /// policy, semantic palette, or VT renderer contract.
+    #[must_use]
+    pub fn input_with_title<'a>(&self, title: &'a str) -> SemanticPresentationInput<'a> {
+        SemanticPresentationInput::new(self.phase, self.attention, self.health, title)
+    }
+
     /// Resolves the fixture through the production presentation policy.
     #[must_use]
     pub fn action(&self) -> PresentationAction {
         PresentationPolicy::resolve(self.input())
+    }
+
+    /// Resolves this fixture using a caller-owned title for visual-test tab
+    /// correlation without changing its semantic fixture state.
+    #[must_use]
+    pub fn action_with_title(&self, title: &str) -> PresentationAction {
+        PresentationPolicy::resolve(self.input_with_title(title))
     }
 }
 

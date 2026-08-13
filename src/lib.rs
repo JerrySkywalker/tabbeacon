@@ -6,6 +6,7 @@ pub mod core;
 pub mod presentation;
 pub mod providers;
 pub mod repo;
+pub mod visual;
 
 /// Public product name used by bootstrap smoke tests.
 pub const PRODUCT_NAME: &str = "TabBeacon";
