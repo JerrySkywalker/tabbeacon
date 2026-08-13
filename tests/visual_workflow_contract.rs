@@ -14,6 +14,7 @@ fn visual_workflow_admits_only_trusted_exact_head_on_an_expected_runner() {
         "persist-credentials: false",
         "Assert approved interactive runner identity",
         "RUNNER_IDENTITY=PASS",
+        "$env:RUNNER_NAME",
         "tabbeacon-visual",
     ] {
         assert!(
@@ -28,5 +29,9 @@ fn visual_workflow_admits_only_trusted_exact_head_on_an_expected_runner() {
     assert!(
         !VISUAL_WORKFLOW.contains("\n  pull_request:"),
         "the self-hosted visual workflow must not run generic pull requests"
+    );
+    assert!(
+        !VISUAL_WORKFLOW.contains("${{ runner.name }}"),
+        "runner context is unavailable at job-level environment admission"
     );
 }

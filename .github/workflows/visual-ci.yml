@@ -31,7 +31,6 @@ jobs:
       EXPECTED_SHA: ${{ inputs.expected_sha }}
       HEAD_BRANCH: ${{ inputs.head_branch }}
       EXPECTED_RUNNER_NAME: ${{ inputs.expected_runner_name }}
-      ACTUAL_RUNNER_NAME: ${{ runner.name }}
     steps:
       - name: Admit trusted in-repository candidate ref
         shell: pwsh
@@ -77,8 +76,8 @@ jobs:
           if ($env:EXPECTED_RUNNER_NAME -notmatch '^tabbeacon-visual-[a-z0-9-]+$') {
             throw "Unsafe expected runner name: $env:EXPECTED_RUNNER_NAME"
           }
-          if ($env:ACTUAL_RUNNER_NAME -ne $env:EXPECTED_RUNNER_NAME) {
-            throw "Runner identity mismatch: expected=$env:EXPECTED_RUNNER_NAME actual=$env:ACTUAL_RUNNER_NAME"
+          if ($env:RUNNER_NAME -ne $env:EXPECTED_RUNNER_NAME) {
+            throw "Runner identity mismatch: expected=$env:EXPECTED_RUNNER_NAME actual=$env:RUNNER_NAME"
           }
           $task = @(& tasklist /FI "PID eq $PID" /FO CSV /NH)
           if ($LASTEXITCODE -ne 0 -or $task.Count -ne 1) {
@@ -89,7 +88,7 @@ jobs:
           if ($session -eq '0' -or [string]::IsNullOrWhiteSpace($fields[2])) {
             throw "Visual lane is not in an interactive user session: session=$session name=$($fields[2])"
           }
-          "RUNNER_IDENTITY=PASS name=$env:ACTUAL_RUNNER_NAME session=$session" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "RUNNER_IDENTITY=PASS name=$env:RUNNER_NAME session=$session" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 
       - name: Checkout admitted exact candidate
         uses: actions/checkout@v4
