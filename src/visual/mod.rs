@@ -38,7 +38,7 @@ pub mod session;
 pub mod uia;
 
 #[cfg(windows)]
-pub use capture::{CaptureBackend, UiaGdiCaptureBackend};
+pub use capture::{CaptureBackend, OwnedWindowCaptureTarget, PrintWindowCaptureBackend};
 #[cfg(windows)]
 pub use runner::{LiveVisualRunRequest, LiveVisualRunSummary};
 #[cfg(windows)]

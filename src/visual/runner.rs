@@ -14,10 +14,10 @@ use super::{
     AnimationThreshold, AssertionKind, AssertionResult, Availability, CaptureBackend,
     ColorClassification, ColorMetrics, ColorSemantic, ColorTolerance, DesktopPreflight,
     EvidenceBundle, EvidenceManifest, EvidenceWriter, FixtureDriver, MachineEnvironment,
-    PreflightProbe, RgbaFrame, Roi, ScreenRect, SessionKind, TargetLocator,
-    TerminalTestSessionLauncher, UiaDump, UiaGdiCaptureBackend, VisualDisposition, VisualError,
-    VisualResult, WindowsUiaLocator, assess_animation, classify_color, matches_baseline,
-    select_background_roi,
+    OwnedWindowCaptureTarget, PreflightProbe, PrintWindowCaptureBackend, RgbaFrame, Roi,
+    ScreenRect, SessionKind, TargetLocator, TerminalTestSessionLauncher, UiaDump,
+    VisualDisposition, VisualError, VisualResult, WindowsUiaLocator, assess_animation,
+    classify_color, matches_baseline, select_background_roi,
 };
 
 /// Inputs for one live visual-harness invocation.
@@ -116,7 +116,7 @@ pub fn run_live(request: &LiveVisualRunRequest) -> VisualResult<LiveVisualRunSum
         visual_head: visual_head.clone(),
         run_id: request.run_id.clone(),
         observed_at_unix_seconds: unix_seconds(),
-        capture_backend: UiaGdiCaptureBackend.name().to_owned(),
+        capture_backend: PrintWindowCaptureBackend.name().to_owned(),
         preflight: observation.preflight.clone(),
         environment: environment.clone(),
         window_geometry: observation.uia.window_bounds,
@@ -212,19 +212,33 @@ fn observe_replay(
         );
         return Ok(());
     }
-    observe_capture(writer, replay, window_bounds, tab_bounds, dpi, observation)
+    let Some(native_handle) = target.native_window_handle.as_deref() else {
+        observation.record_capture_blocked(
+            &replay.case.fixture_name,
+            "UIA did not provide an owned native window handle",
+        );
+        return Ok(());
+    };
+    let capture_target = match OwnedWindowCaptureTarget::new(native_handle, window_bounds) {
+        Ok(target) => target,
+        Err(error) => {
+            observation.record_capture_blocked(&replay.case.fixture_name, error.to_string());
+            return Ok(());
+        }
+    };
+    observe_capture(writer, replay, capture_target, tab_bounds, dpi, observation)
 }
 
 fn observe_capture(
     writer: &EvidenceWriter,
     replay: &super::FixtureReplay,
-    window_bounds: ScreenRect,
+    capture_target: OwnedWindowCaptureTarget,
     tab_bounds: ScreenRect,
     dpi: u32,
     observation: &mut Observation,
 ) -> VisualResult<()> {
-    let capture_backend = UiaGdiCaptureBackend;
-    let frames = match capture_frames(&capture_backend, window_bounds, 3) {
+    let capture_backend = PrintWindowCaptureBackend;
+    let frames = match capture_frames(&capture_backend, capture_target, 3) {
         Ok(frames) => frames,
         Err(error) => {
             observation.record_capture_blocked(&replay.case.fixture_name, error.to_string());
@@ -235,7 +249,7 @@ fn observe_capture(
         .first()
         .cloned()
         .ok_or_else(|| VisualError::Platform("capture returned no frames".to_owned()))?;
-    let tab_roi = relative_roi(window_bounds, tab_bounds, &first_frame, dpi)?;
+    let tab_roi = relative_roi(capture_target.window_bounds, tab_bounds, &first_frame, dpi)?;
     write_capture_images(writer, replay, &first_frame, tab_roi)?;
     observation.record_capture_pass(&replay.case.fixture_name, capture_backend.name());
     observe_color(writer, replay, &first_frame, tab_roi, observation)?;
@@ -586,12 +600,12 @@ fn locate_focused_with_retry(
 
 fn capture_frames(
     backend: &impl CaptureBackend,
-    rect: ScreenRect,
+    target: OwnedWindowCaptureTarget,
     count: usize,
 ) -> VisualResult<Vec<RgbaFrame>> {
     let mut frames = Vec::with_capacity(count);
     for index in 0..count {
-        frames.push(backend.capture(rect)?);
+        frames.push(backend.capture(target)?);
         if index + 1 < count {
             thread::sleep(Duration::from_millis(300));
         }

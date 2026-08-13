@@ -346,6 +346,7 @@ dependencies = [
  "serde",
  "serde_json",
  "uiautomation",
+ "win-screenshot",
 ]
 
 [[package]]
@@ -355,7 +356,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c68495a701b9f2f21f29353ac446f0d27dd0d7ce97aa9ccf9061bca0446cd744"
 dependencies = [
  "chrono",
- "png",
  "uiautomation_derive",
  "windows",
  "windows-core",
@@ -421,6 +421,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ef64dbcc55df09c7e5a46182d181c2cfa3e925f3da937ea764728b4bbb9dcbf"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "win-screenshot"
+version = "4.0.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e46fb2d7cb00430b7c433b05cc37a0f2f03a5305a975b1886a6ce5e1d8977d4b"
+dependencies = [
+ "windows",
 ]
 
 [[package]]

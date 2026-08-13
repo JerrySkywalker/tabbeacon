@@ -104,16 +104,18 @@ to make the owned fixture window capture-visible. It never sends input, changes
 Terminal settings, or targets another window. `src/core` has no UIA, HWND,
 image, or evidence-path types.
 
-The initial `uiautomation-gdi-visible-screen-rectangle` capture backend is
-explicitly visibility-dependent. It captures only the UIA bounds of the
-positively owned test window after the harness has established foreground
-activation and target continuity. Windows Terminal may report keyboard focus
-on a child element rather than its top-level UIA Window, so that diagnostic is
+The primary backend is `win-screenshot-printwindow-full-owned-window`, a
+window-only `PrintWindow(PW_RENDERFULLCONTENT)` capture of the admitted native
+HWND. It does not desktop-copy the UIA rectangle, so transparent Terminal
+backgrounds cannot pull pixels from a browser or another desktop window into
+the evidence. The harness establishes owned foreground activation and target
+continuity before capture. Windows Terminal may report keyboard focus on a
+child element rather than its top-level UIA Window, so that diagnostic is
 recorded but is not mistaken for a foreground failure. Failure to establish
-the owned foreground condition, or any capture error, is a capture-preflight
-blocker rather than a color or animation failure. The capture trait permits a
-later empirically justified Windows replacement without changing oracle or
-evidence semantics.
+the owned foreground condition, missing handle, or any capture error is a
+capture-preflight blocker rather than a color or animation failure. The capture
+trait permits a later empirically justified Windows replacement without
+changing oracle or evidence semantics.
 
 ## Deterministic oracle rules
 
@@ -133,10 +135,14 @@ capture remain distinct outcomes.
 
 TB-G03 adds only the following direct dependencies:
 
-- `uiautomation` 0.25.0, Apache-2.0: maintained safe Rust UIA client plus its
-  optional GDI screenshot adapter. The standard library has no Windows UIA or
-  GDI abstraction, and this keeps project code compatible with the repository's
-  `unsafe_code = "forbid"` policy.
+- `uiautomation` 0.25.0, Apache-2.0: maintained safe Rust UIA client and
+  foreground wrapper. The standard library has no Windows UIA abstraction, and
+  this keeps project code compatible with the repository's `unsafe_code =
+  "forbid"` policy.
+- `win-screenshot` 4.0.14, MIT OR Apache-2.0: maintained safe wrapper for
+  window-only `PrintWindow(PW_RENDERFULLCONTENT)` RGBA buffers. The standard
+  library and the UIA binding cannot capture an admitted HWND without sampling
+  underlying desktop pixels.
 - `serde` 1.0.229 and `serde_json` 1.0.151, both MIT OR Apache-2.0: stable,
   typed deterministic evidence serialization. The standard library has no JSON
   serializer/deserializer.
