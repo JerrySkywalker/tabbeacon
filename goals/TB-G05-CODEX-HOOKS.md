@@ -23,6 +23,7 @@ upstream source.
 LOCAL_CODEX_VERSION=0.147.0
 LOCAL_CODEX_HOOKS_FEATURE=stable/enabled
 UPSTREAM_RELEASE=rust-v0.147.0
+UPSTREAM_RELEASE_SOURCE=be6e8eac029b183056b7e4402879f15d2c85f61b
 UPSTREAM_SOURCE_HEAD=4eff3b788ba629acc944ed6db6502c362fc08e0a
 UPSTREAM_SOURCE_DATE=2026-08-14T08:16:23Z
 ```
@@ -41,8 +42,13 @@ Admitted upstream behavior:
 - unmanaged hook definitions run only after the user trusts the current
   normalized definition hash; a changed definition is inactive until reviewed
   again;
-- asynchronous command hooks are informational and do not participate in the
-  operation's control decision;
+- the installed `0.147.0` release parses the `async` field but skips non-end
+  hooks that enable it; current upstream `main` has since implemented
+  asynchronous execution, so the release source governs this compatibility
+  decision;
+- release hook failures and timeouts are recorded as failed hook runs but do
+  not block an operation; only an explicit exit code `2` plus the event's
+  required non-empty stderr feedback selects the blocking path;
 - `SessionEnd` is always run synchronously, defaults to a one-second timeout,
   is capped at three seconds, and cannot keep the thread open;
 - Codex owns the terminal title by default; the supported disablement is
@@ -148,10 +154,12 @@ surface.
 
 ## 8. Hook execution and fail-open contract
 
-- configured lifecycle hooks are asynchronous and informational wherever the
-  Codex interface permits it;
-- `SessionEnd` is synchronous only because Codex requires it and uses the
-  one-second bounded timeout after lifecycle end;
+- installed-release hooks are synchronous because `0.147.0` otherwise skips
+  them, and every declaration uses the minimum one-second timeout;
+- the Windows command contains an explicit shell fail-open suffix so a missing
+  or nonzero TabBeacon binary resolves to command success rather than the
+  special Codex exit-code-2 blocking path;
+- `SessionEnd` uses the same one-second bound after lifecycle end;
 - the hook command writes no control JSON and makes no allow/deny/block
   decision;
 - malformed or unsupported input, repository discovery failure, corrupt local
@@ -159,9 +167,9 @@ surface.
   are contained inside the hook command;
 - the hook ingress process exits successfully after such a degradation so
   TabBeacon cannot block Codex progression;
-- missing TabBeacon executables remain a Codex hook-launch failure only; the
-  asynchronous declarations prevent that failure from becoming a provider
-  operation decision;
+- missing or nonzero TabBeacon executables are neutralized by the owned command
+  suffix; a Codex-enforced timeout is a failed hook run which the admitted
+  release source proves does not set the event's block/stop decision;
 - hook input is size-bounded and no raw prompt/tool content is logged or
   persisted;
 - no network access is used by hook normalization, repository identity, or
