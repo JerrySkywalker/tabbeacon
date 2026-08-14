@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::{
     env, fs,
     io::{self, Write},
@@ -12,6 +14,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tabbeacon::{
     core::{Attention, AuthoritySet, FieldUpdate, Health, Phase, StateAxis},
     providers::codex::{
@@ -20,6 +23,7 @@ use tabbeacon::{
         UninstallOutcome,
     },
 };
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -153,6 +157,109 @@ fn compile_codex_probe(root: &TestRoot) -> PathBuf {
         String::from_utf8_lossy(&output.stderr)
     );
     executable
+}
+
+#[cfg(windows)]
+fn run_codex_windows_hook(command_line: &str) -> std::process::Output {
+    // Mirror Codex 0.147.0 command_runner::build_command: /C followed by one
+    // raw, outer-quoted command line. Normal argument quoting is not equivalent.
+    let shell = env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
+    let mut command = Command::new(shell);
+    command.arg("/C");
+    command.raw_arg(format!(r#""{command_line}""#));
+    command
+        .output()
+        .expect("Codex-compatible hook shell starts")
+}
+
+fn codex_event_key(event: &str) -> &'static str {
+    match event {
+        "SessionStart" => "session_start",
+        "UserPromptSubmit" => "user_prompt_submit",
+        "PreToolUse" => "pre_tool_use",
+        "PermissionRequest" => "permission_request",
+        "PostToolUse" => "post_tool_use",
+        "Stop" => "stop",
+        "SessionEnd" => "session_end",
+        other => panic!("unsupported test event: {other}"),
+    }
+}
+
+fn canonical_json(value: &Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut entries = object.iter().collect::<Vec<_>>();
+            entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key.clone(), canonical_json(value)))
+                    .collect(),
+            )
+        }
+        Value::Array(values) => Value::Array(values.iter().map(canonical_json).collect()),
+        other => other.clone(),
+    }
+}
+
+fn normalized_codex_hash(event: &str, group: &Value) -> String {
+    let handler = &group["hooks"][0];
+    let normalized = json!({
+        "event_name": codex_event_key(event),
+        "hooks": [{
+            "type": "command",
+            "command": handler["commandWindows"],
+            "timeout": handler["timeout"],
+            "async": handler["async"]
+        }]
+    });
+    let bytes = serde_json::to_vec(&canonical_json(&normalized))
+        .expect("normalized hook fixture serializes");
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
+    let hooks_path = codex_home.join("hooks.json");
+    let hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("hooks read")).expect("hooks parse");
+    let config_path = codex_home.join("config.toml");
+    let mut config = fs::read_to_string(&config_path)
+        .expect("config reads")
+        .parse::<DocumentMut>()
+        .expect("config parses");
+    if !config.as_table().contains_key("hooks") {
+        config["hooks"] = Item::Table(Table::new());
+    }
+    if !config["hooks"]
+        .as_table_like()
+        .expect("hooks config is a table")
+        .contains_key("state")
+    {
+        config["hooks"]["state"] = Item::Table(Table::new());
+    }
+
+    let mut keys = Vec::new();
+    for event in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PermissionRequest",
+        "PostToolUse",
+        "Stop",
+        "SessionEnd",
+    ] {
+        let group = &hooks["hooks"][event][0];
+        let key = format!("{}:{}:0:0", hooks_path.display(), codex_event_key(event));
+        let mut trusted = Table::new();
+        trusted.insert("trusted_hash", value(normalized_codex_hash(event, group)));
+        config["hooks"]["state"]
+            .as_table_like_mut()
+            .expect("hook state is a table")
+            .insert(&key, Item::Table(trusted));
+        keys.push(key);
+    }
+    fs::write(config_path, config.to_string()).expect("trusted config writes");
+    keys
 }
 
 #[test]
@@ -552,11 +659,62 @@ fn setup_and_uninstall_are_safe_for_absent_files_and_modified_ownership() {
         serde_json::to_vec_pretty(&hooks).expect("mutated hooks serialize"),
     )
     .expect("mutated hook is written");
+    let report = integration.doctor();
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.declarations" && check.status() == DoctorStatus::Fail
+    }));
     assert!(matches!(
         integration.uninstall(),
         Err(CodexIntegrationError::ModifiedOwnedHook)
     ));
     assert!(codex_home.join("config.toml").is_file());
+}
+
+#[test]
+fn doctor_supports_current_codex_trust_shape_and_detects_inactive_or_conflicting_state() {
+    let root = TestRoot::new("doctor-current-shape");
+    let integration = test_integration(&root);
+    integration.setup().expect("setup succeeds");
+    let codex_home = root.child("codex-home");
+    let trusted_keys = install_current_codex_trust_state(&codex_home);
+
+    let report = integration.doctor();
+    assert_eq!(report.overall(), DoctorStatus::Pass);
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.trust"
+            && check.status() == DoctorStatus::Pass
+            && check.summary().contains("trusted and active")
+    }));
+
+    let config_path = codex_home.join("config.toml");
+    let mut config = fs::read_to_string(&config_path)
+        .expect("trusted config reads")
+        .parse::<DocumentMut>()
+        .expect("trusted config parses");
+    config["hooks"]["state"][&trusted_keys[0]]["trusted_hash"] = value("sha256:modified");
+    fs::write(&config_path, config.to_string()).expect("modified trust state writes");
+    let report = integration.doctor();
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.trust"
+            && check.status() == DoctorStatus::Fail
+            && check.summary().contains("modified/inactive")
+    }));
+
+    install_current_codex_trust_state(&codex_home);
+    let mut config = fs::read_to_string(&config_path)
+        .expect("restored trusted config reads")
+        .parse::<DocumentMut>()
+        .expect("restored trusted config parses");
+    let mut title = Array::new();
+    title.push("project");
+    config["tui"]["terminal_title"] = value(title);
+    fs::write(config_path, config.to_string()).expect("conflicting title writes");
+    let report = integration.doctor();
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "terminal.title"
+            && check.status() == DoctorStatus::Fail
+            && check.summary().contains("conflicts")
+    }));
 }
 
 #[test]
@@ -684,14 +842,55 @@ fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
         let command = hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["commandWindows"]
             .as_str()
             .expect("Windows command is a string");
-        let status = Command::new("cmd.exe")
-            .args(["/D", "/S", "/C", command])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("Windows hook shell starts");
-        assert!(status.success(), "missing managed binary must fail open");
+        let output = run_codex_windows_hook(command);
+        assert!(
+            output.status.success(),
+            "missing managed binary must fail open"
+        );
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn explicit_blocking_like_hook_failure_is_neutralized_with_a_bounded_declaration() {
+    let root = TestRoot::new("explicit-hook-failure");
+    let executable = root.child("bin").join("tabbeacon-failure.cmd");
+    let execution_marker = root.child("failure-probe-ran");
+    fs::create_dir_all(executable.parent().expect("failure binary parent"))
+        .expect("failure binary parent is created");
+    fs::write(
+        &executable,
+        format!(
+            "@echo off\r\necho ran> \"{}\"\r\nexit /b 2\r\n",
+            execution_marker.display()
+        ),
+    )
+    .expect("failure binary writes");
+    let integration =
+        CodexIntegration::new(root.child("codex-home"), root.child("state"), executable)
+            .with_codex_program(compile_codex_probe(&root));
+    integration.setup().expect("setup succeeds");
+    let hooks: Value =
+        serde_json::from_slice(&fs::read(root.child("codex-home/hooks.json")).expect("hooks read"))
+            .expect("hooks parse");
+    let handler = &hooks["hooks"]["PermissionRequest"][0]["hooks"][0];
+    assert_eq!(handler["timeout"], 1);
+    assert_eq!(handler["async"], false);
+    let command = handler["commandWindows"]
+        .as_str()
+        .expect("Windows command is a string");
+    let output = run_codex_windows_hook(command);
+    assert!(
+        output.status.success(),
+        "exit-code-2 hook failure must be neutralized: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        execution_marker.is_file(),
+        "failure probe must have executed; command={command:?}; stdout={}; stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
