@@ -216,13 +216,19 @@ writes trust state.
 
 ## 11. Dependency decision
 
-One new direct dependency is allowed: `toml_edit`, with default parse/display
-features, solely for comment- and formatting-preserving mutation of the one
-supported Codex TOML setting. The admitted current crate is pure Rust,
-`0.25.13+spec-1.1.0`, requires Rust 1.85 or newer, and is dual licensed
-`MIT OR Apache-2.0`. This is compatible with the pinned Rust 1.97.1 toolchain
-and avoids unsafe hand-editing of arbitrary user configuration. No SQLite/C or
-network dependency is introduced.
+Two new direct dependencies are allowed:
+
+- `toml_edit`, with default parse/display features, solely for comment- and
+  formatting-preserving mutation of the one supported Codex TOML setting. The
+  admitted current crate is pure Rust, `0.25.13+spec-1.1.0`, requires Rust 1.85
+  or newer, and is dual licensed `MIT OR Apache-2.0`.
+- `atomic-write-file` `0.3.1`, with no optional features, solely to durably
+  replace existing external configuration files with platform-correct atomic
+  semantics. It requires Rust 1.85 or newer and is BSD-3-Clause licensed.
+
+Both are compatible with the pinned Rust 1.97.1 toolchain. Together they avoid
+unsafe hand-editing and the non-atomic remove/rename gap on Windows. No
+SQLite/C or network dependency is introduced.
 
 ## 12. Acceptance tests
 
