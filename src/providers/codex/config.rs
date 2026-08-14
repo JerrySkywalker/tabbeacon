@@ -898,7 +898,7 @@ fn hook_is_enabled(config: &DocumentMut, key: &str) -> bool {
         .and_then(|state| state.get(key))
         .and_then(Item::as_table_like)
         .and_then(|entry| entry.get("enabled"))
-        .map_or(true, |enabled| enabled.as_bool().unwrap_or(false))
+        .is_none_or(|enabled| enabled.as_bool().unwrap_or(false))
 }
 
 fn trusted_hash<'a>(config: &'a DocumentMut, key: &str) -> Option<&'a str> {
