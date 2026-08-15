@@ -33,6 +33,8 @@ const HOOK_EVENTS: [&str; 7] = [
 pub enum SetupOutcome {
     /// The supported Codex user layer was updated and now needs hook review.
     InstalledTrustReviewRequired,
+    /// Exact owned declarations were atomically replaced with the current form.
+    Upgraded,
     /// The exact owned integration was already present; no file was rewritten.
     AlreadyInstalled,
 }
@@ -301,6 +303,20 @@ impl CodexIntegration {
                 ),
                 _ => fail("hooks.declarations", "owned hooks are missing or modified"),
             });
+            checks.push(match desired_hooks(&self.tabbeacon_executable) {
+                Ok(desired) if desired == manifest.hooks => pass(
+                    "hooks.currentness",
+                    "owned hook declarations match the current TabBeacon integration",
+                ),
+                Ok(_) => fail(
+                    "hooks.currentness",
+                    "owned hook declarations require a TabBeacon upgrade",
+                ),
+                Err(_) => fail(
+                    "hooks.currentness",
+                    "current TabBeacon hook declarations cannot be generated safely",
+                ),
+            });
             checks.push(match (&version, &config) {
                 (Some((_, true)), Ok(config)) => {
                     hook_trust_check(config, &self.hooks_path(), hooks, &manifest.hooks)
@@ -342,9 +358,9 @@ impl CodexIntegration {
         reject_symbolic_link(&self.hooks_path())?;
         reject_symbolic_link(&self.config_path())?;
         let desired_hooks = desired_hooks(&self.tabbeacon_executable)?;
-        if let Some(manifest) = self.load_manifest()? {
+        if let Some(mut manifest) = self.load_manifest()? {
             self.validate_manifest_target(&manifest)?;
-            let hooks = read_hooks_document(&self.hooks_path())?;
+            let mut hooks = read_hooks_document(&self.hooks_path())?;
             let config = read_config_document(&self.config_path())?;
             locate_owned_hooks(&hooks, &manifest.hooks)
                 .map_err(|_| CodexIntegrationError::ModifiedOwnedHook)?;
@@ -354,6 +370,14 @@ impl CodexIntegration {
                 } else {
                     CodexIntegrationError::TerminalTitleConflict
                 });
+            }
+            if manifest.hooks != desired_hooks {
+                remove_owned_hooks(&mut hooks, &manifest.hooks)?;
+                append_owned_hooks(&mut hooks, &desired_hooks)?;
+                atomic_write(&self.hooks_path(), &serialize_hooks(&hooks)?)?;
+                manifest.hooks = desired_hooks;
+                self.write_manifest(&manifest)?;
+                return Ok(SetupOutcome::Upgraded);
             }
             return Ok(SetupOutcome::AlreadyInstalled);
         }
@@ -604,7 +628,7 @@ fn desired_hooks(executable: &Path) -> Result<Vec<OwnedHook>, CodexIntegrationEr
                     .any(|character| matches!(character, '"' | '%' | '\r' | '\n'))
         })
         .ok_or(CodexIntegrationError::UnsafeExecutablePath)?;
-    let windows_command = format!("\"{executable}\" hook codex || exit /b 0");
+    let windows_command = shell_independent_windows_hook_command(executable);
     Ok(HOOK_EVENTS
         .into_iter()
         .map(|event| OwnedHook {
@@ -620,6 +644,46 @@ fn desired_hooks(executable: &Path) -> Result<Vec<OwnedHook>, CodexIntegrationEr
             }),
         })
         .collect())
+}
+
+fn shell_independent_windows_hook_command(executable: &str) -> String {
+    let executable = executable.replace('\'', "''");
+    let script = format!(
+        "$ErrorActionPreference = 'SilentlyContinue'; & '{executable}' hook codex 1>$null 2>$null; exit 0"
+    );
+    let mut utf16 = Vec::with_capacity(script.len() * 2);
+    for unit in script.encode_utf16() {
+        utf16.extend_from_slice(&unit.to_le_bytes());
+    }
+    format!(
+        "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
+        base64_encode(&utf16)
+    )
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = *chunk.get(1).unwrap_or(&0);
+        let third = *chunk.get(2).unwrap_or(&0);
+        encoded.push(char::from(ALPHABET[usize::from(first >> 2)]));
+        encoded.push(char::from(
+            ALPHABET[usize::from(((first & 0b0000_0011) << 4) | (second >> 4))],
+        ));
+        encoded.push(if chunk.len() > 1 {
+            char::from(ALPHABET[usize::from(((second & 0b0000_1111) << 2) | (third >> 6))])
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            char::from(ALPHABET[usize::from(third & 0b0011_1111)])
+        } else {
+            '='
+        });
+    }
+    encoded
 }
 
 fn read_hooks_document(path: &Path) -> Result<Value, CodexIntegrationError> {

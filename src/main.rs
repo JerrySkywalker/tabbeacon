@@ -45,6 +45,13 @@ fn setup_codex() -> ExitCode {
             println!("OWNER_ACTION=launch codex and trust the TabBeacon hooks in /hooks");
             ExitCode::SUCCESS
         }
+        Ok(SetupOutcome::Upgraded) => {
+            println!("SETUP_IDEMPOTENCE=PASS");
+            println!("CODEX_INTEGRATION=UPGRADED");
+            println!("HOOK_TRUST=REVIEW_REQUIRED");
+            println!("OWNER_ACTION=launch codex and trust the updated TabBeacon hooks in /hooks");
+            ExitCode::SUCCESS
+        }
         Ok(SetupOutcome::AlreadyInstalled) => {
             println!("SETUP_IDEMPOTENCE=PASS");
             println!("CODEX_INTEGRATION=ALREADY_INSTALLED");

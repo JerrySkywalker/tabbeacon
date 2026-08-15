@@ -161,25 +161,80 @@ fn compile_codex_probe(root: &TestRoot) -> PathBuf {
 
 #[cfg(windows)]
 fn run_codex_windows_hook(command_line: &str) -> std::process::Output {
-    run_codex_windows_hook_with_input(command_line, &[], false)
+    run_codex_windows_hook_with_shell(
+        CodexWindowsHookShell::ComspecFallback,
+        command_line,
+        &[],
+        false,
+        None,
+    )
 }
 
 #[cfg(windows)]
-fn run_codex_windows_hook_with_input(
+#[derive(Clone, Copy)]
+enum CodexWindowsHookShell {
+    Pwsh7,
+    WindowsPowerShell,
+    Cmd,
+    ComspecFallback,
+}
+
+#[cfg(windows)]
+impl CodexWindowsHookShell {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pwsh7 => "pwsh.exe/-NoProfile/-Command",
+            Self::WindowsPowerShell => "powershell.exe/-NoProfile/-Command",
+            Self::Cmd => "cmd.exe//c",
+            Self::ComspecFallback => "empty-program/COMSPEC-fallback",
+        }
+    }
+}
+
+#[cfg(windows)]
+fn run_codex_windows_hook_with_shell(
+    shell: CodexWindowsHookShell,
     command_line: &str,
     input: &[u8],
     isolate_runtime_state: bool,
+    local_app_data: Option<&Path>,
 ) -> std::process::Output {
-    // Mirror Codex 0.147.0 command_runner::build_command: /C followed by one
-    // raw, outer-quoted command line. Normal argument quoting is not equivalent.
-    let shell = env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
-    let mut command = Command::new(shell);
-    command.arg("/C");
-    command.raw_arg(format!(r#""{command_line}""#));
+    // Mirror Codex 0.147.0 command_runner::build_command exactly. A non-empty
+    // CommandShell receives normal arguments, except cmd.exe's /c branch uses
+    // the runner's raw outer quotation. An empty program falls back to COMSPEC.
+    let mut command = match shell {
+        CodexWindowsHookShell::Pwsh7 => {
+            let mut command = Command::new("pwsh.exe");
+            command.args(["-NoProfile", "-Command"]);
+            command.arg(command_line);
+            command
+        }
+        CodexWindowsHookShell::WindowsPowerShell => {
+            let mut command = Command::new("powershell.exe");
+            command.args(["-NoProfile", "-Command"]);
+            command.arg(command_line);
+            command
+        }
+        CodexWindowsHookShell::Cmd => {
+            let mut command = Command::new("cmd.exe");
+            command.arg("/c");
+            command.raw_arg(format!(r#""{command_line}""#));
+            command
+        }
+        CodexWindowsHookShell::ComspecFallback => {
+            let program = env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
+            let mut command = Command::new(program);
+            command.arg("/C");
+            command.raw_arg(format!(r#""{command_line}""#));
+            command
+        }
+    };
     command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
-    if isolate_runtime_state {
+    if let Some(local_app_data) = local_app_data {
+        command.env("LOCALAPPDATA", local_app_data);
+    } else if isolate_runtime_state {
         command.env_remove("LOCALAPPDATA");
     }
     let mut child = command.spawn().expect("Codex-compatible hook shell starts");
@@ -661,6 +716,129 @@ animations = false
 }
 
 #[test]
+fn setup_upgrades_exact_owned_declarations_without_duplicates_or_baseline_loss() {
+    let root = TestRoot::new("owned-upgrade");
+    let codex_home = root.child("codex-home");
+    fs::create_dir_all(&codex_home).expect("Codex home is created");
+    let unrelated_stop = json!({
+        "hooks": [{"type": "command", "command": "owner-stop-hook"}]
+    });
+    fs::write(
+        codex_home.join("hooks.json"),
+        serde_json::to_vec_pretty(&json!({
+            "description": "owner hooks",
+            "hooks": {"Stop": [unrelated_stop.clone()]}
+        }))
+        .expect("owner hooks serialize"),
+    )
+    .expect("owner hooks are written");
+    fs::write(codex_home.join("config.toml"), "model = \"gpt-test\"\n")
+        .expect("owner config is written");
+
+    let integration = test_integration(&root);
+    assert_eq!(
+        integration.setup().expect("initial setup succeeds"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    let manifest_path = root.child("state/integration-v1.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest reads"))
+            .expect("manifest parses");
+    let original_hooks_backup = manifest["hooks_backup"].clone();
+    let original_config_backup = manifest["config_backup"].clone();
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(codex_home.join("hooks.json")).expect("hooks read"))
+            .expect("hooks parse");
+
+    let legacy_command = r#""C:\\legacy\\tabbeacon.exe" hook codex || exit /b 0"#;
+    for owned in manifest["hooks"]
+        .as_array_mut()
+        .expect("manifest owned hooks are an array")
+    {
+        let event = owned["event"]
+            .as_str()
+            .expect("owned event name")
+            .to_owned();
+        let prior_group = owned["group"].clone();
+        let live_group = hooks["hooks"][&event]
+            .as_array_mut()
+            .expect("event groups are an array")
+            .iter_mut()
+            .find(|group| **group == prior_group)
+            .expect("owned group is present in hooks");
+        live_group["hooks"][0]["command"] = json!(legacy_command);
+        live_group["hooks"][0]["commandWindows"] = json!(legacy_command);
+        owned["group"]["hooks"][0]["command"] = json!(legacy_command);
+        owned["group"]["hooks"][0]["commandWindows"] = json!(legacy_command);
+    }
+    fs::write(
+        codex_home.join("hooks.json"),
+        serde_json::to_vec_pretty(&hooks).expect("legacy hooks serialize"),
+    )
+    .expect("legacy hooks are written");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("legacy manifest serialize"),
+    )
+    .expect("legacy manifest is written");
+
+    let before_upgrade = integration.doctor();
+    assert_eq!(before_upgrade.overall(), DoctorStatus::Fail);
+    assert!(before_upgrade.checks().iter().any(|check| {
+        check.id() == "hooks.currentness"
+            && check.status() == DoctorStatus::Fail
+            && check.summary().contains("require a TabBeacon upgrade")
+    }));
+
+    assert_eq!(
+        integration.setup().expect("owned upgrade succeeds"),
+        SetupOutcome::Upgraded
+    );
+    let upgraded_manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("upgraded manifest reads"))
+            .expect("upgraded manifest parses");
+    assert_eq!(upgraded_manifest["hooks_backup"], original_hooks_backup);
+    assert_eq!(upgraded_manifest["config_backup"], original_config_backup);
+    let upgraded_hooks: Value = serde_json::from_slice(
+        &fs::read(codex_home.join("hooks.json")).expect("upgraded hooks read"),
+    )
+    .expect("upgraded hooks parse");
+    let owned_handler_count = upgraded_hooks["hooks"]
+        .as_object()
+        .expect("hooks object")
+        .values()
+        .flat_map(|groups| groups.as_array().into_iter().flatten())
+        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+        .filter(|handler| {
+            handler["command"].as_str().is_some_and(|command| {
+                command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
+            })
+        })
+        .count();
+    assert_eq!(
+        owned_handler_count, 7,
+        "upgrade must never append another seven hooks"
+    );
+    assert_eq!(upgraded_hooks["hooks"]["Stop"][0], unrelated_stop);
+    let after_upgrade = integration.doctor();
+    assert!(after_upgrade.checks().iter().any(|check| {
+        check.id() == "hooks.currentness" && check.status() == DoctorStatus::Pass
+    }));
+
+    assert_eq!(
+        integration
+            .uninstall()
+            .expect("upgraded integration uninstalls"),
+        UninstallOutcome::Removed
+    );
+    let uninstalled_hooks: Value = serde_json::from_slice(
+        &fs::read(codex_home.join("hooks.json")).expect("uninstalled hooks read"),
+    )
+    .expect("uninstalled hooks parse");
+    assert_eq!(uninstalled_hooks["hooks"]["Stop"], json!([unrelated_stop]));
+}
+
+#[test]
 fn setup_and_uninstall_are_safe_for_absent_files_and_modified_ownership() {
     let root = TestRoot::new("ownership");
     let integration = test_integration(&root);
@@ -866,12 +1044,10 @@ fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
     ] {
         assert_eq!(hooks["hooks"][event][0]["hooks"][0]["async"], false);
         assert_eq!(hooks["hooks"][event][0]["hooks"][0]["timeout"], 1);
-        assert!(
-            hooks["hooks"][event][0]["hooks"][0]["commandWindows"]
-                .as_str()
-                .expect("Windows command is a string")
-                .ends_with(" || exit /b 0")
-        );
+        let command = hooks["hooks"][event][0]["hooks"][0]["commandWindows"]
+            .as_str()
+            .expect("Windows command is a string");
+        assert!(command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand "));
     }
     #[cfg(windows)]
     {
@@ -890,8 +1066,16 @@ fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
 #[test]
 fn generated_windows_command_runs_the_real_binary_in_the_codex_0_147_shell_model() {
     let root = TestRoot::new("real-command-windows");
-    let executable = PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon"));
-    assert!(executable.is_file(), "real TabBeacon binary is available");
+    let compiled_binary = PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon"));
+    assert!(
+        compiled_binary.is_file(),
+        "real TabBeacon binary is available"
+    );
+    let executable = root.child("real binary & quote'").join("tabbeacon.exe");
+    fs::create_dir_all(executable.parent().expect("hostile binary parent"))
+        .expect("hostile binary parent is created");
+    fs::copy(&compiled_binary, &executable)
+        .expect("real TabBeacon binary is copied to hostile path");
     let integration = CodexIntegration::new(
         root.child("codex-home"),
         root.child("integration-state"),
@@ -914,7 +1098,11 @@ fn generated_windows_command_runs_the_real_binary_in_the_codex_0_147_shell_model
         .as_str()
         .expect("generated Windows command is a string");
     assert_eq!(command, command_windows);
-    assert!(command.contains(executable.to_str().expect("binary path is UTF-8")));
+    assert!(command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand "));
+    assert!(
+        !command.contains(executable.to_str().expect("binary path is UTF-8")),
+        "the outer declaration must not expose shell-sensitive executable quoting"
+    );
 
     let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "real-shell", &root.path))
         .expect("Codex-shaped payload serializes");
@@ -943,14 +1131,63 @@ fn generated_windows_command_runs_the_real_binary_in_the_codex_0_147_shell_model
     assert!(direct.stdout.is_empty());
     assert!(direct.stderr.is_empty());
 
-    let shell = run_codex_windows_hook_with_input(command, &payload, true);
-    assert!(
-        shell.status.success(),
-        "Codex-compatible real hook shell failed: {}",
-        String::from_utf8_lossy(&shell.stderr)
+    for shell in [
+        CodexWindowsHookShell::Pwsh7,
+        CodexWindowsHookShell::WindowsPowerShell,
+        CodexWindowsHookShell::Cmd,
+        CodexWindowsHookShell::ComspecFallback,
+    ] {
+        let output = run_codex_windows_hook_with_shell(shell, command, &payload, true, None);
+        assert!(
+            output.status.success(),
+            "{} real hook shell failed: {}",
+            shell.label(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{} wrote hook stdout",
+            shell.label()
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{} wrote hook stderr",
+            shell.label()
+        );
+    }
+
+    let ingress_state_root = root.child("isolated-local-app-data");
+    let ingress_payload = serde_json::to_vec(&hook_payload(
+        "UserPromptSubmit",
+        "real-shell-ingress",
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+    ))
+    .expect("ingress payload serializes");
+    let ingress = run_codex_windows_hook_with_shell(
+        CodexWindowsHookShell::Pwsh7,
+        command,
+        &ingress_payload,
+        false,
+        Some(&ingress_state_root),
     );
-    assert!(shell.stdout.is_empty());
-    assert!(shell.stderr.is_empty());
+    assert!(
+        ingress.status.success(),
+        "real hook ingress failed: {}",
+        String::from_utf8_lossy(&ingress.stderr)
+    );
+    let registry_root = ingress_state_root.join("TabBeacon/repository-identity");
+    assert!(
+        fs::read_dir(registry_root)
+            .expect("real hook ingress creates isolated registry state")
+            .any(|entry| {
+                entry.is_ok_and(|entry| {
+                    entry.file_name().to_str().is_some_and(|name| {
+                        name.starts_with("registry-v1-") && name.ends_with(".json")
+                    })
+                })
+            }),
+        "the real binary must receive Codex stdin and reach repository identity"
+    );
 }
 
 #[cfg(windows)]
