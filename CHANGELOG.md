@@ -11,6 +11,12 @@ All notable changes to TabBeacon will be documented here.
 - Repository identity remains stable on the right while ready, working,
   result-ready, approval, question, and reset semantics update only the left
   slot; redundant lifecycle-word suffixes are no longer emitted.
+- Codex Hooks now use the exact source-audited `0.147.0` compatibility profile,
+  reject stale prior-turn events through content-minimal durable generations,
+  isolate thread-spawn subagents, and classify compact lifecycle explicitly.
+- Ownership-safe setup covers all eleven admitted Hook events while preserving
+  unrelated notifiers, plugins, same-event groups, unknown events, and the
+  official `/hooks` trust boundary.
 
 ## [0.1.1] - 2026-08-15
 

@@ -18,9 +18,10 @@ use sha2::{Digest, Sha256};
 use tabbeacon::{
     core::{Attention, AuthoritySet, FieldUpdate, Health, Phase, StateAxis},
     providers::codex::{
-        CodexHookError, CodexHookNormalizer, CodexHookRuntime, CodexIntegration,
-        CodexIntegrationError, CodexNormalization, DoctorStatus, HookDispatchOutcome, SetupOutcome,
-        TitleOwnershipOutcome, UninstallOutcome,
+        CodexHookError, CodexHookEvent, CodexHookNormalizer, CodexHookProfile, CodexHookRuntime,
+        CodexIntegration, CodexIntegrationError, CodexNormalization, DoctorStatus,
+        HookDispatchOutcome, SetupOutcome, TitleOwnershipOutcome, UninstallOutcome,
+        UnknownEventPolicy,
     },
     settings::{
         ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
@@ -30,6 +31,28 @@ use tabbeacon::{
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+const ADMITTED_HOOK_EVENTS: [&str; 11] = [
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PreCompact",
+    "PostCompact",
+    "SessionStart",
+    "SessionEnd",
+    "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
+];
+const LEGACY_HOOK_EVENTS: [&str; 7] = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "Stop",
+    "SessionEnd",
+];
 
 struct TestRoot {
     path: PathBuf,
@@ -71,6 +94,29 @@ fn hook_payload(event: &str, session: &str, cwd: &Path) -> Value {
         "transcript_path": null,
         "turn_id": "turn-1"
     })
+}
+
+fn hook_payload_for_turn(event: &str, session: &str, turn: &str, cwd: &Path) -> Value {
+    let mut payload = hook_payload(event, session, cwd);
+    payload["turn_id"] = Value::String(turn.to_owned());
+    payload
+}
+
+fn files_under(root: &Path) -> Vec<PathBuf> {
+    let mut pending = vec![root.to_owned()];
+    let mut files = Vec::new();
+    while let Some(path) = pending.pop() {
+        if path.is_dir() {
+            pending.extend(
+                fs::read_dir(path)
+                    .expect("state directory reads")
+                    .map(|entry| entry.expect("state entry reads").path()),
+            );
+        } else if path.is_file() {
+            files.push(path);
+        }
+    }
+    files
 }
 
 fn evidence(value: &Value) -> tabbeacon::core::AgentEvidence {
@@ -255,13 +301,17 @@ fn run_codex_windows_hook_with_shell(
 
 fn codex_event_key(event: &str) -> &'static str {
     match event {
-        "SessionStart" => "session_start",
-        "UserPromptSubmit" => "user_prompt_submit",
         "PreToolUse" => "pre_tool_use",
         "PermissionRequest" => "permission_request",
         "PostToolUse" => "post_tool_use",
-        "Stop" => "stop",
+        "PreCompact" => "pre_compact",
+        "PostCompact" => "post_compact",
+        "SessionStart" => "session_start",
         "SessionEnd" => "session_end",
+        "UserPromptSubmit" => "user_prompt_submit",
+        "SubagentStart" => "subagent_start",
+        "SubagentStop" => "subagent_stop",
+        "Stop" => "stop",
         other => panic!("unsupported test event: {other}"),
     }
 }
@@ -320,15 +370,7 @@ fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
     }
 
     let mut keys = Vec::new();
-    for event in [
-        "SessionStart",
-        "UserPromptSubmit",
-        "PreToolUse",
-        "PermissionRequest",
-        "PostToolUse",
-        "Stop",
-        "SessionEnd",
-    ] {
+    for event in ADMITTED_HOOK_EVENTS {
         let group = &hooks["hooks"][event][0];
         let key = format!("{}:{}:0:0", hooks_path.display(), codex_event_key(event));
         let mut trusted = Table::new();
@@ -345,15 +387,24 @@ fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
 
 fn replace_manifest_owned_declarations_with_legacy(hooks: &mut Value, manifest: &mut Value) {
     let legacy_command = r#""C:\\legacy\\tabbeacon.exe" hook codex || exit /b 0"#;
-    for owned in manifest["hooks"]
-        .as_array_mut()
+    let current_owned = manifest["hooks"]
+        .as_array()
         .expect("manifest owned hooks are an array")
-    {
+        .clone();
+    let mut legacy_owned = Vec::new();
+    for mut owned in current_owned {
         let event = owned["event"]
             .as_str()
             .expect("owned event name")
             .to_owned();
         let prior_group = owned["group"].clone();
+        if !LEGACY_HOOK_EVENTS.contains(&event.as_str()) {
+            hooks["hooks"]
+                .as_object_mut()
+                .expect("hooks object")
+                .remove(&event);
+            continue;
+        }
         let live_group = hooks["hooks"][&event]
             .as_array_mut()
             .expect("event groups are an array")
@@ -364,7 +415,9 @@ fn replace_manifest_owned_declarations_with_legacy(hooks: &mut Value, manifest: 
             group["hooks"][0]["command"] = json!(legacy_command);
             group["hooks"][0]["commandWindows"] = json!(legacy_command);
         }
+        legacy_owned.push(owned);
     }
+    manifest["hooks"] = Value::Array(legacy_owned);
 }
 
 fn shell_independent_owned_handler_count(hooks: &Value) -> usize {
@@ -493,6 +546,33 @@ fn capabilities_are_lifecycle_only_and_provider_neutral() {
 }
 
 #[test]
+fn exact_release_profile_is_explicit_and_future_versions_are_not_assumed() {
+    let profile = CodexHookNormalizer::profile();
+    assert_eq!(profile.id(), "codex-hooks-rust-v0.147.0");
+    assert_eq!(profile.version(), (0, 147, 0));
+    assert_eq!(profile.lifecycle_events().len(), 11);
+    assert!(
+        profile
+            .lifecycle_events()
+            .contains(&CodexHookEvent::PreCompact)
+    );
+    assert!(
+        profile
+            .lifecycle_events()
+            .contains(&CodexHookEvent::PostCompact)
+    );
+    assert!(profile.turn_aware());
+    assert!(profile.agent_aware());
+    assert!(profile.compact_aware());
+    assert_eq!(
+        profile.unknown_event_policy(),
+        UnknownEventPolicy::IgnoreFailOpen
+    );
+    assert_eq!(CodexHookProfile::for_version((0, 147, 0)), Some(profile));
+    assert_eq!(CodexHookProfile::for_version((0, 148, 0)), None);
+}
+
+#[test]
 fn session_start_sources_distinguish_ready_from_compact_preservation() {
     let root = TestRoot::new("session-start");
     for source in ["startup", "resume", "clear"] {
@@ -506,15 +586,51 @@ fn session_start_sources_distinguish_ready_from_compact_preservation() {
 
     let mut compact = hook_payload("SessionStart", "session-a", &root.path);
     compact["source"] = Value::String("compact".to_owned());
-    assert_eq!(
+    assert!(matches!(
         CodexHookNormalizer
             .normalize(
                 &serde_json::to_vec(&compact).expect("compact fixture serializes"),
                 UNIX_EPOCH
             )
             .expect("compact is valid"),
-        CodexNormalization::PreserveCurrentState
-    );
+        CodexNormalization::PreserveCurrentState(_)
+    ));
+}
+
+#[test]
+fn compact_and_subagent_lifecycle_are_classified_from_release_metadata() {
+    let root = TestRoot::new("compact-subagent-classification");
+    for event in ["PreCompact", "PostCompact"] {
+        let payload = hook_payload(event, "session-a", &root.path);
+        let normalized = CodexHookNormalizer
+            .normalize(
+                &serde_json::to_vec(&payload).expect("compact fixture serializes"),
+                UNIX_EPOCH,
+            )
+            .expect("compact event is valid");
+        let CodexNormalization::PreserveCurrentState(context) = normalized else {
+            panic!("expected compact preservation, got {normalized:?}");
+        };
+        assert_eq!(context.turn_id(), Some("turn-1"));
+        assert_eq!(context.agent_id(), None);
+    }
+
+    for event in ["SubagentStart", "SubagentStop"] {
+        let mut payload = hook_payload(event, "session-a", &root.path);
+        payload["agent_id"] = Value::String("agent-child".to_owned());
+        payload["agent_type"] = Value::String("explorer".to_owned());
+        let normalized = CodexHookNormalizer
+            .normalize(
+                &serde_json::to_vec(&payload).expect("subagent fixture serializes"),
+                UNIX_EPOCH,
+            )
+            .expect("subagent event is valid");
+        let CodexNormalization::IgnoreSubagent(context) = normalized else {
+            panic!("expected subagent isolation, got {normalized:?}");
+        };
+        assert_eq!(context.agent_id(), Some("agent-child"));
+        assert_eq!(context.agent_type(), Some("explorer"));
+    }
 }
 
 #[test]
@@ -596,6 +712,44 @@ fn malformed_missing_and_unknown_inputs_are_safe() {
 }
 
 #[test]
+fn optional_agent_metadata_is_fail_open_and_sensitive_bodies_do_not_affect_evidence() {
+    let root = TestRoot::new("content-minimization");
+    let mut first = hook_payload("UserPromptSubmit", "session-a", &root.path);
+    first["prompt"] = Value::String("sensitive prompt alpha".to_owned());
+    let mut second = first.clone();
+    second["prompt"] = Value::String("sensitive prompt beta".to_owned());
+    assert_eq!(
+        evidence(&first),
+        evidence(&second),
+        "prompt content must not affect normalized evidence"
+    );
+
+    let mut tool_a = hook_payload("PostToolUse", "session-a", &root.path);
+    tool_a["tool_input"] = json!({"secret": "alpha"});
+    tool_a["tool_response"] = json!({"secret": "beta"});
+    let mut tool_b = tool_a.clone();
+    tool_b["tool_input"] = json!({"secret": "changed"});
+    tool_b["tool_response"] = json!({"secret": "changed"});
+    assert_eq!(
+        evidence(&tool_a),
+        evidence(&tool_b),
+        "tool bodies must not affect normalized evidence"
+    );
+
+    let mut subagent_prompt = first;
+    subagent_prompt["agent_id"] = Value::String("agent-child".to_owned());
+    assert!(matches!(
+        CodexHookNormalizer
+            .normalize(
+                &serde_json::to_vec(&subagent_prompt).expect("subagent prompt serializes"),
+                UNIX_EPOCH,
+            )
+            .expect("partial optional subagent metadata is contained"),
+        CodexNormalization::IgnoreSubagent(_)
+    ));
+}
+
+#[test]
 fn duplicate_payloads_are_deterministic_and_sessions_remain_separate() {
     let root = TestRoot::new("idempotence");
     let first_payload = hook_payload("UserPromptSubmit", "session-a", &root.path);
@@ -655,6 +809,205 @@ fn runtime_uses_repository_identity_reconciler_and_existing_renderer() {
     assert!(!rendered.contains("reset"));
     assert!(rendered.contains("\u{1b}]9;4;0;0\u{1b}\\"));
     assert!(rendered.contains("\u{1b}]104;264\u{1b}\\"));
+}
+
+#[test]
+fn newer_turn_supersedes_and_rejects_stale_stop_working_and_revival() {
+    let root = TestRoot::new("turn-supersession");
+    let repo = root.child("repo");
+    init_repo(&repo, "https://example.invalid/team/repo.git");
+    let runtime = CodexHookRuntime::new(root.child("state"), true);
+
+    for turn in ["turn-1", "turn-2"] {
+        let payload = hook_payload_for_turn("UserPromptSubmit", "session-a", turn, &repo);
+        assert_eq!(
+            runtime.dispatch_to(
+                &serde_json::to_vec(&payload).expect("prompt serializes"),
+                UNIX_EPOCH,
+                &mut Vec::new(),
+            ),
+            HookDispatchOutcome::Applied,
+            "turn={turn}"
+        );
+    }
+
+    for event in ["Stop", "PreToolUse", "PostToolUse", "PermissionRequest"] {
+        let stale = hook_payload_for_turn(event, "session-a", "turn-1", &repo);
+        let mut output = Vec::new();
+        assert_eq!(
+            runtime.dispatch_to(
+                &serde_json::to_vec(&stale).expect("stale event serializes"),
+                UNIX_EPOCH,
+                &mut output,
+            ),
+            HookDispatchOutcome::RejectedStaleGeneration,
+            "event={event}"
+        );
+        assert!(output.is_empty(), "stale event emitted terminal bytes");
+    }
+
+    let stale_prompt = hook_payload_for_turn("UserPromptSubmit", "session-a", "turn-1", &repo);
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&stale_prompt).expect("stale prompt serializes"),
+            UNIX_EPOCH,
+            &mut Vec::new(),
+        ),
+        HookDispatchOutcome::RejectedStaleGeneration,
+        "a retired turn must not revive activity"
+    );
+
+    let current_stop = hook_payload_for_turn("Stop", "session-a", "turn-2", &repo);
+    let mut output = Vec::new();
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&current_stop).expect("current stop serializes"),
+            UNIX_EPOCH,
+            &mut output,
+        ),
+        HookDispatchOutcome::Applied
+    );
+    assert!(String::from_utf8_lossy(&output).contains("\u{1b}]0;✓ "));
+}
+
+#[test]
+fn subagent_start_stop_and_activity_cannot_replace_or_terminate_root_state() {
+    let root = TestRoot::new("subagent-isolation");
+    let repo = root.child("repo");
+    init_repo(&repo, "https://example.invalid/team/repo.git");
+    let runtime = CodexHookRuntime::new(root.child("state"), true);
+    let root_prompt = hook_payload_for_turn("UserPromptSubmit", "session-a", "root-turn", &repo);
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&root_prompt).expect("root prompt serializes"),
+            UNIX_EPOCH,
+            &mut Vec::new(),
+        ),
+        HookDispatchOutcome::Applied
+    );
+
+    for event in ["SubagentStart", "SubagentStop", "UserPromptSubmit"] {
+        let mut payload = hook_payload_for_turn(event, "session-a", "child-turn", &repo);
+        payload["agent_id"] = Value::String("agent-child".to_owned());
+        payload["agent_type"] = Value::String("explorer".to_owned());
+        let mut output = Vec::new();
+        assert_eq!(
+            runtime.dispatch_to(
+                &serde_json::to_vec(&payload).expect("subagent event serializes"),
+                UNIX_EPOCH,
+                &mut output,
+            ),
+            HookDispatchOutcome::IgnoredSubagent,
+            "event={event}"
+        );
+        assert!(output.is_empty(), "subagent event emitted terminal bytes");
+    }
+
+    let root_stop = hook_payload_for_turn("Stop", "session-a", "root-turn", &repo);
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&root_stop).expect("root stop serializes"),
+            UNIX_EPOCH,
+            &mut Vec::new(),
+        ),
+        HookDispatchOutcome::Applied,
+        "root turn must remain current after subagent lifecycle"
+    );
+}
+
+#[test]
+fn persisted_generation_state_contains_no_prompt_or_tool_bodies() {
+    let root = TestRoot::new("persisted-content-minimization");
+    let repo = root.child("repo");
+    let state = root.child("state");
+    init_repo(&repo, "https://example.invalid/team/repo.git");
+    let runtime = CodexHookRuntime::new(&state, true);
+    let marker = "TB-G10-SENSITIVE-CONTENT-MUST-NOT-PERSIST";
+    let mut prompt =
+        hook_payload_for_turn("UserPromptSubmit", "session-secret", "turn-secret", &repo);
+    prompt["prompt"] = Value::String(marker.to_owned());
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&prompt).expect("prompt serializes"),
+            UNIX_EPOCH,
+            &mut Vec::new(),
+        ),
+        HookDispatchOutcome::Applied
+    );
+    let mut tool = hook_payload_for_turn("PostToolUse", "session-secret", "turn-secret", &repo);
+    tool["tool_input"] = json!({"marker": marker});
+    tool["tool_response"] = json!({"marker": marker});
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&tool).expect("tool serializes"),
+            UNIX_EPOCH,
+            &mut Vec::new(),
+        ),
+        HookDispatchOutcome::Applied
+    );
+
+    let files = files_under(&state);
+    assert!(!files.is_empty(), "runtime state evidence must exist");
+    for path in files {
+        let bytes = fs::read(&path).expect("state file reads");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            !text.contains(marker),
+            "sensitive body persisted in {path:?}"
+        );
+        assert!(
+            !text.contains("tool_input"),
+            "tool input key persisted in {path:?}"
+        );
+        assert!(
+            !text.contains("tool_response"),
+            "tool output key persisted in {path:?}"
+        );
+        assert!(!text.contains("prompt"), "prompt key persisted in {path:?}");
+        assert!(
+            !text.contains("session-secret"),
+            "raw session ID persisted in {path:?}"
+        );
+        assert!(
+            !text.contains("turn-secret"),
+            "raw turn ID persisted in {path:?}"
+        );
+    }
+}
+
+#[test]
+fn corrupt_generation_state_loses_decoration_without_emitting_terminal_bytes() {
+    let root = TestRoot::new("corrupt-generation-state");
+    let repo = root.child("repo");
+    let state = root.child("state");
+    init_repo(&repo, "https://example.invalid/team/repo.git");
+    let runtime = CodexHookRuntime::new(&state, true);
+    let prompt = hook_payload_for_turn("UserPromptSubmit", "session-a", "turn-1", &repo);
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&prompt).expect("prompt serializes"),
+            UNIX_EPOCH,
+            &mut Vec::new(),
+        ),
+        HookDispatchOutcome::Applied
+    );
+    let generation_file = files_under(&state.join("codex-turn-state-v1"))
+        .into_iter()
+        .find(|path| path.extension().is_some_and(|value| value == "json"))
+        .expect("generation state file exists");
+    fs::write(generation_file, b"not-json").expect("generation state is corrupted for the test");
+
+    let stop = hook_payload_for_turn("Stop", "session-a", "turn-1", &repo);
+    let mut output = Vec::new();
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&stop).expect("stop serializes"),
+            UNIX_EPOCH,
+            &mut output,
+        ),
+        HookDispatchOutcome::DegradedGenerationState
+    );
+    assert!(output.is_empty());
 }
 
 #[test]
@@ -974,6 +1327,68 @@ animations = false
 }
 
 #[test]
+fn setup_upgrade_preserves_ntfy_plugins_multiple_stop_hooks_and_unknown_events() {
+    let root = TestRoot::new("unrelated-hook-matrix");
+    let codex_home = root.child("codex-home");
+    fs::create_dir_all(&codex_home).expect("Codex home is created");
+    let ntfy_stop = json!({
+        "matcher": "",
+        "hooks": [{"type": "command", "command": "codex-ntfy-notifier Stop"}]
+    });
+    let plugin_stop = json!({
+        "hooks": [{"type": "command", "command": "owner-plugin stop"}],
+        "plugin": "owner.plugin"
+    });
+    let user_stop = json!({
+        "hooks": [{"type": "command", "command": "owner-user-hook"}]
+    });
+    let unknown_event = json!([{
+        "hooks": [{"type": "command", "command": "future-owner-hook"}],
+        "opaque_owner_field": true
+    }]);
+    let original_hooks = json!({
+        "description": "owner hook matrix",
+        "hooks": {
+            "Stop": [ntfy_stop.clone(), plugin_stop.clone(), user_stop.clone()],
+            "FutureLifecycleEvent": unknown_event.clone()
+        }
+    });
+    fs::write(
+        codex_home.join("hooks.json"),
+        serde_json::to_vec_pretty(&original_hooks).expect("owner hooks serialize"),
+    )
+    .expect("owner hooks write");
+    fs::write(codex_home.join("config.toml"), "model = \"gpt-test\"\n")
+        .expect("owner config writes");
+
+    let integration = test_integration(&root);
+    assert_eq!(
+        integration.setup().expect("setup succeeds"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    let installed: Value = serde_json::from_slice(
+        &fs::read(codex_home.join("hooks.json")).expect("installed hooks read"),
+    )
+    .expect("installed hooks parse");
+    assert_eq!(
+        &installed["hooks"]["Stop"].as_array().expect("Stop groups")[..3],
+        &[ntfy_stop, plugin_stop, user_stop]
+    );
+    assert_eq!(installed["hooks"]["FutureLifecycleEvent"], unknown_event);
+    assert_eq!(installed["hooks"]["Stop"].as_array().map(Vec::len), Some(4));
+
+    assert_eq!(
+        integration.uninstall().expect("uninstall succeeds"),
+        UninstallOutcome::Removed
+    );
+    let restored: Value = serde_json::from_slice(
+        &fs::read(codex_home.join("hooks.json")).expect("restored hooks read"),
+    )
+    .expect("restored hooks parse");
+    assert_eq!(restored, original_hooks);
+}
+
+#[test]
 fn title_preference_reconciliation_restores_native_codex_title_without_losing_baseline() {
     let root = TestRoot::new("title-preference");
     let codex_home = root.child("codex-home");
@@ -1022,7 +1437,7 @@ fn title_preference_reconciliation_restores_native_codex_title_without_losing_ba
 }
 
 #[test]
-fn repeated_setup_ten_times_keeps_exactly_seven_owned_hook_definitions() {
+fn repeated_setup_ten_times_keeps_exactly_eleven_owned_hook_definitions() {
     let root = TestRoot::new("setup-ten-times");
     let integration = test_integration(&root);
     assert_eq!(
@@ -1039,16 +1454,8 @@ fn repeated_setup_ten_times_keeps_exactly_seven_owned_hook_definitions() {
         &fs::read(root.child("codex-home/hooks.json")).expect("installed hooks read"),
     )
     .expect("installed hooks parse");
-    assert_eq!(shell_independent_owned_handler_count(&hooks), 7);
-    for event in [
-        "SessionStart",
-        "UserPromptSubmit",
-        "PreToolUse",
-        "PermissionRequest",
-        "PostToolUse",
-        "Stop",
-        "SessionEnd",
-    ] {
+    assert_eq!(shell_independent_owned_handler_count(&hooks), 11);
+    for event in ADMITTED_HOOK_EVENTS {
         assert_eq!(hooks["hooks"][event].as_array().map(Vec::len), Some(1));
     }
 }
@@ -1103,7 +1510,7 @@ fn relocated_executable_migrates_exact_owned_hooks_without_duplicates() {
         &fs::read(root.child("codex-home/hooks.json")).expect("migrated hooks read"),
     )
     .expect("migrated hooks parse");
-    assert_eq!(shell_independent_owned_handler_count(&hooks), 7);
+    assert_eq!(shell_independent_owned_handler_count(&hooks), 11);
     let after_migration = relocated.doctor();
     assert!(after_migration.checks().iter().any(|check| {
         check.id() == "hooks.currentness" && check.status() == DoctorStatus::Pass
@@ -1234,8 +1641,8 @@ fn setup_upgrades_exact_owned_declarations_without_duplicates_or_baseline_loss()
     .expect("upgraded hooks parse");
     let owned_handler_count = shell_independent_owned_handler_count(&upgraded_hooks);
     assert_eq!(
-        owned_handler_count, 7,
-        "upgrade must never append another seven hooks"
+        owned_handler_count, 11,
+        "upgrade must never append another eleven hooks"
     );
     assert_eq!(upgraded_hooks["hooks"]["Stop"][0], unrelated_stop);
     let after_upgrade = integration.doctor();
@@ -1386,15 +1793,7 @@ fn concurrent_setup_serializes_first_assignment_without_duplicate_hooks() {
     let hooks: Value =
         serde_json::from_slice(&fs::read(root.child("codex-home/hooks.json")).expect("hooks read"))
             .expect("hooks parse");
-    for event in [
-        "SessionStart",
-        "UserPromptSubmit",
-        "PreToolUse",
-        "PermissionRequest",
-        "PostToolUse",
-        "Stop",
-        "SessionEnd",
-    ] {
+    for event in ADMITTED_HOOK_EVENTS {
         assert_eq!(hooks["hooks"][event].as_array().map(Vec::len), Some(1));
     }
 }
@@ -1451,15 +1850,7 @@ fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
     let hooks: Value =
         serde_json::from_slice(&fs::read(root.child("codex-home/hooks.json")).expect("hooks read"))
             .expect("hooks parse");
-    for event in [
-        "SessionStart",
-        "UserPromptSubmit",
-        "PreToolUse",
-        "PermissionRequest",
-        "PostToolUse",
-        "Stop",
-        "SessionEnd",
-    ] {
+    for event in ADMITTED_HOOK_EVENTS {
         assert_eq!(hooks["hooks"][event][0]["hooks"][0]["async"], false);
         assert_eq!(hooks["hooks"][event][0]["hooks"][0]["timeout"], 1);
         let command = hooks["hooks"][event][0]["hooks"][0]["commandWindows"]

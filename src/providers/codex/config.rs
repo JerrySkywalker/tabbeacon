@@ -13,19 +13,24 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 
+use super::CodexHookProfile;
+
 const MANIFEST_SCHEMA: &str = "tabbeacon-codex-integration-v1";
 const MANIFEST_FILE: &str = "integration-v1.json";
 const LOCK_FILE: &str = "integration.lock";
 const OWNED_DESCRIPTION: &str = "TabBeacon user-global lifecycle hooks";
-const MINIMUM_CODEX_VERSION: (u64, u64, u64) = (0, 147, 0);
-const HOOK_EVENTS: [&str; 7] = [
-    "SessionStart",
-    "UserPromptSubmit",
+const HOOK_EVENTS: [&str; 11] = [
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
-    "Stop",
+    "PreCompact",
+    "PostCompact",
+    "SessionStart",
     "SessionEnd",
+    "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
 ];
 
 /// Result of a setup invocation.
@@ -311,12 +316,36 @@ impl CodexIntegration {
         let mut checks = Vec::new();
         let version = self.probe_codex_version();
         checks.push(match &version {
-            Some((version, true)) => pass("codex.version", format!("Codex {version} is supported")),
-            Some((version, false)) => fail(
+            Some((version, Some(_))) => pass(
+                "codex.version",
+                format!("Codex {version} is source-audited"),
+            ),
+            Some((version, None)) => fail(
                 "codex.version",
                 format!("Codex {version} is outside the admitted hook contract"),
             ),
             None => fail("codex.version", "Codex executable/version is unavailable"),
+        });
+        checks.push(match &version {
+            Some((_, Some(profile))) => pass(
+                "codex.hook-profile",
+                format!(
+                    "{}: events={}; turn-aware={}; agent-aware={}; compact-aware={}; unknown=ignore-fail-open",
+                    profile.id(),
+                    profile.lifecycle_events().len(),
+                    profile.turn_aware(),
+                    profile.agent_aware(),
+                    profile.compact_aware()
+                ),
+            ),
+            Some((version, None)) => fail(
+                "codex.hook-profile",
+                format!("no source-audited Hook profile matches Codex {version}"),
+            ),
+            None => fail(
+                "codex.hook-profile",
+                "Hook profile cannot be classified without a Codex version",
+            ),
         });
         checks.push(if self.tabbeacon_executable.is_file() {
             pass("tabbeacon.executable", "managed hook executable exists")
@@ -362,7 +391,7 @@ impl CodexIntegration {
                 ),
             });
             checks.push(match (&version, &config) {
-                (Some((_, true)), Ok(config)) => {
+                (Some((_, Some(_))), Ok(config)) => {
                     hook_trust_check(config, &self.hooks_path(), hooks, &manifest.hooks)
                 }
                 _ => fail(
@@ -671,7 +700,7 @@ impl CodexIntegration {
         })
     }
 
-    fn probe_codex_version(&self) -> Option<(String, bool)> {
+    fn probe_codex_version(&self) -> Option<(String, Option<CodexHookProfile>)> {
         let output = if let Some(program) = &self.codex_program {
             Command::new(program).arg("--version").output().ok()?
         } else {
@@ -682,10 +711,10 @@ impl CodexIntegration {
         }
         let stdout = String::from_utf8(output.stdout).ok()?;
         let version = stdout.split_whitespace().find_map(parse_semver)?;
-        let supported = version >= MINIMUM_CODEX_VERSION;
+        let profile = CodexHookProfile::for_version(version);
         Some((
             format!("{}.{}.{}", version.0, version.1, version.2),
-            supported,
+            profile,
         ))
     }
 }
@@ -1143,13 +1172,17 @@ fn canonical_json(value: &Value) -> Value {
 
 fn event_key_label(event: &str) -> &'static str {
     match event {
-        "SessionStart" => "session_start",
-        "UserPromptSubmit" => "user_prompt_submit",
         "PreToolUse" => "pre_tool_use",
         "PermissionRequest" => "permission_request",
         "PostToolUse" => "post_tool_use",
-        "Stop" => "stop",
+        "PreCompact" => "pre_compact",
+        "PostCompact" => "post_compact",
+        "SessionStart" => "session_start",
         "SessionEnd" => "session_end",
+        "UserPromptSubmit" => "user_prompt_submit",
+        "SubagentStart" => "subagent_start",
+        "SubagentStop" => "subagent_stop",
+        "Stop" => "stop",
         _ => "unsupported",
     }
 }
@@ -1234,6 +1267,14 @@ mod tests {
         let command = r#""V:\src\tabbeacon\target\debug\tabbeacon.exe" hook codex || exit /b 0"#;
         let expected = [
             (
+                "PreCompact",
+                "sha256:2a11700970f86f25c3a894ef6f13ccc653c0dbbb786e9a439a9808fdfc1febfa",
+            ),
+            (
+                "PostCompact",
+                "sha256:bd9dba3835dcfc8b51ea3dbc075ce23e28f09c3d9190d9ff3af7451d492e69da",
+            ),
+            (
                 "SessionStart",
                 "sha256:db9a01c26f509ce8f06a93e13a2fc19aad3658e1e8a950e16072fbd423565b61",
             ),
@@ -1260,6 +1301,14 @@ mod tests {
             (
                 "SessionEnd",
                 "sha256:364d9e07702ed4381fe806a253b5b565388d3c857cfff51ea583fde02e325101",
+            ),
+            (
+                "SubagentStart",
+                "sha256:4338387a6874fe79a5f7a14a09a635ca885a91006f9667f1b48cc23a2ff09206",
+            ),
+            (
+                "SubagentStop",
+                "sha256:8c02618ab03d57f168092e445e7b5bc0a11684b52001d017e0f80be5743b4aa8",
             ),
         ];
         for (event, hash) in expected {

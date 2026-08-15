@@ -277,6 +277,23 @@ When `title=native` or `title=off`, it restores the pre-install title setting
 instead of leaving both title systems disabled. Hook trust remains exclusively
 in the supported Codex review flow.
 
+### TB-G10 exact profile and generations
+
+The Hook normalizer is frozen to the source-audited
+`codex-hooks-rust-v0.147.0` profile instead of assuming later releases. Doctor
+reports the exact profile and its turn, agent, compact, and unknown-event
+capabilities. The owned surface follows all eleven events proven by that tag.
+
+Before reconciliation, a process-safe per-session ledger admits only the
+current root `turn_id`. `UserPromptSubmit` is the causal generation boundary;
+older turn-scoped events and retired prompts are rejected before repository or
+terminal work. Thread-spawn subagent metadata and explicit subagent lifecycle
+events are filtered before root state. Compact events preserve presentation.
+
+The ledger contains hashed session/turn identifiers and bounded ordering state
+only. It does not retain payload bodies. Ledger failure is another fail-open
+decoration loss, and no provider-specific ordering type crosses into core.
+
 ## 12. TB-G03 visual verification infrastructure
 
 Visual verification is test infrastructure above the presentation system under

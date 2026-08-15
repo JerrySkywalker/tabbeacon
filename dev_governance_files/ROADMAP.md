@@ -236,7 +236,7 @@ Because this changes visible title semantics, exact-head L3 visual evidence is r
 
 Estimated effective engineering effort: **2–4 h**.
 
-## TB-G10 — Codex Hook Compatibility and Turn/Agent Awareness
+## TB-G10 — Codex Hook Compatibility and Turn/Agent Awareness — IMPLEMENTATION CANDIDATE; L4 BLOCKED
 
 **Purpose:** harden the Hooks backend against Codex lifecycle evolution before a long-lived animation worker depends on it.
 
@@ -261,6 +261,13 @@ Exit gate:
 - setup preserves unrelated hooks and the official trust boundary.
 
 This goal should use upstream/source research as evidence, but production behavior must be frozen against an actually admitted Codex version/profile rather than upstream `main` alone.
+
+Current candidate profile is `codex-hooks-rust-v0.147.0`, audited from the
+official `rust-v0.147.0` tag. Local deterministic coverage is implemented.
+Acceptance remains blocked because the unattended isolated real-Codex fixture
+correctly requires Owner review of the changed eleven-event declarations in
+`/hooks`; trust was neither written nor bypassed. Do not merge or begin G11
+production while L4 is blocked.
 
 Estimated effective engineering effort: **4–8 h**.
 

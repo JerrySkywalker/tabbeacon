@@ -4,12 +4,15 @@
 //! exposed to the core reconciler.
 
 mod config;
+mod generation;
+mod profile;
 mod runtime;
 
 pub use config::{
     CodexDoctorReport, CodexIntegration, CodexIntegrationError, DoctorStatus, SetupOutcome,
     TitleOwnershipOutcome, UninstallOutcome,
 };
+pub use profile::{CodexHookEvent, CodexHookProfile, UnknownEventPolicy};
 pub use runtime::{CodexHookRuntime, HookDispatchOutcome};
 
 use std::{fmt, path::PathBuf, time::SystemTime};
@@ -32,17 +35,68 @@ const SOURCE_INSTANCE: &str = "user-global";
 pub enum CodexNormalization {
     /// A supported lifecycle event normalized into core evidence.
     Evidence(NormalizedCodexHook),
-    /// A compact start intentionally preserves the currently displayed state.
-    PreserveCurrentState,
+    /// A compact event intentionally preserves the currently displayed state.
+    PreserveCurrentState(CodexHookContext),
+    /// A subagent event cannot mutate the root session presentation.
+    IgnoreSubagent(CodexHookContext),
     /// A forward-compatible event that `TabBeacon` does not claim to understand.
     UnsupportedEvent,
+}
+
+/// Non-sensitive identity and ordering fields retained from one Hook payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexHookContext {
+    event: CodexHookEvent,
+    session_id: String,
+    turn_id: Option<String>,
+    agent_id: Option<String>,
+    agent_type: Option<String>,
+    cwd: PathBuf,
+}
+
+impl CodexHookContext {
+    /// Exact admitted Hook event.
+    #[must_use]
+    pub const fn event(&self) -> CodexHookEvent {
+        self.event
+    }
+
+    /// Durable Codex session identity.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    /// Reliable turn identity when the event schema carries one.
+    #[must_use]
+    pub fn turn_id(&self) -> Option<&str> {
+        self.turn_id.as_deref()
+    }
+
+    /// Thread-spawned subagent identity when present.
+    #[must_use]
+    pub fn agent_id(&self) -> Option<&str> {
+        self.agent_id.as_deref()
+    }
+
+    /// Thread-spawned subagent role/type when present.
+    #[must_use]
+    pub fn agent_type(&self) -> Option<&str> {
+        self.agent_type.as_deref()
+    }
+
+    /// Local working directory used only for offline repository identity.
+    #[must_use]
+    pub fn cwd(&self) -> &std::path::Path {
+        &self.cwd
+    }
 }
 
 /// Provider-neutral evidence plus the local cwd binding owned by the adapter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NormalizedCodexHook {
     evidence: AgentEvidence,
-    cwd: PathBuf,
+    context: CodexHookContext,
 }
 
 impl NormalizedCodexHook {
@@ -52,10 +106,16 @@ impl NormalizedCodexHook {
         &self.evidence
     }
 
+    /// Returns non-sensitive event identity needed for generation admission.
+    #[must_use]
+    pub const fn context(&self) -> &CodexHookContext {
+        &self.context
+    }
+
     /// Returns the local cwd used for repository identity resolution.
     #[must_use]
     pub fn cwd(&self) -> &std::path::Path {
-        &self.cwd
+        self.context.cwd()
     }
 }
 
@@ -89,6 +149,12 @@ impl std::error::Error for CodexHookError {}
 pub struct CodexHookNormalizer;
 
 impl CodexHookNormalizer {
+    /// Returns the exact release profile implemented by this normalizer.
+    #[must_use]
+    pub const fn profile() -> CodexHookProfile {
+        CodexHookProfile::RUST_V0_147_0
+    }
+
     /// Declares exactly the semantic axes and authority available from hooks.
     #[must_use]
     pub const fn capabilities() -> BackendCapabilities {
@@ -118,50 +184,86 @@ impl CodexHookNormalizer {
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
             .ok_or(CodexHookError::MissingField("hook_event_name"))?;
+        let Some(event) = CodexHookEvent::parse(event_name) else {
+            return Ok(CodexNormalization::UnsupportedEvent);
+        };
+        let session_id = required_string(object, "session_id")?;
+        let cwd = required_string(object, "cwd")?;
+        let turn_id = if event.requires_turn_id() {
+            Some(required_string(object, "turn_id")?.to_owned())
+        } else {
+            None
+        };
+        let mut agent_id = optional_string(object, "agent_id");
+        let mut agent_type = optional_string(object, "agent_type");
+        if event.is_subagent_lifecycle() {
+            agent_id = Some(required_string(object, "agent_id")?.to_owned());
+            agent_type = Some(required_string(object, "agent_type")?.to_owned());
+        }
+        let context = CodexHookContext {
+            event,
+            session_id: session_id.to_owned(),
+            turn_id,
+            agent_id,
+            agent_type,
+            cwd: PathBuf::from(cwd),
+        };
 
-        let patch = match event_name {
-            "SessionStart" => match required_string(object, "source")? {
+        if context.agent_id.is_some()
+            || context.agent_type.is_some()
+            || event.is_subagent_lifecycle()
+        {
+            return Ok(CodexNormalization::IgnoreSubagent(context));
+        }
+
+        let patch = match event {
+            CodexHookEvent::SessionStart => match required_string(object, "source")? {
                 "startup" | "resume" | "clear" => StatePatch {
                     phase: FieldUpdate::set(Phase::Ready),
                     attention: FieldUpdate::clear(),
                     health: FieldUpdate::unchanged(),
                 },
-                "compact" => return Ok(CodexNormalization::PreserveCurrentState),
+                "compact" => return Ok(CodexNormalization::PreserveCurrentState(context)),
                 _ => return Ok(CodexNormalization::UnsupportedEvent),
             },
-            "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => StatePatch {
+            CodexHookEvent::UserPromptSubmit
+            | CodexHookEvent::PreToolUse
+            | CodexHookEvent::PostToolUse => StatePatch {
                 phase: FieldUpdate::set(Phase::Working),
                 attention: FieldUpdate::clear(),
                 health: FieldUpdate::unchanged(),
             },
-            "PermissionRequest" => StatePatch {
+            CodexHookEvent::PermissionRequest => StatePatch {
                 phase: FieldUpdate::set(Phase::WaitingUser),
                 attention: FieldUpdate::set(Attention::Approval),
                 health: FieldUpdate::unchanged(),
             },
-            "Stop" => StatePatch {
+            CodexHookEvent::Stop => StatePatch {
                 phase: FieldUpdate::set(Phase::WaitingUser),
                 attention: FieldUpdate::set(Attention::ResultReady),
                 health: FieldUpdate::unchanged(),
             },
-            "SessionEnd" => StatePatch {
+            CodexHookEvent::SessionEnd => StatePatch {
                 phase: FieldUpdate::set(Phase::Ended),
                 attention: FieldUpdate::clear(),
                 health: FieldUpdate::unchanged(),
             },
-            _ => return Ok(CodexNormalization::UnsupportedEvent),
+            CodexHookEvent::PreCompact | CodexHookEvent::PostCompact => {
+                return Ok(CodexNormalization::PreserveCurrentState(context));
+            }
+            CodexHookEvent::SubagentStart | CodexHookEvent::SubagentStop => {
+                unreachable!("explicit subagent events were classified before semantic mapping")
+            }
         };
 
-        let session_id = required_string(object, "session_id")?;
-        let cwd = required_string(object, "cwd")?;
         let provider = AgentProvider::new(PROVIDER_ID)
             .map_err(|_| CodexHookError::InvalidIdentifier("provider"))?;
-        let session = AgentSessionKey::new(provider, session_id)
+        let session = AgentSessionKey::new(provider, context.session_id())
             .map_err(|_| CodexHookError::InvalidIdentifier("session ID"))?;
         let source = EvidenceSource::new(BACKEND_ID, SOURCE_INSTANCE)
             .map_err(|_| CodexHookError::InvalidIdentifier("evidence source"))?;
         let tie_break =
-            EvidenceTieBreak::new(format!("{event_name}:{}", canonical_json_digest(&value)))
+            EvidenceTieBreak::new(format!("{event_name}:{}", identity_digest(&context)))
                 .map_err(|_| CodexHookError::InvalidIdentifier("tie-break key"))?;
         let evidence = AgentEvidence::new(
             session,
@@ -174,7 +276,7 @@ impl CodexHookNormalizer {
         );
         Ok(CodexNormalization::Evidence(NormalizedCodexHook {
             evidence,
-            cwd: PathBuf::from(cwd),
+            context,
         }))
     }
 }
@@ -190,25 +292,25 @@ fn required_string<'a>(
         .ok_or(CodexHookError::MissingField(field))
 }
 
-fn canonical_json_digest(value: &Value) -> String {
-    let canonical = canonical_json(value);
-    let bytes = serde_json::to_vec(&canonical).expect("JSON values always serialize");
-    format!("{:x}", Sha256::digest(bytes))
+fn optional_string(object: &serde_json::Map<String, Value>, field: &str) -> Option<String> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(ToOwned::to_owned)
 }
 
-fn canonical_json(value: &Value) -> Value {
-    match value {
-        Value::Object(object) => {
-            let mut entries = object.iter().collect::<Vec<_>>();
-            entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
-            Value::Object(
-                entries
-                    .into_iter()
-                    .map(|(key, value)| (key.clone(), canonical_json(value)))
-                    .collect(),
-            )
-        }
-        Value::Array(values) => Value::Array(values.iter().map(canonical_json).collect()),
-        other => other.clone(),
+fn identity_digest(context: &CodexHookContext) -> String {
+    let mut digest = Sha256::new();
+    for value in [
+        context.event.as_str(),
+        context.session_id(),
+        context.turn_id().unwrap_or("root-lifecycle"),
+        context.agent_id().unwrap_or("root-agent"),
+        context.agent_type().unwrap_or("root-agent"),
+    ] {
+        digest.update(value.len().to_le_bytes());
+        digest.update(value.as_bytes());
     }
+    format!("{:x}", digest.finalize())
 }

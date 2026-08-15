@@ -35,7 +35,7 @@ Setup is idempotent. It refuses a TabBeacon-like declaration that it cannot
 prove it owns.
 
 When upgrading to a binary at a new path, run `tabbeacon setup codex` from
-that new binary. TabBeacon migrates exactly the seven manifest-proven command
+that new binary. TabBeacon migrates exactly the eleven manifest-proven command
 groups and updates its manifest atomically; it never adopts a lookalike hook,
 an unsafe recorded executable path, or a different Codex configuration root.
 
@@ -151,8 +151,13 @@ After setup:
 
 Doctor reports declaration presence, modified owned hooks, trusted versus
 inactive hooks, title ownership, executable presence, version compatibility,
-and manifest consistency. Declaration presence alone is not reported as
+the exact Hook profile, and manifest consistency. Declaration presence alone is not reported as
 active.
+
+The admitted production profile is `codex-hooks-rust-v0.147.0`, audited from
+the official `rust-v0.147.0` source tag. It is turn-aware, thread-spawn
+subagent-aware, and compact-aware. A newer version does not inherit that
+profile merely because its version number is higher.
 
 ## State fidelity
 
@@ -165,8 +170,20 @@ The hook backend represents only evidence Codex emits directly:
 | `UserPromptSubmit` | working |
 | `PreToolUse` / `PostToolUse` | reinforce working |
 | `PermissionRequest` | approval required |
+| `PreCompact` / `PostCompact` | preserve current state |
+| `SubagentStart` / `SubagentStop` | ignore for root presentation |
 | `Stop` | result ready |
 | `SessionEnd` | reset |
+
+Turn-scoped root events must match the current admitted `turn_id`.
+`UserPromptSubmit` opens a new local generation and retires the prior turn;
+stale stop/activity/prompt events cannot overwrite or revive it. Any applicable
+event carrying thread-spawn subagent identity is isolated from root state.
+
+The process-safe generation ledger stores only hashed session/turn identifiers,
+a local generation, current turn, and a bounded retired-turn set. Prompt text,
+assistant content, tool input/output, credentials, and arbitrary payload bodies
+are neither persisted nor used for ordering.
 
 `Stop` is a hook stop point, not an authoritative app-server completed
 verdict. Tool failures, shell exit codes, missing events, and timeouts never
@@ -177,7 +194,7 @@ become authoritative failed/warning/interrupted states.
 The installed Codex `0.147.0` release requires these hooks to be synchronous,
 so TabBeacon uses the minimum one-second Codex timeout. The Windows command
 neutralizes a missing or nonzero TabBeacon executable, and the internal hook
-ingress is silent and always successful. Repository, state, or terminal output
+ingress is silent and always successful. Generation, repository, state, or terminal output
 failure loses decoration only; it does not return a Codex block decision.
 
 ## Uninstall
