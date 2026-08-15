@@ -32,6 +32,7 @@ const HOOK_EVENTS: [&str; 11] = [
     "SubagentStop",
     "Stop",
 ];
+type ProbedCodexProfile = (String, Option<CodexHookProfile>);
 
 /// Result of a setup invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -315,38 +316,8 @@ impl CodexIntegration {
     pub fn doctor(&self) -> CodexDoctorReport {
         let mut checks = Vec::new();
         let version = self.probe_codex_version();
-        checks.push(match &version {
-            Some((version, Some(_))) => pass(
-                "codex.version",
-                format!("Codex {version} is source-audited"),
-            ),
-            Some((version, None)) => fail(
-                "codex.version",
-                format!("Codex {version} is outside the admitted hook contract"),
-            ),
-            None => fail("codex.version", "Codex executable/version is unavailable"),
-        });
-        checks.push(match &version {
-            Some((_, Some(profile))) => pass(
-                "codex.hook-profile",
-                format!(
-                    "{}: events={}; turn-aware={}; agent-aware={}; compact-aware={}; unknown=ignore-fail-open",
-                    profile.id(),
-                    profile.lifecycle_events().len(),
-                    profile.turn_aware(),
-                    profile.agent_aware(),
-                    profile.compact_aware()
-                ),
-            ),
-            Some((version, None)) => fail(
-                "codex.hook-profile",
-                format!("no source-audited Hook profile matches Codex {version}"),
-            ),
-            None => fail(
-                "codex.hook-profile",
-                "Hook profile cannot be classified without a Codex version",
-            ),
-        });
+        checks.push(codex_version_check(version.as_ref()));
+        checks.push(codex_profile_check(version.as_ref()));
         checks.push(if self.tabbeacon_executable.is_file() {
             pass("tabbeacon.executable", "managed hook executable exists")
         } else {
@@ -700,7 +671,7 @@ impl CodexIntegration {
         })
     }
 
-    fn probe_codex_version(&self) -> Option<(String, Option<CodexHookProfile>)> {
+    fn probe_codex_version(&self) -> Option<ProbedCodexProfile> {
         let output = if let Some(program) = &self.codex_program {
             Command::new(program).arg("--version").output().ok()?
         } else {
@@ -1108,6 +1079,44 @@ fn hook_trust_check(
         )
     } else {
         pass("hooks.trust", "all owned hooks are trusted and active")
+    }
+}
+
+fn codex_version_check(version: Option<&ProbedCodexProfile>) -> DoctorCheck {
+    match version {
+        Some((version, Some(_))) => pass(
+            "codex.version",
+            format!("Codex {version} is source-audited"),
+        ),
+        Some((version, None)) => fail(
+            "codex.version",
+            format!("Codex {version} is outside the admitted hook contract"),
+        ),
+        None => fail("codex.version", "Codex executable/version is unavailable"),
+    }
+}
+
+fn codex_profile_check(version: Option<&ProbedCodexProfile>) -> DoctorCheck {
+    match version {
+        Some((_, Some(profile))) => pass(
+            "codex.hook-profile",
+            format!(
+                "{}: events={}; turn-aware={}; agent-aware={}; compact-aware={}; unknown=ignore-fail-open",
+                profile.id(),
+                profile.lifecycle_events().len(),
+                profile.turn_aware(),
+                profile.agent_aware(),
+                profile.compact_aware()
+            ),
+        ),
+        Some((version, None)) => fail(
+            "codex.hook-profile",
+            format!("no source-audited Hook profile matches Codex {version}"),
+        ),
+        None => fail(
+            "codex.hook-profile",
+            "Hook profile cannot be classified without a Codex version",
+        ),
     }
 }
 
