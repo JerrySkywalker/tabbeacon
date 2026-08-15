@@ -38,6 +38,40 @@ v0.1 is intentionally limited to:
 
 Claude and OpenCode support are architectural extension points, not v0.1 release requirements.
 
+## Installation
+
+TabBeacon has two first-class installation channels:
+
+- **Windows binary users:** download the prebuilt Windows x64 ZIP from
+  [GitHub Releases](https://github.com/JerrySkywalker/tabbeacon/releases).
+- **Rust/Cargo users:** install the public CLI from crates.io:
+
+  ```powershell
+  cargo install tabbeacon --locked
+  ```
+
+  To install this release exactly:
+
+  ```powershell
+  cargo install tabbeacon --version 0.1.1 --locked
+  ```
+
+The default Cargo install surface is the public `tabbeacon` command only.
+After installing, configure Codex integration with:
+
+```powershell
+tabbeacon setup codex
+```
+
+Then complete Codex `/hooks` trust review when prompted. Daily agent use remains
+literally `codex`, not `tabbeacon codex`.
+
+### Rust library target
+
+The published package includes the `tabbeacon` library target used internally
+by the CLI and its tests. TabBeacon v0.1.x is CLI-first and does not promise a
+mature public Rust library API beyond normal SemVer expectations.
+
 ## Non-goals for v0.1
 
 TabBeacon is not a PTY host, session manager, worktree manager, agent orchestrator, prompt router, remote-control service, terminal replacement, or web dashboard.

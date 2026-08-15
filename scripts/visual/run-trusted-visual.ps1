@@ -28,7 +28,7 @@ if ($actualHead -ne $ExpectedHead) {
 
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
 
-& cargo run --locked --bin tabbeacon-visual-fixture -- run `
+& cargo run --locked --features visual-fixture --bin tabbeacon-visual-fixture -- run `
     --expected-head $ExpectedHead `
     --run-id $RunId `
     --evidence-root $EvidenceRoot

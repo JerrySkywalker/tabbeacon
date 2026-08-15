@@ -176,7 +176,7 @@ and must be given an exact checked-out SHA, a unique safe run ID, and a fresh
 owned evidence root:
 
 ```text
-cargo run --locked --bin tabbeacon-visual-fixture -- run \
+cargo run --locked --features visual-fixture --bin tabbeacon-visual-fixture -- run \
   --expected-head <40-lowercase-sha> \
   --run-id TB03-<unique-token> \
   --evidence-root target/visual-evidence \
