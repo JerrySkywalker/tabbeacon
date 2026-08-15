@@ -15,9 +15,11 @@ The project is intentionally narrow: it keeps the user's existing terminal and a
 
 ## Current status
 
-**Bootstrap only. Runtime integration is not implemented yet.**
-
-The repository currently contains the architecture contract, governance, quality gates, roadmap, and a minimal Rust build skeleton. See [`dev_governance_files/ROADMAP.md`](dev_governance_files/ROADMAP.md).
+The provider-neutral core, Windows Terminal presentation layer, deterministic
+visual infrastructure, offline repository identity, and first Codex hooks
+provider are implemented. See
+[`dev_governance_files/ROADMAP.md`](dev_governance_files/ROADMAP.md) and the
+[`Codex hooks integration guide`](docs/codex-hooks.md).
 
 ## v0.1 scope
 

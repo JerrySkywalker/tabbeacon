@@ -237,6 +237,31 @@ v0.1 production integration uses global Codex hooks because it preserves direct 
 
 The app-server backend is an experimental fidelity track. It may provide richer warning/failure/interruption semantics, but it must not become a hidden wrapper/remote-launch dependency without a later ADR and evidence that zero-workflow-change/fail-open invariants are preserved.
 
+### TB-G05 hook backend
+
+The production hook adapter reads one bounded JSON object, retains only the
+event name, session ID, cwd, and stable ordering material, and produces
+provider-neutral lifecycle evidence. It declares lifecycle authority for phase
+and attention and no health authority. Prompt text, tool input/output, and
+assistant content are neither persisted nor used in titles.
+
+The admitted Codex `0.147.0` release requires synchronous command hooks. The
+user-global declarations therefore use its minimum one-second timeout and a
+Windows shell fail-open suffix; only Codex's explicit exit-code-2 contract can
+block an operation, while TabBeacon's command always resolves to success.
+
+Each supported event supplies a complete transition for a one-shot reconciler.
+Compact deliberately produces no presentation write. A resolved G04 alias and
+the reconciled semantic suffix form the typed G02 title, and the existing G02
+policy/renderer writes VT through the Windows console handle rather than hook
+stdout, which Codex captures.
+
+Configuration management is separate from event normalization. It preserves
+unrelated global hooks and TOML, atomically replaces changed files, records
+exact backups and ownership locally, disables Codex's competing title through
+`[tui].terminal_title = []`, and leaves hook trust to the supported Codex
+review flow.
+
 ## 12. TB-G03 visual verification infrastructure
 
 Visual verification is test infrastructure above the presentation system under
