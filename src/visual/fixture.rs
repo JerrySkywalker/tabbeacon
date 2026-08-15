@@ -8,7 +8,7 @@ use crate::settings::{PresentationSettings, PresentationTheme};
 
 use super::{ColorSemantic, VisualError, VisualResult};
 
-/// One uniquely titled replay of a G02 fixture case.
+/// One uniquely identified replay of a presentation fixture case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisualTestCase {
     /// Stable G02 fixture name.
@@ -97,8 +97,8 @@ impl FixtureDriver {
         if !is_safe_run_id(run_id) {
             return Err(VisualError::InvalidIdentifier(run_id.to_owned()));
         }
-        let title = format!("TB03-{run_id}-{}", fixture.name());
-        let action = fixture.action_with_title(&title);
+        let repository_alias = format!("TB03-{run_id}-{}", fixture.name());
+        let action = fixture.action_with_title(&repository_alias);
         let state = match &action {
             PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
         };

@@ -185,10 +185,10 @@ repository or dotfiles.
 The reconciled session and repository identity produce a typed `VisualState` containing only presentation-safe data such as:
 
 ```text
-title
+repository_alias
+title_status
 progress_kind
 tab_color
-attention_indicator
 reset_policy
 ```
 
@@ -196,29 +196,34 @@ Raw provider strings must never be concatenated directly into terminal control s
 
 ### TB-G02 presentation model
 
-The G02 policy accepts a `SemanticPresentationInput`: the orthogonal
-`Phase`/`Attention`/`Health` values plus an opaque title. A helper creates this
-input from a `SessionSnapshot`; deterministic fixtures construct it directly
-without a provider. The policy produces either `PresentationAction::Apply` with
-a typed `VisualState`, or `PresentationAction::Reset` for ordinary ended
-sessions. Failed, interrupted, warning, and attention evidence retain the
-normative priority over an ended phase; an ended session with no higher-priority
-semantic state resets instead of being represented as ready.
+The presentation policy accepts a `SemanticPresentationInput`: the orthogonal
+`Phase`/`Attention`/`Health` values plus one stable repository alias. A helper
+creates this input from a `SessionSnapshot`; deterministic fixtures construct it
+directly without a provider. The policy produces either
+`PresentationAction::Apply` with a typed `VisualState`, or
+`PresentationAction::Reset` for ordinary ended sessions. Failed, interrupted,
+warning, and attention evidence retain the normative priority over an ended
+phase; an ended session with no higher-priority semantic state resets to the
+neutral status slot.
 
-`VisualState` stores a typed sanitized title, a semantic tab color, and a
-progress semantic. `Question` and `Approval` remain distinct semantic colors
-even when the default palette intentionally maps both to yellow. `Reset`
-explicitly clears progress and the dynamic frame color while retaining a safe
-title update.
+`VisualState` keeps a control-free `TitleIdentity` derived from the resolved
+repository alias, typed `TitleStatus`, semantic tab color, and progress
+semantic as separate fields. The Windows
+Terminal renderer alone maps `TitleStatus` and typed activity settings to a
+glyph/frame and composes the default grammar `<status-slot> <repository-alias>`.
+The provider and core never carry terminal glyphs. `Question` and `Approval`
+remain distinct semantic colors even when the default palette intentionally
+maps both to yellow. `Reset` explicitly clears progress and the dynamic frame
+color while rendering the neutral status-first title.
 
-The title type replaces all Unicode control characters before rendering and
-limits output to a fixed number of Unicode scalar values, using an ellipsis for
-truncation. Only this sanitized type reaches the renderer. The Windows Terminal
-renderer uses static OSC/CSI envelopes with ST terminators: OSC `0` for title,
-OSC `9;4` for progress, and OSC `4`/`104` at frame-background color-table index
-`264` for dynamic tab/frame color. The frame-color sequence is capability
-gated: without that capability, the exact title and progress bytes remain and
-only color bytes are omitted.
+The final title type replaces all Unicode control characters and limits the
+composed output to a fixed number of Unicode scalar values, using an ellipsis
+for truncation. Only this sanitized type reaches the encoder. The Windows
+Terminal renderer uses static OSC/CSI envelopes with ST terminators: OSC `0`
+for title, OSC `9;4` for progress, and OSC `4`/`104` at frame-background
+color-table index `264` for dynamic tab/frame color. The frame-color sequence
+is capability gated: without that capability, the exact title and progress
+bytes remain and only color bytes are omitted.
 
 ## 10. Windows Terminal backend
 
@@ -251,10 +256,11 @@ Windows shell fail-open suffix; only Codex's explicit exit-code-2 contract can
 block an operation, while TabBeacon's command always resolves to success.
 
 Each supported event supplies a complete transition for a one-shot reconciler.
-Compact deliberately produces no presentation write. A resolved G04 alias and
-the reconciled semantic suffix form the typed G02 title, and the existing G02
-policy/renderer writes VT through the Windows console handle rather than hook
-stdout, which Codex captures.
+Compact deliberately produces no presentation write. The hook runtime passes a
+resolved G04 alias and the reconciled semantic snapshot to presentation as
+separate inputs. Presentation selects the left status slot and composes the
+status-first title before writing VT through the Windows console handle rather
+than hook stdout, which Codex captures.
 
 Configuration management is separate from event normalization. Typed
 presentation preferences live under the per-user TabBeacon state root, are

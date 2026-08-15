@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    core::{Attention, Phase, SessionReconciler},
+    core::SessionReconciler,
     presentation::{
         PresentationPolicy, SemanticPresentationInput, WindowsTerminalCapabilities,
         WindowsTerminalRenderer,
@@ -127,33 +127,15 @@ impl CodexHookRuntime {
         };
         let mut reconciler = SessionReconciler::default();
         let snapshot = reconciler.apply(normalized.evidence());
-        let title = format!(
-            "{} {}",
-            resolved.alias.as_str(),
-            semantic_title_suffix(snapshot.phase(), snapshot.attention())
-        );
         let action = PresentationPolicy::resolve(SemanticPresentationInput::from_snapshot(
-            &snapshot, &title,
+            &snapshot,
+            resolved.alias.as_str(),
         ));
         let bytes = self.renderer.render(&action);
         if sink.write_all(&bytes).and_then(|()| sink.flush()).is_err() {
             return HookDispatchOutcome::DegradedPresentationOutput;
         }
         HookDispatchOutcome::Applied
-    }
-}
-
-fn semantic_title_suffix(phase: Phase, attention: Attention) -> &'static str {
-    match attention {
-        Attention::Approval => "approval",
-        Attention::ResultReady => "result-ready",
-        Attention::Question => "question",
-        Attention::None => match phase {
-            Phase::Ready => "ready",
-            Phase::Working => "working",
-            Phase::WaitingUser => "waiting",
-            Phase::Ended => "reset",
-        },
     }
 }
 

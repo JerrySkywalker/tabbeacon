@@ -21,6 +21,19 @@ provider are implemented. See
 [`dev_governance_files/ROADMAP.md`](dev_governance_files/ROADMAP.md) and the
 [`Codex hooks integration guide`](docs/codex-hooks.md).
 
+The default TabBeacon-owned tab title uses a compact status-first grammar:
+
+```text
+○ OWH
+⠋ OWH
+✓ OWH
+! OWH
+? OWH
+```
+
+The mutable status slot stays on the left and the stable offline repository
+alias stays on the right. Default titles do not append lifecycle prose.
+
 ## v0.1 scope
 
 v0.1 is intentionally limited to:

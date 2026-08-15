@@ -104,6 +104,18 @@ preset is the reduced bullet pair `•`/`◦`, inspired by Codex's textual activ
 language without claiming to reproduce its shimmer. Other fixed frame sets are
 braille, quadrant, line, and pulse. No arbitrary frame strings are accepted.
 
+When `title=tabbeacon`, the default title grammar is status-first:
+
+```text
+<status-slot> <repository-alias>
+```
+
+For example: `○ OWH`, `⠋ OWH`, `✓ OWH`, `! OWH`, and `? OWH`. The
+repository alias remains the stable offline identity. Only the left status slot
+changes, and default titles do not append `working`, `result-ready`, `approval`,
+`question`, `waiting`, or other lifecycle prose. `title=native` and
+`title=off` retain their existing ownership behavior.
+
 `muted-dark` is the intended v0.1 default for long multi-tab sessions. It uses
 lower-saturation semantic fills: working `#1B4E3A`, result-ready `#1E3E88`,
 approval/question `#776824`, warning `#81340E`, interrupted `#48395F`, and

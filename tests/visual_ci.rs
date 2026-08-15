@@ -410,18 +410,43 @@ fn fixture_driver_uses_a_unique_title_without_changing_g02_semantics() {
     assert!(cases.iter().all(|case| {
         case.case
             .expected_title
-            .starts_with("TB03-TB03TEST-unique-")
+            .split_once(' ')
+            .is_some_and(|(_, identity)| identity.starts_with("TB03-TB03TEST-unique-"))
     }));
     assert!(cases.iter().all(|case| !case.vt_bytes.is_empty()));
+    for case in &cases {
+        let expected_slot = match case.case.fixture_name.as_str() {
+            "ready" | "reset" => "○",
+            "working" => "•",
+            "result-ready" => "✓",
+            "approval" | "warning-working" | "warning-idle" => "!",
+            "question" => "?",
+            "interrupted" => "⊘",
+            "failed" => "×",
+            other => panic!("unexpected fixture: {other}"),
+        };
+        let (slot, identity) = case
+            .case
+            .expected_title
+            .split_once(' ')
+            .expect("status-first grammar has one separator");
+        assert_eq!(slot, expected_slot);
+        assert_eq!(
+            identity,
+            format!("TB03-TB03TEST-unique-{}", case.case.fixture_name)
+        );
+    }
     let working = cases
         .iter()
         .find(|case| case.case.fixture_name == "working")
         .expect("working fixture exists");
-    assert!(working.case.expected_title.ends_with(" •"));
+    assert!(working.case.expected_title.starts_with("• "));
+    assert!(working.case.expected_title.ends_with("-working"));
     assert_eq!(working.case.theme, PresentationTheme::MutedDark);
     assert!(!working.case.expects_animation);
     let reset = driver
         .reset("TB03TEST-unique")
         .expect("reset fixture exists");
     assert_eq!(reset.case.fixture_name, "reset");
+    assert!(reset.case.expected_title.starts_with("○ "));
 }

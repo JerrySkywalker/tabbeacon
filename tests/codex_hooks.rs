@@ -635,7 +635,8 @@ fn runtime_uses_repository_identity_reconciler_and_existing_renderer() {
         HookDispatchOutcome::Applied
     );
     let rendered = String::from_utf8_lossy(&output);
-    assert!(rendered.contains("\u{1b}]0;WM working\u{1b}\\"));
+    assert!(rendered.contains("\u{1b}]0;○ WM\u{1b}\\"));
+    assert!(!rendered.contains("working"));
     assert!(rendered.contains("\u{1b}]9;4;3;0\u{1b}\\"));
     assert!(rendered.contains("rgb:2e/cc/71"));
 
@@ -650,7 +651,8 @@ fn runtime_uses_repository_identity_reconciler_and_existing_renderer() {
         HookDispatchOutcome::Applied
     );
     let rendered = String::from_utf8_lossy(&output);
-    assert!(rendered.contains("WM reset"));
+    assert!(rendered.contains("○ WM"));
+    assert!(!rendered.contains("reset"));
     assert!(rendered.contains("\u{1b}]9;4;0;0\u{1b}\\"));
     assert!(rendered.contains("\u{1b}]104;264\u{1b}\\"));
 }
@@ -675,7 +677,7 @@ fn production_hook_path_applies_each_required_v0_1_channel_combination() {
                 SpinnerPreset::Codex,
                 PresentationTheme::MutedDark,
             ),
-            ["WM working •", "rgb:1b/4e/3a", "]9;4;0;0"].as_slice(),
+            ["• WM", "rgb:1b/4e/3a", "]9;4;0;0"].as_slice(),
             ["9;4;3;0"].as_slice(),
         ),
         (
@@ -699,7 +701,7 @@ fn production_hook_path_applies_each_required_v0_1_channel_combination() {
                 SpinnerPreset::Codex,
                 PresentationTheme::MutedDark,
             ),
-            ["WM working •", "]104;264"].as_slice(),
+            ["• WM", "]104;264"].as_slice(),
             ["rgb:", "9;4;3;0"].as_slice(),
         ),
         (
@@ -711,7 +713,7 @@ fn production_hook_path_applies_each_required_v0_1_channel_combination() {
                 SpinnerPreset::Braille,
                 PresentationTheme::MutedDark,
             ),
-            ["WM working ⠋", "]104;264"].as_slice(),
+            ["⠋ WM", "]104;264"].as_slice(),
             ["rgb:", "9;4;3;0"].as_slice(),
         ),
         (
@@ -723,8 +725,8 @@ fn production_hook_path_applies_each_required_v0_1_channel_combination() {
                 SpinnerPreset::Codex,
                 PresentationTheme::MutedDark,
             ),
-            ["WM working", "rgb:1b/4e/3a", "]9;4;3;0"].as_slice(),
-            ["WM working •"].as_slice(),
+            ["○ WM", "rgb:1b/4e/3a", "]9;4;3;0"].as_slice(),
+            ["• WM", "working"].as_slice(),
         ),
         (
             "activity-off",
@@ -735,8 +737,8 @@ fn production_hook_path_applies_each_required_v0_1_channel_combination() {
                 SpinnerPreset::Codex,
                 PresentationTheme::MutedDark,
             ),
-            ["WM working", "rgb:1b/4e/3a", "]9;4;0;0"].as_slice(),
-            ["WM working •", "9;4;3;0"].as_slice(),
+            ["○ WM", "rgb:1b/4e/3a", "]9;4;0;0"].as_slice(),
+            ["• WM", "working", "9;4;3;0"].as_slice(),
         ),
     ];
     for (name, settings, expected, absent) in cases {
@@ -813,10 +815,10 @@ fn runtime_preserves_linked_worktree_identity_and_collision_aliases() {
         );
         String::from_utf8(output).expect("renderer output is UTF-8")
     };
-    assert!(render(&ordinary, "one").contains("JPC working"));
-    assert!(render(&linked, "two").contains("JPC working"));
+    assert!(render(&ordinary, "one").contains("○ JPC"));
+    assert!(render(&linked, "two").contains("○ JPC"));
     let newcomer = render(&colliding, "three");
-    assert!(!newcomer.contains("]0;JPC working"));
+    assert!(!newcomer.contains("]0;○ JPC"));
     assert!(!newcomer.contains("rgb:"));
 }
 
