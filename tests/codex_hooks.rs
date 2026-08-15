@@ -339,6 +339,138 @@ fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
     keys
 }
 
+fn replace_manifest_owned_declarations_with_legacy(hooks: &mut Value, manifest: &mut Value) {
+    let legacy_command = r#""C:\\legacy\\tabbeacon.exe" hook codex || exit /b 0"#;
+    for owned in manifest["hooks"]
+        .as_array_mut()
+        .expect("manifest owned hooks are an array")
+    {
+        let event = owned["event"]
+            .as_str()
+            .expect("owned event name")
+            .to_owned();
+        let prior_group = owned["group"].clone();
+        let live_group = hooks["hooks"][&event]
+            .as_array_mut()
+            .expect("event groups are an array")
+            .iter_mut()
+            .find(|group| **group == prior_group)
+            .expect("owned group is present in hooks");
+        for group in [live_group, &mut owned["group"]] {
+            group["hooks"][0]["command"] = json!(legacy_command);
+            group["hooks"][0]["commandWindows"] = json!(legacy_command);
+        }
+    }
+}
+
+fn shell_independent_owned_handler_count(hooks: &Value) -> usize {
+    hooks["hooks"]
+        .as_object()
+        .expect("hooks object")
+        .values()
+        .flat_map(|groups| groups.as_array().into_iter().flatten())
+        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+        .filter(|handler| {
+            handler["command"].as_str().is_some_and(|command| {
+                command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
+            })
+        })
+        .count()
+}
+
+#[cfg(windows)]
+fn assert_real_hook_direct(executable: &Path, payload: &[u8]) {
+    let mut child = Command::new(executable)
+        .args(["hook", "codex"])
+        .env_remove("LOCALAPPDATA")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("real TabBeacon starts");
+    child
+        .stdin
+        .take()
+        .expect("real TabBeacon exposes stdin")
+        .write_all(payload)
+        .expect("real TabBeacon accepts stdin");
+    let output = child.wait_with_output().expect("real TabBeacon completes");
+    assert!(
+        output.status.success(),
+        "real direct hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[cfg(windows)]
+fn assert_real_hook_shell_matrix(command: &str, payload: &[u8]) {
+    for shell in [
+        CodexWindowsHookShell::Pwsh7,
+        CodexWindowsHookShell::WindowsPowerShell,
+        CodexWindowsHookShell::Cmd,
+        CodexWindowsHookShell::ComspecFallback,
+    ] {
+        let output = run_codex_windows_hook_with_shell(shell, command, payload, true, None);
+        assert!(
+            output.status.success(),
+            "{} real hook shell failed: {}",
+            shell.label(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "{} wrote hook stdout",
+            shell.label()
+        );
+        assert!(
+            output.stderr.is_empty(),
+            "{} wrote hook stderr",
+            shell.label()
+        );
+    }
+}
+
+#[cfg(windows)]
+fn assert_real_hook_ingress(root: &TestRoot, command: &str) {
+    let local_app_data = root.child("isolated-local-app-data");
+    let payload = serde_json::to_vec(&hook_payload(
+        "UserPromptSubmit",
+        "real-shell-ingress",
+        Path::new(env!("CARGO_MANIFEST_DIR")),
+    ))
+    .expect("ingress payload serializes");
+    let output = run_codex_windows_hook_with_shell(
+        CodexWindowsHookShell::Pwsh7,
+        command,
+        &payload,
+        false,
+        Some(&local_app_data),
+    );
+    assert!(
+        output.status.success(),
+        "real hook ingress failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let registry_root = local_app_data.join("TabBeacon/repository-identity");
+    assert!(
+        fs::read_dir(registry_root)
+            .expect("real hook ingress creates isolated registry state")
+            .any(|entry| {
+                entry.is_ok_and(|entry| {
+                    entry.file_name().to_str().is_some_and(|name| {
+                        name.starts_with("registry-v1-")
+                            && Path::new(name)
+                                .extension()
+                                .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+                    })
+                })
+            }),
+        "the real binary must receive Codex stdin and reach repository identity"
+    );
+}
+
 #[test]
 fn capabilities_are_lifecycle_only_and_provider_neutral() {
     let capabilities = CodexHookNormalizer::capabilities();
@@ -750,27 +882,7 @@ fn setup_upgrades_exact_owned_declarations_without_duplicates_or_baseline_loss()
         serde_json::from_slice(&fs::read(codex_home.join("hooks.json")).expect("hooks read"))
             .expect("hooks parse");
 
-    let legacy_command = r#""C:\\legacy\\tabbeacon.exe" hook codex || exit /b 0"#;
-    for owned in manifest["hooks"]
-        .as_array_mut()
-        .expect("manifest owned hooks are an array")
-    {
-        let event = owned["event"]
-            .as_str()
-            .expect("owned event name")
-            .to_owned();
-        let prior_group = owned["group"].clone();
-        let live_group = hooks["hooks"][&event]
-            .as_array_mut()
-            .expect("event groups are an array")
-            .iter_mut()
-            .find(|group| **group == prior_group)
-            .expect("owned group is present in hooks");
-        live_group["hooks"][0]["command"] = json!(legacy_command);
-        live_group["hooks"][0]["commandWindows"] = json!(legacy_command);
-        owned["group"]["hooks"][0]["command"] = json!(legacy_command);
-        owned["group"]["hooks"][0]["commandWindows"] = json!(legacy_command);
-    }
+    replace_manifest_owned_declarations_with_legacy(&mut hooks, &mut manifest);
     fs::write(
         codex_home.join("hooks.json"),
         serde_json::to_vec_pretty(&hooks).expect("legacy hooks serialize"),
@@ -803,18 +915,7 @@ fn setup_upgrades_exact_owned_declarations_without_duplicates_or_baseline_loss()
         &fs::read(codex_home.join("hooks.json")).expect("upgraded hooks read"),
     )
     .expect("upgraded hooks parse");
-    let owned_handler_count = upgraded_hooks["hooks"]
-        .as_object()
-        .expect("hooks object")
-        .values()
-        .flat_map(|groups| groups.as_array().into_iter().flatten())
-        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
-        .filter(|handler| {
-            handler["command"].as_str().is_some_and(|command| {
-                command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
-            })
-        })
-        .count();
+    let owned_handler_count = shell_independent_owned_handler_count(&upgraded_hooks);
     assert_eq!(
         owned_handler_count, 7,
         "upgrade must never append another seven hooks"
@@ -1106,88 +1207,9 @@ fn generated_windows_command_runs_the_real_binary_in_the_codex_0_147_shell_model
 
     let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "real-shell", &root.path))
         .expect("Codex-shaped payload serializes");
-    let mut direct_child = Command::new(&executable)
-        .args(["hook", "codex"])
-        .env_remove("LOCALAPPDATA")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("real TabBeacon starts");
-    direct_child
-        .stdin
-        .take()
-        .expect("real TabBeacon exposes stdin")
-        .write_all(&payload)
-        .expect("real TabBeacon accepts stdin");
-    let direct = direct_child
-        .wait_with_output()
-        .expect("real TabBeacon completes");
-    assert!(
-        direct.status.success(),
-        "real direct hook failed: {}",
-        String::from_utf8_lossy(&direct.stderr)
-    );
-    assert!(direct.stdout.is_empty());
-    assert!(direct.stderr.is_empty());
-
-    for shell in [
-        CodexWindowsHookShell::Pwsh7,
-        CodexWindowsHookShell::WindowsPowerShell,
-        CodexWindowsHookShell::Cmd,
-        CodexWindowsHookShell::ComspecFallback,
-    ] {
-        let output = run_codex_windows_hook_with_shell(shell, command, &payload, true, None);
-        assert!(
-            output.status.success(),
-            "{} real hook shell failed: {}",
-            shell.label(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(
-            output.stdout.is_empty(),
-            "{} wrote hook stdout",
-            shell.label()
-        );
-        assert!(
-            output.stderr.is_empty(),
-            "{} wrote hook stderr",
-            shell.label()
-        );
-    }
-
-    let ingress_state_root = root.child("isolated-local-app-data");
-    let ingress_payload = serde_json::to_vec(&hook_payload(
-        "UserPromptSubmit",
-        "real-shell-ingress",
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-    ))
-    .expect("ingress payload serializes");
-    let ingress = run_codex_windows_hook_with_shell(
-        CodexWindowsHookShell::Pwsh7,
-        command,
-        &ingress_payload,
-        false,
-        Some(&ingress_state_root),
-    );
-    assert!(
-        ingress.status.success(),
-        "real hook ingress failed: {}",
-        String::from_utf8_lossy(&ingress.stderr)
-    );
-    let registry_root = ingress_state_root.join("TabBeacon/repository-identity");
-    assert!(
-        fs::read_dir(registry_root)
-            .expect("real hook ingress creates isolated registry state")
-            .any(|entry| {
-                entry.is_ok_and(|entry| {
-                    entry.file_name().to_str().is_some_and(|name| {
-                        name.starts_with("registry-v1-") && name.ends_with(".json")
-                    })
-                })
-            }),
-        "the real binary must receive Codex stdin and reach repository identity"
-    );
+    assert_real_hook_direct(&executable, &payload);
+    assert_real_hook_shell_matrix(command, &payload);
+    assert_real_hook_ingress(&root, command);
 }
 
 #[cfg(windows)]
