@@ -1,13 +1,33 @@
 [package]
 name = "tabbeacon"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.97.1"
 license = "MIT"
-description = "Live identity and status beacons for coding-agent tabs in Windows Terminal."
+description = "Live identity and status beacons for Codex CLI tabs in Windows Terminal."
 repository = "https://github.com/JerrySkywalker/tabbeacon"
 readme = "README.md"
-publish = false
+keywords = ["terminal", "cli", "windows-terminal", "codex", "developer-tools"]
+categories = ["command-line-utilities", "development-tools"]
+publish = ["crates-io"]
+include = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "LICENSE",
+    "README.md",
+    "CHANGELOG.md",
+    "rust-toolchain.toml",
+    "rustfmt.toml",
+    "src/**",
+    "tests/**",
+    "docs/codex-hooks.md",
+    "AGENTS.md",
+    "dev_governance_files/ROADMAP.md",
+    "dev_governance_files/QUALITY_GATES.md",
+]
+
+[features]
+visual-fixture = []
 
 [lib]
 path = "src/lib.rs"
@@ -19,6 +39,7 @@ path = "src/main.rs"
 [[bin]]
 name = "tabbeacon-visual-fixture"
 path = "src/bin/tabbeacon-visual-fixture.rs"
+required-features = ["visual-fixture"]
 
 [dependencies]
 atomic-write-file = "0.3.1"
