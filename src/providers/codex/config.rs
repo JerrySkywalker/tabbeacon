@@ -420,7 +420,7 @@ impl CodexIntegration {
         reject_symbolic_link(&self.config_path())?;
         let desired_hooks = desired_hooks(&self.tabbeacon_executable)?;
         if let Some(mut manifest) = self.load_manifest()? {
-            self.validate_manifest_target(&manifest)?;
+            self.validate_manifest_scope(&manifest)?;
             let mut hooks = read_hooks_document(&self.hooks_path())?;
             let mut config = read_config_document(&self.config_path())?;
             locate_owned_hooks(&hooks, &manifest.hooks)
@@ -433,6 +433,7 @@ impl CodexIntegration {
                 append_owned_hooks(&mut hooks, &desired_hooks)?;
                 atomic_write(&self.hooks_path(), &serialize_hooks(&hooks)?)?;
                 manifest.hooks = desired_hooks;
+                manifest.executable.clone_from(&self.tabbeacon_executable);
                 changed = true;
             }
             if changed {
@@ -489,7 +490,7 @@ impl CodexIntegration {
         let Some(mut manifest) = self.load_manifest()? else {
             return Ok(TitleOwnershipOutcome::NotInstalled);
         };
-        self.validate_manifest_target(&manifest)?;
+        self.validate_manifest_scope(&manifest)?;
         let hooks = read_hooks_document(&self.hooks_path())?;
         locate_owned_hooks(&hooks, &manifest.hooks)
             .map_err(|_| CodexIntegrationError::ModifiedOwnedHook)?;
@@ -546,7 +547,7 @@ impl CodexIntegration {
         let Some(manifest) = self.load_manifest()? else {
             return Ok(UninstallOutcome::NotInstalled);
         };
-        self.validate_manifest_target(&manifest)?;
+        self.validate_manifest_scope(&manifest)?;
         let mut hooks = read_hooks_document(&self.hooks_path())?;
         let mut config = read_config_document(&self.config_path())?;
         locate_owned_hooks(&hooks, &manifest.hooks)
@@ -615,17 +616,22 @@ impl CodexIntegration {
         Ok(Some(manifest))
     }
 
-    fn validate_manifest_target(
+    fn validate_manifest_scope(
         &self,
         manifest: &IntegrationManifest,
     ) -> Result<(), CodexIntegrationError> {
         if manifest.codex_home != self.codex_home
             || manifest.hooks_path != self.hooks_path()
             || manifest.config_path != self.config_path()
-            || manifest.executable != self.tabbeacon_executable
         {
             return Err(CodexIntegrationError::OwnershipManifest);
         }
+        // A manifest records the executable that installed the exact owned
+        // declarations. It must be shell-safe, but it is intentionally not
+        // required to equal this process: setup is the ownership-proven path
+        // that migrates hooks during a same-user binary relocation.
+        desired_hooks(&manifest.executable)
+            .map_err(|_| CodexIntegrationError::OwnershipManifest)?;
         Ok(())
     }
 
