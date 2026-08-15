@@ -60,7 +60,11 @@ impl TerminalTestSessionLauncher {
                 fixture_executable.display()
             )));
         }
-        let window_name = format!("tabbeacon-g03-{run_id}");
+        // A fixture needs its own owned window. Reusing one named window turns
+        // later fixtures into additional tabs; then Windows Terminal may retain
+        // valid UIA elements for a hidden or expiring earlier tab. That makes a
+        // pixel capture target ambiguous even when the title lookup succeeds.
+        let window_name = fixture_window_name(run_id, &replay.case.fixture_name);
         let position = format!(
             "{},{}",
             self.requested_position.0, self.requested_position.1
@@ -91,5 +95,26 @@ impl TerminalTestSessionLauncher {
             expected_title: replay.case.expected_title.clone(),
             requested_size: self.requested_size,
         })
+    }
+}
+
+fn fixture_window_name(run_id: &str, fixture_name: &str) -> String {
+    format!("tabbeacon-g03-{run_id}-{fixture_name}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixture_window_name;
+
+    #[test]
+    fn fixture_windows_are_isolated_within_one_visual_run() {
+        assert_ne!(
+            fixture_window_name("GHA-123-1", "working"),
+            fixture_window_name("GHA-123-1", "result-ready")
+        );
+        assert_eq!(
+            fixture_window_name("GHA-123-1", "working"),
+            "tabbeacon-g03-GHA-123-1-working"
+        );
     }
 }
