@@ -162,13 +162,14 @@ fn observe_replay(
         return Ok(());
     }
     let locator = WindowsUiaLocator;
-    let initial_target = match locate_with_retry(locator, run_id, &replay.case.expected_title) {
-        Ok(target) => target,
-        Err(error) => {
-            observation.record_uia_failure(&replay.case.fixture_name, error.to_string());
-            return Ok(());
-        }
-    };
+    let initial_target =
+        match locate_capturable_with_retry(locator, run_id, &replay.case.expected_title) {
+            Ok(target) => target,
+            Err(error) => {
+                observation.record_uia_failure(&replay.case.fixture_name, error.to_string());
+                return Ok(());
+            }
+        };
     let activation = match activate_with_retry(locator, run_id, &replay.case.expected_title) {
         Ok(activation) => activation,
         Err(error) => {
@@ -180,14 +181,18 @@ fn observe_replay(
             return Ok(());
         }
     };
-    let mut target = match locate_focused_with_retry(locator, run_id, &replay.case.expected_title) {
+    let mut target = match locate_capturable_with_retry(
+        locator,
+        run_id,
+        &replay.case.expected_title,
+    ) {
         Ok(target) => target,
         Err(error) => {
             observation.record_target(writer, replay, &initial_target)?;
             observation.record_capture_blocked(
                 &replay.case.fixture_name,
                 format!(
-                    "owned-window activation lost its UIA target after foreground={} focus={}: {error}",
+                    "owned-window activation did not yield capturable UIA geometry after foreground={} focus={}: {error}",
                     activation.set_foreground, activation.set_focus
                 ),
             );
@@ -265,7 +270,16 @@ fn observe_capture(
         .first()
         .cloned()
         .ok_or_else(|| VisualError::Platform("capture returned no frames".to_owned()))?;
-    let tab_roi = relative_roi(capture_target.window_bounds, tab_bounds, &first_frame)?;
+    let tab_roi = match relative_roi(capture_target.window_bounds, tab_bounds, &first_frame) {
+        Ok(tab_roi) => tab_roi,
+        Err(error) => {
+            observation.record_capture_blocked(
+                &replay.case.fixture_name,
+                format!("UIA geometry became non-capturable before frame sampling: {error}"),
+            );
+            return Ok(());
+        }
+    };
     write_capture_images(writer, replay, &first_frame, tab_roi)?;
     observation.record_capture_pass(&replay.case.fixture_name, capture_backend.name());
     observe_color(writer, replay, &first_frame, tab_roi, observation)?;
@@ -337,6 +351,26 @@ fn observe_animation(
 
 fn capture_bounds(target: &UiaDump) -> Option<(ScreenRect, ScreenRect)> {
     target.window_bounds.zip(target.tab_bounds)
+}
+
+fn target_has_capturable_geometry(target: &UiaDump) -> bool {
+    capture_bounds(target).is_some_and(|(window, tab)| {
+        if window.width == 0 || window.height == 0 || tab.width == 0 || tab.height == 0 {
+            return false;
+        }
+        let window_left = i64::from(window.left);
+        let window_top = i64::from(window.top);
+        let window_right = window_left + i64::from(window.width);
+        let window_bottom = window_top + i64::from(window.height);
+        let tab_left = i64::from(tab.left);
+        let tab_top = i64::from(tab.top);
+        let tab_right = tab_left + i64::from(tab.width);
+        let tab_bottom = tab_top + i64::from(tab.height);
+        tab_left >= window_left
+            && tab_top >= window_top
+            && tab_right <= window_right
+            && tab_bottom <= window_bottom
+    })
 }
 
 struct Observation {
@@ -569,54 +603,36 @@ fn selected_replays(
     }
 }
 
-fn locate_with_retry(
+fn locate_capturable_with_retry(
     locator: WindowsUiaLocator,
     run_id: &str,
     expected_title: &str,
 ) -> VisualResult<UiaDump> {
-    const TARGET_DISCOVERY_ATTEMPTS: usize = 30;
-    const TARGET_DISCOVERY_INTERVAL: Duration = Duration::from_millis(200);
-    let mut last_error = None;
-    for _ in 0..TARGET_DISCOVERY_ATTEMPTS {
-        match locator.locate(run_id, expected_title) {
-            Ok(target) => return Ok(target),
-            Err(error) => last_error = Some(error),
-        }
-        thread::sleep(TARGET_DISCOVERY_INTERVAL);
-    }
-    Err(last_error.unwrap_or_else(|| {
-        VisualError::Platform(format!(
-            "UIA target did not appear within {TARGET_DISCOVERY_ATTEMPTS} bounded discovery attempts"
-        ))
-    }))
-}
-
-fn locate_focused_with_retry(
-    locator: WindowsUiaLocator,
-    run_id: &str,
-    expected_title: &str,
-) -> VisualResult<UiaDump> {
+    const CAPTURABLE_GEOMETRY_ATTEMPTS: usize = 20;
     let mut last_target = None;
     let mut last_error = None;
-    for _ in 0..10 {
+    for _ in 0..CAPTURABLE_GEOMETRY_ATTEMPTS {
         match locator.locate(run_id, expected_title) {
-            Ok(target) => {
-                if target.window_has_keyboard_focus == Some(true) {
-                    return Ok(target);
-                }
-                last_target = Some(target);
-            }
+            Ok(target) if target_has_capturable_geometry(&target) => return Ok(target),
+            Ok(target) => last_target = Some(target),
             Err(error) => last_error = Some(error),
         }
-        thread::sleep(Duration::from_millis(150));
+        thread::sleep(Duration::from_millis(200));
     }
-    last_target.ok_or_else(|| {
-        last_error.unwrap_or_else(|| {
-            VisualError::Platform(
-                "owned Windows Terminal target did not reappear after activation".to_owned(),
+    let detail = last_target.map_or_else(
+        || "no matching UIA target was observed".to_owned(),
+        |target| {
+            format!(
+                "last target had non-capturable geometry: window={:?}; tab={:?}",
+                target.window_bounds, target.tab_bounds
             )
-        })
-    })
+        },
+    );
+    Err(last_error.unwrap_or_else(|| {
+        VisualError::Platform(format!(
+            "owned Windows Terminal target did not expose capturable geometry within {CAPTURABLE_GEOMETRY_ATTEMPTS} attempts: {detail}"
+        ))
+    }))
 }
 
 fn capture_frames(
@@ -987,7 +1003,10 @@ fn merge(target: &mut Option<VisualDisposition>, incoming: VisualDisposition) {
 mod tests {
     use crate::visual::Rgb;
 
-    use super::{RgbaFrame, Roi, ScreenRect, progress_roi, relative_roi};
+    use super::{
+        RgbaFrame, Roi, ScreenRect, UiaDump, empty_uia_dump, progress_roi, relative_roi,
+        target_has_capturable_geometry,
+    };
 
     #[test]
     fn tab_roi_uses_actual_capture_to_uia_window_mapping() {
@@ -1007,6 +1026,30 @@ mod tests {
         )
         .expect("physically reported tab maps without duplicate DPI scaling");
         assert_eq!(physically_reported, Roi::new(498, 17, 493, 64));
+    }
+
+    #[test]
+    fn capturable_geometry_rejects_zero_sized_or_off_window_tabs() {
+        let valid = UiaDump {
+            window_bounds: Some(ScreenRect::new(67, 80, 1492, 966)),
+            tab_bounds: Some(ScreenRect::new(565, 97, 493, 64)),
+            ..empty_uia_dump()
+        };
+        assert!(target_has_capturable_geometry(&valid));
+
+        let zero_window = UiaDump {
+            window_bounds: Some(ScreenRect::new(0, 0, 0, 0)),
+            tab_bounds: Some(ScreenRect::new(-31_575, -31_983, 433, 64)),
+            ..empty_uia_dump()
+        };
+        assert!(!target_has_capturable_geometry(&zero_window));
+
+        let off_window_tab = UiaDump {
+            window_bounds: Some(ScreenRect::new(0, 0, 100, 100)),
+            tab_bounds: Some(ScreenRect::new(-1, 0, 50, 20)),
+            ..empty_uia_dump()
+        };
+        assert!(!target_has_capturable_geometry(&off_window_tab));
     }
 
     #[test]

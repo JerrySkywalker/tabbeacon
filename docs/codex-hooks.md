@@ -34,6 +34,11 @@ changes, exact backups and an ownership manifest are written below:
 Setup is idempotent. It refuses a TabBeacon-like declaration that it cannot
 prove it owns.
 
+When upgrading to a binary at a new path, run `tabbeacon setup codex` from
+that new binary. TabBeacon migrates exactly the seven manifest-proven command
+groups and updates its manifest atomically; it never adopts a lookalike hook,
+an unsafe recorded executable path, or a different Codex configuration root.
+
 ## Presentation configuration
 
 Presentation preferences are user-global, never repository-local:
