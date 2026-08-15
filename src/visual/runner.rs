@@ -17,7 +17,7 @@ use super::{
     OwnedWindowCaptureTarget, PreflightProbe, PrintWindowCaptureBackend, RgbaFrame, Roi,
     ScreenRect, SessionKind, TargetLocator, TerminalTestSessionLauncher, UiaDump,
     VisualDisposition, VisualError, VisualResult, WindowsUiaLocator, assess_animation,
-    classify_color, matches_baseline, select_background_roi,
+    classify_color_for_theme, matches_baseline, select_background_roi,
 };
 
 /// Inputs for one live visual-harness invocation.
@@ -466,6 +466,7 @@ impl Observation {
         } else {
             evaluate_color(
                 replay.case.expected_color,
+                replay.case.theme,
                 &metrics,
                 self.baseline.as_ref(),
                 ColorTolerance::default(),
@@ -688,6 +689,7 @@ fn progress_roi(tab: Roi) -> VisualResult<Roi> {
 
 fn evaluate_color(
     expected: ColorSemantic,
+    theme: crate::settings::PresentationTheme,
     observed: &ColorMetrics,
     baseline: Option<&ColorMetrics>,
     tolerance: ColorTolerance,
@@ -701,7 +703,7 @@ fn evaluate_color(
             }
         }),
         ColorSemantic::Approval | ColorSemantic::Question => {
-            match classify_color(observed, tolerance) {
+            match classify_color_for_theme(observed, tolerance, theme) {
                 ColorClassification::Match(ColorSemantic::Approval | ColorSemantic::Question)
                 | ColorClassification::Ambiguous(_) => VisualDisposition::Pass,
                 ColorClassification::ContaminatedRoi | ColorClassification::Unclassified => {
@@ -711,7 +713,9 @@ fn evaluate_color(
             }
         }
         semantic => {
-            if classify_color(observed, tolerance) == ColorClassification::Match(semantic) {
+            if classify_color_for_theme(observed, tolerance, theme)
+                == ColorClassification::Match(semantic)
+            {
                 VisualDisposition::Pass
             } else {
                 VisualDisposition::Fail

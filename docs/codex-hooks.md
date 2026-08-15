@@ -34,6 +34,90 @@ changes, exact backups and an ownership manifest are written below:
 Setup is idempotent. It refuses a TabBeacon-like declaration that it cannot
 prove it owns.
 
+## Presentation configuration
+
+Presentation preferences are user-global, never repository-local:
+
+```text
+%LOCALAPPDATA%\TabBeacon\config.toml
+```
+
+The default is a comfortable v0.1 profile:
+
+```toml
+[presentation]
+title = "tabbeacon"
+tab_color = "tabbeacon"
+activity = "title-indicator"
+spinner = "codex"
+theme = "muted-dark"
+```
+
+Use the compact commands below; values are closed typed choices, so settings
+cannot inject a script, command, or raw terminal sequence.
+
+```powershell
+tabbeacon config show
+tabbeacon config wizard
+tabbeacon config set title tabbeacon
+tabbeacon config set tab-color native
+tabbeacon config set activity title-indicator
+tabbeacon config set spinner braille
+tabbeacon config set theme muted-dark
+tabbeacon config preset balanced
+tabbeacon config reset
+```
+
+Supported values are:
+
+| Setting | Values |
+| --- | --- |
+| `title` | `tabbeacon`, `native`, `off` |
+| `tab_color` | `tabbeacon`, `native`, `off` |
+| `activity` | `title-spinner`, `title-indicator`, `wt-ring`, `both`, `native`, `off` |
+| `spinner` | `codex`, `braille`, `quadrant`, `line`, `pulse` |
+| `theme` | `muted-dark`, `classic` |
+
+`title=tabbeacon` makes TabBeacon safely own the terminal title and disables
+Codex's competing title setting through the existing ownership manifest.
+`title=native` restores the prior supported Codex setting. `title=off` also
+restores Codex native ownership: TabBeacon emits no title, but does not leave
+both title producers disabled. Changes are atomic and process-safe; a malformed
+settings file falls back to defaults for hook handling, while `config reset`
+explicitly rewrites documented defaults.
+
+`tab_color=native` and `tab_color=off` clear a TabBeacon-owned frame color and
+then stop applying semantic dynamic colors. `activity=native` emits no
+TabBeacon activity decoration; `activity=off` additionally clears any owned
+progress state. `wt-ring` uses Windows Terminal OSC `9;4`; its foreground is
+terminal-controlled and cannot be RGB-configured by TabBeacon.
+
+`title-spinner` is accepted as a preference, but v0.1 intentionally uses one
+deterministic static frame from the chosen preset rather than spawning a
+long-lived animation worker from a one-shot Codex hook. The built-in `codex`
+preset is the reduced bullet pair `•`/`◦`, inspired by Codex's textual activity
+language without claiming to reproduce its shimmer. Other fixed frame sets are
+braille, quadrant, line, and pulse. No arbitrary frame strings are accepted.
+
+`muted-dark` is the intended v0.1 default for long multi-tab sessions. It uses
+lower-saturation semantic fills: working `#1B4E3A`, result-ready `#1E3E88`,
+approval/question `#776824`, warning `#81340E`, interrupted `#48395F`, and
+failed `#5E1E35`. These values are deliberately separated beyond the visual
+oracle's classification tolerance. `classic` retains the original G02 values
+for compatibility.
+
+## Preview
+
+Preview does not mutate Codex hook trust or configuration. It cycles ready,
+working, result-ready, approval, and reset through the current choices and
+cleans up before exit:
+
+```powershell
+tabbeacon preview
+tabbeacon preview --theme muted-dark
+tabbeacon preview --spinner braille
+```
+
 ## Required trust review
 
 Codex does not run a new or changed unmanaged hook until its normalized

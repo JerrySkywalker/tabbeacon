@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::{presentation::TabColor, settings::PresentationTheme};
+
 use super::{Rgb, RgbaFrame, Roi, VisualError, VisualResult};
 
 /// A semantic Windows Terminal palette color observable in a tab-background
@@ -31,14 +33,25 @@ impl ColorSemantic {
     /// Returns the fixed G02 palette color where one exists.
     #[must_use]
     pub const fn palette_rgb(self) -> Option<Rgb> {
-        match self {
-            Self::Default => None,
-            Self::Working => Some(Rgb::new(0x2e, 0xcc, 0x71)),
-            Self::ResultReady => Some(Rgb::new(0x34, 0x98, 0xdb)),
-            Self::Approval | Self::Question => Some(Rgb::new(0xf1, 0xc4, 0x0f)),
-            Self::Warning => Some(Rgb::new(0xe6, 0x7e, 0x22)),
-            Self::Interrupted => Some(Rgb::new(0x9b, 0x59, 0xb6)),
-            Self::Failed => Some(Rgb::new(0xe7, 0x4c, 0x3c)),
+        self.palette_rgb_for(PresentationTheme::Classic)
+    }
+
+    /// Returns this semantic color in the selected production palette.
+    #[must_use]
+    pub const fn palette_rgb_for(self, theme: PresentationTheme) -> Option<Rgb> {
+        let semantic = match self {
+            Self::Default => return None,
+            Self::Working => TabColor::Working,
+            Self::ResultReady => TabColor::ResultReady,
+            Self::Approval => TabColor::Approval,
+            Self::Question => TabColor::Question,
+            Self::Warning => TabColor::Warning,
+            Self::Interrupted => TabColor::Interrupted,
+            Self::Failed => TabColor::Failed,
+        };
+        match theme.rgb(semantic) {
+            Some(color) => Some(Rgb::new(color.red(), color.green(), color.blue())),
+            None => None,
         }
     }
 }
@@ -181,6 +194,16 @@ pub fn color_metrics(frame: &RgbaFrame, roi: Roi) -> VisualResult<ColorMetrics> 
 /// Classifies an ROI against the non-default G02 semantic palette.
 #[must_use]
 pub fn classify_color(metrics: &ColorMetrics, tolerance: ColorTolerance) -> ColorClassification {
+    classify_color_for_theme(metrics, tolerance, PresentationTheme::Classic)
+}
+
+/// Classifies an ROI against one selected semantic presentation palette.
+#[must_use]
+pub fn classify_color_for_theme(
+    metrics: &ColorMetrics,
+    tolerance: ColorTolerance,
+    theme: PresentationTheme,
+) -> ColorClassification {
     if metrics.variance.red > tolerance.max_channel_variance
         || metrics.variance.green > tolerance.max_channel_variance
         || metrics.variance.blue > tolerance.max_channel_variance
@@ -198,7 +221,7 @@ pub fn classify_color(metrics: &ColorMetrics, tolerance: ColorTolerance) -> Colo
         ColorSemantic::Interrupted,
         ColorSemantic::Failed,
     ] {
-        if let Some(expected) = semantic.palette_rgb()
+        if let Some(expected) = semantic.palette_rgb_for(theme)
             && mean_distance_milli_squared(metrics.mean_milli, expected)
                 <= tolerance.max_mean_distance_milli_squared
         {
