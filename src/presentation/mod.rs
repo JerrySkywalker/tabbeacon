@@ -16,35 +16,50 @@ const FRAME_BACKGROUND_COLOR_INDEX: u16 = 264;
 /// Maximum number of Unicode scalar values emitted in one terminal title.
 pub const MAX_TITLE_SCALARS: usize = 80;
 
+const STATUS_IDENTITY_SEPARATOR: char = ' ';
+const READY_STATUS_SLOT: &str = "○";
+const STATIC_WORKING_STATUS_SLOT: &str = "•";
+const RESULT_READY_STATUS_SLOT: &str = "✓";
+const APPROVAL_STATUS_SLOT: &str = "!";
+const QUESTION_STATUS_SLOT: &str = "?";
+const WARNING_STATUS_SLOT: &str = "!";
+const INTERRUPTED_STATUS_SLOT: &str = "⊘";
+const FAILED_STATUS_SLOT: &str = "×";
+
 /// Semantic presentation input independent from a provider or terminal backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SemanticPresentationInput<'a> {
     phase: Phase,
     attention: Attention,
     health: Health,
-    title: &'a str,
+    repository_alias: &'a str,
 }
 
 impl<'a> SemanticPresentationInput<'a> {
     /// Creates semantic presentation input without a provider integration.
     #[must_use]
-    pub const fn new(phase: Phase, attention: Attention, health: Health, title: &'a str) -> Self {
+    pub const fn new(
+        phase: Phase,
+        attention: Attention,
+        health: Health,
+        repository_alias: &'a str,
+    ) -> Self {
         Self {
             phase,
             attention,
             health,
-            title,
+            repository_alias,
         }
     }
 
     /// Extracts the semantic axes from a reconciled core session snapshot.
     #[must_use]
-    pub fn from_snapshot(snapshot: &SessionSnapshot, title: &'a str) -> Self {
+    pub fn from_snapshot(snapshot: &SessionSnapshot, repository_alias: &'a str) -> Self {
         Self::new(
             snapshot.phase(),
             snapshot.attention(),
             snapshot.health(),
-            title,
+            repository_alias,
         )
     }
 
@@ -66,10 +81,28 @@ impl<'a> SemanticPresentationInput<'a> {
         self.health
     }
 
-    /// Returns the untrusted semantic title before title-policy sanitization.
+    /// Returns the stable repository identity before title-policy sanitization.
     #[must_use]
-    pub const fn title(self) -> &'a str {
-        self.title
+    pub const fn repository_alias(self) -> &'a str {
+        self.repository_alias
+    }
+}
+
+/// A presentation-safe repository identity kept separate from semantic status.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TitleIdentity(String);
+
+impl TitleIdentity {
+    /// Replaces controls without applying the final composed-title limit.
+    #[must_use]
+    pub fn new(value: &str) -> Self {
+        Self(sanitize_title_text(value))
+    }
+
+    /// Returns the control-free repository identity.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -81,16 +114,7 @@ impl TerminalTitle {
     /// Replaces control characters and applies the deterministic title limit.
     #[must_use]
     pub fn new(value: &str) -> Self {
-        let sanitized = value
-            .chars()
-            .map(|character| {
-                if character.is_control() {
-                    '\u{fffd}'
-                } else {
-                    character
-                }
-            })
-            .collect::<String>();
+        let sanitized = sanitize_title_text(value);
         let value = if sanitized.chars().count() > MAX_TITLE_SCALARS {
             let mut truncated = sanitized
                 .chars()
@@ -110,6 +134,27 @@ impl TerminalTitle {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+}
+
+/// Provider-neutral semantic selection for the mutable left title slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TitleStatus {
+    /// Neutral/ready presentation.
+    Ready,
+    /// Active work presentation.
+    Working,
+    /// A result is ready for inspection.
+    ResultReady,
+    /// Approval is required.
+    Approval,
+    /// An answer is required.
+    Question,
+    /// Evidence-backed warning.
+    Warning,
+    /// The session was interrupted.
+    Interrupted,
+    /// The session failed.
+    Failed,
 }
 
 /// Semantic tab/frame color, separate from the renderer's RGB palette.
@@ -222,7 +267,8 @@ pub enum Progress {
 /// Fully typed visual state that can be applied to a terminal backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisualState {
-    title: TerminalTitle,
+    repository_alias: TitleIdentity,
+    title_status: TitleStatus,
     tab_color: TabColor,
     progress: Progress,
     reset_semantics: ResetSemantics,
@@ -231,28 +277,41 @@ pub struct VisualState {
 impl VisualState {
     /// Creates a typed visual state.
     #[must_use]
-    pub const fn new(title: TerminalTitle, tab_color: TabColor, progress: Progress) -> Self {
+    pub const fn new(
+        repository_alias: TitleIdentity,
+        title_status: TitleStatus,
+        tab_color: TabColor,
+        progress: Progress,
+    ) -> Self {
         Self {
-            title,
+            repository_alias,
+            title_status,
             tab_color,
             progress,
             reset_semantics: ResetSemantics::NoReset,
         }
     }
 
-    const fn reset(title: TerminalTitle) -> Self {
+    const fn reset(repository_alias: TitleIdentity) -> Self {
         Self {
-            title,
+            repository_alias,
+            title_status: TitleStatus::Ready,
             tab_color: TabColor::Default,
             progress: Progress::Clear,
             reset_semantics: ResetSemantics::ClearProgressAndFrameColor,
         }
     }
 
-    /// Returns the safe title payload.
+    /// Returns the stable, presentation-safe repository identity.
     #[must_use]
-    pub const fn title(&self) -> &TerminalTitle {
-        &self.title
+    pub const fn repository_alias(&self) -> &TitleIdentity {
+        &self.repository_alias
+    }
+
+    /// Returns the semantic status used by the mutable left title slot.
+    #[must_use]
+    pub const fn title_status(&self) -> TitleStatus {
+        self.title_status
     }
 
     /// Returns the semantic tab/frame color.
@@ -300,18 +359,20 @@ impl PresentationPolicy {
     /// Resolves semantic input according to the normative G02 precedence order.
     #[must_use]
     pub fn resolve(input: SemanticPresentationInput<'_>) -> PresentationAction {
-        let title = TerminalTitle::new(input.title());
+        let repository_alias = TitleIdentity::new(input.repository_alias());
 
         if input.health() == Health::Failed {
             return PresentationAction::Apply(VisualState::new(
-                title,
+                repository_alias,
+                TitleStatus::Failed,
                 TabColor::Failed,
                 Progress::Error,
             ));
         }
         if input.health() == Health::Interrupted {
             return PresentationAction::Apply(VisualState::new(
-                title,
+                repository_alias,
+                TitleStatus::Interrupted,
                 TabColor::Interrupted,
                 Progress::Clear,
             ));
@@ -322,41 +383,55 @@ impl PresentationPolicy {
             } else {
                 Progress::Warning
             };
-            return PresentationAction::Apply(VisualState::new(title, TabColor::Warning, progress));
+            return PresentationAction::Apply(VisualState::new(
+                repository_alias,
+                TitleStatus::Warning,
+                TabColor::Warning,
+                progress,
+            ));
         }
         if input.attention() == Attention::Approval {
             return PresentationAction::Apply(VisualState::new(
-                title,
+                repository_alias,
+                TitleStatus::Approval,
                 TabColor::Approval,
                 Progress::Warning,
             ));
         }
         if input.attention() == Attention::Question {
             return PresentationAction::Apply(VisualState::new(
-                title,
+                repository_alias,
+                TitleStatus::Question,
                 TabColor::Question,
                 Progress::Warning,
             ));
         }
         if input.attention() == Attention::ResultReady {
             return PresentationAction::Apply(VisualState::new(
-                title,
+                repository_alias,
+                TitleStatus::ResultReady,
                 TabColor::ResultReady,
                 Progress::Clear,
             ));
         }
         if input.phase() == Phase::Working {
             return PresentationAction::Apply(VisualState::new(
-                title,
+                repository_alias,
+                TitleStatus::Working,
                 TabColor::Working,
                 Progress::Indeterminate,
             ));
         }
         if input.phase() == Phase::Ended {
-            return PresentationAction::Reset(VisualState::reset(title));
+            return PresentationAction::Reset(VisualState::reset(repository_alias));
         }
 
-        PresentationAction::Apply(VisualState::new(title, TabColor::Default, Progress::Clear))
+        PresentationAction::Apply(VisualState::new(
+            repository_alias,
+            TitleStatus::Ready,
+            TabColor::Default,
+            Progress::Clear,
+        ))
     }
 }
 
@@ -468,7 +543,22 @@ impl WindowsTerminalRenderer {
     #[must_use]
     pub fn title_for(&self, state: &VisualState) -> Option<TerminalTitle> {
         (self.settings.title() == TitleMode::TabBeacon)
-            .then(|| configured_title(state, self.settings))
+            .then(|| configured_title(state, self.settings, 0))
+    }
+
+    /// Resolves one deterministic configured spinner frame for title previews/tests.
+    ///
+    /// The one-shot hook path continues to use frame zero. A later admitted
+    /// animator may advance this index without changing repository identity or
+    /// the status-first grammar.
+    #[must_use]
+    pub fn title_for_spinner_frame(
+        &self,
+        state: &VisualState,
+        frame_index: usize,
+    ) -> Option<TerminalTitle> {
+        (self.settings.title() == TitleMode::TabBeacon)
+            .then(|| configured_title(state, self.settings, frame_index))
     }
 
     /// Whether an indeterminate visual state uses Windows Terminal animation.
@@ -485,7 +575,7 @@ pub struct PresentationFixtureCase {
     phase: Phase,
     attention: Attention,
     health: Health,
-    title: &'static str,
+    repository_alias: &'static str,
 }
 
 impl PresentationFixtureCase {
@@ -498,7 +588,12 @@ impl PresentationFixtureCase {
     /// Returns provider-free semantic input for this fixture state.
     #[must_use]
     pub const fn input(&self) -> SemanticPresentationInput<'static> {
-        SemanticPresentationInput::new(self.phase, self.attention, self.health, self.title)
+        SemanticPresentationInput::new(
+            self.phase,
+            self.attention,
+            self.health,
+            self.repository_alias,
+        )
     }
 
     /// Returns this provider-free fixture input with a caller-owned title.
@@ -559,70 +654,70 @@ const PRESENTATION_FIXTURES: [PresentationFixtureCase; 10] = [
         phase: Phase::Ready,
         attention: Attention::None,
         health: Health::Normal,
-        title: "JPC ready",
+        repository_alias: "JPC",
     },
     PresentationFixtureCase {
         name: "working",
         phase: Phase::Working,
         attention: Attention::None,
         health: Health::Normal,
-        title: "OWH working",
+        repository_alias: "OWH",
     },
     PresentationFixtureCase {
         name: "result-ready",
         phase: Phase::WaitingUser,
         attention: Attention::ResultReady,
         health: Health::Normal,
-        title: "WM result-ready",
+        repository_alias: "WM",
     },
     PresentationFixtureCase {
         name: "approval",
         phase: Phase::WaitingUser,
         attention: Attention::Approval,
         health: Health::Normal,
-        title: "JPC approval",
+        repository_alias: "JPC",
     },
     PresentationFixtureCase {
         name: "question",
         phase: Phase::WaitingUser,
         attention: Attention::Question,
         health: Health::Normal,
-        title: "OWH question",
+        repository_alias: "OWH",
     },
     PresentationFixtureCase {
         name: "warning-working",
         phase: Phase::Working,
         attention: Attention::None,
         health: Health::Warning,
-        title: "WM warning-working",
+        repository_alias: "WM",
     },
     PresentationFixtureCase {
         name: "warning-idle",
         phase: Phase::WaitingUser,
         attention: Attention::None,
         health: Health::Warning,
-        title: "JPC warning-idle",
+        repository_alias: "JPC",
     },
     PresentationFixtureCase {
         name: "interrupted",
         phase: Phase::Ready,
         attention: Attention::None,
         health: Health::Interrupted,
-        title: "OWH interrupted",
+        repository_alias: "OWH",
     },
     PresentationFixtureCase {
         name: "failed",
         phase: Phase::Ready,
         attention: Attention::None,
         health: Health::Failed,
-        title: "WM failed",
+        repository_alias: "WM",
     },
     PresentationFixtureCase {
         name: "reset",
         phase: Phase::Ended,
         attention: Attention::None,
         health: Health::Normal,
-        title: "JPC reset",
+        repository_alias: "JPC",
     },
 ];
 
@@ -667,20 +762,52 @@ fn append_progress(bytes: &mut Vec<u8>, progress: Progress) {
     append_osc(bytes, payload);
 }
 
-fn configured_title(state: &VisualState, settings: PresentationSettings) -> TerminalTitle {
-    let mut title = state.title().as_str().to_owned();
-    if state.progress() == Progress::Indeterminate && settings.activity().uses_title_activity() {
-        let indicator = match settings.activity() {
-            ActivityMode::TitleSpinner => settings.spinner().fallback_indicator(),
-            ActivityMode::TitleIndicator | ActivityMode::Both => "•",
-            ActivityMode::WindowsTerminalRing | ActivityMode::Native | ActivityMode::Off => "",
-        };
-        if !indicator.is_empty() {
-            title.push(' ');
-            title.push_str(indicator);
-        }
-    }
+fn configured_title(
+    state: &VisualState,
+    settings: PresentationSettings,
+    frame_index: usize,
+) -> TerminalTitle {
+    let status_slot = match state.title_status() {
+        TitleStatus::Ready => READY_STATUS_SLOT,
+        TitleStatus::Working => match settings.activity() {
+            ActivityMode::TitleSpinner => {
+                let frames = settings.spinner().frames();
+                frames[frame_index % frames.len()]
+            }
+            ActivityMode::TitleIndicator | ActivityMode::Both => STATIC_WORKING_STATUS_SLOT,
+            ActivityMode::WindowsTerminalRing | ActivityMode::Native | ActivityMode::Off => {
+                READY_STATUS_SLOT
+            }
+        },
+        TitleStatus::ResultReady => RESULT_READY_STATUS_SLOT,
+        TitleStatus::Approval => APPROVAL_STATUS_SLOT,
+        TitleStatus::Question => QUESTION_STATUS_SLOT,
+        TitleStatus::Warning => WARNING_STATUS_SLOT,
+        TitleStatus::Interrupted => INTERRUPTED_STATUS_SLOT,
+        TitleStatus::Failed => FAILED_STATUS_SLOT,
+    };
+    let mut title = String::with_capacity(
+        status_slot.len()
+            + STATUS_IDENTITY_SEPARATOR.len_utf8()
+            + state.repository_alias().as_str().len(),
+    );
+    title.push_str(status_slot);
+    title.push(STATUS_IDENTITY_SEPARATOR);
+    title.push_str(state.repository_alias().as_str());
     TerminalTitle::new(&title)
+}
+
+fn sanitize_title_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
 fn configured_progress(state: &VisualState, settings: PresentationSettings) -> Progress {

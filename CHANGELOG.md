@@ -4,6 +4,14 @@ All notable changes to TabBeacon will be documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- Default TabBeacon-owned titles now use the compact status-first grammar
+  `<status-slot> <repository-alias>`.
+- Repository identity remains stable on the right while ready, working,
+  result-ready, approval, question, and reset semantics update only the left
+  slot; redundant lifecycle-word suffixes are no longer emitted.
+
 ## [0.1.1] - 2026-08-15
 
 ### Changed

@@ -6,8 +6,9 @@ use tabbeacon::{
     },
     presentation::{
         MAX_TITLE_SCALARS, PresentationAction, PresentationPolicy, Progress, ResetSemantics,
-        SemanticPresentationInput, TabColor, TerminalTitle, WindowsTerminalCapabilities,
-        WindowsTerminalRenderer, presentation_fixture, replay_presentation_fixture,
+        SemanticPresentationInput, TabColor, TerminalTitle, TitleIdentity, TitleStatus,
+        WindowsTerminalCapabilities, WindowsTerminalRenderer, presentation_fixture,
+        replay_presentation_fixture,
     },
     settings::{
         ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
@@ -47,7 +48,7 @@ fn title_encoding_uses_one_st_terminated_osc_envelope() {
 
     assert_eq!(
         renderer.render(&action),
-        b"\x1b]0;JPC ready\x1b\\\x1b]9;4;0;0\x1b\\"
+        "\x1b]0;○ JPC ready\x1b\\\x1b]9;4;0;0\x1b\\".as_bytes()
     );
 }
 
@@ -64,10 +65,13 @@ fn title_sanitization_blocks_control_sequence_injection() {
     let bytes = renderer.render(&action);
     let expected_title = "JPC�]9;4;2;100��\\�done";
 
-    assert_eq!(visual_state(action).title().as_str(), expected_title);
+    assert_eq!(
+        visual_state(action).repository_alias().as_str(),
+        expected_title
+    );
     assert_eq!(
         bytes,
-        format!("\x1b]0;{expected_title}\x1b\\\x1b]9;4;0;0\x1b\\").into_bytes()
+        format!("\x1b]0;○ {expected_title}\x1b\\\x1b]9;4;0;0\x1b\\").into_bytes()
     );
     assert!(!bytes.contains(&0x07));
     assert!(!bytes.contains(&0x9c));
@@ -89,7 +93,7 @@ fn title_length_uses_unicode_scalar_limit_and_ellipsis() {
 #[test]
 fn renderer_encodes_each_progress_semantic() {
     let renderer = WindowsTerminalRenderer::new(WindowsTerminalCapabilities::new(false));
-    let title = TerminalTitle::new("OWH");
+    let repository_alias = TitleIdentity::new("OWH");
     let cases = [
         (Progress::Clear, b"9;4;0;0".as_slice()),
         (Progress::Indeterminate, b"9;4;3;0".as_slice()),
@@ -99,7 +103,8 @@ fn renderer_encodes_each_progress_semantic() {
 
     for (progress, payload) in cases {
         let action = PresentationAction::Apply(tabbeacon::presentation::VisualState::new(
-            title.clone(),
+            repository_alias.clone(),
+            TitleStatus::Ready,
             TabColor::Default,
             progress,
         ));
@@ -221,7 +226,8 @@ fn policy_consumes_normalized_session_snapshot_without_provider_raw_types() {
         SemanticPresentationInput::from_snapshot(&snapshot, "JPC snapshot"),
     ));
 
-    assert_eq!(state.title().as_str(), "JPC snapshot");
+    assert_eq!(state.repository_alias().as_str(), "JPC snapshot");
+    assert_eq!(state.title_status(), TitleStatus::Approval);
     assert_eq!(
         (state.tab_color(), state.progress()),
         (TabColor::Approval, Progress::Warning)
@@ -238,7 +244,8 @@ fn ended_produces_cleanup_reset_instead_of_ready() {
                 reset.reset_semantics(),
                 ResetSemantics::ClearProgressAndFrameColor
             );
-            assert_eq!(reset.title().as_str(), "JPC semantic fixture");
+            assert_eq!(reset.repository_alias().as_str(), "JPC semantic fixture");
+            assert_eq!(reset.title_status(), TitleStatus::Ready);
             assert_eq!(reset.tab_color(), TabColor::Default);
             assert_eq!(reset.progress(), Progress::Clear);
         }
@@ -296,7 +303,7 @@ fn absent_frame_color_capability_preserves_title_and_progress_only() {
 
     assert_eq!(
         disabled,
-        b"\x1b]0;JPC semantic fixture\x1b\\\x1b]9;4;3;0\x1b\\"
+        "\x1b]0;○ JPC semantic fixture\x1b\\\x1b]9;4;3;0\x1b\\".as_bytes()
     );
     assert!(enabled.starts_with(&disabled));
     assert!(
@@ -351,7 +358,7 @@ fn muted_dark_is_resolved_after_semantic_color_and_static_title_activity_is_legi
     let terminal_output =
         String::from_utf8(terminal_renderer.render(&working)).expect("terminal bytes are UTF-8");
 
-    assert!(terminal_output.contains("]0;JPC semantic fixture •"));
+    assert!(terminal_output.contains("]0;• JPC semantic fixture"));
     assert!(terminal_output.contains("rgb:1b/4e/3a"));
     assert!(terminal_output.contains("]9;4;0;0"));
     assert_eq!(settings.theme(), PresentationTheme::MutedDark);
@@ -368,7 +375,7 @@ fn title_spinner_request_uses_one_safe_deterministic_fallback_frame() {
     let terminal_output =
         String::from_utf8(terminal_renderer.render(&working)).expect("terminal bytes are UTF-8");
 
-    assert!(terminal_output.contains("]0;JPC semantic fixture ⠋"));
+    assert!(terminal_output.contains("]0;⠋ JPC semantic fixture"));
     assert!(!terminal_output.contains("⠙"));
     assert!(terminal_output.contains("]9;4;0;0"));
 }
@@ -407,6 +414,157 @@ fn both_mode_keeps_static_title_activity_and_the_native_progress_ring() {
     let terminal_output =
         String::from_utf8(terminal_renderer.render(&working)).expect("terminal bytes are UTF-8");
 
-    assert!(terminal_output.contains("]0;JPC semantic fixture •"));
+    assert!(terminal_output.contains("]0;• JPC semantic fixture"));
     assert!(terminal_output.contains("]9;4;3;0"));
+}
+
+#[test]
+fn status_first_title_grammar_is_compact_for_every_required_semantic() {
+    let settings = PresentationSettings::default()
+        .with_activity(ActivityMode::TitleSpinner)
+        .with_spinner(SpinnerPreset::Braille);
+    let renderer =
+        WindowsTerminalRenderer::with_settings(WindowsTerminalCapabilities::new(false), settings);
+    let cases = [
+        (Phase::Ready, Attention::None, "○ OWH"),
+        (Phase::Working, Attention::None, "⠋ OWH"),
+        (Phase::WaitingUser, Attention::ResultReady, "✓ OWH"),
+        (Phase::WaitingUser, Attention::Approval, "! OWH"),
+        (Phase::WaitingUser, Attention::Question, "? OWH"),
+    ];
+
+    for (phase, attention, expected) in cases {
+        let action = PresentationPolicy::resolve(input(phase, attention, Health::Normal, "OWH"));
+        let state = match &action {
+            PresentationAction::Apply(state) => state,
+            PresentationAction::Reset(_) => panic!("semantic case unexpectedly reset"),
+        };
+        let title = renderer.title_for(state).expect("TabBeacon owns the title");
+        assert_eq!(title.as_str(), expected);
+        for prose in [
+            "working",
+            "result-ready",
+            "approval",
+            "question",
+            "waiting",
+            "ready",
+            "reset",
+        ] {
+            assert!(!title.as_str().contains(prose));
+        }
+    }
+}
+
+#[test]
+fn every_spinner_frame_changes_only_the_left_status_slot() {
+    for preset in [
+        SpinnerPreset::Codex,
+        SpinnerPreset::Braille,
+        SpinnerPreset::Quadrant,
+        SpinnerPreset::Line,
+        SpinnerPreset::Pulse,
+    ] {
+        let settings = PresentationSettings::default()
+            .with_activity(ActivityMode::TitleSpinner)
+            .with_spinner(preset);
+        let renderer = WindowsTerminalRenderer::with_settings(
+            WindowsTerminalCapabilities::new(false),
+            settings,
+        );
+        let working = resolve(Phase::Working, Attention::None, Health::Normal);
+        let state = match &working {
+            PresentationAction::Apply(state) => state,
+            PresentationAction::Reset(_) => panic!("working unexpectedly reset"),
+        };
+
+        for (index, frame) in preset.frames().iter().enumerate() {
+            let title = renderer
+                .title_for_spinner_frame(state, index)
+                .expect("TabBeacon owns the title");
+            assert_eq!(title.as_str(), format!("{frame} JPC semantic fixture"));
+            assert_eq!(
+                title.as_str().chars().skip(2).collect::<String>(),
+                "JPC semantic fixture"
+            );
+        }
+    }
+}
+
+#[test]
+fn long_repository_alias_is_sanitized_and_bounded_after_status_layout() {
+    let mut alias = "界".repeat(MAX_TITLE_SCALARS + 10);
+    alias.push('\u{0007}');
+    let action =
+        PresentationPolicy::resolve(input(Phase::Ready, Attention::None, Health::Normal, &alias));
+    let state = match &action {
+        PresentationAction::Apply(state) => state,
+        PresentationAction::Reset(_) => panic!("ready unexpectedly reset"),
+    };
+    let renderer = WindowsTerminalRenderer::new(WindowsTerminalCapabilities::new(false));
+    let title = renderer.title_for(state).expect("TabBeacon owns the title");
+
+    assert_eq!(title.as_str().chars().count(), MAX_TITLE_SCALARS);
+    assert!(title.as_str().starts_with("○ "));
+    assert!(title.as_str().ends_with('…'));
+    assert!(!title.as_str().chars().any(char::is_control));
+}
+
+#[test]
+fn title_and_activity_ownership_modes_preserve_their_existing_boundaries() {
+    let working = resolve(Phase::Working, Attention::None, Health::Normal);
+    let state = match &working {
+        PresentationAction::Apply(state) => state,
+        PresentationAction::Reset(_) => panic!("working unexpectedly reset"),
+    };
+    for (activity, expected_title) in [
+        (ActivityMode::TitleIndicator, "• JPC semantic fixture"),
+        (ActivityMode::Both, "• JPC semantic fixture"),
+        (ActivityMode::WindowsTerminalRing, "○ JPC semantic fixture"),
+        (ActivityMode::Native, "○ JPC semantic fixture"),
+        (ActivityMode::Off, "○ JPC semantic fixture"),
+    ] {
+        let renderer = WindowsTerminalRenderer::with_settings(
+            WindowsTerminalCapabilities::new(false),
+            PresentationSettings::default().with_activity(activity),
+        );
+        assert_eq!(
+            renderer
+                .title_for(state)
+                .expect("TabBeacon title remains owned")
+                .as_str(),
+            expected_title
+        );
+    }
+
+    for title_mode in [TitleMode::Native, TitleMode::Off] {
+        let renderer = WindowsTerminalRenderer::with_settings(
+            WindowsTerminalCapabilities::new(false),
+            PresentationSettings::default().with_title(title_mode),
+        );
+        assert!(renderer.title_for(state).is_none());
+    }
+}
+
+#[test]
+fn reset_returns_to_the_neutral_status_first_title() {
+    let action = resolve(Phase::Ended, Attention::None, Health::Normal);
+    let state = match &action {
+        PresentationAction::Reset(state) => state,
+        PresentationAction::Apply(_) => panic!("ended state must reset"),
+    };
+    let renderer = WindowsTerminalRenderer::with_settings(
+        WindowsTerminalCapabilities::new(true),
+        PresentationSettings::default().with_activity(ActivityMode::TitleSpinner),
+    );
+
+    assert_eq!(
+        renderer
+            .title_for(state)
+            .expect("TabBeacon owns reset title")
+            .as_str(),
+        "○ JPC semantic fixture"
+    );
+    let bytes = String::from_utf8(renderer.render(&action)).expect("terminal bytes are UTF-8");
+    assert!(bytes.contains("]9;4;0;0"));
+    assert!(bytes.contains("]104;264"));
 }

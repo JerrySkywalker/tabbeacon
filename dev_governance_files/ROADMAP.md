@@ -208,7 +208,7 @@ TB-G14
 
 Do not parallelize these goals by default. Turn/agent identity decisions in `TB-G10` directly constrain worker identity and stale-event rejection in `TB-G11`.
 
-## TB-G09 — Status-First Title Grammar v2
+## TB-G09 — Status-First Title Grammar v2 — COMPLETE
 
 **Purpose:** establish one compact presentation grammar before adding real animation.
 
