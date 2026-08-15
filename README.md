@@ -30,8 +30,9 @@ v0.1 is intentionally limited to:
 - pure Rust product code;
 - automatic repository abbreviation;
 - tab title ownership;
-- native progress animation;
-- dynamic tab color;
+- independently configurable title, activity, and dynamic tab-color channels;
+- muted-dark and classic semantic palettes;
+- static title activity indicators with a safe one-shot spinner fallback;
 - global Codex integration with no change to the `codex` launch command;
 - autonomous functional and visual verification.
 
@@ -48,6 +49,11 @@ The repository pins Rust 1.97.1. The local quality gate is:
 ```powershell
 pwsh -NoProfile -File ./scripts/ci/run-local-ci.ps1
 ```
+
+For daily presentation choices, use `tabbeacon config show`, the compact
+`tabbeacon config wizard`, or the documented presets in the
+[`Codex hooks integration guide`](docs/codex-hooks.md). Settings are user-global
+under `%LOCALAPPDATA%\TabBeacon`, never in a repository.
 
 All production changes after the bootstrap commit follow feature-branch, pull-request, exact-head CI, and evidence rules defined in [`AGENTS.md`](AGENTS.md) and [`dev_governance_files/QUALITY_GATES.md`](dev_governance_files/QUALITY_GATES.md).
 

@@ -4,6 +4,7 @@ use crate::presentation::{
     PresentationAction, PresentationFixtureCase, WindowsTerminalCapabilities,
     WindowsTerminalRenderer, presentation_fixture,
 };
+use crate::settings::{PresentationSettings, PresentationTheme};
 
 use super::{ColorSemantic, VisualError, VisualResult};
 
@@ -16,6 +17,8 @@ pub struct VisualTestCase {
     pub expected_title: String,
     /// Semantic color expected for a non-default G02 state.
     pub expected_color: ColorSemantic,
+    /// Palette used to resolve the semantic color for this replay.
+    pub theme: PresentationTheme,
     /// Whether the fixture uses indeterminate progress and needs a bounded
     /// animation observation.
     pub expects_animation: bool,
@@ -40,7 +43,10 @@ pub struct FixtureDriver {
 
 impl Default for FixtureDriver {
     fn default() -> Self {
-        Self::new(WindowsTerminalCapabilities::new(true))
+        Self::with_settings(
+            WindowsTerminalCapabilities::new(true),
+            PresentationSettings::default(),
+        )
     }
 }
 
@@ -50,6 +56,17 @@ impl FixtureDriver {
     pub const fn new(capabilities: WindowsTerminalCapabilities) -> Self {
         Self {
             renderer: WindowsTerminalRenderer::new(capabilities),
+        }
+    }
+
+    /// Creates a driver using the supplied v0.1 settings for a visual candidate.
+    #[must_use]
+    pub const fn with_settings(
+        capabilities: WindowsTerminalCapabilities,
+        settings: PresentationSettings,
+    ) -> Self {
+        Self {
+            renderer: WindowsTerminalRenderer::with_settings(capabilities, settings),
         }
     }
 
@@ -95,14 +112,20 @@ impl FixtureDriver {
             crate::presentation::TabColor::Interrupted => ColorSemantic::Interrupted,
             crate::presentation::TabColor::Failed => ColorSemantic::Failed,
         };
+        let expected_title = self.renderer.title_for(state).ok_or_else(|| {
+            VisualError::Platform(
+                "visual fixture requires TabBeacon title ownership for UIA correlation".to_owned(),
+            )
+        })?;
         let case = VisualTestCase {
             fixture_name: fixture.name().to_owned(),
-            expected_title: state.title().as_str().to_owned(),
+            expected_title: expected_title.as_str().to_owned(),
             expected_color,
+            theme: self.renderer.settings().theme(),
             expects_animation: matches!(
                 state.progress(),
                 crate::presentation::Progress::Indeterminate
-            ),
+            ) && self.renderer.uses_progress_animation(),
         };
         let vt_bytes = self.renderer.render(&action);
         Ok(FixtureReplay {

@@ -8,7 +8,7 @@ mod runtime;
 
 pub use config::{
     CodexDoctorReport, CodexIntegration, CodexIntegrationError, DoctorStatus, SetupOutcome,
-    UninstallOutcome,
+    TitleOwnershipOutcome, UninstallOutcome,
 };
 pub use runtime::{CodexHookRuntime, HookDispatchOutcome};
 

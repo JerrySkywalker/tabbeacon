@@ -256,11 +256,20 @@ the reconciled semantic suffix form the typed G02 title, and the existing G02
 policy/renderer writes VT through the Windows console handle rather than hook
 stdout, which Codex captures.
 
-Configuration management is separate from event normalization. It preserves
-unrelated global hooks and TOML, atomically replaces changed files, records
-exact backups and ownership locally, disables Codex's competing title through
-`[tui].terminal_title = []`, and leaves hook trust to the supported Codex
-review flow.
+Configuration management is separate from event normalization. Typed
+presentation preferences live under the per-user TabBeacon state root, are
+read fresh by one-shot hook invocations, and fall back safely when absent or
+malformed. The presentation renderer receives semantic state plus these
+preferences, then independently decides whether to emit title, dynamic frame
+color, and Windows Terminal progress. Themes resolve semantic `TabColor` only
+at the renderer boundary; provider adapters never carry RGB choices.
+
+Codex integration preserves unrelated global hooks and TOML, atomically
+replaces changed files, and records exact backups and ownership locally. When
+`title=tabbeacon`, it owns the supported `[tui].terminal_title = []` setting.
+When `title=native` or `title=off`, it restores the pre-install title setting
+instead of leaving both title systems disabled. Hook trust remains exclusively
+in the supported Codex review flow.
 
 ## 12. TB-G03 visual verification infrastructure
 

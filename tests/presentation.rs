@@ -9,6 +9,10 @@ use tabbeacon::{
         SemanticPresentationInput, TabColor, TerminalTitle, WindowsTerminalCapabilities,
         WindowsTerminalRenderer, presentation_fixture, replay_presentation_fixture,
     },
+    settings::{
+        ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
+        TitleMode,
+    },
 };
 
 fn input(
@@ -336,4 +340,73 @@ fn fixture_covers_every_named_state_and_replays_without_external_input() {
         1
     );
     assert!(first.iter().all(|fixture| !fixture.bytes().is_empty()));
+}
+
+#[test]
+fn muted_dark_is_resolved_after_semantic_color_and_static_title_activity_is_legible() {
+    let settings = PresentationSettings::default();
+    let terminal_renderer =
+        WindowsTerminalRenderer::with_settings(WindowsTerminalCapabilities::new(true), settings);
+    let working = resolve(Phase::Working, Attention::None, Health::Normal);
+    let terminal_output =
+        String::from_utf8(terminal_renderer.render(&working)).expect("terminal bytes are UTF-8");
+
+    assert!(terminal_output.contains("]0;JPC semantic fixture •"));
+    assert!(terminal_output.contains("rgb:1b/4e/3a"));
+    assert!(terminal_output.contains("]9;4;0;0"));
+    assert_eq!(settings.theme(), PresentationTheme::MutedDark);
+}
+
+#[test]
+fn title_spinner_request_uses_one_safe_deterministic_fallback_frame() {
+    let settings = PresentationSettings::default()
+        .with_activity(ActivityMode::TitleSpinner)
+        .with_spinner(SpinnerPreset::Braille);
+    let terminal_renderer =
+        WindowsTerminalRenderer::with_settings(WindowsTerminalCapabilities::new(false), settings);
+    let working = resolve(Phase::Working, Attention::None, Health::Normal);
+    let terminal_output =
+        String::from_utf8(terminal_renderer.render(&working)).expect("terminal bytes are UTF-8");
+
+    assert!(terminal_output.contains("]0;JPC semantic fixture ⠋"));
+    assert!(!terminal_output.contains("⠙"));
+    assert!(terminal_output.contains("]9;4;0;0"));
+}
+
+#[test]
+fn native_and_off_channels_clear_owned_terminal_state_without_emitting_title() {
+    for title_mode in [TitleMode::Native, TitleMode::Off] {
+        let settings = PresentationSettings::new(
+            title_mode,
+            TabColorMode::Off,
+            ActivityMode::Off,
+            SpinnerPreset::Codex,
+            PresentationTheme::MutedDark,
+        );
+        let terminal_renderer = WindowsTerminalRenderer::with_settings(
+            WindowsTerminalCapabilities::new(true),
+            settings,
+        );
+        let working = resolve(Phase::Working, Attention::None, Health::Normal);
+        let terminal_bytes = terminal_renderer.render(&working);
+        let terminal_output = String::from_utf8(terminal_bytes).expect("terminal bytes are UTF-8");
+
+        assert!(!terminal_output.contains("]0;"));
+        assert!(terminal_output.contains("]9;4;0;0"));
+        assert!(terminal_output.contains("]104;264"));
+        assert!(!terminal_output.contains("rgb:"));
+    }
+}
+
+#[test]
+fn both_mode_keeps_static_title_activity_and_the_native_progress_ring() {
+    let settings = PresentationSettings::default().with_activity(ActivityMode::Both);
+    let terminal_renderer =
+        WindowsTerminalRenderer::with_settings(WindowsTerminalCapabilities::new(false), settings);
+    let working = resolve(Phase::Working, Attention::None, Health::Normal);
+    let terminal_output =
+        String::from_utf8(terminal_renderer.render(&working)).expect("terminal bytes are UTF-8");
+
+    assert!(terminal_output.contains("]0;JPC semantic fixture •"));
+    assert!(terminal_output.contains("]9;4;3;0"));
 }

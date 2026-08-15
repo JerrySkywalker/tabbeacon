@@ -12,6 +12,7 @@ use crate::{
         WindowsTerminalRenderer,
     },
     repo::{RepositoryIdentityResolver, StableAliasRegistry},
+    settings::{PresentationSettings, PresentationSettingsStore},
 };
 
 use super::{CodexHookNormalizer, CodexNormalization};
@@ -47,11 +48,32 @@ impl CodexHookRuntime {
     /// capability. Tests use this to avoid the owner's application data.
     #[must_use]
     pub fn new(state_root: impl Into<PathBuf>, frame_color_supported: bool) -> Self {
+        Self::with_settings(
+            state_root,
+            frame_color_supported,
+            PresentationSettings::new(
+                crate::settings::TitleMode::TabBeacon,
+                crate::settings::TabColorMode::TabBeacon,
+                crate::settings::ActivityMode::WindowsTerminalRing,
+                crate::settings::SpinnerPreset::Codex,
+                crate::settings::PresentationTheme::Classic,
+            ),
+        )
+    }
+
+    /// Creates a runtime with explicit persistent presentation preferences.
+    #[must_use]
+    pub fn with_settings(
+        state_root: impl Into<PathBuf>,
+        frame_color_supported: bool,
+        settings: PresentationSettings,
+    ) -> Self {
         Self {
             identity_resolver: RepositoryIdentityResolver::new(state_root),
-            renderer: WindowsTerminalRenderer::new(WindowsTerminalCapabilities::new(
-                frame_color_supported,
-            )),
+            renderer: WindowsTerminalRenderer::with_settings(
+                WindowsTerminalCapabilities::new(frame_color_supported),
+                settings,
+            ),
         }
     }
 
@@ -65,7 +87,11 @@ impl CodexHookRuntime {
             return HookDispatchOutcome::DegradedStateRoot;
         };
         let frame_color_supported = std::env::var_os("WT_SESSION").is_some();
-        let runtime = Self::new(state_root, frame_color_supported);
+        let settings = PresentationSettingsStore::from_environment().map_or_else(
+            |_| PresentationSettings::default(),
+            |store| store.load_or_default(),
+        );
+        let runtime = Self::with_settings(state_root, frame_color_supported, settings);
         let Ok(mut console) = open_owned_console() else {
             return HookDispatchOutcome::DegradedPresentationOutput;
         };

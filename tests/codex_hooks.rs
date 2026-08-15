@@ -20,7 +20,11 @@ use tabbeacon::{
     providers::codex::{
         CodexHookError, CodexHookNormalizer, CodexHookRuntime, CodexIntegration,
         CodexIntegrationError, CodexNormalization, DoctorStatus, HookDispatchOutcome, SetupOutcome,
-        UninstallOutcome,
+        TitleOwnershipOutcome, UninstallOutcome,
+    },
+    settings::{
+        ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
+        TitleMode,
     },
 };
 use toml_edit::{Array, DocumentMut, Item, Table, value};
@@ -652,6 +656,126 @@ fn runtime_uses_repository_identity_reconciler_and_existing_renderer() {
 }
 
 #[test]
+fn production_hook_path_applies_each_required_v0_1_channel_combination() {
+    let root = TestRoot::new("runtime-settings");
+    let repo = root.child("workstation-manager");
+    init_repo(
+        &repo,
+        "https://github.com/JerrySkywalker/workstation-manager.git",
+    );
+    let raw = serde_json::to_vec(&hook_payload("UserPromptSubmit", "session-a", &repo))
+        .expect("prompt serializes");
+    let cases = [
+        (
+            "full-muted-dark",
+            PresentationSettings::new(
+                TitleMode::TabBeacon,
+                TabColorMode::TabBeacon,
+                ActivityMode::TitleIndicator,
+                SpinnerPreset::Codex,
+                PresentationTheme::MutedDark,
+            ),
+            ["WM working •", "rgb:1b/4e/3a", "]9;4;0;0"].as_slice(),
+            ["9;4;3;0"].as_slice(),
+        ),
+        (
+            "native",
+            PresentationSettings::new(
+                TitleMode::Native,
+                TabColorMode::Native,
+                ActivityMode::Native,
+                SpinnerPreset::Codex,
+                PresentationTheme::MutedDark,
+            ),
+            ["]9;4;0;0", "]104;264"].as_slice(),
+            ["]0;", "rgb:"].as_slice(),
+        ),
+        (
+            "minimal-title-only",
+            PresentationSettings::new(
+                TitleMode::TabBeacon,
+                TabColorMode::Native,
+                ActivityMode::TitleIndicator,
+                SpinnerPreset::Codex,
+                PresentationTheme::MutedDark,
+            ),
+            ["WM working •", "]104;264"].as_slice(),
+            ["rgb:", "9;4;3;0"].as_slice(),
+        ),
+        (
+            "spinner-without-color",
+            PresentationSettings::new(
+                TitleMode::TabBeacon,
+                TabColorMode::Off,
+                ActivityMode::TitleSpinner,
+                SpinnerPreset::Braille,
+                PresentationTheme::MutedDark,
+            ),
+            ["WM working ⠋", "]104;264"].as_slice(),
+            ["rgb:", "9;4;3;0"].as_slice(),
+        ),
+        (
+            "color-and-ring",
+            PresentationSettings::new(
+                TitleMode::TabBeacon,
+                TabColorMode::TabBeacon,
+                ActivityMode::WindowsTerminalRing,
+                SpinnerPreset::Codex,
+                PresentationTheme::MutedDark,
+            ),
+            ["WM working", "rgb:1b/4e/3a", "]9;4;3;0"].as_slice(),
+            ["WM working •"].as_slice(),
+        ),
+        (
+            "activity-off",
+            PresentationSettings::new(
+                TitleMode::TabBeacon,
+                TabColorMode::TabBeacon,
+                ActivityMode::Off,
+                SpinnerPreset::Codex,
+                PresentationTheme::MutedDark,
+            ),
+            ["WM working", "rgb:1b/4e/3a", "]9;4;0;0"].as_slice(),
+            ["WM working •", "9;4;3;0"].as_slice(),
+        ),
+    ];
+    for (name, settings, expected, absent) in cases {
+        assert_runtime_settings_case(&root, &raw, name, settings, expected, absent);
+    }
+}
+
+fn assert_runtime_settings_case(
+    root: &TestRoot,
+    raw: &[u8],
+    name: &str,
+    settings: PresentationSettings,
+    expected: &[&str],
+    absent: &[&str],
+) {
+    let state = format!("state-{name}");
+    let runtime = CodexHookRuntime::with_settings(root.child(&state), true, settings);
+    let mut output = Vec::new();
+    assert_eq!(
+        runtime.dispatch_to(raw, UNIX_EPOCH, &mut output),
+        HookDispatchOutcome::Applied,
+        "{name} dispatches through the full hook path"
+    );
+    let rendered = String::from_utf8(output).expect("terminal bytes are UTF-8");
+    for expected in expected {
+        assert!(
+            rendered.contains(expected),
+            "{name} must include {expected:?}: {rendered}"
+        );
+    }
+    for absent in absent {
+        assert!(
+            !rendered.contains(absent),
+            "{name} must omit {absent:?}: {rendered}"
+        );
+    }
+}
+
+#[test]
 fn runtime_preserves_linked_worktree_identity_and_collision_aliases() {
     let root = TestRoot::new("worktree-collision");
     let ordinary = root.child("ordinary");
@@ -845,6 +969,86 @@ animations = false
         integration.uninstall().expect("repeat uninstall succeeds"),
         UninstallOutcome::NotInstalled
     );
+}
+
+#[test]
+fn title_preference_reconciliation_restores_native_codex_title_without_losing_baseline() {
+    let root = TestRoot::new("title-preference");
+    let codex_home = root.child("codex-home");
+    fs::create_dir_all(&codex_home).expect("Codex home is created");
+    let original = "[tui]\nterminal_title = [\"activity\", \"project\"]\n";
+    fs::write(codex_home.join("config.toml"), original).expect("owner config writes");
+    let integration = test_integration(&root);
+    integration.setup().expect("setup owns the title");
+
+    assert_eq!(
+        integration
+            .reconcile_title_ownership(false)
+            .expect("native preference restores title"),
+        TitleOwnershipOutcome::Updated
+    );
+    assert!(
+        fs::read_to_string(codex_home.join("config.toml"))
+            .expect("native config reads")
+            .contains("[\"activity\", \"project\"]")
+    );
+    let report = integration.doctor();
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "terminal.title"
+            && check.status() == DoctorStatus::Pass
+            && check.summary().contains("native")
+    }));
+
+    assert_eq!(
+        integration
+            .reconcile_title_ownership(true)
+            .expect("TabBeacon reacquires title"),
+        TitleOwnershipOutcome::Updated
+    );
+    assert!(
+        fs::read_to_string(codex_home.join("config.toml"))
+            .expect("owned config reads")
+            .contains("terminal_title = []")
+    );
+    integration
+        .uninstall()
+        .expect("uninstall restores original baseline");
+    assert_eq!(
+        fs::read_to_string(codex_home.join("config.toml")).expect("restored config reads"),
+        original
+    );
+}
+
+#[test]
+fn repeated_setup_ten_times_keeps_exactly_seven_owned_hook_definitions() {
+    let root = TestRoot::new("setup-ten-times");
+    let integration = test_integration(&root);
+    assert_eq!(
+        integration.setup().expect("initial setup succeeds"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    for _ in 0..10 {
+        assert_eq!(
+            integration.setup().expect("repeated setup succeeds"),
+            SetupOutcome::AlreadyInstalled
+        );
+    }
+    let hooks: Value = serde_json::from_slice(
+        &fs::read(root.child("codex-home/hooks.json")).expect("installed hooks read"),
+    )
+    .expect("installed hooks parse");
+    assert_eq!(shell_independent_owned_handler_count(&hooks), 7);
+    for event in [
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PermissionRequest",
+        "PostToolUse",
+        "Stop",
+        "SessionEnd",
+    ] {
+        assert_eq!(hooks["hooks"][event].as_array().map(Vec::len), Some(1));
+    }
 }
 
 #[test]

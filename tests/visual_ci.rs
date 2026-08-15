@@ -3,13 +3,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use tabbeacon::settings::PresentationTheme;
 use tabbeacon::visual::{
     AnimationOutcome, AnimationThreshold, AssertionKind, AssertionResult, Availability,
     ColorClassification, ColorSemantic, ColorTolerance, DesktopPreflight, EvidenceBundle,
     EvidenceManifest, EvidenceWriter, FailureCategory, FixtureDriver, MachineEnvironment,
     PreflightBlocker, PreflightProbe, Rgb, RgbaFrame, Roi, ScreenRect, SessionKind, UiaDump,
     VisualDisposition, VisualError, WindowActivation, assess_animation, classify_color,
-    color_metrics, frame_delta, matches_baseline, select_background_roi,
+    classify_color_for_theme, color_metrics, frame_delta, matches_baseline, select_background_roi,
 };
 
 fn frame(width: u32, height: u32, color: Rgb) -> RgbaFrame {
@@ -84,6 +85,60 @@ fn color_aggregation_uses_deterministic_mean_median_and_tolerance() {
         classify_color(&metrics, ColorTolerance::default()),
         ColorClassification::Match(ColorSemantic::Working)
     );
+}
+
+#[test]
+fn muted_dark_color_oracle_uses_the_selected_semantic_palette() {
+    let muted = ColorSemantic::Working
+        .palette_rgb_for(PresentationTheme::MutedDark)
+        .expect("working color exists");
+    let classic = ColorSemantic::Working
+        .palette_rgb_for(PresentationTheme::Classic)
+        .expect("classic working color exists");
+    assert_ne!(muted, classic);
+    let metrics = color_metrics(&frame(5, 4, muted), Roi::new(0, 0, 5, 4))
+        .expect("valid muted frame metrics");
+    assert_eq!(
+        classify_color_for_theme(
+            &metrics,
+            ColorTolerance::default(),
+            PresentationTheme::MutedDark
+        ),
+        ColorClassification::Match(ColorSemantic::Working)
+    );
+    for semantic in [
+        ColorSemantic::ResultReady,
+        ColorSemantic::Warning,
+        ColorSemantic::Interrupted,
+        ColorSemantic::Failed,
+    ] {
+        let color = semantic
+            .palette_rgb_for(PresentationTheme::MutedDark)
+            .expect("non-default semantic color exists");
+        let metrics = color_metrics(&frame(5, 4, color), Roi::new(0, 0, 5, 4))
+            .expect("valid muted frame metrics");
+        assert_eq!(
+            classify_color_for_theme(
+                &metrics,
+                ColorTolerance::default(),
+                PresentationTheme::MutedDark
+            ),
+            ColorClassification::Match(semantic)
+        );
+    }
+    let approval = ColorSemantic::Approval
+        .palette_rgb_for(PresentationTheme::MutedDark)
+        .expect("approval color exists");
+    let metrics = color_metrics(&frame(5, 4, approval), Roi::new(0, 0, 5, 4))
+        .expect("valid approval frame metrics");
+    assert!(matches!(
+        classify_color_for_theme(
+            &metrics,
+            ColorTolerance::default(),
+            PresentationTheme::MutedDark
+        ),
+        ColorClassification::Match(ColorSemantic::Approval) | ColorClassification::Ambiguous(_)
+    ));
 }
 
 #[test]
@@ -358,6 +413,13 @@ fn fixture_driver_uses_a_unique_title_without_changing_g02_semantics() {
             .starts_with("TB03-TB03TEST-unique-")
     }));
     assert!(cases.iter().all(|case| !case.vt_bytes.is_empty()));
+    let working = cases
+        .iter()
+        .find(|case| case.case.fixture_name == "working")
+        .expect("working fixture exists");
+    assert!(working.case.expected_title.ends_with(" •"));
+    assert_eq!(working.case.theme, PresentationTheme::MutedDark);
+    assert!(!working.case.expects_animation);
     let reset = driver
         .reset("TB03TEST-unique")
         .expect("reset fixture exists");

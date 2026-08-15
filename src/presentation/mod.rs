@@ -4,7 +4,10 @@
 //! and bytes. It intentionally contains no provider transport, repository
 //! identity, process, terminal-launch, or UI-automation code.
 
-use crate::core::{Attention, Health, Phase, SessionSnapshot};
+use crate::{
+    core::{Attention, Health, Phase, SessionSnapshot},
+    settings::{ActivityMode, PresentationSettings, PresentationTheme, TabColorMode, TitleMode},
+};
 
 const ESC: u8 = 0x1b;
 const STRING_TERMINATOR: [u8; 2] = [ESC, b'\\'];
@@ -131,17 +134,40 @@ pub enum TabColor {
 }
 
 impl TabColor {
-    /// Returns the default Windows Terminal palette value for this semantic color.
+    /// Returns the classic G02 compatibility palette value for this semantic color.
+    ///
+    /// New presentation code should resolve colors through [`PresentationTheme`]
+    /// so semantic state remains independent from user palette choice.
     #[must_use]
     pub const fn rgb(self) -> Option<Rgb> {
-        match self {
-            Self::Default => None,
-            Self::Working => Some(Rgb::new(0x2e, 0xcc, 0x71)),
-            Self::ResultReady => Some(Rgb::new(0x34, 0x98, 0xdb)),
-            Self::Approval | Self::Question => Some(Rgb::new(0xf1, 0xc4, 0x0f)),
-            Self::Warning => Some(Rgb::new(0xe6, 0x7e, 0x22)),
-            Self::Interrupted => Some(Rgb::new(0x9b, 0x59, 0xb6)),
-            Self::Failed => Some(Rgb::new(0xe7, 0x4c, 0x3c)),
+        PresentationTheme::Classic.rgb(self)
+    }
+}
+
+impl PresentationTheme {
+    /// Resolves one provider-neutral semantic tab color to a terminal RGB value.
+    #[must_use]
+    pub const fn rgb(self, color: TabColor) -> Option<Rgb> {
+        match (self, color) {
+            (_, TabColor::Default) => None,
+            (Self::Classic, TabColor::Working) => Some(Rgb::new(0x2e, 0xcc, 0x71)),
+            (Self::Classic, TabColor::ResultReady) => Some(Rgb::new(0x34, 0x98, 0xdb)),
+            (Self::Classic, TabColor::Approval | TabColor::Question) => {
+                Some(Rgb::new(0xf1, 0xc4, 0x0f))
+            }
+            (Self::Classic, TabColor::Warning) => Some(Rgb::new(0xe6, 0x7e, 0x22)),
+            (Self::Classic, TabColor::Interrupted) => Some(Rgb::new(0x9b, 0x59, 0xb6)),
+            (Self::Classic, TabColor::Failed) => Some(Rgb::new(0xe7, 0x4c, 0x3c)),
+            // Muted dark deliberately uses low-saturation dark fills. It is a
+            // semantic palette, not a constant multiplier of the classic RGBs.
+            (Self::MutedDark, TabColor::Working) => Some(Rgb::new(0x1b, 0x4e, 0x3a)),
+            (Self::MutedDark, TabColor::ResultReady) => Some(Rgb::new(0x1e, 0x3e, 0x88)),
+            (Self::MutedDark, TabColor::Approval | TabColor::Question) => {
+                Some(Rgb::new(0x77, 0x68, 0x24))
+            }
+            (Self::MutedDark, TabColor::Warning) => Some(Rgb::new(0x81, 0x34, 0x0e)),
+            (Self::MutedDark, TabColor::Interrupted) => Some(Rgb::new(0x48, 0x39, 0x5f)),
+            (Self::MutedDark, TabColor::Failed) => Some(Rgb::new(0x5e, 0x1e, 0x35)),
         }
     }
 }
@@ -364,13 +390,38 @@ impl Default for WindowsTerminalCapabilities {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct WindowsTerminalRenderer {
     capabilities: WindowsTerminalCapabilities,
+    settings: PresentationSettings,
 }
 
 impl WindowsTerminalRenderer {
     /// Creates a renderer using the supplied explicit terminal capabilities.
     #[must_use]
     pub const fn new(capabilities: WindowsTerminalCapabilities) -> Self {
-        Self { capabilities }
+        // Preserve the G02 renderer contract for deterministic fixture and
+        // visual-infrastructure callers. The live Codex runtime supplies the
+        // user-selected v0.1 settings explicitly.
+        Self::with_settings(
+            capabilities,
+            PresentationSettings::new(
+                TitleMode::TabBeacon,
+                TabColorMode::TabBeacon,
+                ActivityMode::WindowsTerminalRing,
+                crate::settings::SpinnerPreset::Codex,
+                PresentationTheme::Classic,
+            ),
+        )
+    }
+
+    /// Creates a renderer with explicitly selected user presentation settings.
+    #[must_use]
+    pub const fn with_settings(
+        capabilities: WindowsTerminalCapabilities,
+        settings: PresentationSettings,
+    ) -> Self {
+        Self {
+            capabilities,
+            settings,
+        }
     }
 
     /// Returns the renderer capabilities.
@@ -379,20 +430,51 @@ impl WindowsTerminalRenderer {
         self.capabilities
     }
 
+    /// Returns the typed channel and theme preferences used by this renderer.
+    #[must_use]
+    pub const fn settings(self) -> PresentationSettings {
+        self.settings
+    }
+
     /// Produces deterministic VT bytes for the action without writing to a terminal.
     #[must_use]
     pub fn render(&self, action: &PresentationAction) -> Vec<u8> {
         let mut bytes = Vec::new();
         match action {
             PresentationAction::Apply(state) | PresentationAction::Reset(state) => {
-                append_title(&mut bytes, state.title());
-                append_progress(&mut bytes, state.progress());
+                if let Some(title) = self.title_for(state) {
+                    append_title(&mut bytes, &title);
+                }
+                append_progress(&mut bytes, configured_progress(state, self.settings));
                 if self.capabilities.frame_color_supported() {
-                    append_frame_color(&mut bytes, state.tab_color());
+                    let color = if self.settings.tab_color() == TabColorMode::TabBeacon {
+                        state.tab_color()
+                    } else {
+                        // Native/off never reapply a dynamic color. The clear is
+                        // harmlessly idempotent and removes a prior owned color.
+                        TabColor::Default
+                    };
+                    append_frame_color(&mut bytes, color, self.settings.theme());
                 }
             }
         }
         bytes
+    }
+
+    /// Resolves the title channel without encoding any terminal control bytes.
+    ///
+    /// A `None` result means native/off mode deliberately leaves title output
+    /// to `Codex` rather than emitting an OSC title from `TabBeacon`.
+    #[must_use]
+    pub fn title_for(&self, state: &VisualState) -> Option<TerminalTitle> {
+        (self.settings.title() == TitleMode::TabBeacon)
+            .then(|| configured_title(state, self.settings))
+    }
+
+    /// Whether an indeterminate visual state uses Windows Terminal animation.
+    #[must_use]
+    pub const fn uses_progress_animation(self) -> bool {
+        self.settings.activity().uses_windows_terminal_ring()
     }
 }
 
@@ -585,8 +667,33 @@ fn append_progress(bytes: &mut Vec<u8>, progress: Progress) {
     append_osc(bytes, payload);
 }
 
-fn append_frame_color(bytes: &mut Vec<u8>, tab_color: TabColor) {
-    let Some(color) = tab_color.rgb() else {
+fn configured_title(state: &VisualState, settings: PresentationSettings) -> TerminalTitle {
+    let mut title = state.title().as_str().to_owned();
+    if state.progress() == Progress::Indeterminate && settings.activity().uses_title_activity() {
+        let indicator = match settings.activity() {
+            ActivityMode::TitleSpinner => settings.spinner().fallback_indicator(),
+            ActivityMode::TitleIndicator | ActivityMode::Both => "•",
+            ActivityMode::WindowsTerminalRing | ActivityMode::Native | ActivityMode::Off => "",
+        };
+        if !indicator.is_empty() {
+            title.push(' ');
+            title.push_str(indicator);
+        }
+    }
+    TerminalTitle::new(&title)
+}
+
+fn configured_progress(state: &VisualState, settings: PresentationSettings) -> Progress {
+    if settings.activity().uses_windows_terminal_ring() {
+        state.progress()
+    } else {
+        // Explicitly clear a ring left by a prior config or lifecycle state.
+        Progress::Clear
+    }
+}
+
+fn append_frame_color(bytes: &mut Vec<u8>, tab_color: TabColor, theme: PresentationTheme) {
+    let Some(color) = theme.rgb(tab_color) else {
         let mut payload = Vec::from(b"104;".as_slice());
         append_decimal(&mut payload, FRAME_BACKGROUND_COLOR_INDEX);
         append_osc(bytes, &payload);

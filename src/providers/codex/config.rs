@@ -48,6 +48,17 @@ pub enum UninstallOutcome {
     NotInstalled,
 }
 
+/// Result of reconciling the optional Codex terminal-title ownership layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TitleOwnershipOutcome {
+    /// The owned Codex title setting was changed safely.
+    Updated,
+    /// The requested ownership was already exact.
+    AlreadyConfigured,
+    /// No `TabBeacon` `Codex` integration is installed, so user preferences were saved only.
+    NotInstalled,
+}
+
 /// Severity of one doctor check and of the aggregate report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DoctorStatus {
@@ -248,7 +259,23 @@ impl CodexIntegration {
     /// Refuses unsupported config shapes, unowned matching hooks, symbolic-link
     /// targets, or drift in an existing owned integration.
     pub fn setup(&self) -> Result<SetupOutcome, CodexIntegrationError> {
-        self.with_lock(|| self.setup_locked())
+        self.setup_with_title_ownership(true)
+    }
+
+    /// Installs or upgrades hooks while applying the requested title owner.
+    ///
+    /// The caller derives this from provider-neutral presentation preferences;
+    /// the integration never accepts raw TOML or executable configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if exact hook ownership, the Codex TOML shape, or a
+    /// required atomic external-file update cannot be proven safe.
+    pub fn setup_with_title_ownership(
+        &self,
+        tabbeacon_owns_title: bool,
+    ) -> Result<SetupOutcome, CodexIntegrationError> {
+        self.with_lock(|| self.setup_locked(tabbeacon_owns_title))
     }
 
     /// Removes only exact owned declarations and restores the prior title value.
@@ -259,6 +286,23 @@ impl CodexIntegration {
     /// owned elements.
     pub fn uninstall(&self) -> Result<UninstallOutcome, CodexIntegrationError> {
         self.with_lock(|| self.uninstall_locked())
+    }
+
+    /// Reconciles only the title ownership part of an already installed integration.
+    ///
+    /// The original pre-install title value remains in the manifest so a later
+    /// uninstall restores the A-before-upgrade baseline rather than a transient
+    /// user preference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the installed integration, owned hooks, or current
+    /// title declaration cannot be proven safe to update.
+    pub fn reconcile_title_ownership(
+        &self,
+        tabbeacon_owns_title: bool,
+    ) -> Result<TitleOwnershipOutcome, CodexIntegrationError> {
+        self.with_lock(|| self.reconcile_title_ownership_locked(tabbeacon_owns_title))
     }
 
     /// Audits binary, manifest, hook, trust, and terminal-title state read-only.
@@ -333,16 +377,30 @@ impl CodexIntegration {
             ));
             checks.push(fail("hooks.trust", "hook trust is not proven"));
         }
-        checks.push(match config {
-            Ok(config) if terminal_title_is_disabled(&config).unwrap_or(false) => pass(
+        checks.push(match (&manifest, config) {
+            (Some(manifest), Ok(config))
+                if manifest.title_owned && terminal_title_is_disabled(&config).unwrap_or(false) =>
+            {
+                pass("terminal.title", "TabBeacon owns the Codex terminal title")
+            }
+            (Some(manifest), Ok(config))
+                if !manifest.title_owned
+                    && !terminal_title_is_disabled(&config).unwrap_or(false) =>
+            {
+                pass(
+                    "terminal.title",
+                    "Codex native terminal-title ownership is restored",
+                )
+            }
+            (Some(_), Ok(_)) => fail(
                 "terminal.title",
-                "Codex terminal-title ownership is disabled",
+                "Codex terminal-title ownership conflicts with the TabBeacon preference",
             ),
-            Ok(_) => fail(
+            (None, _) => fail(
                 "terminal.title",
-                "Codex terminal-title ownership conflicts with TabBeacon",
+                "TabBeacon title ownership is not installed",
             ),
-            Err(_) => fail("terminal.title", "Codex config is incompatible"),
+            (_, Err(_)) => fail("terminal.title", "Codex config is incompatible"),
         });
 
         let overall = checks
@@ -353,7 +411,10 @@ impl CodexIntegration {
         CodexDoctorReport { overall, checks }
     }
 
-    fn setup_locked(&self) -> Result<SetupOutcome, CodexIntegrationError> {
+    fn setup_locked(
+        &self,
+        tabbeacon_owns_title: bool,
+    ) -> Result<SetupOutcome, CodexIntegrationError> {
         fs::create_dir_all(&self.codex_home)?;
         reject_symbolic_link(&self.hooks_path())?;
         reject_symbolic_link(&self.config_path())?;
@@ -361,21 +422,20 @@ impl CodexIntegration {
         if let Some(mut manifest) = self.load_manifest()? {
             self.validate_manifest_target(&manifest)?;
             let mut hooks = read_hooks_document(&self.hooks_path())?;
-            let config = read_config_document(&self.config_path())?;
+            let mut config = read_config_document(&self.config_path())?;
             locate_owned_hooks(&hooks, &manifest.hooks)
                 .map_err(|_| CodexIntegrationError::ModifiedOwnedHook)?;
-            if !terminal_title_is_disabled(&config)? {
-                return Err(if manifest.title_owned {
-                    CodexIntegrationError::ModifiedOwnedTitle
-                } else {
-                    CodexIntegrationError::TerminalTitleConflict
-                });
-            }
+            Self::validate_title_ownership(&manifest, &config)?;
+            let mut changed =
+                self.apply_title_ownership(&mut manifest, &mut config, tabbeacon_owns_title)?;
             if manifest.hooks != desired_hooks {
                 remove_owned_hooks(&mut hooks, &manifest.hooks)?;
                 append_owned_hooks(&mut hooks, &desired_hooks)?;
                 atomic_write(&self.hooks_path(), &serialize_hooks(&hooks)?)?;
                 manifest.hooks = desired_hooks;
+                changed = true;
+            }
+            if changed {
                 self.write_manifest(&manifest)?;
                 return Ok(SetupOutcome::Upgraded);
             }
@@ -391,7 +451,7 @@ impl CodexIntegration {
         }
         append_owned_hooks(&mut hooks, &desired_hooks)?;
         let prior_title = terminal_title_item(&config)?.map(ToString::to_string);
-        let title_owned = !terminal_title_is_disabled(&config)?;
+        let title_owned = tabbeacon_owns_title && !terminal_title_is_disabled(&config)?;
         if title_owned {
             disable_terminal_title(&mut config)?;
         }
@@ -420,6 +480,66 @@ impl CodexIntegration {
         manifest.phase = ManifestPhase::Active;
         self.write_manifest(&manifest)?;
         Ok(SetupOutcome::InstalledTrustReviewRequired)
+    }
+
+    fn reconcile_title_ownership_locked(
+        &self,
+        tabbeacon_owns_title: bool,
+    ) -> Result<TitleOwnershipOutcome, CodexIntegrationError> {
+        let Some(mut manifest) = self.load_manifest()? else {
+            return Ok(TitleOwnershipOutcome::NotInstalled);
+        };
+        self.validate_manifest_target(&manifest)?;
+        let hooks = read_hooks_document(&self.hooks_path())?;
+        locate_owned_hooks(&hooks, &manifest.hooks)
+            .map_err(|_| CodexIntegrationError::ModifiedOwnedHook)?;
+        let mut config = read_config_document(&self.config_path())?;
+        Self::validate_title_ownership(&manifest, &config)?;
+        if !self.apply_title_ownership(&mut manifest, &mut config, tabbeacon_owns_title)? {
+            return Ok(TitleOwnershipOutcome::AlreadyConfigured);
+        }
+        self.write_manifest(&manifest)?;
+        Ok(TitleOwnershipOutcome::Updated)
+    }
+
+    fn validate_title_ownership(
+        manifest: &IntegrationManifest,
+        config: &DocumentMut,
+    ) -> Result<(), CodexIntegrationError> {
+        let disabled = terminal_title_is_disabled(config)?;
+        if manifest.title_owned && !disabled {
+            return Err(CodexIntegrationError::ModifiedOwnedTitle);
+        }
+        if !manifest.title_owned && disabled {
+            return Err(CodexIntegrationError::TerminalTitleConflict);
+        }
+        Ok(())
+    }
+
+    fn apply_title_ownership(
+        &self,
+        manifest: &mut IntegrationManifest,
+        config: &mut DocumentMut,
+        tabbeacon_owns_title: bool,
+    ) -> Result<bool, CodexIntegrationError> {
+        if manifest.title_owned == tabbeacon_owns_title {
+            return Ok(false);
+        }
+        if tabbeacon_owns_title {
+            disable_terminal_title(config)?;
+            atomic_write(&self.config_path(), config.to_string().as_bytes())?;
+            manifest.title_owned = true;
+            return Ok(true);
+        }
+        restore_terminal_title(config, manifest.prior_title.as_deref())?;
+        let restored = config.to_string();
+        if !manifest.config_backup.existed && restored.trim().is_empty() {
+            fs::remove_file(self.config_path())?;
+        } else {
+            atomic_write(&self.config_path(), restored.as_bytes())?;
+        }
+        manifest.title_owned = false;
+        Ok(true)
     }
 
     fn uninstall_locked(&self) -> Result<UninstallOutcome, CodexIntegrationError> {
@@ -876,7 +996,11 @@ fn restore_terminal_title(
     prior: Option<&str>,
 ) -> Result<(), CodexIntegrationError> {
     if let Some(prior) = prior {
-        let restored = format!("terminal_title = {prior}")
+        // `toml_edit::Item::to_string` retains the item-leading whitespace.
+        // Keeping that spacing rather than adding another separator restores
+        // the user's original title declaration byte-for-byte in the ordinary
+        // supported shape.
+        let restored = format!("terminal_title ={prior}")
             .parse::<DocumentMut>()
             .map_err(|_| CodexIntegrationError::OwnershipManifest)?;
         let item = restored

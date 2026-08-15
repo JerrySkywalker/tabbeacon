@@ -22,7 +22,7 @@ pub use image::{Rgb, RgbaFrame, Roi, ScreenRect};
 pub use oracle::{
     AnimationOutcome, AnimationThreshold, ColorClassification, ColorMetrics, ColorSemantic,
     ColorTolerance, FrameDeltaMetrics, RgbMilli, RgbVariance, assess_animation, classify_color,
-    color_metrics, frame_delta, matches_baseline, select_background_roi,
+    classify_color_for_theme, color_metrics, frame_delta, matches_baseline, select_background_roi,
 };
 pub use preflight::{
     Availability, DesktopPreflight, PreflightBlocker, PreflightProbe, SessionKind,
