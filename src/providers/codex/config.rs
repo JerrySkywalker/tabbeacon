@@ -850,6 +850,7 @@ fn hook_trust_check(
     };
     let mut untrusted = 0_usize;
     let mut modified = 0_usize;
+    let mut disabled = 0_usize;
     for declaration in owned {
         let Some(group_index) = locations.get(&declaration.event).copied() else {
             return fail("hooks.trust", "owned hook positions cannot be resolved");
@@ -860,16 +861,22 @@ fn hook_trust_check(
             event_key_label(&declaration.event)
         );
         let expected = normalized_hook_hash(declaration);
+        if !hook_is_enabled(config, &key) {
+            disabled += 1;
+            continue;
+        }
         match trusted_hash(config, &key) {
             Some(actual) if actual == expected => {}
             Some(_) => modified += 1,
             None => untrusted += 1,
         }
     }
-    if modified > 0 {
+    if modified > 0 || disabled > 0 {
         fail(
             "hooks.trust",
-            format!("{modified} owned hook definitions are modified/inactive"),
+            format!(
+                "{modified} owned hook definitions are modified/inactive; {disabled} owned hooks are disabled"
+            ),
         )
     } else if untrusted > 0 {
         warning(
@@ -879,6 +886,19 @@ fn hook_trust_check(
     } else {
         pass("hooks.trust", "all owned hooks are trusted and active")
     }
+}
+
+fn hook_is_enabled(config: &DocumentMut, key: &str) -> bool {
+    config
+        .as_table()
+        .get("hooks")
+        .and_then(Item::as_table_like)
+        .and_then(|hooks| hooks.get("state"))
+        .and_then(Item::as_table_like)
+        .and_then(|state| state.get(key))
+        .and_then(Item::as_table_like)
+        .and_then(|entry| entry.get("enabled"))
+        .is_none_or(|enabled| enabled.as_bool().unwrap_or(false))
 }
 
 fn trusted_hash<'a>(config: &'a DocumentMut, key: &str) -> Option<&'a str> {

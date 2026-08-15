@@ -691,6 +691,20 @@ fn doctor_supports_current_codex_trust_shape_and_detects_inactive_or_conflicting
         .expect("trusted config reads")
         .parse::<DocumentMut>()
         .expect("trusted config parses");
+    config["hooks"]["state"][&trusted_keys[0]]["enabled"] = value(false);
+    fs::write(&config_path, config.to_string()).expect("disabled hook state writes");
+    let report = integration.doctor();
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.trust"
+            && check.status() == DoctorStatus::Fail
+            && check.summary().contains("disabled")
+    }));
+
+    install_current_codex_trust_state(&codex_home);
+    let mut config = fs::read_to_string(&config_path)
+        .expect("trusted config reads")
+        .parse::<DocumentMut>()
+        .expect("trusted config parses");
     config["hooks"]["state"][&trusted_keys[0]]["trusted_hash"] = value("sha256:modified");
     fs::write(&config_path, config.to_string()).expect("modified trust state writes");
     let report = integration.doctor();
