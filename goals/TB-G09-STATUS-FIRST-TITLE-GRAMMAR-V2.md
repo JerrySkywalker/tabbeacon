@@ -2,7 +2,10 @@
 
 ## Status
 
-Candidate implementation; acceptance evidence pending.
+COMPLETE. The implementation acceptance head passed local L0/L1/L2, hosted
+exact-head CI, and trusted interactive exact-head visual CI. This status update
+is included in the final candidate and therefore must receive the same final
+exact-head gates before merge.
 
 ## Admission
 
@@ -57,13 +60,19 @@ Visual CI on tabbeacon-visual-zenbookduo at <sha>
 - no setup, trust, production install, App Server, Claude, or OpenCode change;
 - no visual-runner infrastructure redesign.
 
-## Evidence
+## Acceptance basis before closure-status update
 
 ```text
-EXPECTED_HEAD=pending
-CODE_HEAD=pending
-VISUAL_HEAD=pending
-LOCAL_VALIDATION=pending
-CI=pending
-VISUAL_CI=pending
+EXPECTED_HEAD=5de7c74dd202db658b0e97ef2a8bf28d902450ee
+CODE_HEAD=5de7c74dd202db658b0e97ef2a8bf28d902450ee
+VISUAL_HEAD=5de7c74dd202db658b0e97ef2a8bf28d902450ee
+LOCAL_VALIDATION=PASS
+CI=PASS
+CI_RUN=31900883087
+VISUAL_CI=PASS
+VISUAL_RUN=31900899528
+VISUAL_EVIDENCE_TREE_SHA256=35421c869964267d29f32a261b1ae1b377e390323f14be7dbc7daf8bbc17f1fd
 ```
+
+The final PR-head receipt is maintained by the governed train because a Git
+commit cannot embed its own SHA without changing that SHA.
