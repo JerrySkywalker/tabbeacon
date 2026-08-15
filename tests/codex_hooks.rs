@@ -1052,6 +1052,117 @@ fn repeated_setup_ten_times_keeps_exactly_seven_owned_hook_definitions() {
 }
 
 #[test]
+fn relocated_executable_migrates_exact_owned_hooks_without_duplicates() {
+    let root = TestRoot::new("relocated-executable");
+    let original = test_integration(&root);
+    assert_eq!(
+        original.setup().expect("initial setup succeeds"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+
+    let relocated_executable = root.child(if cfg!(windows) {
+        "relocated/tabbeacon.exe"
+    } else {
+        "relocated/tabbeacon"
+    });
+    fs::create_dir_all(relocated_executable.parent().expect("relocated parent"))
+        .expect("relocated parent is created");
+    fs::write(&relocated_executable, b"relocated test executable")
+        .expect("relocated executable is written");
+    let relocated = CodexIntegration::new(
+        root.child("codex-home"),
+        root.child("state"),
+        &relocated_executable,
+    )
+    .with_codex_program(root.child(if cfg!(windows) {
+        "codex-version-probe.exe"
+    } else {
+        "codex-version-probe"
+    }));
+
+    let before_migration = relocated.doctor();
+    assert!(before_migration.checks().iter().any(|check| {
+        check.id() == "hooks.currentness" && check.status() == DoctorStatus::Fail
+    }));
+    assert_eq!(
+        relocated.setup().expect("exact owned relocation succeeds"),
+        SetupOutcome::Upgraded
+    );
+
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(root.child("state/integration-v1.json")).expect("migrated manifest reads"),
+    )
+    .expect("migrated manifest parses");
+    assert_eq!(
+        manifest["executable"],
+        json!(relocated_executable.to_string_lossy().to_string())
+    );
+    let hooks: Value = serde_json::from_slice(
+        &fs::read(root.child("codex-home/hooks.json")).expect("migrated hooks read"),
+    )
+    .expect("migrated hooks parse");
+    assert_eq!(shell_independent_owned_handler_count(&hooks), 7);
+    let after_migration = relocated.doctor();
+    assert!(after_migration.checks().iter().any(|check| {
+        check.id() == "hooks.currentness" && check.status() == DoctorStatus::Pass
+    }));
+    assert_eq!(
+        relocated
+            .uninstall()
+            .expect("migrated integration uninstalls"),
+        UninstallOutcome::Removed
+    );
+}
+
+#[test]
+fn relocated_executable_refuses_an_unsafe_recorded_manifest_target() {
+    let root = TestRoot::new("unsafe-relocation");
+    let original = test_integration(&root);
+    original.setup().expect("initial setup succeeds");
+    let manifest_path = root.child("state/integration-v1.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest reads before mutation"))
+            .expect("manifest parses before mutation");
+    manifest["executable"] = json!("relative-tabbeacon.exe");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("unsafe manifest serializes"),
+    )
+    .expect("unsafe manifest writes");
+    let hooks_path = root.child("codex-home/hooks.json");
+    let hooks_before = fs::read(&hooks_path).expect("hooks read before unsafe relocation");
+
+    let relocated_executable = root.child(if cfg!(windows) {
+        "relocated/tabbeacon.exe"
+    } else {
+        "relocated/tabbeacon"
+    });
+    fs::create_dir_all(relocated_executable.parent().expect("relocated parent"))
+        .expect("relocated parent is created");
+    fs::write(&relocated_executable, b"relocated test executable")
+        .expect("relocated executable is written");
+    let relocated = CodexIntegration::new(
+        root.child("codex-home"),
+        root.child("state"),
+        &relocated_executable,
+    )
+    .with_codex_program(root.child(if cfg!(windows) {
+        "codex-version-probe.exe"
+    } else {
+        "codex-version-probe"
+    }));
+
+    assert!(matches!(
+        relocated.setup(),
+        Err(CodexIntegrationError::OwnershipManifest)
+    ));
+    assert_eq!(
+        fs::read(&hooks_path).expect("hooks read after unsafe relocation"),
+        hooks_before
+    );
+}
+
+#[test]
 fn setup_upgrades_exact_owned_declarations_without_duplicates_or_baseline_loss() {
     let root = TestRoot::new("owned-upgrade");
     let codex_home = root.child("codex-home");
