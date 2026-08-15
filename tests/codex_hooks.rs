@@ -161,15 +161,37 @@ fn compile_codex_probe(root: &TestRoot) -> PathBuf {
 
 #[cfg(windows)]
 fn run_codex_windows_hook(command_line: &str) -> std::process::Output {
+    run_codex_windows_hook_with_input(command_line, &[], false)
+}
+
+#[cfg(windows)]
+fn run_codex_windows_hook_with_input(
+    command_line: &str,
+    input: &[u8],
+    isolate_runtime_state: bool,
+) -> std::process::Output {
     // Mirror Codex 0.147.0 command_runner::build_command: /C followed by one
     // raw, outer-quoted command line. Normal argument quoting is not equivalent.
     let shell = env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
     let mut command = Command::new(shell);
     command.arg("/C");
     command.raw_arg(format!(r#""{command_line}""#));
-    command
-        .output()
-        .expect("Codex-compatible hook shell starts")
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    if isolate_runtime_state {
+        command.env_remove("LOCALAPPDATA");
+    }
+    let mut child = command.spawn().expect("Codex-compatible hook shell starts");
+    child
+        .stdin
+        .take()
+        .expect("Codex-compatible hook shell exposes stdin")
+        .write_all(input)
+        .expect("Codex-compatible hook shell accepts stdin");
+    child
+        .wait_with_output()
+        .expect("Codex-compatible hook shell completes")
 }
 
 fn codex_event_key(event: &str) -> &'static str {
@@ -862,6 +884,73 @@ fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
             "missing managed binary must fail open"
         );
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn generated_windows_command_runs_the_real_binary_in_the_codex_0_147_shell_model() {
+    let root = TestRoot::new("real-command-windows");
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon"));
+    assert!(executable.is_file(), "real TabBeacon binary is available");
+    let integration = CodexIntegration::new(
+        root.child("codex-home"),
+        root.child("integration-state"),
+        &executable,
+    )
+    .with_codex_program(compile_codex_probe(&root));
+    assert_eq!(
+        integration.setup().expect("setup succeeds"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+
+    let hooks: Value =
+        serde_json::from_slice(&fs::read(root.child("codex-home/hooks.json")).expect("hooks read"))
+            .expect("hooks parse");
+    let handler = &hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0];
+    let command = handler["command"]
+        .as_str()
+        .expect("generated command is a string");
+    let command_windows = handler["commandWindows"]
+        .as_str()
+        .expect("generated Windows command is a string");
+    assert_eq!(command, command_windows);
+    assert!(command.contains(executable.to_str().expect("binary path is UTF-8")));
+
+    let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "real-shell", &root.path))
+        .expect("Codex-shaped payload serializes");
+    let mut direct_child = Command::new(&executable)
+        .args(["hook", "codex"])
+        .env_remove("LOCALAPPDATA")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("real TabBeacon starts");
+    direct_child
+        .stdin
+        .take()
+        .expect("real TabBeacon exposes stdin")
+        .write_all(&payload)
+        .expect("real TabBeacon accepts stdin");
+    let direct = direct_child
+        .wait_with_output()
+        .expect("real TabBeacon completes");
+    assert!(
+        direct.status.success(),
+        "real direct hook failed: {}",
+        String::from_utf8_lossy(&direct.stderr)
+    );
+    assert!(direct.stdout.is_empty());
+    assert!(direct.stderr.is_empty());
+
+    let shell = run_codex_windows_hook_with_input(command, &payload, true);
+    assert!(
+        shell.status.success(),
+        "Codex-compatible real hook shell failed: {}",
+        String::from_utf8_lossy(&shell.stderr)
+    );
+    assert!(shell.stdout.is_empty());
+    assert!(shell.stderr.is_empty());
 }
 
 #[cfg(windows)]

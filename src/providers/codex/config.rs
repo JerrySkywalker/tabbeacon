@@ -612,7 +612,7 @@ fn desired_hooks(executable: &Path) -> Result<Vec<OwnedHook>, CodexIntegrationEr
             group: json!({
                 "hooks": [{
                     "type": "command",
-                    "command": "tabbeacon hook codex",
+                    "command": windows_command.clone(),
                     "commandWindows": windows_command,
                     "timeout": 1,
                     "async": false
