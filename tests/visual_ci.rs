@@ -343,6 +343,7 @@ fn evidence_writer_refuses_overwrite_and_writes_only_owned_bundle_files() {
             window_bounds: None,
             tab_bounds: None,
             native_window_handle: None,
+            native_window_id: Some(42),
             window_has_keyboard_focus: None,
             activation: Some(WindowActivation {
                 set_foreground: true,
@@ -392,6 +393,7 @@ fn evidence_writer_refuses_overwrite_and_writes_only_owned_bundle_files() {
     let uia = std::fs::read_to_string(writer.directory().join("uia.json"))
         .expect("owned UIA evidence reads");
     assert!(uia.contains("set_foreground"));
+    assert!(!uia.contains("native_window_id"));
     assert!(matches!(
         EvidenceWriter::create(&root, "TB03TEST-0002"),
         Err(VisualError::EvidenceDirectoryExists(_))
@@ -417,7 +419,7 @@ fn fixture_driver_uses_a_unique_title_without_changing_g02_semantics() {
     for case in &cases {
         let expected_slot = match case.case.fixture_name.as_str() {
             "ready" | "reset" => "○",
-            "working" => "•",
+            "working" => "⠋",
             "result-ready" => "✓",
             "approval" | "warning-working" | "warning-idle" => "!",
             "question" => "?",
@@ -440,10 +442,20 @@ fn fixture_driver_uses_a_unique_title_without_changing_g02_semantics() {
         .iter()
         .find(|case| case.case.fixture_name == "working")
         .expect("working fixture exists");
-    assert!(working.case.expected_title.starts_with("• "));
+    assert!(working.case.expected_title.starts_with("⠋ "));
     assert!(working.case.expected_title.ends_with("-working"));
     assert_eq!(working.case.theme, PresentationTheme::MutedDark);
-    assert!(!working.case.expects_animation);
+    assert!(working.case.expects_animation);
+    assert!(working.case.expects_title_animation);
+    assert!(working.case.expected_title_frames.len() >= 2);
+    assert!(working.title_frame_bytes.len() >= 2);
+    let aliases = working
+        .case
+        .expected_title_frames
+        .iter()
+        .map(|title| title.split_once(' ').expect("status-first title").1)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(aliases.len(), 1, "title animation keeps the alias stable");
     let reset = driver
         .reset("TB03TEST-unique")
         .expect("reset fixture exists");

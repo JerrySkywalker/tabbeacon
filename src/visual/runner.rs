@@ -15,9 +15,9 @@ use super::{
     ColorClassification, ColorMetrics, ColorSemantic, ColorTolerance, DesktopPreflight,
     EvidenceBundle, EvidenceManifest, EvidenceWriter, FixtureDriver, MachineEnvironment,
     OwnedWindowCaptureTarget, PreflightProbe, PrintWindowCaptureBackend, RgbaFrame, Roi,
-    ScreenRect, SessionKind, TargetLocator, TerminalTestSessionLauncher, UiaDump,
-    VisualDisposition, VisualError, VisualResult, WindowsUiaLocator, assess_animation,
-    classify_color_for_theme, matches_baseline, select_background_roi,
+    ScreenRect, SessionKind, TerminalTestSessionLauncher, UiaDump, VisualDisposition, VisualError,
+    VisualResult, WindowsUiaLocator, assess_animation, classify_color_for_theme, matches_baseline,
+    select_background_roi,
 };
 
 /// Inputs for one live visual-harness invocation.
@@ -162,16 +162,15 @@ fn observe_replay(
         return Ok(());
     }
     let locator = WindowsUiaLocator;
-    let initial_target =
-        match locate_capturable_with_retry(locator, run_id, &replay.case.expected_title) {
-            Ok(target) => target,
-            Err(error) => {
-                observation.record_uia_failure(&replay.case.fixture_name, error.to_string());
-                return Ok(());
-            }
-        };
-    let activation = match activate_with_retry(locator, run_id, &replay.case.expected_title) {
-        Ok(activation) => activation,
+    let initial_target = match locate_capturable_with_retry(locator, run_id, replay) {
+        Ok(target) => target,
+        Err(error) => {
+            observation.record_uia_failure(&replay.case.fixture_name, error.to_string());
+            return Ok(());
+        }
+    };
+    let target = match locate_activated_capturable_with_retry(locator, run_id, replay) {
+        Ok(target) => target,
         Err(error) => {
             observation.record_target(writer, replay, &initial_target)?;
             observation.record_capture_blocked(
@@ -181,26 +180,10 @@ fn observe_replay(
             return Ok(());
         }
     };
-    let mut target = match locate_capturable_with_retry(
-        locator,
-        run_id,
-        &replay.case.expected_title,
-    ) {
-        Ok(target) => target,
-        Err(error) => {
-            observation.record_target(writer, replay, &initial_target)?;
-            observation.record_capture_blocked(
-                &replay.case.fixture_name,
-                format!(
-                    "owned-window activation did not yield capturable UIA geometry after foreground={} focus={}: {error}",
-                    activation.set_foreground, activation.set_focus
-                ),
-            );
-            return Ok(());
-        }
-    };
-    target.activation = Some(activation);
     observation.record_target(writer, replay, &target)?;
+    if replay.case.expects_title_animation {
+        observe_title_animation(writer, locator, run_id, replay, observation)?;
+    }
     let Some((window_bounds, tab_bounds)) = capture_bounds(&target) else {
         observation.record_capture_blocked(
             &replay.case.fixture_name,
@@ -219,7 +202,13 @@ fn observe_replay(
         );
         return Ok(());
     }
-    let capture_target = match OwnedWindowCaptureTarget::new(&target.window_name, window_bounds) {
+    let capture_target_result = match target.native_window_id {
+        Some(window_handle) => OwnedWindowCaptureTarget::new(window_handle, window_bounds),
+        None => Err(VisualError::Platform(
+            "owned UIA target did not expose a native HWND".to_owned(),
+        )),
+    };
+    let capture_target = match capture_target_result {
         Ok(target) => target,
         Err(error) => {
             observation.record_capture_blocked(&replay.case.fixture_name, error.to_string());
@@ -229,26 +218,71 @@ fn observe_replay(
     observe_capture(writer, replay, &capture_target, tab_bounds, observation)
 }
 
-fn activate_with_retry(
+fn locate_activated_capturable_with_retry(
     locator: WindowsUiaLocator,
     run_id: &str,
-    expected_title: &str,
-) -> VisualResult<super::WindowActivation> {
-    let mut last_activation = None;
+    replay: &super::FixtureReplay,
+) -> VisualResult<UiaDump> {
+    let mut last_target = None;
     let mut last_error = None;
-    for _ in 0..5 {
-        match locator.activate_owned_window(run_id, expected_title) {
-            Ok(activation) if activation.set_foreground => return Ok(activation),
-            Ok(activation) => last_activation = Some(activation),
+    for _ in 0..20 {
+        match locator.locate_and_activate_any(run_id, &replay.case.expected_title_frames) {
+            Ok(target)
+                if target
+                    .activation
+                    .as_ref()
+                    .is_some_and(|value| value.set_foreground)
+                    && target_has_capturable_geometry(&target) =>
+            {
+                return Ok(target);
+            }
+            Ok(target) => last_target = Some(target),
             Err(error) => last_error = Some(error),
         }
         thread::sleep(Duration::from_millis(200));
     }
-    last_activation.ok_or_else(|| {
-        last_error.unwrap_or_else(|| {
-            VisualError::Platform("owned-window activation produced no observation".to_owned())
-        })
-    })
+    Err(last_error.unwrap_or_else(|| {
+        let detail = last_target.map_or_else(
+            || "no activated UIA target was observed".to_owned(),
+            |target| {
+                format!(
+                    "last target had activation={:?}; window={:?}; tab={:?}",
+                    target.activation, target.window_bounds, target.tab_bounds
+                )
+            },
+        );
+        VisualError::Platform(format!(
+            "owned-window activation produced no capturable observation: {detail}"
+        ))
+    }))
+}
+
+fn observe_title_animation(
+    writer: &EvidenceWriter,
+    locator: WindowsUiaLocator,
+    run_id: &str,
+    replay: &super::FixtureReplay,
+    observation: &mut Observation,
+) -> VisualResult<()> {
+    let mut observed = std::collections::BTreeSet::new();
+    for _ in 0..12 {
+        if let Ok(target) = locator.locate_any(run_id, &replay.case.expected_title_frames)
+            && replay.case.expected_title_frames.contains(&target.tab_name)
+        {
+            observed.insert(target.tab_name);
+        }
+        if observed.len() >= 2 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(120));
+    }
+    let observed = observed.into_iter().collect::<Vec<_>>();
+    writer.write_json_document(
+        &format!("title-frames-{}.json", replay.case.fixture_name),
+        &observed,
+    )?;
+    observation.record_title_animation(&replay.case.fixture_name, &observed);
+    Ok(())
 }
 
 fn observe_capture(
@@ -454,7 +488,7 @@ impl Observation {
             Some(replay.case.fixture_name.clone()),
             "owned Windows Terminal window and exact tab resolved through UIA".to_owned(),
         ));
-        let disposition = if target.tab_name == replay.case.expected_title {
+        let disposition = if replay.case.expected_title_frames.contains(&target.tab_name) {
             VisualDisposition::Pass
         } else {
             VisualDisposition::Fail
@@ -466,11 +500,30 @@ impl Observation {
             disposition,
             Some(replay.case.fixture_name.clone()),
             format!(
-                "expected_title={}; uia_title={}",
-                replay.case.expected_title, target.tab_name
+                "expected_titles={:?}; uia_title={}",
+                replay.case.expected_title_frames, target.tab_name
             ),
         ));
         Ok(())
+    }
+
+    fn record_title_animation(&mut self, fixture: &str, observed: &[String]) {
+        let disposition = if observed.len() >= 2 {
+            VisualDisposition::Pass
+        } else {
+            VisualDisposition::Fail
+        };
+        self.saw_non_pass |= !matches!(disposition, VisualDisposition::Pass);
+        self.lanes.observe_animation(disposition);
+        self.assertions.push(AssertionResult::new(
+            AssertionKind::Animation,
+            disposition,
+            Some(fixture.to_owned()),
+            format!(
+                "distinct_title_frames={}; observed={observed:?}",
+                observed.len()
+            ),
+        ));
     }
 
     fn record_capture_blocked(&mut self, fixture: &str, detail: impl Into<String>) {
@@ -606,13 +659,13 @@ fn selected_replays(
 fn locate_capturable_with_retry(
     locator: WindowsUiaLocator,
     run_id: &str,
-    expected_title: &str,
+    replay: &super::FixtureReplay,
 ) -> VisualResult<UiaDump> {
     const CAPTURABLE_GEOMETRY_ATTEMPTS: usize = 20;
     let mut last_target = None;
     let mut last_error = None;
     for _ in 0..CAPTURABLE_GEOMETRY_ATTEMPTS {
-        match locator.locate(run_id, expected_title) {
+        match locator.locate_any(run_id, &replay.case.expected_title_frames) {
             Ok(target) if target_has_capturable_geometry(&target) => return Ok(target),
             Ok(target) => last_target = Some(target),
             Err(error) => last_error = Some(error),
@@ -766,6 +819,7 @@ fn empty_uia_dump() -> UiaDump {
         window_bounds: None,
         tab_bounds: None,
         native_window_handle: None,
+        native_window_id: None,
         window_has_keyboard_focus: None,
         activation: None,
         detail: "no owned UIA target was resolved".to_owned(),

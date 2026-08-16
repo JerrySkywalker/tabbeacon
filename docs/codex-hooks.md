@@ -97,12 +97,19 @@ TabBeacon activity decoration; `activity=off` additionally clears any owned
 progress state. `wt-ring` uses Windows Terminal OSC `9;4`; its foreground is
 terminal-controlled and cannot be RGB-configured by TabBeacon.
 
-`title-spinner` is accepted as a preference, but v0.1 intentionally uses one
-deterministic static frame from the chosen preset rather than spawning a
-long-lived animation worker from a one-shot Codex hook. The built-in `codex`
-preset is the reduced bullet pair `•`/`◦`, inspired by Codex's textual activity
-language without claiming to reproduce its shimmer. Other fixed frame sets are
-braille, quadrant, line, and pulse. No arbitrary frame strings are accepted.
+`title-spinner` starts a direct ephemeral worker while reliable Hook evidence
+proves active work. `both` combines the same title animation with Windows
+Terminal's progress ring; `title-indicator` remains static. The worker is bound
+to the originating terminal and turn generation, self-expires, and stops on
+result, attention, or session-end evidence. Worker failure loses decoration
+only and never blocks Codex. The built-in `codex` preset is the reduced bullet
+pair `•`/`◦`; other fixed frame sets are braille, quadrant, line, and pulse. No
+arbitrary frame strings are accepted.
+
+Worker leases contain only hashed session/turn/terminal and executable-owner
+identity, generation/order metadata, a safe workspace alias, semantic active
+state, and the selected built-in spinner. Prompt, assistant, tool, credential,
+and raw Hook payload content is neither passed to nor persisted by the worker.
 
 When `title=tabbeacon`, the default title grammar is status-first:
 

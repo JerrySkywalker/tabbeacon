@@ -365,7 +365,7 @@ fn muted_dark_is_resolved_after_semantic_color_and_static_title_activity_is_legi
 }
 
 #[test]
-fn title_spinner_request_uses_one_safe_deterministic_fallback_frame() {
+fn title_spinner_frame_zero_is_a_safe_deterministic_fail_open_fallback() {
     let settings = PresentationSettings::default()
         .with_activity(ActivityMode::TitleSpinner)
         .with_spinner(SpinnerPreset::Braille);
@@ -406,7 +406,7 @@ fn native_and_off_channels_clear_owned_terminal_state_without_emitting_title() {
 }
 
 #[test]
-fn both_mode_keeps_static_title_activity_and_the_native_progress_ring() {
+fn both_mode_combines_title_frame_zero_with_the_native_progress_ring() {
     let settings = PresentationSettings::default().with_activity(ActivityMode::Both);
     let terminal_renderer =
         WindowsTerminalRenderer::with_settings(WindowsTerminalCapabilities::new(false), settings);
@@ -488,6 +488,35 @@ fn every_spinner_frame_changes_only_the_left_status_slot() {
             );
         }
     }
+}
+
+#[test]
+fn worker_title_frames_and_hook_owned_channels_are_encoded_independently() {
+    let settings = PresentationSettings::default()
+        .with_activity(ActivityMode::Both)
+        .with_spinner(SpinnerPreset::Braille);
+    let renderer =
+        WindowsTerminalRenderer::with_settings(WindowsTerminalCapabilities::new(true), settings);
+    let working = resolve(Phase::Working, Attention::None, Health::Normal);
+    let state = match &working {
+        PresentationAction::Apply(state) => state,
+        PresentationAction::Reset(_) => panic!("working unexpectedly reset"),
+    };
+
+    let first = String::from_utf8(renderer.render_title_spinner_frame(state, 0))
+        .expect("worker title frame is UTF-8");
+    let second = String::from_utf8(renderer.render_title_spinner_frame(state, 1))
+        .expect("worker title frame is UTF-8");
+    assert_eq!(first, "\x1b]0;⠋ JPC semantic fixture\x1b\\");
+    assert_eq!(second, "\x1b]0;⠙ JPC semantic fixture\x1b\\");
+    assert!(!first.contains("]9;4;"));
+    assert!(!first.contains("]4;264;"));
+
+    let hook_channels =
+        String::from_utf8(renderer.render_without_title(&working)).expect("Hook bytes are UTF-8");
+    assert!(!hook_channels.contains("]0;"));
+    assert!(hook_channels.contains("]9;4;3;0"));
+    assert!(hook_channels.contains("]4;264;rgb:1b/4e/3a"));
 }
 
 #[test]

@@ -106,13 +106,13 @@ impl fmt::Display for TabColorMode {
 /// Activity channels `TabBeacon` may own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActivityMode {
-    /// A configured spinner request; v0.1 safely falls back to one static frame.
+    /// Animate the title status slot while active work is proven.
     TitleSpinner,
     /// A static title activity marker while working.
     TitleIndicator,
     /// Windows Terminal's native progress ring only.
     WindowsTerminalRing,
-    /// Static title activity plus the Windows Terminal progress ring.
+    /// Animated title activity plus the Windows Terminal progress ring.
     Both,
     /// `TabBeacon` emits no activity decoration.
     Native,
@@ -152,6 +152,12 @@ impl ActivityMode {
     #[must_use]
     pub const fn uses_title_activity(self) -> bool {
         matches!(self, Self::TitleSpinner | Self::TitleIndicator | Self::Both)
+    }
+
+    /// Whether active work should be owned by the ephemeral title worker.
+    #[must_use]
+    pub const fn uses_worker_animation(self) -> bool {
+        matches!(self, Self::TitleSpinner | Self::Both)
     }
 
     /// Whether Windows Terminal progress belongs on active work.

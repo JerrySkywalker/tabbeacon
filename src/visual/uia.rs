@@ -5,6 +5,7 @@ use uiautomation::{
     controls::WindowControl,
     types::{ControlType, Rect},
 };
+use windows::Win32::Foundation::HWND;
 
 use super::{ScreenRect, UiaDump, VisualError, VisualResult, WindowActivation};
 
@@ -66,27 +67,92 @@ impl WindowsUiaLocator {
             set_focus: true,
         })
     }
+
+    /// Activates a worker-animated target at whichever admitted frame is live.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no admitted frame identifies the owned target or
+    /// Windows refuses foreground/focus activation.
+    pub fn activate_owned_window_any(
+        &self,
+        run_id: &str,
+        expected_titles: &[String],
+    ) -> VisualResult<WindowActivation> {
+        let (window, _) = owned_window_and_tab_any(run_id, expected_titles)?;
+        let control = WindowControl::try_from(window.clone()).map_err(platform_error)?;
+        let set_foreground = control.set_foregrand().map_err(platform_error)?;
+        window.set_focus().map_err(platform_error)?;
+        Ok(WindowActivation {
+            set_foreground,
+            set_focus: true,
+        })
+    }
+
+    /// Locates a worker-animated target at whichever admitted frame is live.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no admitted frame resolves to one owned Windows
+    /// Terminal window and tab, or UIA properties cannot be read.
+    pub fn locate_any(&self, run_id: &str, expected_titles: &[String]) -> VisualResult<UiaDump> {
+        let (window, tab) = owned_window_and_tab_any(run_id, expected_titles)?;
+        uia_dump(&window, &tab, None)
+    }
+
+    /// Locates and activates a worker-animated target without resolving its
+    /// changing title a second time.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no admitted frame identifies the owned target,
+    /// UIA properties cannot be read, or Windows rejects activation.
+    pub fn locate_and_activate_any(
+        &self,
+        run_id: &str,
+        expected_titles: &[String],
+    ) -> VisualResult<UiaDump> {
+        let (window, tab) = owned_window_and_tab_any(run_id, expected_titles)?;
+        let control = WindowControl::try_from(window.clone()).map_err(platform_error)?;
+        let set_foreground = control.set_foregrand().map_err(platform_error)?;
+        window.set_focus().map_err(platform_error)?;
+        let activation = WindowActivation {
+            set_foreground,
+            set_focus: true,
+        };
+        uia_dump(&window, &tab, Some(activation))
+    }
 }
 
 impl TargetLocator for WindowsUiaLocator {
     fn locate(&self, run_id: &str, expected_title: &str) -> VisualResult<UiaDump> {
         let (window, tab) = owned_window_and_tab(run_id, expected_title)?;
-        Ok(UiaDump {
-            window_name: window.get_name().map_err(platform_error)?,
-            tab_name: tab.get_name().map_err(platform_error)?,
-            window_bounds: screen_rect(window.get_bounding_rectangle().map_err(platform_error)?),
-            tab_bounds: screen_rect(tab.get_bounding_rectangle().map_err(platform_error)?),
-            native_window_handle: window
-                .get_native_window_handle()
-                .map(|handle| handle.to_string())
-                .ok(),
-            window_has_keyboard_focus: window.has_keyboard_focus().ok(),
-            activation: None,
-            detail:
-                "resolved only the run-token-matched Windows Terminal window and exact fixture tab"
-                    .to_owned(),
-        })
+        uia_dump(&window, &tab, None)
     }
+}
+
+fn uia_dump(
+    window: &UIElement,
+    tab: &UIElement,
+    activation: Option<WindowActivation>,
+) -> VisualResult<UiaDump> {
+    let native_window_handle = window.get_native_window_handle().ok();
+    let native_window_id = native_window_handle.map(|handle| {
+        let hwnd: HWND = handle.into();
+        hwnd.0 as isize
+    });
+    Ok(UiaDump {
+        window_name: window.get_name().map_err(platform_error)?,
+        tab_name: tab.get_name().map_err(platform_error)?,
+        window_bounds: screen_rect(window.get_bounding_rectangle().map_err(platform_error)?),
+        tab_bounds: screen_rect(tab.get_bounding_rectangle().map_err(platform_error)?),
+        native_window_handle: native_window_handle.map(|handle| handle.to_string()),
+        native_window_id,
+        window_has_keyboard_focus: window.has_keyboard_focus().ok(),
+        activation,
+        detail: "resolved an owned Windows Terminal window and tab at an admitted title frame through UIA"
+            .to_owned(),
+    })
 }
 
 fn owned_window_and_tab(
@@ -121,6 +187,27 @@ fn owned_window_and_tab(
         .find_first()
         .map_err(platform_error)?;
     Ok((window, tab))
+}
+
+fn owned_window_and_tab_any(
+    run_id: &str,
+    expected_titles: &[String],
+) -> VisualResult<(UIElement, UIElement)> {
+    if expected_titles.is_empty() || expected_titles.iter().any(|title| !title.contains(run_id)) {
+        return Err(VisualError::Platform(
+            "animated fixture titles are not correlated to the requested visual run".to_owned(),
+        ));
+    }
+    let mut last_error = None;
+    for expected_title in expected_titles {
+        match owned_window_and_tab(run_id, expected_title) {
+            Ok(target) => return Ok(target),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        VisualError::Platform("no admitted animated title frame was visible".to_owned())
+    }))
 }
 
 fn screen_rect(rectangle: Rect) -> Option<ScreenRect> {

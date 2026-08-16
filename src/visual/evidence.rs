@@ -146,6 +146,13 @@ pub struct UiaDump {
     pub tab_bounds: Option<ScreenRect>,
     /// Native window handle rendered as a diagnostic string, if available.
     pub native_window_handle: Option<String>,
+    /// Process-local HWND admitted by UIA for immediate capture use.
+    ///
+    /// This value is deliberately excluded from durable evidence: HWND values
+    /// are ephemeral, and the diagnostic string above is sufficient for a
+    /// retained receipt.
+    #[serde(skip)]
+    pub native_window_id: Option<isize>,
     /// Whether UIA reported keyboard focus on the top-level owned window when
     /// it was resolved. Windows Terminal can retain focus in a child element,
     /// so this is diagnostic only; capture relies on the recorded successful

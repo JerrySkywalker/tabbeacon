@@ -25,8 +25,42 @@ pub(super) enum RequestedHandling {
 }
 
 /// Result of admitting one event against durable session generation state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum GenerationAdmission {
+    Apply(AdmittedGeneration),
+    Preserve,
+    RejectStale,
+}
+
+/// Content-minimal ordering ticket for one admitted root Hook event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AdmittedGeneration {
+    session_sha256: String,
+    turn_sha256: Option<String>,
+    generation: u64,
+    event_sequence: u64,
+}
+
+impl AdmittedGeneration {
+    pub(super) fn session_sha256(&self) -> &str {
+        &self.session_sha256
+    }
+
+    pub(super) fn turn_sha256(&self) -> Option<&str> {
+        self.turn_sha256.as_deref()
+    }
+
+    pub(super) const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(super) const fn event_sequence(&self) -> u64 {
+        self.event_sequence
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdmissionDecision {
     Apply,
     Preserve,
     RejectStale,
@@ -75,32 +109,32 @@ impl CodexGenerationStore {
         reject_symbolic_link(&path)?;
         let mut state = load_state(&path, &session_digest)?;
         let before = state.clone();
-        let admission = match context.event() {
+        let decision = match context.event() {
             CodexHookEvent::SessionStart => {
                 if requested == RequestedHandling::Preserve {
-                    GenerationAdmission::Preserve
+                    AdmissionDecision::Preserve
                 } else {
                     state.retire_current();
                     state.generation = state.generation.saturating_add(1);
-                    GenerationAdmission::Apply
+                    AdmissionDecision::Apply
                 }
             }
             CodexHookEvent::SessionEnd => {
                 state.retire_current();
                 state.generation = state.generation.saturating_add(1);
-                GenerationAdmission::Apply
+                AdmissionDecision::Apply
             }
             CodexHookEvent::UserPromptSubmit => {
                 let turn = turn_digest(context)?;
                 if state.current_turn.as_deref() == Some(&turn) {
-                    GenerationAdmission::Apply
+                    AdmissionDecision::Apply
                 } else if state.retired_turns.contains(&turn) {
-                    GenerationAdmission::RejectStale
+                    AdmissionDecision::RejectStale
                 } else {
                     state.retire_current();
                     state.generation = state.generation.saturating_add(1);
                     state.current_turn = Some(turn);
-                    GenerationAdmission::Apply
+                    AdmissionDecision::Apply
                 }
             }
             CodexHookEvent::PreToolUse
@@ -112,21 +146,34 @@ impl CodexGenerationStore {
                 let turn = turn_digest(context)?;
                 let matches_current = state.current_turn.as_deref() == Some(&turn);
                 if matches_current {
-                    requested.admission()
+                    requested.decision()
                 } else if state.current_turn.is_none() && !state.retired_turns.contains(&turn) {
                     // A mid-session install or a prior fail-open Hook loss can omit the
                     // prompt observation. Admit exactly one untracked current turn; once
                     // a current generation exists, different turn IDs are always stale.
                     state.generation = state.generation.saturating_add(1);
                     state.current_turn = Some(turn);
-                    requested.admission()
+                    requested.decision()
                 } else {
-                    GenerationAdmission::RejectStale
+                    AdmissionDecision::RejectStale
                 }
             }
             CodexHookEvent::SubagentStart | CodexHookEvent::SubagentStop => {
                 unreachable!("subagent lifecycle is filtered before generation admission")
             }
+        };
+        let admission = match decision {
+            AdmissionDecision::Apply => {
+                state.event_sequence = state.event_sequence.saturating_add(1);
+                GenerationAdmission::Apply(AdmittedGeneration {
+                    session_sha256: session_digest,
+                    turn_sha256: context.turn_id().map(identifier_digest),
+                    generation: state.generation,
+                    event_sequence: state.event_sequence,
+                })
+            }
+            AdmissionDecision::Preserve => GenerationAdmission::Preserve,
+            AdmissionDecision::RejectStale => GenerationAdmission::RejectStale,
         };
         if state != before {
             write_state(&path, &state)?;
@@ -136,10 +183,10 @@ impl CodexGenerationStore {
 }
 
 impl RequestedHandling {
-    const fn admission(self) -> GenerationAdmission {
+    const fn decision(self) -> AdmissionDecision {
         match self {
-            Self::Apply => GenerationAdmission::Apply,
-            Self::Preserve => GenerationAdmission::Preserve,
+            Self::Apply => AdmissionDecision::Apply,
+            Self::Preserve => AdmissionDecision::Preserve,
         }
     }
 }
@@ -149,6 +196,8 @@ struct GenerationState {
     schema: String,
     session_digest: String,
     generation: u64,
+    #[serde(default)]
+    event_sequence: u64,
     current_turn: Option<String>,
     retired_turns: Vec<String>,
 }
@@ -159,6 +208,7 @@ impl GenerationState {
             schema: STATE_SCHEMA.to_owned(),
             session_digest: session_digest.to_owned(),
             generation: 0,
+            event_sequence: 0,
             current_turn: None,
             retired_turns: Vec::new(),
         }
@@ -226,5 +276,92 @@ fn reject_symbolic_link(path: &Path) -> io::Result<()> {
         Ok(_) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf, time::SystemTime};
+
+    use super::{
+        CodexGenerationStore, GenerationAdmission, RequestedHandling, identifier_digest, load_state,
+    };
+    use crate::providers::codex::{CodexHookContext, CodexHookEvent};
+
+    struct TestRoot(PathBuf);
+
+    impl TestRoot {
+        fn new(name: &str) -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("test clock is after epoch")
+                .as_nanos();
+            Self(std::env::temp_dir().join(format!(
+                "tabbeacon-generation-{name}-{}-{nonce}",
+                std::process::id()
+            )))
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn context(event: CodexHookEvent, turn_id: Option<&str>) -> CodexHookContext {
+        CodexHookContext {
+            event,
+            session_id: "session-a".to_owned(),
+            turn_id: turn_id.map(str::to_owned),
+            agent_id: None,
+            agent_type: None,
+            cwd: PathBuf::from("workspace"),
+        }
+    }
+
+    #[test]
+    fn legacy_generation_state_defaults_the_new_event_sequence() {
+        let root = TestRoot::new("legacy");
+        fs::create_dir_all(&root.0).expect("test root creates");
+        let session_digest = identifier_digest("session-a");
+        let path = root.0.join("legacy.json");
+        fs::write(
+            &path,
+            format!(
+                "{{\"schema\":\"tabbeacon-codex-turn-state-v1\",\"session_digest\":\"{session_digest}\",\"generation\":3,\"current_turn\":null,\"retired_turns\":[]}}"
+            ),
+        )
+        .expect("legacy fixture writes");
+        let state = load_state(&path, &session_digest).expect("legacy state migrates in memory");
+        assert_eq!(state.generation, 3);
+        assert_eq!(state.event_sequence, 0);
+    }
+
+    #[test]
+    fn every_applied_event_receives_a_monotonic_content_free_sequence() {
+        let root = TestRoot::new("sequence");
+        let store = CodexGenerationStore::new(&root.0);
+        let prompt = context(CodexHookEvent::UserPromptSubmit, Some("turn-a"));
+        let stop = context(CodexHookEvent::Stop, Some("turn-a"));
+        let GenerationAdmission::Apply(first) = store
+            .admit(&prompt, RequestedHandling::Apply)
+            .expect("prompt admits")
+        else {
+            panic!("prompt must apply");
+        };
+        let GenerationAdmission::Apply(second) = store
+            .admit(&stop, RequestedHandling::Apply)
+            .expect("stop admits")
+        else {
+            panic!("stop must apply");
+        };
+        assert_eq!(first.generation(), second.generation());
+        assert_eq!(first.event_sequence() + 1, second.event_sequence());
+        assert_eq!(first.session_sha256(), identifier_digest("session-a"));
+        assert_eq!(
+            first.turn_sha256(),
+            Some(identifier_digest("turn-a").as_str())
+        );
     }
 }

@@ -514,6 +514,7 @@ dependencies = [
  "toml_edit",
  "uiautomation",
  "win-screenshot",
+ "windows",
 ]
 
 [[package]]

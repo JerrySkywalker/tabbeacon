@@ -16,8 +16,8 @@ The project is intentionally narrow: it keeps the user's existing terminal and a
 ## Current status
 
 The provider-neutral core, Windows Terminal presentation layer, deterministic
-visual infrastructure, offline repository identity, and first Codex hooks
-provider are implemented. See
+visual infrastructure, Git and non-Git workspace identity, first Codex hooks
+provider, and session-scoped ephemeral title animator are implemented. See
 [`dev_governance_files/ROADMAP.md`](dev_governance_files/ROADMAP.md) and the
 [`Codex hooks integration guide`](docs/codex-hooks.md).
 
@@ -34,9 +34,9 @@ The default TabBeacon-owned tab title uses a compact status-first grammar:
 The mutable status slot stays on the left and the stable offline repository
 alias stays on the right. Default titles do not append lifecycle prose.
 
-## v0.1 scope
+## Current product scope
 
-v0.1 is intentionally limited to:
+The Codex-first product is intentionally limited to:
 
 - Windows Terminal;
 - Codex CLI;
@@ -45,7 +45,7 @@ v0.1 is intentionally limited to:
 - tab title ownership;
 - independently configurable title, activity, and dynamic tab-color channels;
 - muted-dark and classic semantic palettes;
-- static title activity indicators with a safe one-shot spinner fallback;
+- static title indicators and a fail-open ephemeral title animator;
 - global Codex integration with no change to the `codex` launch command;
 - autonomous functional and visual verification.
 
