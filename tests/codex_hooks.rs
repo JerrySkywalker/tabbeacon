@@ -1525,9 +1525,14 @@ fn title_reconciliation_refuses_a_dangling_codex_config_symlink() {
     match std::os::windows::fs::symlink_file(&missing_target, &config_path) {
         Ok(()) => {}
         // Windows permits unprivileged symbolic links only when Developer Mode
-        // is enabled. This is a capability-conditioned regression fixture, not
-        // a prerequisite for ordinary integration behavior.
+        // is enabled. Ordinary integration coverage may skip this capability-
+        // conditioned fixture, but the dedicated release workflow must prove
+        // it actually executed on a capable runner.
         Err(error) if error.raw_os_error() == Some(1314) => {
+            assert!(
+                std::env::var_os("TABBEACON_REQUIRE_DANGLING_SYMLINK").is_none(),
+                "dangling symbolic-link release fixture requires Windows symbolic-link capability: {error}"
+            );
             eprintln!("skipping symbolic-link fixture: Windows privilege unavailable");
             return;
         }
@@ -1545,6 +1550,8 @@ fn title_reconciliation_refuses_a_dangling_codex_config_symlink() {
             .is_symlink(),
         "title reconciliation must not replace the unowned link"
     );
+    println!("DANGLING_SYMLINK_FIXTURE_EXECUTED=true");
+    println!("DANGLING_SYMLINK_POLICY=PASS");
 }
 
 #[test]

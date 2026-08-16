@@ -1,0 +1,99 @@
+name: Release dangling symlink
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact 40-character release SHA in this repository
+        required: true
+        type: string
+      head_branch:
+        description: In-repository branch whose refs/heads value must equal expected_sha
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  windows-hosted-release-fixture:
+    name: Windows hosted / dangling symlink / exact head
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.actor == github.repository_owner
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      HEAD_BRANCH: ${{ inputs.head_branch }}
+      TABBEACON_REQUIRE_DANGLING_SYMLINK: '1'
+    steps:
+      - name: Admit trusted in-repository release ref
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            throw "Release fixture must be sourced from main; ref=$env:GITHUB_REF"
+          }
+          if ($env:GITHUB_ACTOR -ne $env:GITHUB_REPOSITORY_OWNER) {
+            throw "Release fixture actor is not the repository owner: $env:GITHUB_ACTOR"
+          }
+          if ($env:EXPECTED_SHA -notmatch '^[0-9a-f]{40}$') {
+            throw "expected_sha must be a lowercase 40-character SHA: $env:EXPECTED_SHA"
+          }
+          if (
+            $env:HEAD_BRANCH -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$' -or
+            $env:HEAD_BRANCH.Contains('..') -or
+            $env:HEAD_BRANCH.EndsWith('/') -or
+            $env:HEAD_BRANCH.StartsWith('-')
+          ) {
+            throw "Unsafe head_branch input: $env:HEAD_BRANCH"
+          }
+          $remote = "https://github.com/$env:GITHUB_REPOSITORY.git"
+          $lines = @(& git ls-remote --exit-code $remote "refs/heads/$env:HEAD_BRANCH")
+          if ($LASTEXITCODE -ne 0 -or $lines.Count -ne 1) {
+            throw "Trusted in-repository branch ref was not found exactly once: refs/heads/$env:HEAD_BRANCH"
+          }
+          $parts = $lines[0] -split "`t", 2
+          if ($parts.Count -ne 2 -or $parts[0] -ne $env:EXPECTED_SHA -or $parts[1] -ne "refs/heads/$env:HEAD_BRANCH") {
+            throw "Candidate ref mismatch: expected=$env:EXPECTED_SHA observed=$($lines[0])"
+          }
+          "TRUSTED_REF=PASS expected_sha=$env:EXPECTED_SHA head_branch=$env:HEAD_BRANCH"
+
+      - name: Checkout admitted exact release SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.expected_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Assert exact checkout
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -ne $env:EXPECTED_SHA) {
+            throw "Exact-head mismatch after checkout: expected=$env:EXPECTED_SHA actual=$actual"
+          }
+          "CODE_HEAD=$actual" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install 1.97.1 --profile minimal --component clippy
+          rustup override set 1.97.1
+          rustc --version
+          cargo --version
+
+      - name: Require dangling symbolic-link fixture execution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo test --locked --test codex_hooks title_reconciliation_refuses_a_dangling_codex_config_symlink -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) {
+            throw "DANGLING_SYMLINK_POLICY=FAIL fixture exit=$LASTEXITCODE"
+          }
+          "DANGLING_SYMLINK_FIXTURE_EXECUTED=true" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "DANGLING_SYMLINK_POLICY=PASS" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

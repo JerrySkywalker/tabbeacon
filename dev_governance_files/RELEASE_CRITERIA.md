@@ -1,6 +1,6 @@
 # Release Criteria
 
-A public v0.1 candidate is releasable only when all applicable conditions below are proved at one exact candidate SHA.
+A public v0.2 candidate is releasable only when all applicable conditions below are proved at one exact candidate SHA.
 
 ## Product
 
@@ -15,7 +15,7 @@ A public v0.1 candidate is releasable only when all applicable conditions below 
 
 - provider-specific event types remain below the normalizer boundary;
 - presentation code consumes typed visual state, not raw provider strings;
-- Codex hooks remain the production v0.1 backend unless a later ADR explicitly promotes another backend;
+- Codex hooks remain the production v0.2 backend unless a later ADR explicitly promotes another backend;
 - experimental app-server work is not a hidden runtime dependency of the production path.
 
 ## Verification

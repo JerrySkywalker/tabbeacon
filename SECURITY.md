@@ -2,7 +2,8 @@
 
 ## Supported versions
 
-TabBeacon has not yet published a stable release. Security fixes target the current `main` branch until the first release line exists.
+TabBeacon 0.2.x is the current supported release line. Security fixes target
+the current `main` branch and the latest published release when practical.
 
 ## Reporting a vulnerability
 
