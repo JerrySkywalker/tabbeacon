@@ -891,8 +891,9 @@ fn read_hooks_document(path: &Path) -> Result<Value, CodexIntegrationError> {
 }
 
 fn read_config_document(path: &Path) -> Result<DocumentMut, CodexIntegrationError> {
-    let bytes = fs::read(path)?;
-    parse_config_bytes(Some(&bytes))
+    reject_symbolic_link(path)?;
+    let bytes = read_optional_bytes(path)?;
+    parse_config_bytes(bytes.as_deref())
 }
 
 fn parse_hooks_bytes(bytes: Option<&[u8]>) -> Result<Value, CodexIntegrationError> {
@@ -1280,12 +1281,17 @@ fn parse_semver(value: &str) -> Option<(u64, u64, u64)> {
 
 fn reject_symbolic_link(path: &Path) -> Result<(), CodexIntegrationError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            Err(CodexIntegrationError::SymbolicLinkTarget)
-        }
-        Ok(_) => Ok(()),
+        Ok(metadata) => ensure_not_symbolic_link(metadata.file_type().is_symlink()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
+    }
+}
+
+fn ensure_not_symbolic_link(is_symbolic_link: bool) -> Result<(), CodexIntegrationError> {
+    if is_symbolic_link {
+        Err(CodexIntegrationError::SymbolicLinkTarget)
+    } else {
+        Ok(())
     }
 }
 
@@ -1341,7 +1347,7 @@ fn fail(id: &'static str, summary: impl Into<String>) -> DoctorCheck {
 
 #[cfg(test)]
 mod tests {
-    use super::{OwnedHook, normalized_hook_hash};
+    use super::{CodexIntegrationError, OwnedHook, ensure_not_symbolic_link, normalized_hook_hash};
     use serde_json::json;
 
     #[test]
@@ -1408,5 +1414,14 @@ mod tests {
             };
             assert_eq!(normalized_hook_hash(&declaration), hash, "event={event}");
         }
+    }
+
+    #[test]
+    fn symbolic_link_policy_refuses_link_targets() {
+        assert!(ensure_not_symbolic_link(false).is_ok());
+        assert!(matches!(
+            ensure_not_symbolic_link(true),
+            Err(CodexIntegrationError::SymbolicLinkTarget)
+        ));
     }
 }

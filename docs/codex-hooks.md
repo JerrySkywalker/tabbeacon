@@ -110,6 +110,11 @@ both title producers disabled. Changes are atomic and process-safe; a malformed
 settings file falls back to defaults for hook handling, while `config reset`
 explicitly rewrites documented defaults.
 
+When an originally absent Codex `config.toml` needs no title change,
+`title=native` or `title=off` leaves it absent. Later repeat setup, title
+reconciliation, doctor, and ownership-safe uninstall treat that absence as the
+same empty supported configuration rather than creating or requiring a file.
+
 `tab_color=native` and `tab_color=off` clear a TabBeacon-owned frame color and
 then stop applying semantic dynamic colors. `activity=native` emits no
 TabBeacon activity decoration; `activity=off` additionally clears any owned
