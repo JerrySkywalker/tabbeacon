@@ -159,6 +159,12 @@ impl CodexDoctorReport {
     pub fn check(&self, id: &str) -> Option<&DoctorCheck> {
         self.checks.iter().find(|check| check.id() == id)
     }
+
+    /// Disposition of one stable non-sensitive doctor check.
+    #[must_use]
+    pub fn check_status(&self, id: &str) -> Option<DoctorStatus> {
+        self.check(id).map(DoctorCheck::status)
+    }
 }
 
 /// Safe configuration-management error with no config contents.

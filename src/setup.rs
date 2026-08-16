@@ -110,10 +110,6 @@ impl SetupDiscovery {
         windows_terminal: WindowsTerminalState,
         report: &CodexDoctorReport,
     ) -> Self {
-        let check_status = |id| match report.check(id) {
-            Some(check) => Some(check.status()),
-            None => None,
-        };
         Self {
             tabbeacon_version: tabbeacon_version.into(),
             binary_path: binary_path.into(),
@@ -122,10 +118,10 @@ impl SetupDiscovery {
             hook_profile: report.hook_profile().map(CodexHookProfile::id),
             profile_supported: report.profile_supported(),
             hooks: HookSetupState::from_statuses(
-                check_status("ownership.manifest"),
-                check_status("hooks.declarations"),
-                check_status("hooks.currentness"),
-                check_status("hooks.trust"),
+                report.check_status("ownership.manifest"),
+                report.check_status("hooks.declarations"),
+                report.check_status("hooks.currentness"),
+                report.check_status("hooks.trust"),
                 report.overall(),
             ),
             doctor_status: report.overall(),
