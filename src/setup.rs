@@ -8,7 +8,7 @@
 use std::{env, path::PathBuf, process::Command};
 
 use crate::{
-    providers::codex::{CodexDoctorReport, DoctorStatus, SetupOutcome},
+    providers::codex::{CodexDoctorReport, CodexHookProfile, DoctorStatus, SetupOutcome},
     settings::{
         ConditionalSaveOutcome, PresentationSettings, PresentationSettingsStore, SettingsError,
     },
@@ -40,7 +40,7 @@ impl WindowsTerminalState {
 /// Read-only classification of the existing Codex Hook integration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookSetupState {
-    /// No valid TabBeacon ownership manifest was found.
+    /// No valid `TabBeacon` ownership manifest was found.
     AbsentOrInvalid,
     /// Owned declarations are exact, current, trusted, and active.
     Current,
@@ -110,13 +110,16 @@ impl SetupDiscovery {
         windows_terminal: WindowsTerminalState,
         report: &CodexDoctorReport,
     ) -> Self {
-        let check_status = |id| report.check(id).map(|check| check.status());
+        let check_status = |id| match report.check(id) {
+            Some(check) => Some(check.status()),
+            None => None,
+        };
         Self {
             tabbeacon_version: tabbeacon_version.into(),
             binary_path: binary_path.into(),
             windows_terminal,
             codex_version: report.codex_version().map(ToOwned::to_owned),
-            hook_profile: report.hook_profile().map(|profile| profile.id()),
+            hook_profile: report.hook_profile().map(CodexHookProfile::id),
             profile_supported: report.profile_supported(),
             hooks: HookSetupState::from_statuses(
                 check_status("ownership.manifest"),
@@ -135,7 +138,7 @@ impl SetupDiscovery {
         &self.tabbeacon_version
     }
 
-    /// Current executable path, intentionally limited to TabBeacon itself.
+    /// Current executable path, intentionally limited to `TabBeacon` itself.
     #[must_use]
     pub fn binary_path(&self) -> &std::path::Path {
         &self.binary_path
@@ -249,6 +252,13 @@ impl SetupPlan {
     /// change. The closure is intentionally the only provider boundary: callers
     /// must pass the existing ownership-aware setup implementation instead of
     /// duplicating Hook/config behavior in the wizard.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`SettingsError`] when the settings snapshot cannot be read or
+    /// the requested atomic update cannot be persisted. Provider failures are
+    /// represented by [`SetupApplyResult::SetupFailed`] after a best-effort
+    /// settings rollback.
     pub fn apply(
         &self,
         store: &PresentationSettingsStore,

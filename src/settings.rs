@@ -745,8 +745,8 @@ mod tests {
     };
 
     use super::{
-        ActivityMode, PresentationSettings, PresentationSettingsStore, PresentationTheme,
-        SpinnerPreset, TabColorMode, TitleMode,
+        ActivityMode, ConditionalSaveOutcome, PresentationSettings, PresentationSettingsStore,
+        PresentationTheme, SpinnerPreset, TabColorMode, TitleMode,
     };
 
     fn temporary_config(name: &str) -> std::path::PathBuf {
