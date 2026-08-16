@@ -4,18 +4,19 @@ Roadmap IDs are stable governance identifiers. `X` suffixes denote experimental 
 
 ## Current production baseline
 
-The v0.1 production line is complete through public v0.1.1 distribution.
+The v0.2 production line is complete through public `0.2.0` distribution.
+The Codex-first v0.2 implementation train is complete: `TB-G10A` through
+`TB-G14` are **COMPLETE**.
 
-The accepted Codex-first v0.2 implementation train is complete through
-`TB-G13`: `TB-G10A`, `TB-G11`, `TB-G12`, and `TB-G13` are **COMPLETE**.
-`TB-G14` is **NEXT** for hardening and release preparation; no v0.2 public
-release is implied by this implementation status.
-
-Authoritative v0.1.1 release head:
+Authoritative v0.2.0 release head and tag:
 
 ```text
-2259ab5aa5dd2f42a3c13b072dd61814b713af7a
+RELEASE_SHA=0b1d5136833a05bf94b7d32c414a21da2f5ac78e
+TAG=v0.2.0
 ```
+
+Public distribution: crates.io `tabbeacon 0.2.0` and the GitHub `v0.2.0`
+Release, including the verified Windows x64 ZIP and SHA-256 sidecar.
 
 The mandatory v0.1 path is complete: `TB-B00`, `TB-G01`, `TB-G02`, `TB-G03`, `TB-G04`, `TB-G05`, `TB-G07`, and `TB-G08` all landed and were released. The Codex App Server experiment (`TB-G06X`) and future Claude/OpenCode provider tracks (`TB-G20`, `TB-G30`) remain deliberately deferred and do not count as Codex-only product debt.
 
@@ -210,7 +211,7 @@ TB-G12
   ↓
 TB-G13
   ↓
-TB-G14 (NEXT)
+TB-G14 (COMPLETE)
 ```
 
 Do not parallelize these goals by default. Turn/agent identity decisions in `TB-G10` directly constrain worker identity and stale-event rejection in `TB-G11`.
@@ -388,9 +389,14 @@ The structured interface should be suitable for a Codex maintenance task to cons
 
 Estimated effective engineering effort: **2–4 h**.
 
-## TB-G14 — Codex-Only v0.2 Hardening and Release — NEXT
+## TB-G14 — Codex-Only v0.2 Hardening and Release — COMPLETE
 
 **Purpose:** close the Codex-first track with one production release candidate rather than adding another feature.
+
+Release closure completed for `0.2.0` at
+`0b1d5136833a05bf94b7d32c414a21da2f5ac78e` / `v0.2.0`: exact-head L0–L4,
+functional matrix, crates.io publication, GitHub Release, Windows x64 ZIP,
+and public consumer verification all passed.
 
 Required real-world scenarios include:
 

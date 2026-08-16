@@ -2,15 +2,25 @@
 
 ## Status
 
-Planning document only. This file does not authorize implementation work by itself.
+Planning document retained as the v0.2 design record. It does not authorize
+new implementation work by itself.
 
 Starting production baseline when this plan was admitted:
 
 ```text
 v0.1.1 release head = 2259ab5aa5dd2f42a3c13b072dd61814b713af7a
+v0.2.0 release head = 0b1d5136833a05bf94b7d32c414a21da2f5ac78e
+v0.2.0 release tag = v0.2.0
 ```
 
 The v0.1 mandatory path is complete. Near-term work is intentionally limited to improving the direct Codex CLI + Codex Hooks + Windows Terminal workflow.
+
+## Release outcome
+
+`TB-G14` is **COMPLETE** and TabBeacon `0.2.0` is publicly released from
+`0b1d5136833a05bf94b7d32c414a21da2f5ac78e` / `v0.2.0`. The release completed
+the exact-head code, Visual, terminal-close, and isolated real-Codex evidence
+matrix; crates.io and GitHub consumer verification passed.
 
 ## Product objective
 
@@ -357,6 +367,10 @@ Requirements:
 Estimated effort: 2–4 h.
 
 # 8. TB-G14 — Codex-only v0.2 hardening and release
+
+**Status: COMPLETE.** TabBeacon `0.2.0` was released from
+`0b1d5136833a05bf94b7d32c414a21da2f5ac78e` / `v0.2.0` after the full
+exact-head closure matrix passed.
 
 No new product feature is admitted in this goal.
 
