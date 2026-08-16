@@ -22,19 +22,19 @@ pub struct TerminalTestSession {
 pub struct TerminalTestSessionLauncher {
     requested_size: (u16, u16),
     requested_position: (u16, u16),
-    hold_millis: u64,
 }
+
+const STATIC_FIXTURE_HOLD_MILLIS: u64 = 10_000;
+// UIA queries are synchronous and can take materially longer than the runner's
+// nominal polling cadence. A title-animated fixture therefore reserves enough
+// time for activation, actual UIA observation, and owned-window capture.
+const TITLE_ANIMATION_FIXTURE_HOLD_MILLIS: u64 = 60_000;
 
 impl Default for TerminalTestSessionLauncher {
     fn default() -> Self {
         Self {
             requested_size: (100, 30),
             requested_position: (80, 80),
-            // A capture needs initial UIA discovery, owned-window activation,
-            // focus re-observation, and three bounded frames. Keep the child
-            // alive long enough for that sequence while retaining deterministic
-            // reset-and-exit cleanup.
-            hold_millis: 10_000,
         }
     }
 }
@@ -70,6 +70,7 @@ impl TerminalTestSessionLauncher {
             self.requested_position.0, self.requested_position.1
         );
         let size = format!("{},{}", self.requested_size.0, self.requested_size.1);
+        let hold_millis = fixture_hold_millis(replay.case.expects_title_animation);
         Command::new("wt.exe")
             .args(["-w", &window_name, "--pos", &position, "--size", &size])
             .arg("new-tab")
@@ -81,7 +82,7 @@ impl TerminalTestSessionLauncher {
                 "--run-id",
                 run_id,
                 "--hold-ms",
-                &self.hold_millis.to_string(),
+                &hold_millis.to_string(),
             ])
             .spawn()
             .map_err(|error| {
@@ -98,13 +99,33 @@ impl TerminalTestSessionLauncher {
     }
 }
 
+fn fixture_hold_millis(expects_title_animation: bool) -> u64 {
+    if expects_title_animation {
+        TITLE_ANIMATION_FIXTURE_HOLD_MILLIS
+    } else {
+        STATIC_FIXTURE_HOLD_MILLIS
+    }
+}
+
 fn fixture_window_name(run_id: &str, fixture_name: &str) -> String {
     format!("tabbeacon-g03-{run_id}-{fixture_name}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::fixture_window_name;
+    use super::{
+        STATIC_FIXTURE_HOLD_MILLIS, TITLE_ANIMATION_FIXTURE_HOLD_MILLIS, fixture_hold_millis,
+        fixture_window_name,
+    };
+
+    #[test]
+    fn title_animated_fixture_reserves_the_uia_observation_budget() {
+        assert_eq!(fixture_hold_millis(false), STATIC_FIXTURE_HOLD_MILLIS);
+        assert_eq!(
+            fixture_hold_millis(true),
+            TITLE_ANIMATION_FIXTURE_HOLD_MILLIS
+        );
+    }
 
     #[test]
     fn fixture_windows_are_isolated_within_one_visual_run() {

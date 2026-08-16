@@ -1,5 +1,11 @@
 //! Windows UI Automation target discovery for an owned Windows Terminal tab.
 
+use std::{
+    collections::BTreeSet,
+    thread,
+    time::{Duration, Instant},
+};
+
 use uiautomation::{
     UIAutomation, UIElement,
     controls::WindowControl,
@@ -23,6 +29,59 @@ pub trait TargetLocator {
 /// The Windows UIA implementation used by G03.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WindowsUiaLocator;
+
+/// A live UIA tab element that was already correlated to one owned test window.
+pub struct OwnedTabTitleReader {
+    tab: UIElement,
+}
+
+/// Outcome of trying to activate one already-correlated owned tab.
+pub enum OwnedTabActivation {
+    /// The owned window accepted foreground and focus activation.
+    Activated {
+        /// UIA evidence for the admitted top-level owned window and tab.
+        dump: UiaDump,
+        /// Live title reader pinned to that exact owned tab.
+        title_reader: OwnedTabTitleReader,
+    },
+    /// The owned target resolved, but Windows refused a visibility precondition.
+    Refused {
+        /// UIA evidence retained so the caller can classify capture as blocked.
+        dump: UiaDump,
+        /// Sanitized platform diagnostic for the refused activation.
+        detail: String,
+    },
+}
+
+impl OwnedTabTitleReader {
+    /// Samples admitted title frames from the exact tab selected during owned
+    /// window activation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualError::Platform`] when UIA cannot read the live title
+    /// property for the already-correlated tab.
+    pub fn observe_frames(
+        &self,
+        expected_titles: &[String],
+        budget: Duration,
+    ) -> VisualResult<Vec<String>> {
+        let deadline = Instant::now() + budget;
+        let mut observed = BTreeSet::new();
+        while Instant::now() < deadline {
+            let title = self.tab.get_name().map_err(platform_error)?;
+            if expected_titles.contains(&title) {
+                observed.insert(title);
+            }
+            if observed.len() >= 2 {
+                break;
+            }
+            // Deliberately incommensurate with the 180 ms fixture cadence.
+            thread::sleep(Duration::from_millis(137));
+        }
+        Ok(observed.into_iter().collect())
+    }
+}
 
 impl WindowsUiaLocator {
     /// Reports whether the UIA root can be created in this process context.
@@ -112,15 +171,59 @@ impl WindowsUiaLocator {
         run_id: &str,
         expected_titles: &[String],
     ) -> VisualResult<UiaDump> {
+        match self.locate_and_activate_any_with_title_reader(run_id, expected_titles)? {
+            OwnedTabActivation::Activated { dump, .. } => Ok(dump),
+            OwnedTabActivation::Refused { detail, .. } => Err(VisualError::Platform(detail)),
+        }
+    }
+
+    /// Activates an owned window and retains its exact animated tab for later
+    /// title sampling without a second dynamic-title lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualError::Platform`] when the owned target cannot be
+    /// resolved or Windows refuses foreground/focus activation.
+    pub fn locate_and_activate_any_with_title_reader(
+        &self,
+        run_id: &str,
+        expected_titles: &[String],
+    ) -> VisualResult<OwnedTabActivation> {
         let (window, tab) = owned_window_and_tab_any(run_id, expected_titles)?;
-        let control = WindowControl::try_from(window.clone()).map_err(platform_error)?;
-        let set_foreground = control.set_foregrand().map_err(platform_error)?;
-        window.set_focus().map_err(platform_error)?;
+        let mut dump = uia_dump(&window, &tab, None)?;
+        let control = match WindowControl::try_from(window.clone()) {
+            Ok(control) => control,
+            Err(error) => {
+                return Ok(OwnedTabActivation::Refused {
+                    dump,
+                    detail: platform_error(error).to_string(),
+                });
+            }
+        };
+        let set_foreground = match control.set_foregrand() {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(OwnedTabActivation::Refused {
+                    dump,
+                    detail: platform_error(error).to_string(),
+                });
+            }
+        };
+        if let Err(error) = window.set_focus() {
+            return Ok(OwnedTabActivation::Refused {
+                dump,
+                detail: platform_error(error).to_string(),
+            });
+        }
         let activation = WindowActivation {
             set_foreground,
             set_focus: true,
         };
-        uia_dump(&window, &tab, Some(activation))
+        dump.activation = Some(activation);
+        Ok(OwnedTabActivation::Activated {
+            dump,
+            title_reader: OwnedTabTitleReader { tab },
+        })
     }
 }
 
