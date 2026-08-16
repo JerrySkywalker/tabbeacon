@@ -49,10 +49,17 @@ TB-G12   Guided Setup / Configuration Wizard v2
    ↓
 TB-G13   Operational Status / JSON Diagnostics
    ↓
-TB-G14   Codex-only v0.2 Hardening + Release
+TB-G14   Codex-only v0.2 Hardening + Release — COMPLETE
 ```
 
 `TB-G10A` is mandatory for v0.2 completion.
+
+## Release closure record
+
+`TB-G14` completed with TabBeacon `0.2.0` released from
+`0b1d5136833a05bf94b7d32c414a21da2f5ac78e` under tag `v0.2.0`. The final
+exact-head code, Visual, terminal-close, and isolated real-Codex gates passed;
+the crates.io package and GitHub Windows x64 ZIP were independently verified.
 
 ## Identity terminology correction
 
@@ -144,6 +151,9 @@ Key changes:
 - setup/upgrade/relocation;
 - exact release-candidate code/visual/provider evidence;
 - GitHub Release + crates.io from the same accepted source version.
+
+Completed: the accepted source version is `0.2.0` at
+`0b1d5136833a05bf94b7d32c414a21da2f5ac78e` / `v0.2.0`.
 
 ## Deferred items remain deferred
 
