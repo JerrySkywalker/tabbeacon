@@ -6,12 +6,12 @@ use std::{
     time::Duration,
 };
 
-use tabbeacon::setup::{
-    SetupApplyResult, SetupDecision, SetupDiscovery, SetupPlan, detect_windows_terminal,
-};
 use tabbeacon::providers::codex::{
     CodexHookRuntime, CodexIntegration, DoctorStatus, SetupOutcome, TitleOwnershipOutcome,
     UninstallOutcome,
+};
+use tabbeacon::setup::{
+    SetupApplyResult, SetupDecision, SetupDiscovery, SetupPlan, detect_windows_terminal,
 };
 use tabbeacon::{
     activity::run_activity_worker_system,
@@ -378,7 +378,10 @@ fn print_setup_discovery(discovery: &SetupDiscovery, settings: PresentationSetti
     println!("TabBeacon Setup");
     println!();
     println!("Environment");
-    println!("  Windows Terminal   {}", discovery.windows_terminal().label());
+    println!(
+        "  Windows Terminal   {}",
+        discovery.windows_terminal().label()
+    );
     println!(
         "  Codex              {} / profile={} / supported={}",
         discovery.codex_version().unwrap_or("unavailable"),
@@ -410,11 +413,7 @@ fn prompt_setup_draft(current: PresentationSettings) -> Result<PresentationSetti
     println!("Title choices: tabbeacon | native | off");
     let title = prompt_choice("title", base.title().as_str(), TitleMode::parse)?;
     println!("Tab-color choices: tabbeacon | native | off");
-    let tab_color = prompt_choice(
-        "tab-color",
-        base.tab_color().as_str(),
-        TabColorMode::parse,
-    )?;
+    let tab_color = prompt_choice("tab-color", base.tab_color().as_str(), TabColorMode::parse)?;
     println!("Activity choices: title-spinner | title-indicator | wt-ring | both | native | off");
     let activity = prompt_choice("activity", base.activity().as_str(), ActivityMode::parse)?;
     println!("Spinner choices: codex | braille | quadrant | line | pulse");

@@ -75,9 +75,7 @@ impl HookSetupState {
         if manifest != Some(DoctorStatus::Pass) {
             return Self::AbsentOrInvalid;
         }
-        if declarations == Some(DoctorStatus::Pass)
-            && currentness == Some(DoctorStatus::Fail)
-        {
+        if declarations == Some(DoctorStatus::Pass) && currentness == Some(DoctorStatus::Fail) {
             return Self::UpgradeRequired;
         }
         if trust == Some(DoctorStatus::Warning) {
@@ -324,8 +322,8 @@ mod tests {
     };
 
     use super::*;
-    use crate::{
-        settings::{ActivityMode, PresentationTheme, SpinnerPreset, TabColorMode, TitleMode},
+    use crate::settings::{
+        ActivityMode, PresentationTheme, SpinnerPreset, TabColorMode, TitleMode,
     };
 
     fn temporary_config(name: &str) -> std::path::PathBuf {
@@ -358,7 +356,11 @@ mod tests {
     #[test]
     fn preview_and_cancel_preserve_an_absent_settings_root() {
         let path = temporary_config("cancel");
-        let root = path.parent().expect("config parent").parent().expect("state root");
+        let root = path
+            .parent()
+            .expect("config parent")
+            .parent()
+            .expect("state root");
         let draft = PresentationSettings::preset("full").expect("known preset");
         let plan = SetupPlan::new(PresentationSettings::default(), discovery()).with_draft(draft);
 
@@ -388,11 +390,19 @@ mod tests {
             })
             .expect("settings save succeeds");
 
-        assert_eq!(result, SetupApplyResult::Applied(SetupOutcome::AlreadyInstalled));
+        assert_eq!(
+            result,
+            SetupApplyResult::Applied(SetupOutcome::AlreadyInstalled)
+        );
         assert_eq!(requested_title_ownership.get(), Some(false));
         assert_eq!(store.load().expect("persisted settings read"), draft);
-        fs::remove_dir_all(path.parent().expect("config parent").parent().expect("state root"))
-            .expect("fixture root removes");
+        fs::remove_dir_all(
+            path.parent()
+                .expect("config parent")
+                .parent()
+                .expect("state root"),
+        )
+        .expect("fixture root removes");
     }
 
     #[test]
@@ -401,9 +411,8 @@ mod tests {
         let store = PresentationSettingsStore::new(&path);
         let before = PresentationSettings::default();
         store.save(before).expect("baseline settings save");
-        let plan = SetupPlan::new(before, discovery()).with_draft(
-            PresentationSettings::preset("native").expect("known preset"),
-        );
+        let plan = SetupPlan::new(before, discovery())
+            .with_draft(PresentationSettings::preset("native").expect("known preset"));
 
         let result = plan
             .apply(&store, |_| Err("ownership preflight failed".to_owned()))
@@ -417,8 +426,13 @@ mod tests {
             }
         );
         assert_eq!(store.load().expect("restored settings read"), before);
-        fs::remove_dir_all(path.parent().expect("config parent").parent().expect("state root"))
-            .expect("fixture root removes");
+        fs::remove_dir_all(
+            path.parent()
+                .expect("config parent")
+                .parent()
+                .expect("state root"),
+        )
+        .expect("fixture root removes");
     }
 
     #[test]
@@ -427,9 +441,8 @@ mod tests {
         let store = PresentationSettingsStore::new(&path);
         let before = PresentationSettings::default();
         store.save(before).expect("baseline settings save");
-        let plan = SetupPlan::new(before, discovery()).with_draft(
-            PresentationSettings::preset("native").expect("known preset"),
-        );
+        let plan = SetupPlan::new(before, discovery())
+            .with_draft(PresentationSettings::preset("native").expect("known preset"));
         let concurrent = before.with_theme(PresentationTheme::Classic);
         store.save(concurrent).expect("concurrent settings save");
         let setup_called = Cell::new(false);
@@ -444,8 +457,13 @@ mod tests {
         assert_eq!(result, SetupApplyResult::SettingsConflict);
         assert!(!setup_called.get());
         assert_eq!(store.load().expect("concurrent settings read"), concurrent);
-        fs::remove_dir_all(path.parent().expect("config parent").parent().expect("state root"))
-            .expect("fixture root removes");
+        fs::remove_dir_all(
+            path.parent()
+                .expect("config parent")
+                .parent()
+                .expect("state root"),
+        )
+        .expect("fixture root removes");
     }
 
     #[test]
