@@ -2,10 +2,13 @@
 
 ## Status
 
-IMPLEMENTATION CANDIDATE. Local deterministic coverage is implemented, but the
-required isolated real-Codex L4 smoke is blocked until the Owner reviews the
-new isolated eleven-event Hook set through Codex `/hooks`. This goal is not
-COMPLETE and must not be merged while L4 remains blocked.
+ACCEPTANCE CANDIDATE. Local deterministic coverage, exact-head hosted CI, and
+the Owner-completed isolated real-Codex L4 smoke passed at implementation head
+`640e1ff1380c595148502f6eeaba8fc2bb983468`. Trust was granted only inside the
+isolated recorder profile; the real Owner Codex profile was not changed and no
+trust bypass was used. This goal is not COMPLETE until this closeout status is
+included in a final candidate that itself passes local L0/L1/L2, exact-head
+hosted CI, and final-head L4.
 
 ## Admission
 
@@ -47,12 +50,31 @@ UNKNOWN_EVENT_POLICY=ignore-fail-open
 - isolated real-Codex L4 observes admitted payload/profile after official
   `/hooks` trust review.
 
-## L4 blocker
+## Owner L4 evidence
 
-The isolated fixture has no trust entries. `tabbeacon doctor` reports all
-eleven exact groups as `REVIEW_REQUIRED`, and a real `codex exec` invocation
-without the prohibited trust-bypass flag produces no TabBeacon turn state.
-Owner trust is intentionally not manufactured during the unattended train.
+The Owner reviewed the eleven exact declarations through Codex `/hooks` and
+granted trust only in the isolated recorder profile. The fail-closed verifier
+then observed the required real `SessionStart`, `UserPromptSubmit`, `Stop`, and
+`SessionEnd` lifecycle at the exact implementation head with content
+minimization and candidate dispatch both passing:
+
+```text
+EXPECTED_HEAD=640e1ff1380c595148502f6eeaba8fc2bb983468
+CANDIDATE_BINARY_SHA256=c4945f14fa877a6df7d8c707ef72f7c9036e1531c36f27b19898db3656edca39
+SANITIZED_RECORD_COUNT=4
+GENERATION_STATE_FILE_COUNT=1
+CONTENT_MINIMIZATION=PASS
+REQUIRED_REAL_CODEX_LIFECYCLE=PASS
+EXACT_HEAD_CANDIDATE_DISPATCH=PASS
+L4=PASS
+OWNER_REAL_CODEX_CONFIG_MUTATED=false
+TRUST_BYPASS_USED=false
+```
+
+The isolated fixture declares a five-second timeout. For `SessionEnd`, Codex
+0.147.0 reported `clamping SessionEnd hook timeout to 3s`; the real Hook still
+completed and the sanitized `SessionEnd` record was present. This is accepted
+as observed installed-release behavior rather than a product failure.
 
 ## Non-goals
 
