@@ -466,6 +466,56 @@ pub enum ConditionalSaveOutcome {
     Conflict,
 }
 
+/// Opaque, read-only snapshot of one presentation-settings document.
+///
+/// The snapshot retains the original document bytes only for an ownership-safe
+/// rollback; it deliberately exposes typed effective settings instead of raw
+/// user configuration.
+pub struct PresentationSettingsSnapshot {
+    settings: PresentationSettings,
+    contents: Option<Vec<u8>>,
+}
+
+impl PresentationSettingsSnapshot {
+    /// Effective typed settings at the time the snapshot was taken.
+    #[must_use]
+    pub const fn settings(&self) -> PresentationSettings {
+        self.settings
+    }
+
+    /// Whether no settings document existed when the snapshot was taken.
+    #[must_use]
+    pub const fn is_absent(&self) -> bool {
+        self.contents.is_none()
+    }
+
+    fn matches(&self, other: &Self) -> bool {
+        self.contents == other.contents
+    }
+}
+
+/// Opaque receipt for one snapshot-guarded settings write.
+///
+/// The receipt is accepted only by [`PresentationSettingsStore`] to protect a
+/// subsequent rollback from overwriting a concurrent configuration update.
+pub struct PresentationSettingsWriteReceipt {
+    contents: Vec<u8>,
+}
+
+impl PresentationSettingsWriteReceipt {
+    fn matches(&self, snapshot: &PresentationSettingsSnapshot) -> bool {
+        snapshot.contents.as_deref() == Some(self.contents.as_slice())
+    }
+}
+
+/// Result of saving a draft against an exact read-only snapshot.
+pub enum SnapshotSaveOutcome {
+    /// The original document was still exact and the draft was saved.
+    Saved(PresentationSettingsWriteReceipt),
+    /// Another writer changed the document after the snapshot was taken.
+    Conflict,
+}
+
 /// Process-safe, atomic per-user presentation settings storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresentationSettingsStore {
@@ -534,7 +584,20 @@ impl PresentationSettingsStore {
     /// Returns the same safe parse, symbolic-link, or I/O errors as
     /// [`Self::load`].
     pub fn load_read_only(&self) -> Result<PresentationSettings, SettingsError> {
-        self.load_unlocked()
+        Ok(self.snapshot_read_only()?.settings())
+    }
+
+    /// Captures the current document without creating a state directory or lock.
+    ///
+    /// Callers can use the opaque snapshot to ensure a later recovery restores
+    /// an originally absent document as absent, without exposing raw settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same safe parse, symbolic-link, or I/O errors as
+    /// [`Self::load_read_only`].
+    pub fn snapshot_read_only(&self) -> Result<PresentationSettingsSnapshot, SettingsError> {
+        self.snapshot_unlocked()
     }
 
     /// Reads valid settings, defaulting safely for absent or malformed input.
@@ -569,6 +632,53 @@ impl PresentationSettingsStore {
                 return Ok(ConditionalSaveOutcome::Conflict);
             }
             self.save_unlocked(replacement)?;
+            Ok(ConditionalSaveOutcome::Saved)
+        })
+    }
+
+    /// Saves a draft only when the exact read-only document is still current.
+    ///
+    /// Unlike [`Self::save_if_unchanged`], this preserves absence and unknown
+    /// TOML bytes as part of the comparison, so a later rollback can avoid
+    /// overwriting a concurrent change.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error without modifying settings when the current
+    /// document cannot be safely read or written.
+    pub fn save_snapshot_if_unchanged(
+        &self,
+        expected: &PresentationSettingsSnapshot,
+        replacement: PresentationSettings,
+    ) -> Result<SnapshotSaveOutcome, SettingsError> {
+        self.with_lock(|| {
+            let current = self.snapshot_unlocked()?;
+            if !current.matches(expected) {
+                return Ok(SnapshotSaveOutcome::Conflict);
+            }
+            Ok(SnapshotSaveOutcome::Saved(
+                self.save_snapshot_unlocked(&current, replacement)?,
+            ))
+        })
+    }
+
+    /// Restores an original snapshot only when the prior guided write remains exact.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error without modifying settings when the current
+    /// document cannot be safely read or restored.
+    pub fn restore_snapshot_if_unchanged(
+        &self,
+        receipt: &PresentationSettingsWriteReceipt,
+        original: &PresentationSettingsSnapshot,
+    ) -> Result<ConditionalSaveOutcome, SettingsError> {
+        self.with_lock(|| {
+            let current = self.snapshot_unlocked()?;
+            if !receipt.matches(&current) {
+                return Ok(ConditionalSaveOutcome::Conflict);
+            }
+            self.restore_snapshot_unlocked(original)?;
             Ok(ConditionalSaveOutcome::Saved)
         })
     }
@@ -611,28 +721,52 @@ impl PresentationSettingsStore {
     }
 
     fn load_unlocked(&self) -> Result<PresentationSettings, SettingsError> {
+        Ok(self.snapshot_unlocked()?.settings())
+    }
+
+    fn snapshot_unlocked(&self) -> Result<PresentationSettingsSnapshot, SettingsError> {
         self.reject_symbolic_link()?;
-        let Some(bytes) = read_optional_bytes(&self.path)? else {
-            return Ok(PresentationSettings::default());
+        let contents = read_optional_bytes(&self.path)?;
+        let settings = match contents.as_deref() {
+            Some(bytes) => parse_settings_bytes(bytes)?,
+            None => PresentationSettings::default(),
         };
-        let document = String::from_utf8(bytes)
-            .map_err(|_| SettingsError::Malformed)?
-            .parse::<DocumentMut>()
-            .map_err(|_| SettingsError::Malformed)?;
-        settings_from_document(&document)
+        Ok(PresentationSettingsSnapshot { settings, contents })
     }
 
     fn save_unlocked(&self, settings: PresentationSettings) -> Result<(), SettingsError> {
-        self.reject_symbolic_link()?;
-        let mut document = match read_optional_bytes(&self.path)? {
-            Some(bytes) => String::from_utf8(bytes)
+        let snapshot = self.snapshot_unlocked()?;
+        self.save_snapshot_unlocked(&snapshot, settings)?;
+        Ok(())
+    }
+
+    fn save_snapshot_unlocked(
+        &self,
+        snapshot: &PresentationSettingsSnapshot,
+        settings: PresentationSettings,
+    ) -> Result<PresentationSettingsWriteReceipt, SettingsError> {
+        let mut document = match snapshot.contents.as_deref() {
+            Some(bytes) => std::str::from_utf8(bytes)
                 .map_err(|_| SettingsError::Malformed)?
                 .parse::<DocumentMut>()
                 .map_err(|_| SettingsError::Malformed)?,
             None => DocumentMut::new(),
         };
         write_settings(&mut document, settings)?;
-        atomic_write(&self.path, document.to_string().as_bytes())?;
+        let contents = document.to_string().into_bytes();
+        atomic_write(&self.path, &contents)?;
+        Ok(PresentationSettingsWriteReceipt { contents })
+    }
+
+    fn restore_snapshot_unlocked(
+        &self,
+        snapshot: &PresentationSettingsSnapshot,
+    ) -> Result<(), SettingsError> {
+        self.reject_symbolic_link()?;
+        match snapshot.contents.as_deref() {
+            Some(contents) => atomic_write(&self.path, contents)?,
+            None => fs::remove_file(&self.path)?,
+        }
         Ok(())
     }
 
@@ -646,6 +780,14 @@ impl PresentationSettingsStore {
             Err(error) => Err(error.into()),
         }
     }
+}
+
+fn parse_settings_bytes(bytes: &[u8]) -> Result<PresentationSettings, SettingsError> {
+    let document = std::str::from_utf8(bytes)
+        .map_err(|_| SettingsError::Malformed)?
+        .parse::<DocumentMut>()
+        .map_err(|_| SettingsError::Malformed)?;
+    settings_from_document(&document)
 }
 
 fn settings_from_document(document: &DocumentMut) -> Result<PresentationSettings, SettingsError> {
