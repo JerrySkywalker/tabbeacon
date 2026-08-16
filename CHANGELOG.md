@@ -6,6 +6,10 @@ All notable changes to TabBeacon will be documented here.
 
 ### Changed
 
+- Added `tabbeacon setup`, a draft-first guided setup and reconfiguration flow
+  that reports bounded environment/integration state, previews typed settings
+  before Apply, preserves Cancel, and delegates Hook ownership/trust behavior
+  to the existing `setup codex` implementation.
 - Configured `title-spinner` and `both` activity modes now use a real
   session/turn/terminal-scoped ephemeral worker instead of the v0.1 frame-zero
   fallback; `title-indicator` remains the static option.

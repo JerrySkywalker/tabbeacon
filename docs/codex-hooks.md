@@ -10,7 +10,23 @@ There is no TabBeacon launcher wrapper.
 
 ## Setup
 
-Build or install `tabbeacon`, then run:
+Build or install `tabbeacon`, then run the guided first-run or reconfiguration
+flow:
+
+```powershell
+tabbeacon setup
+```
+
+The lightweight flow reads the current TabBeacon settings and Codex doctor
+state without creating settings, configuration, Hook, or trust state. It shows
+Windows Terminal availability, TabBeacon/Codex version and Hook profile,
+existing Hook state, presentation choices, and a temporary renderer-backed
+preview. Select a built-in preset or closed typed values, then choose `Apply`
+or `Cancel`. `Cancel` leaves settings, Codex configuration, and Hook
+declarations unchanged. `Apply` atomically saves the complete typed settings
+draft and delegates to the existing ownership-aware setup implementation.
+
+For scripts or provider-only setup, retain the direct command:
 
 ```powershell
 tabbeacon setup codex
@@ -72,6 +88,9 @@ tabbeacon config set theme muted-dark
 tabbeacon config preset balanced
 tabbeacon config reset
 ```
+
+`tabbeacon setup` is the recommended cohesive flow; the compact commands stay
+available for repeatable, scriptable changes.
 
 Supported values are:
 

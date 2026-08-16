@@ -454,6 +454,18 @@ impl From<io::Error> for SettingsError {
     }
 }
 
+/// Result of conditionally saving a settings draft.
+///
+/// A guided flow can use this to avoid overwriting a setting that changed
+/// after its read-only snapshot was taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionalSaveOutcome {
+    /// The expected settings were still current and the replacement was saved.
+    Saved,
+    /// Another writer changed the settings after the caller took its snapshot.
+    Conflict,
+}
+
 /// Process-safe, atomic per-user presentation settings storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresentationSettingsStore {
@@ -508,17 +520,21 @@ impl PresentationSettingsStore {
     /// Returns an error for malformed TOML, unsupported values, unsafe links,
     /// or an unreadable per-user settings path.
     pub fn load(&self) -> Result<PresentationSettings, SettingsError> {
-        self.with_lock(|| {
-            self.reject_symbolic_link()?;
-            let Some(bytes) = read_optional_bytes(&self.path)? else {
-                return Ok(PresentationSettings::default());
-            };
-            let document = String::from_utf8(bytes)
-                .map_err(|_| SettingsError::Malformed)?
-                .parse::<DocumentMut>()
-                .map_err(|_| SettingsError::Malformed)?;
-            settings_from_document(&document)
-        })
+        self.with_lock(|| self.load_unlocked())
+    }
+
+    /// Reads effective settings without creating a state directory or lock file.
+    ///
+    /// This is intentionally separate from [`Self::load`] for read-only setup
+    /// discovery and diagnostics. It never creates a missing parent directory,
+    /// lock, or settings file.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same safe parse, symbolic-link, or I/O errors as
+    /// [`Self::load`].
+    pub fn load_read_only(&self) -> Result<PresentationSettings, SettingsError> {
+        self.load_unlocked()
     }
 
     /// Reads valid settings, defaulting safely for absent or malformed input.
@@ -534,18 +550,26 @@ impl PresentationSettingsStore {
     /// Returns an error for malformed existing TOML, unsafe links, or a failed
     /// process-safe atomic write.
     pub fn save(&self, settings: PresentationSettings) -> Result<(), SettingsError> {
+        self.with_lock(|| self.save_unlocked(settings))
+    }
+
+    /// Saves a draft only when the caller's read snapshot is still current.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error without modifying settings when the current
+    /// document cannot be safely read or written.
+    pub fn save_if_unchanged(
+        &self,
+        expected: PresentationSettings,
+        replacement: PresentationSettings,
+    ) -> Result<ConditionalSaveOutcome, SettingsError> {
         self.with_lock(|| {
-            self.reject_symbolic_link()?;
-            let mut document = match read_optional_bytes(&self.path)? {
-                Some(bytes) => String::from_utf8(bytes)
-                    .map_err(|_| SettingsError::Malformed)?
-                    .parse::<DocumentMut>()
-                    .map_err(|_| SettingsError::Malformed)?,
-                None => DocumentMut::new(),
-            };
-            write_settings(&mut document, settings)?;
-            atomic_write(&self.path, document.to_string().as_bytes())?;
-            Ok(())
+            if self.load_unlocked()? != expected {
+                return Ok(ConditionalSaveOutcome::Conflict);
+            }
+            self.save_unlocked(replacement)?;
+            Ok(ConditionalSaveOutcome::Saved)
         })
     }
 
@@ -584,6 +608,32 @@ impl PresentationSettingsStore {
         let result = operation();
         File::unlock(&lock)?;
         result
+    }
+
+    fn load_unlocked(&self) -> Result<PresentationSettings, SettingsError> {
+        self.reject_symbolic_link()?;
+        let Some(bytes) = read_optional_bytes(&self.path)? else {
+            return Ok(PresentationSettings::default());
+        };
+        let document = String::from_utf8(bytes)
+            .map_err(|_| SettingsError::Malformed)?
+            .parse::<DocumentMut>()
+            .map_err(|_| SettingsError::Malformed)?;
+        settings_from_document(&document)
+    }
+
+    fn save_unlocked(&self, settings: PresentationSettings) -> Result<(), SettingsError> {
+        self.reject_symbolic_link()?;
+        let mut document = match read_optional_bytes(&self.path)? {
+            Some(bytes) => String::from_utf8(bytes)
+                .map_err(|_| SettingsError::Malformed)?
+                .parse::<DocumentMut>()
+                .map_err(|_| SettingsError::Malformed)?,
+            None => DocumentMut::new(),
+        };
+        write_settings(&mut document, settings)?;
+        atomic_write(&self.path, document.to_string().as_bytes())?;
+        Ok(())
     }
 
     fn reject_symbolic_link(&self) -> Result<(), SettingsError> {
@@ -695,13 +745,24 @@ mod tests {
     };
 
     use super::{
-        ActivityMode, PresentationSettings, PresentationSettingsStore, PresentationTheme,
-        SpinnerPreset, TabColorMode, TitleMode,
+        ActivityMode, ConditionalSaveOutcome, PresentationSettings, PresentationSettingsStore,
+        PresentationTheme, SpinnerPreset, TabColorMode, TitleMode,
     };
 
     fn temporary_config(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
             "tabbeacon-settings-{name}-{}-{}.toml",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock is after Unix epoch")
+                .as_nanos()
+        ))
+    }
+
+    fn temporary_root(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "tabbeacon-settings-root-{name}-{}-{}",
             std::process::id(),
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -759,8 +820,48 @@ mod tests {
         fs::write(&path, "[presentation\ntitle = \"tabbeacon\"").expect("malformed fixture writes");
         let store = PresentationSettingsStore::new(&path);
         assert!(store.load().is_err());
+        assert!(store.load_read_only().is_err());
         assert_eq!(store.load_or_default(), PresentationSettings::default());
         fs::remove_file(path).expect("fixture config removes");
+    }
+
+    #[test]
+    fn read_only_load_of_absent_settings_creates_no_parent_or_lock() {
+        let root = temporary_root("read-only");
+        let path = root.join("state").join("config.toml");
+        let store = PresentationSettingsStore::new(&path);
+
+        assert_eq!(
+            store.load_read_only().expect("read-only defaults load"),
+            PresentationSettings::default()
+        );
+        assert!(!root.exists(), "inspection must not create a state root");
+    }
+
+    #[test]
+    fn conditional_save_refuses_to_overwrite_a_newer_settings_value() {
+        let root = temporary_root("conditional");
+        let path = root.join("state").join("config.toml");
+        let store = PresentationSettingsStore::new(&path);
+        let before = PresentationSettings::default();
+        let first = before.with_theme(PresentationTheme::Classic);
+        let second = before.with_activity(ActivityMode::Both);
+
+        store.save(before).expect("baseline settings save");
+        assert_eq!(
+            store
+                .save_if_unchanged(before, first)
+                .expect("first conditional save"),
+            ConditionalSaveOutcome::Saved
+        );
+        assert_eq!(
+            store
+                .save_if_unchanged(before, second)
+                .expect("stale conditional save"),
+            ConditionalSaveOutcome::Conflict
+        );
+        assert_eq!(store.load().expect("current settings read"), first);
+        fs::remove_dir_all(root).expect("fixture root removes");
     }
 
     #[test]

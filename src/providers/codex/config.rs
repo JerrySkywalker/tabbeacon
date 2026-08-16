@@ -119,6 +119,8 @@ impl DoctorCheck {
 pub struct CodexDoctorReport {
     overall: DoctorStatus,
     checks: Vec<DoctorCheck>,
+    codex_version: Option<String>,
+    hook_profile: Option<CodexHookProfile>,
 }
 
 impl CodexDoctorReport {
@@ -132,6 +134,36 @@ impl CodexDoctorReport {
     #[must_use]
     pub fn checks(&self) -> &[DoctorCheck] {
         &self.checks
+    }
+
+    /// Detected Codex semantic version, when the executable could be probed.
+    #[must_use]
+    pub fn codex_version(&self) -> Option<&str> {
+        self.codex_version.as_deref()
+    }
+
+    /// Exact source-audited Hook profile, when the detected version is supported.
+    #[must_use]
+    pub const fn hook_profile(&self) -> Option<CodexHookProfile> {
+        self.hook_profile
+    }
+
+    /// Whether the detected Codex version maps to an admitted Hook profile.
+    #[must_use]
+    pub const fn profile_supported(&self) -> bool {
+        self.hook_profile.is_some()
+    }
+
+    /// Looks up one stable non-sensitive doctor check by identifier.
+    #[must_use]
+    pub fn check(&self, id: &str) -> Option<&DoctorCheck> {
+        self.checks.iter().find(|check| check.id() == id)
+    }
+
+    /// Disposition of one stable non-sensitive doctor check.
+    #[must_use]
+    pub fn check_status(&self, id: &str) -> Option<DoctorStatus> {
+        self.check(id).map(DoctorCheck::status)
     }
 }
 
@@ -316,6 +348,8 @@ impl CodexIntegration {
     pub fn doctor(&self) -> CodexDoctorReport {
         let mut checks = Vec::new();
         let version = self.probe_codex_version();
+        let codex_version = version.as_ref().map(|(version, _)| version.clone());
+        let hook_profile = version.as_ref().and_then(|(_, profile)| *profile);
         checks.push(codex_version_check(version.as_ref()));
         checks.push(codex_profile_check(version.as_ref()));
         checks.push(if self.tabbeacon_executable.is_file() {
@@ -408,7 +442,12 @@ impl CodexIntegration {
             .map(DoctorCheck::status)
             .max()
             .unwrap_or(DoctorStatus::Fail);
-        CodexDoctorReport { overall, checks }
+        CodexDoctorReport {
+            overall,
+            checks,
+            codex_version,
+            hook_profile,
+        }
     }
 
     fn setup_locked(
