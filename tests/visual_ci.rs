@@ -343,6 +343,7 @@ fn evidence_writer_refuses_overwrite_and_writes_only_owned_bundle_files() {
             window_bounds: None,
             tab_bounds: None,
             native_window_handle: None,
+            native_window_id: Some(42),
             window_has_keyboard_focus: None,
             activation: Some(WindowActivation {
                 set_foreground: true,
@@ -392,6 +393,7 @@ fn evidence_writer_refuses_overwrite_and_writes_only_owned_bundle_files() {
     let uia = std::fs::read_to_string(writer.directory().join("uia.json"))
         .expect("owned UIA evidence reads");
     assert!(uia.contains("set_foreground"));
+    assert!(!uia.contains("native_window_id"));
     assert!(matches!(
         EvidenceWriter::create(&root, "TB03TEST-0002"),
         Err(VisualError::EvidenceDirectoryExists(_))

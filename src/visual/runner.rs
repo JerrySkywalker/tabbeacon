@@ -169,8 +169,8 @@ fn observe_replay(
             return Ok(());
         }
     };
-    let activation = match activate_with_retry(locator, run_id, replay) {
-        Ok(activation) => activation,
+    let target = match locate_activated_capturable_with_retry(locator, run_id, replay) {
+        Ok(target) => target,
         Err(error) => {
             observation.record_target(writer, replay, &initial_target)?;
             observation.record_capture_blocked(
@@ -180,21 +180,6 @@ fn observe_replay(
             return Ok(());
         }
     };
-    let mut target = match locate_capturable_with_retry(locator, run_id, replay) {
-        Ok(target) => target,
-        Err(error) => {
-            observation.record_target(writer, replay, &initial_target)?;
-            observation.record_capture_blocked(
-                &replay.case.fixture_name,
-                format!(
-                    "owned-window activation did not yield capturable UIA geometry after foreground={} focus={}: {error}",
-                    activation.set_foreground, activation.set_focus
-                ),
-            );
-            return Ok(());
-        }
-    };
-    target.activation = Some(activation);
     observation.record_target(writer, replay, &target)?;
     if replay.case.expects_title_animation {
         observe_title_animation(writer, locator, run_id, replay, observation)?;
@@ -217,7 +202,13 @@ fn observe_replay(
         );
         return Ok(());
     }
-    let capture_target = match OwnedWindowCaptureTarget::new(&target.window_name, window_bounds) {
+    let capture_target_result = match target.native_window_id {
+        Some(window_handle) => OwnedWindowCaptureTarget::new(window_handle, window_bounds),
+        None => Err(VisualError::Platform(
+            "owned UIA target did not expose a native HWND".to_owned(),
+        )),
+    };
+    let capture_target = match capture_target_result {
         Ok(target) => target,
         Err(error) => {
             observation.record_capture_blocked(&replay.case.fixture_name, error.to_string());
@@ -227,26 +218,43 @@ fn observe_replay(
     observe_capture(writer, replay, &capture_target, tab_bounds, observation)
 }
 
-fn activate_with_retry(
+fn locate_activated_capturable_with_retry(
     locator: WindowsUiaLocator,
     run_id: &str,
     replay: &super::FixtureReplay,
-) -> VisualResult<super::WindowActivation> {
-    let mut last_activation = None;
+) -> VisualResult<UiaDump> {
+    let mut last_target = None;
     let mut last_error = None;
-    for _ in 0..5 {
-        match locator.activate_owned_window_any(run_id, &replay.case.expected_title_frames) {
-            Ok(activation) if activation.set_foreground => return Ok(activation),
-            Ok(activation) => last_activation = Some(activation),
+    for _ in 0..20 {
+        match locator.locate_and_activate_any(run_id, &replay.case.expected_title_frames) {
+            Ok(target)
+                if target
+                    .activation
+                    .as_ref()
+                    .is_some_and(|value| value.set_foreground)
+                    && target_has_capturable_geometry(&target) =>
+            {
+                return Ok(target);
+            }
+            Ok(target) => last_target = Some(target),
             Err(error) => last_error = Some(error),
         }
         thread::sleep(Duration::from_millis(200));
     }
-    last_activation.ok_or_else(|| {
-        last_error.unwrap_or_else(|| {
-            VisualError::Platform("owned-window activation produced no observation".to_owned())
-        })
-    })
+    Err(last_error.unwrap_or_else(|| {
+        let detail = last_target.map_or_else(
+            || "no activated UIA target was observed".to_owned(),
+            |target| {
+                format!(
+                    "last target had activation={:?}; window={:?}; tab={:?}",
+                    target.activation, target.window_bounds, target.tab_bounds
+                )
+            },
+        );
+        VisualError::Platform(format!(
+            "owned-window activation produced no capturable observation: {detail}"
+        ))
+    }))
 }
 
 fn observe_title_animation(
@@ -811,6 +819,7 @@ fn empty_uia_dump() -> UiaDump {
         window_bounds: None,
         tab_bounds: None,
         native_window_handle: None,
+        native_window_id: None,
         window_has_keyboard_focus: None,
         activation: None,
         detail: "no owned UIA target was resolved".to_owned(),
