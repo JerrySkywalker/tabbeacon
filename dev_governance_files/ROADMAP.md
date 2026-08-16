@@ -236,7 +236,7 @@ Because this changes visible title semantics, exact-head L3 visual evidence is r
 
 Estimated effective engineering effort: **2–4 h**.
 
-## TB-G10 — Codex Hook Compatibility and Turn/Agent Awareness — ACCEPTANCE CANDIDATE; INITIAL L4 PASS
+## TB-G10 — Codex Hook Compatibility and Turn/Agent Awareness — COMPLETE
 
 **Purpose:** harden the Hooks backend against Codex lifecycle evolution before a long-lived animation worker depends on it.
 
@@ -269,9 +269,10 @@ Owner-completed isolated real-Codex L4 passed at implementation head
 isolated recorder profile, the real Owner Codex configuration was not changed,
 and no trust bypass was used. Codex 0.147.0 clamped the fixture's five-second
 `SessionEnd` timeout to three seconds, while the real Hook still completed and
-appeared in minimized evidence. Final closeout still requires local L0/L1/L2,
-exact-head hosted CI, and isolated real-Codex L4 at the final candidate head.
-Do not merge or begin G11 production before those final-head gates pass.
+appeared in minimized evidence. The closeout acceptance-candidate head
+`96e336fdd7de6d6f8fb15730816d5494b5d26158` passed local L0/L1/L2, hosted
+exact-head CI run `31940268156`, and fresh isolated real-Codex L4. The final
+COMPLETE metadata head must receive the same final-head gates before merge.
 
 Estimated effective engineering effort: **4–8 h**.
 

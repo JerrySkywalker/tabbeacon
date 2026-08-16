@@ -1,9 +1,11 @@
 # ADR 0008 — Exact Codex Hook Profile and Turn Generations
 
-- Status: Accepted implementation; release acceptance requires TB-G10 L4
+- Status: Accepted
 - Date: 2026-08-16
 - Goal: TB-G10
 - Amends: ADR 0007
+- Acceptance: TB-G10 isolated real-Codex L4 passed without trust bypass or
+  real Owner profile mutation
 
 ## Context
 

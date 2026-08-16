@@ -2,13 +2,11 @@
 
 ## Status
 
-ACCEPTANCE CANDIDATE. Local deterministic coverage, exact-head hosted CI, and
-the Owner-completed isolated real-Codex L4 smoke passed at implementation head
-`640e1ff1380c595148502f6eeaba8fc2bb983468`. Trust was granted only inside the
+COMPLETE. The acceptance-candidate head passed local L0/L1/L2, exact-head
+hosted CI, and fresh isolated real-Codex L4. Trust was granted only inside the
 isolated recorder profile; the real Owner Codex profile was not changed and no
-trust bypass was used. This goal is not COMPLETE until this closeout status is
-included in a final candidate that itself passes local L0/L1/L2, exact-head
-hosted CI, and final-head L4.
+trust bypass was used. This status update is included in the final candidate
+and therefore must receive the same final exact-head gates before merge.
 
 ## Admission
 
@@ -75,6 +73,24 @@ The isolated fixture declares a five-second timeout. For `SessionEnd`, Codex
 0.147.0 reported `clamping SessionEnd hook timeout to 3s`; the real Hook still
 completed and the sanitized `SessionEnd` record was present. This is accepted
 as observed installed-release behavior rather than a product failure.
+
+## Acceptance basis before closure-status update
+
+```text
+EXPECTED_HEAD=96e336fdd7de6d6f8fb15730816d5494b5d26158
+CODE_HEAD=96e336fdd7de6d6f8fb15730816d5494b5d26158
+LOCAL_VALIDATION=PASS
+CI=PASS
+CI_RUN=31940268156
+VISUAL_CI=N/A
+FINAL_G10_L4=PASS
+L4_CANDIDATE_BINARY_SHA256=db152c47c83f88c4b87a5cca67815a41f3dffda49014e9667896112b0dced680
+OWNER_REAL_CODEX_CONFIG_MUTATED=false
+TRUST_BYPASS_USED=false
+```
+
+The governed closeout maintains the final PR-head receipt externally because a
+Git commit cannot embed its own SHA without changing that SHA.
 
 ## Non-goals
 
