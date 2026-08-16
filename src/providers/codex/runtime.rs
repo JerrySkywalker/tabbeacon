@@ -15,7 +15,10 @@ use crate::{
     settings::{PresentationSettings, PresentationSettingsStore},
 };
 
-use super::{CodexHookNormalizer, CodexNormalization};
+use super::{
+    CodexHookNormalizer, CodexNormalization,
+    generation::{CodexGenerationStore, GenerationAdmission, RequestedHandling},
+};
 
 /// Fail-open result for one internal hook invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +27,10 @@ pub enum HookDispatchOutcome {
     Applied,
     /// A compact start deliberately left the current presentation untouched.
     PreservedCurrentState,
+    /// A thread-spawned subagent event was isolated from root presentation state.
+    IgnoredSubagent,
+    /// An event from a superseded turn was rejected before terminal output.
+    RejectedStaleGeneration,
     /// An unrecognized hook event was ignored for forward compatibility.
     IgnoredUnsupported,
     /// Invalid or incomplete input was contained without exposing raw content.
@@ -34,12 +41,15 @@ pub enum HookDispatchOutcome {
     DegradedPresentationOutput,
     /// No safe per-user `TabBeacon` state root was available.
     DegradedStateRoot,
+    /// Durable turn generation state was unavailable or incompatible.
+    DegradedGenerationState,
 }
 
 /// One-shot Codex hook execution through the existing product layers.
 #[derive(Debug, Clone)]
 pub struct CodexHookRuntime {
     identity_resolver: RepositoryIdentityResolver,
+    generation_store: CodexGenerationStore,
     renderer: WindowsTerminalRenderer,
 }
 
@@ -68,8 +78,10 @@ impl CodexHookRuntime {
         frame_color_supported: bool,
         settings: PresentationSettings,
     ) -> Self {
+        let state_root = state_root.into();
         Self {
-            identity_resolver: RepositoryIdentityResolver::new(state_root),
+            identity_resolver: RepositoryIdentityResolver::new(&state_root),
+            generation_store: CodexGenerationStore::new(&state_root),
             renderer: WindowsTerminalRenderer::with_settings(
                 WindowsTerminalCapabilities::new(frame_color_supported),
                 settings,
@@ -114,9 +126,38 @@ impl CodexHookRuntime {
             return HookDispatchOutcome::DegradedInput;
         };
         let normalized = match normalized {
-            CodexNormalization::Evidence(normalized) => normalized,
-            CodexNormalization::PreserveCurrentState => {
-                return HookDispatchOutcome::PreservedCurrentState;
+            CodexNormalization::Evidence(normalized) => {
+                match self
+                    .generation_store
+                    .admit(normalized.context(), RequestedHandling::Apply)
+                {
+                    Ok(GenerationAdmission::Apply) => normalized,
+                    Ok(GenerationAdmission::RejectStale) => {
+                        return HookDispatchOutcome::RejectedStaleGeneration;
+                    }
+                    Ok(GenerationAdmission::Preserve) => {
+                        unreachable!("apply handling cannot produce preserve admission")
+                    }
+                    Err(_) => return HookDispatchOutcome::DegradedGenerationState,
+                }
+            }
+            CodexNormalization::PreserveCurrentState(context) => {
+                return match self
+                    .generation_store
+                    .admit(&context, RequestedHandling::Preserve)
+                {
+                    Ok(GenerationAdmission::Preserve) => HookDispatchOutcome::PreservedCurrentState,
+                    Ok(GenerationAdmission::RejectStale) => {
+                        HookDispatchOutcome::RejectedStaleGeneration
+                    }
+                    Ok(GenerationAdmission::Apply) => {
+                        unreachable!("preserve handling cannot produce apply admission")
+                    }
+                    Err(_) => HookDispatchOutcome::DegradedGenerationState,
+                };
+            }
+            CodexNormalization::IgnoreSubagent(_) => {
+                return HookDispatchOutcome::IgnoredSubagent;
             }
             CodexNormalization::UnsupportedEvent => {
                 return HookDispatchOutcome::IgnoredUnsupported;

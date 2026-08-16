@@ -3,6 +3,7 @@
 - Status: Accepted
 - Date: 2026-08-14
 - Goal: TB-G05-CODEX-HOOKS
+- Amended by: ADR 0008
 
 ## Context
 
@@ -19,7 +20,7 @@ configured with `async = true`.
 
 ## Decision
 
-Install seven user-global command declarations for `SessionStart`,
+The original v0.1 decision installed seven user-global command declarations for `SessionStart`,
 `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop`,
 and `SessionEnd`. Every declaration invokes the internal
 `tabbeacon hook codex` ingress, is synchronous for `0.147.0` compatibility,
@@ -65,6 +66,8 @@ only exact owned fields and refuses drift.
   because hook stdout is captured and interpreted by Codex.
 - `doctor` reimplements the admitted `0.147.0` normalized hook hash only for
   read-only active/inactive diagnosis. A Codex version outside the admitted
-  compatibility floor fails that proof rather than guessing.
+  compatibility contract fails that proof rather than guessing. ADR 0008
+  replaces the version floor with an exact release profile and expands the
+  owned surface to eleven events for turn, subagent, and compact awareness.
 - TB-G06X remains the separate experimental higher-fidelity app-server track;
   TB-G07 remains responsible for autonomous provider-to-terminal E2E.

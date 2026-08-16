@@ -236,7 +236,7 @@ Because this changes visible title semantics, exact-head L3 visual evidence is r
 
 Estimated effective engineering effort: **2–4 h**.
 
-## TB-G10 — Codex Hook Compatibility and Turn/Agent Awareness
+## TB-G10 — Codex Hook Compatibility and Turn/Agent Awareness — COMPLETE
 
 **Purpose:** harden the Hooks backend against Codex lifecycle evolution before a long-lived animation worker depends on it.
 
@@ -261,6 +261,18 @@ Exit gate:
 - setup preserves unrelated hooks and the official trust boundary.
 
 This goal should use upstream/source research as evidence, but production behavior must be frozen against an actually admitted Codex version/profile rather than upstream `main` alone.
+
+Current candidate profile is `codex-hooks-rust-v0.147.0`, audited from the
+official `rust-v0.147.0` tag. Local deterministic coverage is implemented. The
+Owner-completed isolated real-Codex L4 passed at implementation head
+`640e1ff1380c595148502f6eeaba8fc2bb983468`; Hook trust exists only in the
+isolated recorder profile, the real Owner Codex configuration was not changed,
+and no trust bypass was used. Codex 0.147.0 clamped the fixture's five-second
+`SessionEnd` timeout to three seconds, while the real Hook still completed and
+appeared in minimized evidence. The closeout acceptance-candidate head
+`96e336fdd7de6d6f8fb15730816d5494b5d26158` passed local L0/L1/L2, hosted
+exact-head CI run `31940268156`, and fresh isolated real-Codex L4. The final
+COMPLETE metadata head must receive the same final-head gates before merge.
 
 Estimated effective engineering effort: **4–8 h**.
 
