@@ -93,8 +93,8 @@ fn guided_setup() -> ExitCode {
         Ok(store) => store,
         Err(error) => return management_error("SETUP", &error),
     };
-    let before = match store.load_read_only() {
-        Ok(settings) => settings,
+    let snapshot = match store.snapshot_read_only() {
+        Ok(snapshot) => snapshot,
         Err(error) => {
             eprintln!("SETUP=FAIL");
             eprintln!("REASON={error}");
@@ -102,6 +102,7 @@ fn guided_setup() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let before = snapshot.settings();
     let integration = match CodexIntegration::from_environment() {
         Ok(integration) => integration,
         Err(error) => return management_error("SETUP", &error),
@@ -124,7 +125,15 @@ fn guided_setup() -> ExitCode {
     };
     let plan = SetupPlan::new(before, discovery).with_draft(draft);
     println!("Preview");
-    print_preview_result(plan.preview_settings());
+    let preview_exit = print_preview_result(plan.preview_settings());
+    if preview_exit != ExitCode::SUCCESS {
+        eprintln!("SETUP=BLOCKED");
+        eprintln!("REASON=preview must succeed before setup can apply changes");
+        eprintln!("SETTINGS_UNCHANGED=true");
+        eprintln!("CODEX_CONFIG_UNCHANGED=true");
+        eprintln!("HOOKS_UNCHANGED=true");
+        return preview_exit;
+    }
     let decision = match prompt_setup_decision() {
         Ok(decision) => decision,
         Err(error) => return setup_input_error(&error),
@@ -140,7 +149,7 @@ fn guided_setup() -> ExitCode {
             println!("OWNER_ACTION=none");
             ExitCode::SUCCESS
         }
-        SetupDecision::Apply => match plan.apply(&store, |owns_title| {
+        SetupDecision::Apply => match plan.apply(&store, &snapshot, |owns_title| {
             integration
                 .setup_with_title_ownership(owns_title)
                 .map_err(|error| error.to_string())
@@ -182,16 +191,20 @@ fn print_setup_outcome(outcome: SetupOutcome) -> ExitCode {
         SetupOutcome::InstalledTrustReviewRequired => {
             println!("CODEX_INTEGRATION=INSTALLED");
             println!("HOOK_TRUST=REVIEW_REQUIRED");
-            println!("OWNER_ACTION=launch codex and trust the TabBeacon hooks in /hooks");
+            println!(
+                "OWNER_ACTION=launch codex, review TabBeacon hooks in /hooks, then run tabbeacon doctor"
+            );
         }
         SetupOutcome::Upgraded => {
             println!("CODEX_INTEGRATION=UPGRADED");
             println!("HOOK_TRUST=REVIEW_REQUIRED");
-            println!("OWNER_ACTION=launch codex and trust the updated TabBeacon hooks in /hooks");
+            println!(
+                "OWNER_ACTION=launch codex, review updated TabBeacon hooks in /hooks, then run tabbeacon doctor"
+            );
         }
         SetupOutcome::AlreadyInstalled => {
             println!("CODEX_INTEGRATION=ALREADY_INSTALLED");
-            println!("OWNER_ACTION=run tabbeacon doctor to verify hook trust");
+            println!("OWNER_ACTION=run tabbeacon doctor to verify hook trust and configuration");
         }
     }
     ExitCode::SUCCESS

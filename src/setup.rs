@@ -10,7 +10,8 @@ use std::{env, path::PathBuf, process::Command};
 use crate::{
     providers::codex::{CodexDoctorReport, CodexHookProfile, DoctorStatus, SetupOutcome},
     settings::{
-        ConditionalSaveOutcome, PresentationSettings, PresentationSettingsStore, SettingsError,
+        ConditionalSaveOutcome, PresentationSettings, PresentationSettingsSnapshot,
+        PresentationSettingsStore, SettingsError, SnapshotSaveOutcome,
     },
 };
 
@@ -212,7 +213,7 @@ impl SetupPlan {
         self
     }
 
-    /// Original effective settings used for conflict detection and compensation.
+    /// Original effective settings rendered to the user and bound to the snapshot.
     #[must_use]
     pub fn before(&self) -> PresentationSettings {
         self.before
@@ -258,17 +259,21 @@ impl SetupPlan {
     pub fn apply(
         &self,
         store: &PresentationSettingsStore,
+        snapshot: &PresentationSettingsSnapshot,
         setup: impl FnOnce(bool) -> Result<SetupOutcome, String>,
     ) -> Result<SetupApplyResult, SettingsError> {
-        match store.save_if_unchanged(self.before, self.draft)? {
-            ConditionalSaveOutcome::Conflict => return Ok(SetupApplyResult::SettingsConflict),
-            ConditionalSaveOutcome::Saved => {}
+        if snapshot.settings() != self.before {
+            return Ok(SetupApplyResult::SettingsConflict);
         }
+        let receipt = match store.save_snapshot_if_unchanged(snapshot, self.draft)? {
+            SnapshotSaveOutcome::Conflict => return Ok(SetupApplyResult::SettingsConflict),
+            SnapshotSaveOutcome::Saved(receipt) => receipt,
+        };
         match setup(self.draft.title().owns_tabbeacon_title()) {
             Ok(outcome) => Ok(SetupApplyResult::Applied(outcome)),
             Err(reason) => {
                 let settings_restored = matches!(
-                    store.save_if_unchanged(self.draft, self.before),
+                    store.restore_snapshot_if_unchanged(&receipt, snapshot),
                     Ok(ConditionalSaveOutcome::Saved)
                 );
                 Ok(SetupApplyResult::SetupFailed {
@@ -367,8 +372,12 @@ mod tests {
             .expect("config parent")
             .parent()
             .expect("state root");
+        let store = PresentationSettingsStore::new(&path);
+        let snapshot = store
+            .snapshot_read_only()
+            .expect("absent settings snapshot");
         let draft = PresentationSettings::preset("full").expect("known preset");
-        let plan = SetupPlan::new(PresentationSettings::default(), discovery()).with_draft(draft);
+        let plan = SetupPlan::new(snapshot.settings(), discovery()).with_draft(draft);
 
         assert_eq!(plan.preview_settings(), draft);
         assert_eq!(plan.cancel(), SetupApplyResult::Cancelled);
@@ -379,6 +388,9 @@ mod tests {
     fn apply_persists_the_typed_draft_and_reuses_title_ownership() {
         let path = temporary_config("apply");
         let store = PresentationSettingsStore::new(&path);
+        let snapshot = store
+            .snapshot_read_only()
+            .expect("absent settings snapshot");
         let draft = PresentationSettings::new(
             TitleMode::Native,
             TabColorMode::Native,
@@ -386,11 +398,11 @@ mod tests {
             SpinnerPreset::Braille,
             PresentationTheme::Classic,
         );
-        let plan = SetupPlan::new(PresentationSettings::default(), discovery()).with_draft(draft);
+        let plan = SetupPlan::new(snapshot.settings(), discovery()).with_draft(draft);
         let requested_title_ownership = Cell::new(None);
 
         let result = plan
-            .apply(&store, |owns_title| {
+            .apply(&store, &snapshot, |owns_title| {
                 requested_title_ownership.set(Some(owns_title));
                 Ok(SetupOutcome::AlreadyInstalled)
             })
@@ -417,11 +429,16 @@ mod tests {
         let store = PresentationSettingsStore::new(&path);
         let before = PresentationSettings::default();
         store.save(before).expect("baseline settings save");
+        let snapshot = store
+            .snapshot_read_only()
+            .expect("baseline settings snapshot");
         let plan = SetupPlan::new(before, discovery())
             .with_draft(PresentationSettings::preset("native").expect("known preset"));
 
         let result = plan
-            .apply(&store, |_| Err("ownership preflight failed".to_owned()))
+            .apply(&store, &snapshot, |_| {
+                Err("ownership preflight failed".to_owned())
+            })
             .expect("settings save and compensation complete");
 
         assert_eq!(
@@ -442,11 +459,178 @@ mod tests {
     }
 
     #[test]
+    fn failed_provider_setup_restores_an_absent_settings_document() {
+        let path = temporary_config("restore-absent");
+        let root = path
+            .parent()
+            .expect("config parent")
+            .parent()
+            .expect("state root");
+        let store = PresentationSettingsStore::new(&path);
+        let snapshot = store
+            .snapshot_read_only()
+            .expect("absent settings snapshot");
+        assert!(snapshot.is_absent());
+        let plan = SetupPlan::new(snapshot.settings(), discovery())
+            .with_draft(PresentationSettings::preset("native").expect("known preset"));
+
+        let result = plan
+            .apply(&store, &snapshot, |_| {
+                Err("ownership preflight failed".to_owned())
+            })
+            .expect("settings save and compensation complete");
+
+        assert_eq!(
+            result,
+            SetupApplyResult::SetupFailed {
+                reason: "ownership preflight failed".to_owned(),
+                settings_restored: true,
+            }
+        );
+        assert!(
+            !path.exists(),
+            "rollback must restore an originally absent settings document"
+        );
+        fs::remove_dir_all(root).expect("fixture root removes");
+    }
+
+    #[test]
+    fn failed_provider_setup_restores_the_original_document_bytes() {
+        let path = temporary_config("restore-bytes");
+        let parent = path.parent().expect("config parent");
+        fs::create_dir_all(parent).expect("config parent creates");
+        let original = br#"# Preserve comments and unknown user settings.
+[custom]
+value = "keep"
+
+[presentation]
+title = "tabbeacon"
+tab_color = "tabbeacon"
+activity = "title-indicator"
+spinner = "codex"
+theme = "muted-dark"
+"#;
+        fs::write(&path, original).expect("baseline document writes");
+        let store = PresentationSettingsStore::new(&path);
+        let snapshot = store
+            .snapshot_read_only()
+            .expect("baseline settings snapshot");
+        let plan = SetupPlan::new(snapshot.settings(), discovery())
+            .with_draft(PresentationSettings::preset("native").expect("known preset"));
+
+        let result = plan
+            .apply(&store, &snapshot, |_| {
+                Err("ownership preflight failed".to_owned())
+            })
+            .expect("settings save and compensation complete");
+
+        assert_eq!(
+            result,
+            SetupApplyResult::SetupFailed {
+                reason: "ownership preflight failed".to_owned(),
+                settings_restored: true,
+            }
+        );
+        assert_eq!(
+            fs::read(&path).expect("restored document reads"),
+            original,
+            "rollback must restore comments and unknown user configuration exactly"
+        );
+        fs::remove_dir_all(parent.parent().expect("state root")).expect("fixture root removes");
+    }
+
+    #[test]
+    fn failed_provider_setup_preserves_a_concurrent_settings_update() {
+        let path = temporary_config("restore-concurrent");
+        let store = PresentationSettingsStore::new(&path);
+        let before = PresentationSettings::default();
+        store.save(before).expect("baseline settings save");
+        let snapshot = store
+            .snapshot_read_only()
+            .expect("baseline settings snapshot");
+        let plan = SetupPlan::new(before, discovery())
+            .with_draft(PresentationSettings::preset("native").expect("known preset"));
+        let concurrent = before.with_theme(PresentationTheme::Classic);
+
+        let result = plan
+            .apply(&store, &snapshot, |_| {
+                store.save(concurrent).map_err(|error| error.to_string())?;
+                Err("ownership preflight failed".to_owned())
+            })
+            .expect("provider failure is a normal result");
+
+        assert_eq!(
+            result,
+            SetupApplyResult::SetupFailed {
+                reason: "ownership preflight failed".to_owned(),
+                settings_restored: false,
+            }
+        );
+        assert_eq!(
+            store.load().expect("concurrent settings survive rollback"),
+            concurrent
+        );
+        fs::remove_dir_all(
+            path.parent()
+                .expect("config parent")
+                .parent()
+                .expect("state root"),
+        )
+        .expect("fixture root removes");
+    }
+
+    #[test]
+    fn failed_provider_setup_preserves_a_same_settings_raw_document_update() {
+        let path = temporary_config("restore-raw-concurrent");
+        let store = PresentationSettingsStore::new(&path);
+        let before = PresentationSettings::default();
+        store.save(before).expect("baseline settings save");
+        let snapshot = store
+            .snapshot_read_only()
+            .expect("baseline settings snapshot");
+        let plan = SetupPlan::new(before, discovery())
+            .with_draft(PresentationSettings::preset("native").expect("known preset"));
+
+        let result = plan
+            .apply(&store, &snapshot, |_| {
+                let mut concurrent = fs::read(&path).expect("guided document reads");
+                concurrent.extend_from_slice(b"# concurrent unknown setting preservation\n");
+                fs::write(&path, &concurrent).expect("concurrent document writes");
+                Err("ownership preflight failed".to_owned())
+            })
+            .expect("provider failure is a normal result");
+
+        assert_eq!(
+            result,
+            SetupApplyResult::SetupFailed {
+                reason: "ownership preflight failed".to_owned(),
+                settings_restored: false,
+            }
+        );
+        assert!(
+            fs::read(&path)
+                .expect("concurrent document reads")
+                .ends_with(b"# concurrent unknown setting preservation\n"),
+            "rollback must not overwrite a same-effective document changed by another writer"
+        );
+        fs::remove_dir_all(
+            path.parent()
+                .expect("config parent")
+                .parent()
+                .expect("state root"),
+        )
+        .expect("fixture root removes");
+    }
+
+    #[test]
     fn stale_plan_does_not_overwrite_a_concurrent_settings_change() {
         let path = temporary_config("conflict");
         let store = PresentationSettingsStore::new(&path);
         let before = PresentationSettings::default();
         store.save(before).expect("baseline settings save");
+        let snapshot = store
+            .snapshot_read_only()
+            .expect("baseline settings snapshot");
         let plan = SetupPlan::new(before, discovery())
             .with_draft(PresentationSettings::preset("native").expect("known preset"));
         let concurrent = before.with_theme(PresentationTheme::Classic);
@@ -454,7 +638,7 @@ mod tests {
         let setup_called = Cell::new(false);
 
         let result = plan
-            .apply(&store, |_| {
+            .apply(&store, &snapshot, |_| {
                 setup_called.set(true);
                 Ok(SetupOutcome::AlreadyInstalled)
             })
