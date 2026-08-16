@@ -16,7 +16,7 @@ use tabbeacon::setup::{
     SetupApplyResult, SetupDecision, SetupDiscovery, SetupPlan, detect_windows_terminal,
 };
 use tabbeacon::{
-    activity::run_activity_worker_system,
+    activity::{run_activity_cleanup_observer_system, run_activity_worker_system},
     core::{Attention, Health, Phase},
     presentation::{
         PresentationPolicy, SemanticPresentationInput, WindowsTerminalCapabilities,
@@ -38,6 +38,31 @@ fn main() -> ExitCode {
                 (generation.parse::<u64>(), revision.parse::<u64>())
             {
                 run_activity_worker_system(key_digest, generation, revision);
+            }
+            ExitCode::SUCCESS
+        }
+        [
+            command,
+            worker_pid,
+            key_digest,
+            generation,
+            revision,
+            owner_sha256,
+            expected_executable,
+        ] if command == "__activity-cleanup-observer-v1" => {
+            if let (Ok(worker_pid), Ok(generation), Ok(revision)) = (
+                worker_pid.parse::<u32>(),
+                generation.parse::<u64>(),
+                revision.parse::<u64>(),
+            ) {
+                run_activity_cleanup_observer_system(
+                    worker_pid,
+                    key_digest,
+                    generation,
+                    revision,
+                    owner_sha256,
+                    expected_executable,
+                );
             }
             ExitCode::SUCCESS
         }
