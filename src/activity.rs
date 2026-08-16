@@ -10,8 +10,11 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
@@ -37,6 +40,10 @@ const LEASE_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 const FRAME_INTERVAL_MS: u64 = 180;
 const PREDECESSOR_WAIT_MS: u64 = 750;
 const PREDECESSOR_POLL_MS: u64 = 25;
+const CLEANUP_OBSERVER_POLL_MS: u64 = 1_000;
+const CLEANUP_OBSERVER_QUERY_TIMEOUT_MS: u64 = 5_000;
+const CLEANUP_OBSERVER_UNKNOWN_MAX_MS: u64 = 30_000;
+const CLEANUP_OBSERVER_REAP_TIMEOUT_MS: u64 = 1_000;
 const MAX_DIAGNOSTIC_LEASE_FILES: usize = 512;
 const MAX_DIAGNOSTIC_LEASE_BYTES: u64 = 128 * 1_024;
 
@@ -298,11 +305,20 @@ impl ActivityCoordinator {
                         let _ = self.store.deactivate_if_owned(&lease, unix_ms());
                         return ActivityRender::Suppress;
                     }
-                    if spawn_worker(executable, &lease).is_err() {
+                    if let Ok(worker_pid) = spawn_worker(executable, &lease) {
+                        if spawn_cleanup_observer(executable, &lease, worker_pid).is_ok() {
+                            ActivityRender::WithoutTitle
+                        } else {
+                            // A console-attached worker can be terminated with its
+                            // terminal. Without the detached observer, leaving the
+                            // lease active would suppress future presentation, so
+                            // fail open to the static one-shot rendering instead.
+                            let _ = self.store.deactivate_if_owned(&lease, unix_ms());
+                            ActivityRender::Full
+                        }
+                    } else {
                         let _ = self.store.deactivate_if_owned(&lease, unix_ms());
                         ActivityRender::Full
-                    } else {
-                        ActivityRender::WithoutTitle
                     }
                 }
                 LeaseTransition::Stopped { .. } => {
@@ -412,6 +428,92 @@ pub fn run_activity_worker_system(key_digest: &str, generation: u64, revision: u
     );
 }
 
+/// Clears only a terminal-ended worker's exact lease from a detached,
+/// session-scoped observer.
+pub fn run_activity_cleanup_observer_system(
+    worker_pid: u32,
+    key_digest: &str,
+    generation: u64,
+    revision: u64,
+    owner_sha256: &str,
+    expected_executable: &str,
+) {
+    if worker_pid == 0
+        || !is_sha256(key_digest)
+        || !is_sha256(owner_sha256)
+        || !is_safe_normalized_path(expected_executable)
+    {
+        return;
+    }
+    let Ok(state_root) = crate::repo::StableAliasRegistry::default_state_root() else {
+        return;
+    };
+    let store = ActivityLeaseStore::new(state_root);
+    let ownership = WorkerOwnership {
+        key_sha256: key_digest.to_owned(),
+        generation,
+        revision,
+        owner_sha256: owner_sha256.to_owned(),
+    };
+    let mut unknown_observation: Option<(WorkerLease, u64)> = None;
+    loop {
+        let now = unix_ms();
+        // A read failure is not proof that the worker exited. Preserve the
+        // exact lease and let its bounded TTL protect the next transition.
+        let Ok(lease) = store.with_lock(|| store.load(&ownership.key_sha256)) else {
+            return;
+        };
+        let Some(observed) = lease else {
+            return;
+        };
+        let liveness = worker_process_liveness(worker_pid, &ownership, expected_executable);
+        let unknown_timeout_elapsed = matches!(liveness, WorkerProcessLiveness::Unknown)
+            && unknown_observation
+                .as_ref()
+                .is_some_and(|(snapshot, started)| {
+                    snapshot == &observed
+                        && now.saturating_sub(*started) >= CLEANUP_OBSERVER_UNKNOWN_MAX_MS
+                });
+        match cleanup_observer_action(
+            Some(&observed),
+            &ownership,
+            now,
+            liveness,
+            unknown_timeout_elapsed,
+        ) {
+            CleanupObserverAction::Deactivate(reason) => {
+                if store
+                    .deactivate_observed_worker(&observed, unix_ms())
+                    .unwrap_or(false)
+                {
+                    let _ = store.write_exit(&ownership, reason);
+                    return;
+                }
+                // A same-owner refresh may have won while the liveness query
+                // was in flight. That newer snapshot was deliberately
+                // preserved; continue observing it rather than leaving an
+                // active lease without a cleanup observer.
+                unknown_observation = None;
+                thread::sleep(Duration::from_millis(CLEANUP_OBSERVER_POLL_MS));
+            }
+            CleanupObserverAction::Stop => return,
+            CleanupObserverAction::Wait => {
+                unknown_observation = if matches!(liveness, WorkerProcessLiveness::Unknown) {
+                    match unknown_observation {
+                        Some((snapshot, started)) if snapshot == observed => {
+                            Some((snapshot, started))
+                        }
+                        _ => Some((observed, now)),
+                    }
+                } else {
+                    None
+                };
+                thread::sleep(Duration::from_millis(CLEANUP_OBSERVER_POLL_MS));
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct WorkerLease {
     schema: String,
@@ -438,13 +540,6 @@ impl WorkerLease {
             owner_sha256: self.owner_sha256.clone(),
         }
     }
-
-    fn same_worker(&self, other: &Self) -> bool {
-        self.key_sha256 == other.key_sha256
-            && self.generation == other.generation
-            && self.revision == other.revision
-            && self.owner_sha256 == other.owner_sha256
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -453,6 +548,51 @@ struct WorkerOwnership {
     generation: u64,
     revision: u64,
     owner_sha256: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerProcessLiveness {
+    Alive,
+    Exited,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CleanupObserverAction {
+    Deactivate(&'static str),
+    Stop,
+    Wait,
+}
+
+fn cleanup_observer_action(
+    lease: Option<&WorkerLease>,
+    ownership: &WorkerOwnership,
+    now: u64,
+    liveness: WorkerProcessLiveness,
+    unknown_timeout_elapsed: bool,
+) -> CleanupObserverAction {
+    let Some(lease) = lease else {
+        return CleanupObserverAction::Stop;
+    };
+    if lease.ownership() != *ownership || !lease.active {
+        return CleanupObserverAction::Stop;
+    }
+    if now > lease.expires_unix_ms {
+        return CleanupObserverAction::Deactivate("lease_expired");
+    }
+    match liveness {
+        WorkerProcessLiveness::Exited => CleanupObserverAction::Deactivate("worker_process_ended"),
+        WorkerProcessLiveness::Unknown if unknown_timeout_elapsed => {
+            // The exact observed lease is deliberately settled after the
+            // bounded dual-probe outage. This is a decoration-only fail-open
+            // transition; it never targets a process and it cannot clear a
+            // lease refreshed after this observer's snapshot.
+            CleanupObserverAction::Deactivate("liveness_unavailable")
+        }
+        WorkerProcessLiveness::Alive | WorkerProcessLiveness::Unknown => {
+            CleanupObserverAction::Wait
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -598,18 +738,44 @@ impl ActivityLeaseStore {
     }
 
     fn deactivate_if_owned(&self, expected: &WorkerLease, now: u64) -> io::Result<()> {
+        self.deactivate_owned_worker(&expected.ownership(), now)
+            .map(|_| ())
+    }
+
+    fn deactivate_owned_worker(&self, expected: &WorkerOwnership, now: u64) -> io::Result<bool> {
         self.with_lock(|| {
             let Some(mut current) = self.load(&expected.key_sha256)? else {
-                return Ok(());
+                return Ok(false);
             };
-            if current.same_worker(expected) && current.active {
+            if current.ownership() == *expected && current.active {
                 current.active = false;
                 current.presentation = None;
                 current.updated_unix_ms = now;
                 current.expires_unix_ms = now;
                 self.write(&current)?;
+                return Ok(true);
             }
-            Ok(())
+            Ok(false)
+        })
+    }
+
+    /// Deactivates only if the active lease is exactly the snapshot observed
+    /// before an external liveness query. A same-owner refresh is a newer
+    /// state, and must never be cleared by an observer that saw the older one.
+    fn deactivate_observed_worker(&self, observed: &WorkerLease, now: u64) -> io::Result<bool> {
+        self.with_lock(|| {
+            let Some(mut current) = self.load(&observed.key_sha256)? else {
+                return Ok(false);
+            };
+            if current == *observed && current.active {
+                current.active = false;
+                current.presentation = None;
+                current.updated_unix_ms = now;
+                current.expires_unix_ms = now;
+                self.write(&current)?;
+                return Ok(true);
+            }
+            Ok(false)
         })
     }
 
@@ -661,14 +827,17 @@ impl ActivityLeaseStore {
             return;
         };
         let Some(presentation) = initial.presentation.clone() else {
+            let _ = self.deactivate_if_owned(&initial, unix_ms());
             let _ = self.write_exit(&ownership, "inactive");
             return;
         };
         let Some(spinner) = presentation.spinner() else {
+            let _ = self.deactivate_if_owned(&initial, unix_ms());
             let _ = self.write_exit(&ownership, "invalid_presentation");
             return;
         };
         let Ok(mut console) = open_owned_console() else {
+            let _ = self.deactivate_if_owned(&initial, unix_ms());
             let _ = self.write_exit(&ownership, "terminal_unavailable");
             return;
         };
@@ -711,6 +880,7 @@ impl ActivityLeaseStore {
             frame_index = frame_index.saturating_add(1);
             thread::sleep(Duration::from_millis(FRAME_INTERVAL_MS));
         }
+        let _ = self.deactivate_if_owned(&initial, unix_ms());
         let _ = self.write_exit(&ownership, reason);
     }
 
@@ -916,7 +1086,7 @@ fn validate_lease(lease: &WorkerLease) -> io::Result<()> {
     Ok(())
 }
 
-fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<()> {
+fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
     Command::new(executable)
         .args([
             "__activity-worker-v1",
@@ -928,7 +1098,215 @@ fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map(|_| ())
+        .map(|child| child.id())
+}
+
+fn spawn_cleanup_observer(
+    executable: &Path,
+    lease: &WorkerLease,
+    worker_pid: u32,
+) -> io::Result<()> {
+    let expected_executable = normalized_executable_path(executable)?;
+    let mut command = Command::new(executable);
+    command
+        .args([
+            "__activity-cleanup-observer-v1",
+            &worker_pid.to_string(),
+            &lease.key_sha256,
+            &lease.generation.to_string(),
+            &lease.revision.to_string(),
+            &lease.owner_sha256,
+            &expected_executable,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(0x0000_0008 | 0x0000_0200);
+    command.spawn().map(|_| ())
+}
+
+fn worker_process_liveness(
+    worker_pid: u32,
+    ownership: &WorkerOwnership,
+    expected_executable: &str,
+) -> WorkerProcessLiveness {
+    let Some(powershell) = system_powershell_path() else {
+        return WorkerProcessLiveness::Unknown;
+    };
+    let expected_pattern = format!(
+        "(^|\\s)__activity-worker-v1 {} {} {}(\\s|$)",
+        ownership.key_sha256, ownership.generation, ownership.revision
+    );
+    // The observer accepts `Exited` only when the system-owned PowerShell
+    // command completed and returned its narrow sentinel. Querying command-line
+    // identity prevents PID reuse or another TabBeacon process from clearing a
+    // live lease. Every interpolated field is a validated digest or integer;
+    // the executable path is provided through a process-local environment
+    // variable rather than interpolated into PowerShell source.
+    let command = format!(
+        "$process = Get-CimInstance -ClassName Win32_Process -Filter 'ProcessId = {worker_pid}' -ErrorAction Stop; \
+         if ($null -eq $process) {{ 'EXITED' }} \
+         elseif ([string]::IsNullOrWhiteSpace($process.ExecutablePath)) {{ 'UNKNOWN' }} \
+         else {{ \
+           $actual = [IO.Path]::GetFullPath($process.ExecutablePath).Replace('\\','/').ToLowerInvariant(); \
+           if (($actual -eq $env:TABBEACON_EXPECTED_WORKER_PATH) -and ($process.CommandLine -match '{expected_pattern}')) {{ 'ALIVE' }} else {{ 'EXITED' }} \
+         }}"
+    );
+    let mut query = Command::new(powershell);
+    query
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &command,
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .env("TABBEACON_EXPECTED_WORKER_PATH", expected_executable);
+    #[cfg(windows)]
+    query.creation_flags(0x0800_0000);
+    let output = command_output_with_timeout(
+        &mut query,
+        Duration::from_millis(CLEANUP_OBSERVER_QUERY_TIMEOUT_MS),
+    );
+    let Ok(output) = output else {
+        return tasklist_liveness_fallback(worker_pid);
+    };
+    if !output.status.success() {
+        return tasklist_liveness_fallback(worker_pid);
+    }
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "ALIVE" => WorkerProcessLiveness::Alive,
+        "EXITED" => WorkerProcessLiveness::Exited,
+        _ => WorkerProcessLiveness::Unknown,
+    }
+}
+
+fn tasklist_liveness_fallback(worker_pid: u32) -> WorkerProcessLiveness {
+    tasklist_process_absence(worker_pid).map_or(WorkerProcessLiveness::Unknown, |absent| {
+        if absent {
+            WorkerProcessLiveness::Exited
+        } else {
+            WorkerProcessLiveness::Unknown
+        }
+    })
+}
+
+fn system_powershell_path() -> Option<PathBuf> {
+    system_directory_path("WindowsPowerShell\\v1.0\\powershell.exe")
+}
+
+fn normalized_executable_path(path: &Path) -> io::Result<String> {
+    let canonical = fs::canonicalize(path)?;
+    let normalized = canonical
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_lowercase();
+    if is_safe_normalized_path(&normalized) {
+        Ok(normalized)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "activity worker executable path is unsafe",
+        ))
+    }
+}
+
+fn is_safe_normalized_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 32_768
+        && !path.chars().any(char::is_control)
+        && path.contains(':')
+        && !path.contains('\\')
+}
+
+fn system_tasklist_path() -> Option<PathBuf> {
+    system_directory_path("tasklist.exe")
+}
+
+fn system_directory_path(suffix: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(env::var_os("SystemRoot")?)
+        .join("System32")
+        .join(suffix);
+    path.is_file().then_some(path)
+}
+
+fn tasklist_process_absence(worker_pid: u32) -> Option<bool> {
+    let tasklist = system_tasklist_path()?;
+    let mut command = Command::new(tasklist);
+    command
+        .args(["/FI", &format!("PID eq {worker_pid}"), "/FO", "CSV", "/NH"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let output = command_output_with_timeout(
+        &mut command,
+        Duration::from_millis(CLEANUP_OBSERVER_QUERY_TIMEOUT_MS),
+    )
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let process_rows = stdout
+        .lines()
+        .filter(|line| line.trim_start().starts_with('"'))
+        .count();
+    (process_rows == 0).then_some(true)
+}
+
+fn command_output_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> io::Result<std::process::Output> {
+    command.stdout(Stdio::piped());
+    let mut child = command.spawn()?;
+    let deadline = deadline_after(timeout);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output(),
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = reap_owned_child_until(
+                    &mut child,
+                    deadline_after(Duration::from_millis(CLEANUP_OBSERVER_REAP_TIMEOUT_MS)),
+                );
+                return Err(error);
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = reap_owned_child_until(
+                &mut child,
+                deadline_after(Duration::from_millis(CLEANUP_OBSERVER_REAP_TIMEOUT_MS)),
+            );
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "bounded activity liveness command exceeded its deadline",
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn deadline_after(timeout: Duration) -> Instant {
+    Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now)
+}
+
+fn reap_owned_child_until(child: &mut std::process::Child, deadline: Instant) -> io::Result<bool> {
+    loop {
+        match child.try_wait()? {
+            Some(_) => return Ok(true),
+            None if Instant::now() >= deadline => return Ok(false),
+            None => thread::sleep(Duration::from_millis(25)),
+        }
+    }
 }
 
 fn executable_owner_sha256(path: &Path) -> io::Result<String> {
@@ -1031,12 +1409,18 @@ fn open_owned_console() -> io::Result<std::fs::File> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, time::SystemTime};
+    use std::{
+        fs,
+        path::PathBuf,
+        process::{Command, Stdio},
+        time::{Duration, SystemTime},
+    };
 
     use super::{
         ActivityCoordinator, ActivityExecution, ActivityLeaseHealth, ActivityLeaseStore,
-        ActivityRender, LeaseTransition, WorkerKey, WorkerPresentation,
-        inspect_activity_leases_read_only,
+        ActivityRender, CleanupObserverAction, LeaseTransition, WorkerKey, WorkerPresentation,
+        WorkerProcessLiveness, cleanup_observer_action, command_output_with_timeout,
+        inspect_activity_leases_read_only, system_powershell_path,
     };
     use crate::{
         core::{Attention, Health, Phase},
@@ -1358,6 +1742,187 @@ mod tests {
                 .load_worker_lease(&ownership, &digest('c'), 1_201)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn worker_exit_deactivates_only_its_owned_active_lease() {
+        let root = TestRoot::new("worker-exit-deactivation");
+        let store = ActivityLeaseStore::new(&root.0);
+        let worker = key(1, 'a', 'c');
+        let owner = digest('d');
+        let LeaseTransition::Published { lease, .. } = store
+            .publish_active(&worker, 1, &owner, &presentation(), 1_000)
+            .expect("active lease publishes")
+        else {
+            panic!("expected active lease publication");
+        };
+
+        store
+            .deactivate_if_owned(&lease, 1_001)
+            .expect("owned worker exit deactivates lease");
+
+        let current = store
+            .load(worker.digest())
+            .expect("deactivated lease reads")
+            .expect("deactivated lease exists");
+        assert!(!current.active);
+        assert!(current.presentation.is_none());
+        assert_eq!(current.expires_unix_ms, 1_001);
+    }
+
+    #[test]
+    fn cleanup_observer_liveness_error_is_bounded_then_fails_open() {
+        let root = TestRoot::new("cleanup-liveness-error");
+        let store = ActivityLeaseStore::new(&root.0);
+        let worker = key(1, 'a', 'c');
+        let owner = digest('d');
+        let LeaseTransition::Published { lease, .. } = store
+            .publish_active(&worker, 1, &owner, &presentation(), 1_000)
+            .expect("active lease publishes")
+        else {
+            panic!("expected active lease publication");
+        };
+        let ownership = lease.ownership();
+
+        assert_eq!(
+            cleanup_observer_action(
+                Some(&lease),
+                &ownership,
+                1_001,
+                WorkerProcessLiveness::Unknown,
+                false,
+            ),
+            CleanupObserverAction::Wait
+        );
+        assert!(
+            store
+                .load(worker.digest())
+                .expect("lease reads")
+                .is_some_and(|current| current.active),
+            "a liveness-query error must not clear an active lease"
+        );
+        assert_eq!(
+            cleanup_observer_action(
+                Some(&lease),
+                &ownership,
+                31_001,
+                WorkerProcessLiveness::Unknown,
+                true,
+            ),
+            CleanupObserverAction::Deactivate("liveness_unavailable")
+        );
+        assert!(
+            store
+                .deactivate_observed_worker(&lease, 31_001)
+                .expect("bounded observer settles its exact snapshot"),
+            "the bounded fail-open path clears only its owned snapshot"
+        );
+        assert!(
+            store
+                .load(worker.digest())
+                .expect("settled lease reads")
+                .is_some_and(|current| !current.active),
+            "bounded liveness loss cannot leave an active lease indefinitely"
+        );
+    }
+
+    #[test]
+    fn cleanup_observer_deactivates_only_for_exit_or_expiry() {
+        let root = TestRoot::new("cleanup-action");
+        let store = ActivityLeaseStore::new(&root.0);
+        let worker = key(1, 'a', 'c');
+        let owner = digest('d');
+        let LeaseTransition::Published { lease, .. } = store
+            .publish_active(&worker, 1, &owner, &presentation(), 1_000)
+            .expect("active lease publishes")
+        else {
+            panic!("expected active lease publication");
+        };
+        let ownership = lease.ownership();
+
+        assert_eq!(
+            cleanup_observer_action(
+                Some(&lease),
+                &ownership,
+                1_001,
+                WorkerProcessLiveness::Exited,
+                false,
+            ),
+            CleanupObserverAction::Deactivate("worker_process_ended")
+        );
+        assert_eq!(
+            cleanup_observer_action(
+                Some(&lease),
+                &ownership,
+                lease.expires_unix_ms.saturating_add(1),
+                WorkerProcessLiveness::Alive,
+                false,
+            ),
+            CleanupObserverAction::Deactivate("lease_expired")
+        );
+    }
+
+    #[test]
+    fn observer_retries_against_a_same_owner_lease_refreshed_after_its_snapshot() {
+        let root = TestRoot::new("cleanup-snapshot");
+        let store = ActivityLeaseStore::new(&root.0);
+        let worker = key(1, 'a', 'c');
+        let owner = digest('d');
+        let LeaseTransition::Published {
+            lease: observed, ..
+        } = store
+            .publish_active(&worker, 1, &owner, &presentation(), 1_000)
+            .expect("active lease publishes")
+        else {
+            panic!("expected active lease publication");
+        };
+
+        assert_eq!(
+            store
+                .publish_active(&worker, 2, &owner, &presentation(), 1_001)
+                .expect("same owner refreshes"),
+            LeaseTransition::AlreadyActive
+        );
+        assert!(
+            !store
+                .deactivate_observed_worker(&observed, 1_002)
+                .expect("stale observer snapshot is checked"),
+            "an observer cannot clear a same-owner lease refreshed during its liveness query"
+        );
+        let refreshed = store
+            .load(worker.digest())
+            .expect("refreshed lease reads")
+            .expect("refreshed lease exists");
+        assert!(
+            refreshed.active,
+            "the newer active lease remains authoritative"
+        );
+        assert!(
+            store
+                .deactivate_observed_worker(&refreshed, 1_003)
+                .expect("continued observer checks the refreshed snapshot"),
+            "a continued observer settles the newer exact snapshot once liveness is known"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_liveness_command_terminates_its_owned_timeout_child() {
+        let powershell = system_powershell_path().expect("Windows PowerShell is available");
+        let mut command = Command::new(powershell);
+        command
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 2",
+            ])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null());
+        let error = command_output_with_timeout(&mut command, Duration::from_millis(25))
+            .expect_err("owned liveness child must be bounded");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
     }
 
     #[test]
