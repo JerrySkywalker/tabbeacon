@@ -3,7 +3,7 @@
 use std::{
     io::{self, Write},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tabbeacon::{
@@ -49,7 +49,20 @@ fn emit(arguments: &[String]) -> VisualResult<()> {
     let mut stdout = io::stdout().lock();
     stdout.write_all(&replay.vt_bytes)?;
     stdout.flush()?;
-    thread::sleep(Duration::from_millis(hold_millis));
+    if replay.title_frame_bytes.is_empty() {
+        thread::sleep(Duration::from_millis(hold_millis));
+    } else {
+        let deadline = Instant::now() + Duration::from_millis(hold_millis);
+        let mut frame_index = 1_usize;
+        while Instant::now() < deadline {
+            stdout.write_all(
+                &replay.title_frame_bytes[frame_index % replay.title_frame_bytes.len()],
+            )?;
+            stdout.flush()?;
+            frame_index = frame_index.saturating_add(1);
+            thread::sleep(Duration::from_millis(180));
+        }
+    }
     stdout.write_all(&reset.vt_bytes)?;
     stdout.flush()?;
     Ok(())

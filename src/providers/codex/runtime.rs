@@ -6,6 +6,7 @@ use std::{
 };
 
 use crate::{
+    activity::{ActivityCoordinator, ActivityRender},
     core::SessionReconciler,
     presentation::{
         PresentationPolicy, SemanticPresentationInput, WindowsTerminalCapabilities,
@@ -56,6 +57,7 @@ pub struct CodexHookRuntime {
     identity_resolver: WorkspaceIdentityResolver,
     generation_store: CodexGenerationStore,
     renderer: WindowsTerminalRenderer,
+    activity: ActivityCoordinator,
 }
 
 impl CodexHookRuntime {
@@ -91,6 +93,7 @@ impl CodexHookRuntime {
                 WindowsTerminalCapabilities::new(frame_color_supported),
                 settings,
             ),
+            activity: ActivityCoordinator::disabled(&state_root),
         }
     }
 
@@ -108,7 +111,9 @@ impl CodexHookRuntime {
             |_| PresentationSettings::default(),
             |store| store.load_or_default(),
         );
-        let runtime = Self::with_settings(state_root, frame_color_supported, settings);
+        let mut runtime = Self::with_settings(&state_root, frame_color_supported, settings);
+        runtime.activity = ActivityCoordinator::system(&state_root)
+            .unwrap_or_else(|_| ActivityCoordinator::disabled(&state_root));
         let Ok(mut console) = open_owned_console() else {
             return HookDispatchOutcome::DegradedPresentationOutput;
         };
@@ -130,13 +135,13 @@ impl CodexHookRuntime {
         let Ok(normalized) = CodexHookNormalizer.normalize(raw, observed_at) else {
             return HookDispatchOutcome::DegradedInput;
         };
-        let normalized = match normalized {
+        let (normalized, admitted) = match normalized {
             CodexNormalization::Evidence(normalized) => {
                 match self
                     .generation_store
                     .admit(normalized.context(), RequestedHandling::Apply)
                 {
-                    Ok(GenerationAdmission::Apply) => normalized,
+                    Ok(GenerationAdmission::Apply(admitted)) => (normalized, admitted),
                     Ok(GenerationAdmission::RejectStale) => {
                         return HookDispatchOutcome::RejectedStaleGeneration;
                     }
@@ -155,7 +160,7 @@ impl CodexHookRuntime {
                     Ok(GenerationAdmission::RejectStale) => {
                         HookDispatchOutcome::RejectedStaleGeneration
                     }
-                    Ok(GenerationAdmission::Apply) => {
+                    Ok(GenerationAdmission::Apply(_)) => {
                         unreachable!("preserve handling cannot produce apply admission")
                     }
                     Err(_) => HookDispatchOutcome::DegradedGenerationState,
@@ -177,8 +182,35 @@ impl CodexHookRuntime {
             &snapshot,
             resolved.alias.as_str(),
         ));
-        let bytes = self.renderer.render(&action);
-        if sink.write_all(&bytes).and_then(|()| sink.flush()).is_err() {
+        let render = self.activity.reconcile(
+            admitted.session_sha256(),
+            admitted.turn_sha256(),
+            admitted.generation(),
+            admitted.event_sequence(),
+            resolved.alias.as_str(),
+            &action,
+            self.renderer.settings(),
+        );
+        let bytes = match render {
+            ActivityRender::UncoordinatedFull | ActivityRender::Full => {
+                self.renderer.render(&action)
+            }
+            ActivityRender::WithoutTitle => self.renderer.render_without_title(&action),
+            ActivityRender::Suppress => Vec::new(),
+        };
+        if self
+            .activity
+            .write_rendered(
+                admitted.session_sha256(),
+                admitted.turn_sha256(),
+                admitted.generation(),
+                admitted.event_sequence(),
+                render,
+                &bytes,
+                sink,
+            )
+            .is_err()
+        {
             return HookDispatchOutcome::DegradedPresentationOutput;
         }
         HookDispatchOutcome::Applied

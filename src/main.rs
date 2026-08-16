@@ -11,6 +11,7 @@ use tabbeacon::providers::codex::{
     UninstallOutcome,
 };
 use tabbeacon::{
+    activity::run_activity_worker_system,
     core::{Attention, Health, Phase},
     presentation::{
         PresentationPolicy, SemanticPresentationInput, WindowsTerminalCapabilities,
@@ -27,6 +28,14 @@ const MAX_HOOK_INPUT_BYTES: u64 = 1024 * 1024;
 fn main() -> ExitCode {
     let arguments = std::env::args().skip(1).collect::<Vec<_>>();
     match arguments.as_slice() {
+        [command, key_digest, generation, revision] if command == "__activity-worker-v1" => {
+            if let (Ok(generation), Ok(revision)) =
+                (generation.parse::<u64>(), revision.parse::<u64>())
+            {
+                run_activity_worker_system(key_digest, generation, revision);
+            }
+            ExitCode::SUCCESS
+        }
         [command, provider] if command == "setup" && provider == "codex" => setup_codex(),
         [command] if command == "doctor" => doctor(),
         [command, provider] if command == "uninstall" && provider == "codex" => uninstall_codex(),
@@ -316,7 +325,7 @@ fn print_settings(store: &PresentationSettingsStore, settings: PresentationSetti
     println!("ACTIVITY_MODE={}", settings.activity());
     println!("SPINNER_PRESET={}", settings.spinner());
     println!("THEME={}", settings.theme());
-    println!("TITLE_SPINNER_FEASIBILITY=FALLBACK_ACCEPTED");
+    println!("TITLE_SPINNER_FEASIBILITY=PRODUCTION");
 }
 
 fn print_config_choices(key: &str) {
@@ -421,7 +430,7 @@ fn preview(arguments: &[String]) -> ExitCode {
         thread::sleep(Duration::from_millis(450));
     }
     println!("PREVIEW=PASS");
-    println!("TITLE_SPINNER_FEASIBILITY=FALLBACK_ACCEPTED");
+    println!("TITLE_SPINNER_FEASIBILITY=PRODUCTION");
     ExitCode::SUCCESS
 }
 

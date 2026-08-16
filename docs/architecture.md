@@ -9,9 +9,14 @@ The architecture deliberately separates:
 1. **provider integrations** — how Codex/Claude/OpenCode expose events;
 2. **normalization** — how raw events become provider-neutral evidence;
 3. **reconciliation** — how competing/fresh evidence becomes one session snapshot;
-4. **repository identity** — how a working directory maps to a stable short key;
+4. **workspace identity** — how a Git or ordinary directory maps to a stable short key;
 5. **presentation policy** — how semantic state maps to title/progress/color;
 6. **terminal backend** — how the visual state is encoded for Windows Terminal.
+
+Active title animation adds a seventh bounded component: a direct ephemeral
+worker owned by hashed session, turn generation, and terminal binding. It is
+not a global state authority or daemon; Hooks publish minimal atomic leases and
+the worker emits only the mutable left title slot.
 
 ## 2. Provider and backend model
 

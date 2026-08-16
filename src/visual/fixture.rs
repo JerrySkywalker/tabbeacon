@@ -4,7 +4,7 @@ use crate::presentation::{
     PresentationAction, PresentationFixtureCase, WindowsTerminalCapabilities,
     WindowsTerminalRenderer, presentation_fixture,
 };
-use crate::settings::{PresentationSettings, PresentationTheme};
+use crate::settings::{ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset};
 
 use super::{ColorSemantic, VisualError, VisualResult};
 
@@ -15,6 +15,8 @@ pub struct VisualTestCase {
     pub fixture_name: String,
     /// Unique, title-policy-sanitized title expected through UIA.
     pub expected_title: String,
+    /// Every admissible title frame for a worker-animated fixture.
+    pub expected_title_frames: Vec<String>,
     /// Semantic color expected for a non-default G02 state.
     pub expected_color: ColorSemantic,
     /// Palette used to resolve the semantic color for this replay.
@@ -22,6 +24,8 @@ pub struct VisualTestCase {
     /// Whether the fixture uses indeterminate progress and needs a bounded
     /// animation observation.
     pub expects_animation: bool,
+    /// Whether UIA must observe at least two distinct title frames.
+    pub expects_title_animation: bool,
 }
 
 /// A fixture's typed action and exact bytes after the production renderer.
@@ -33,6 +37,8 @@ pub struct FixtureReplay {
     pub action: PresentationAction,
     /// Exact VT bytes sent to the fixture child process.
     pub vt_bytes: Vec<u8>,
+    /// Title-only production renderer bytes advanced by the fixture child.
+    pub title_frame_bytes: Vec<Vec<u8>>,
 }
 
 /// Drives G02 fixtures through the production policy and renderer.
@@ -45,7 +51,9 @@ impl Default for FixtureDriver {
     fn default() -> Self {
         Self::with_settings(
             WindowsTerminalCapabilities::new(true),
-            PresentationSettings::default(),
+            PresentationSettings::default()
+                .with_activity(ActivityMode::Both)
+                .with_spinner(SpinnerPreset::Braille),
         )
     }
 }
@@ -117,21 +125,52 @@ impl FixtureDriver {
                 "visual fixture requires TabBeacon title ownership for UIA correlation".to_owned(),
             )
         })?;
+        let expects_title_animation = state.title_status()
+            == crate::presentation::TitleStatus::Working
+            && self.renderer.settings().activity().uses_worker_animation();
+        let expected_title_frames = if expects_title_animation {
+            self.renderer
+                .settings()
+                .spinner()
+                .frames()
+                .iter()
+                .enumerate()
+                .filter_map(|(index, _)| self.renderer.title_for_spinner_frame(state, index))
+                .map(|title| title.as_str().to_owned())
+                .collect::<Vec<_>>()
+        } else {
+            vec![expected_title.as_str().to_owned()]
+        };
+        let title_frame_bytes = if expects_title_animation {
+            self.renderer
+                .settings()
+                .spinner()
+                .frames()
+                .iter()
+                .enumerate()
+                .map(|(index, _)| self.renderer.render_title_spinner_frame(state, index))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let case = VisualTestCase {
             fixture_name: fixture.name().to_owned(),
             expected_title: expected_title.as_str().to_owned(),
+            expected_title_frames,
             expected_color,
             theme: self.renderer.settings().theme(),
             expects_animation: matches!(
                 state.progress(),
                 crate::presentation::Progress::Indeterminate
             ) && self.renderer.uses_progress_animation(),
+            expects_title_animation,
         };
         let vt_bytes = self.renderer.render(&action);
         Ok(FixtureReplay {
             case,
             action,
             vt_bytes,
+            title_frame_bytes,
         })
     }
 

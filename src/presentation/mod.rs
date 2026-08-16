@@ -548,6 +548,29 @@ impl WindowsTerminalRenderer {
         bytes
     }
 
+    /// Produces the non-title channels for an action managed by a title worker.
+    ///
+    /// This lets one-shot Hooks update progress and color without resetting an
+    /// independently advancing title frame back to frame zero.
+    #[must_use]
+    pub fn render_without_title(&self, action: &PresentationAction) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        match action {
+            PresentationAction::Apply(state) | PresentationAction::Reset(state) => {
+                append_progress(&mut bytes, configured_progress(state, self.settings));
+                if self.capabilities.frame_color_supported() {
+                    let color = if self.settings.tab_color() == TabColorMode::TabBeacon {
+                        state.tab_color()
+                    } else {
+                        TabColor::Default
+                    };
+                    append_frame_color(&mut bytes, color, self.settings.theme());
+                }
+            }
+        }
+        bytes
+    }
+
     /// Resolves the title channel without encoding any terminal control bytes.
     ///
     /// A `None` result means native/off mode deliberately leaves title output
@@ -571,6 +594,16 @@ impl WindowsTerminalRenderer {
     ) -> Option<TerminalTitle> {
         (self.settings.title() == TitleMode::TabBeacon)
             .then(|| configured_title(state, self.settings, frame_index))
+    }
+
+    /// Encodes exactly one title frame and no progress or color bytes.
+    #[must_use]
+    pub fn render_title_spinner_frame(&self, state: &VisualState, frame_index: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        if let Some(title) = self.title_for_spinner_frame(state, frame_index) {
+            append_title(&mut bytes, &title);
+        }
+        bytes
     }
 
     /// Whether an indeterminate visual state uses Windows Terminal animation.
@@ -782,11 +815,11 @@ fn configured_title(
     let status_slot = match state.title_status() {
         TitleStatus::Ready => READY_STATUS_SLOT,
         TitleStatus::Working => match settings.activity() {
-            ActivityMode::TitleSpinner => {
+            ActivityMode::TitleSpinner | ActivityMode::Both => {
                 let frames = settings.spinner().frames();
                 frames[frame_index % frames.len()]
             }
-            ActivityMode::TitleIndicator | ActivityMode::Both => STATIC_WORKING_STATUS_SLOT,
+            ActivityMode::TitleIndicator => STATIC_WORKING_STATUS_SLOT,
             ActivityMode::WindowsTerminalRing | ActivityMode::Native | ActivityMode::Off => {
                 READY_STATUS_SLOT
             }

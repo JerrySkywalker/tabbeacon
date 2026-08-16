@@ -6,6 +6,15 @@ All notable changes to TabBeacon will be documented here.
 
 ### Changed
 
+- Configured `title-spinner` and `both` activity modes now use a real
+  session/turn/terminal-scoped ephemeral worker instead of the v0.1 frame-zero
+  fallback; `title-indicator` remains the static option.
+- Worker ownership uses content-minimal atomic leases, G10 generation plus
+  event ordering, bounded predecessor handoff, terminal isolation, stale
+  expiry, and path-plus-binary upgrade identity. Worker failure remains
+  decoration-only and daily launch remains `codex`.
+- Non-Git directories now resolve to opaque `dir-v1` workspace identities in
+  the same stable alias registry as Git workspaces.
 - Default TabBeacon-owned titles now use the compact status-first grammar
   `<status-slot> <repository-alias>`.
 - Repository identity remains stable on the right while ready, working,
