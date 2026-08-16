@@ -32,7 +32,7 @@ pub struct SemanticPresentationInput<'a> {
     phase: Phase,
     attention: Attention,
     health: Health,
-    repository_alias: &'a str,
+    workspace_alias: &'a str,
 }
 
 impl<'a> SemanticPresentationInput<'a> {
@@ -42,24 +42,24 @@ impl<'a> SemanticPresentationInput<'a> {
         phase: Phase,
         attention: Attention,
         health: Health,
-        repository_alias: &'a str,
+        workspace_alias: &'a str,
     ) -> Self {
         Self {
             phase,
             attention,
             health,
-            repository_alias,
+            workspace_alias,
         }
     }
 
     /// Extracts the semantic axes from a reconciled core session snapshot.
     #[must_use]
-    pub fn from_snapshot(snapshot: &SessionSnapshot, repository_alias: &'a str) -> Self {
+    pub fn from_snapshot(snapshot: &SessionSnapshot, workspace_alias: &'a str) -> Self {
         Self::new(
             snapshot.phase(),
             snapshot.attention(),
             snapshot.health(),
-            repository_alias,
+            workspace_alias,
         )
     }
 
@@ -81,14 +81,20 @@ impl<'a> SemanticPresentationInput<'a> {
         self.health
     }
 
-    /// Returns the stable repository identity before title-policy sanitization.
+    /// Returns the stable workspace identity before title-policy sanitization.
+    #[must_use]
+    pub const fn workspace_alias(self) -> &'a str {
+        self.workspace_alias
+    }
+
+    /// Returns the stable workspace identity using the v0.1 compatibility name.
     #[must_use]
     pub const fn repository_alias(self) -> &'a str {
-        self.repository_alias
+        self.workspace_alias()
     }
 }
 
-/// A presentation-safe repository identity kept separate from semantic status.
+/// A presentation-safe workspace identity kept separate from semantic status.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TitleIdentity(String);
 
@@ -99,7 +105,7 @@ impl TitleIdentity {
         Self(sanitize_title_text(value))
     }
 
-    /// Returns the control-free repository identity.
+    /// Returns the control-free workspace identity.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -267,7 +273,7 @@ pub enum Progress {
 /// Fully typed visual state that can be applied to a terminal backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisualState {
-    repository_alias: TitleIdentity,
+    workspace_alias: TitleIdentity,
     title_status: TitleStatus,
     tab_color: TabColor,
     progress: Progress,
@@ -278,13 +284,13 @@ impl VisualState {
     /// Creates a typed visual state.
     #[must_use]
     pub const fn new(
-        repository_alias: TitleIdentity,
+        workspace_alias: TitleIdentity,
         title_status: TitleStatus,
         tab_color: TabColor,
         progress: Progress,
     ) -> Self {
         Self {
-            repository_alias,
+            workspace_alias,
             title_status,
             tab_color,
             progress,
@@ -292,9 +298,9 @@ impl VisualState {
         }
     }
 
-    const fn reset(repository_alias: TitleIdentity) -> Self {
+    const fn reset(workspace_alias: TitleIdentity) -> Self {
         Self {
-            repository_alias,
+            workspace_alias,
             title_status: TitleStatus::Ready,
             tab_color: TabColor::Default,
             progress: Progress::Clear,
@@ -302,10 +308,16 @@ impl VisualState {
         }
     }
 
-    /// Returns the stable, presentation-safe repository identity.
+    /// Returns the stable, presentation-safe workspace identity.
+    #[must_use]
+    pub const fn workspace_alias(&self) -> &TitleIdentity {
+        &self.workspace_alias
+    }
+
+    /// Returns the workspace alias using the v0.1 compatibility name.
     #[must_use]
     pub const fn repository_alias(&self) -> &TitleIdentity {
-        &self.repository_alias
+        self.workspace_alias()
     }
 
     /// Returns the semantic status used by the mutable left title slot.
@@ -359,11 +371,11 @@ impl PresentationPolicy {
     /// Resolves semantic input according to the normative G02 precedence order.
     #[must_use]
     pub fn resolve(input: SemanticPresentationInput<'_>) -> PresentationAction {
-        let repository_alias = TitleIdentity::new(input.repository_alias());
+        let workspace_alias = TitleIdentity::new(input.workspace_alias());
 
         if input.health() == Health::Failed {
             return PresentationAction::Apply(VisualState::new(
-                repository_alias,
+                workspace_alias,
                 TitleStatus::Failed,
                 TabColor::Failed,
                 Progress::Error,
@@ -371,7 +383,7 @@ impl PresentationPolicy {
         }
         if input.health() == Health::Interrupted {
             return PresentationAction::Apply(VisualState::new(
-                repository_alias,
+                workspace_alias,
                 TitleStatus::Interrupted,
                 TabColor::Interrupted,
                 Progress::Clear,
@@ -384,7 +396,7 @@ impl PresentationPolicy {
                 Progress::Warning
             };
             return PresentationAction::Apply(VisualState::new(
-                repository_alias,
+                workspace_alias,
                 TitleStatus::Warning,
                 TabColor::Warning,
                 progress,
@@ -392,7 +404,7 @@ impl PresentationPolicy {
         }
         if input.attention() == Attention::Approval {
             return PresentationAction::Apply(VisualState::new(
-                repository_alias,
+                workspace_alias,
                 TitleStatus::Approval,
                 TabColor::Approval,
                 Progress::Warning,
@@ -400,7 +412,7 @@ impl PresentationPolicy {
         }
         if input.attention() == Attention::Question {
             return PresentationAction::Apply(VisualState::new(
-                repository_alias,
+                workspace_alias,
                 TitleStatus::Question,
                 TabColor::Question,
                 Progress::Warning,
@@ -408,7 +420,7 @@ impl PresentationPolicy {
         }
         if input.attention() == Attention::ResultReady {
             return PresentationAction::Apply(VisualState::new(
-                repository_alias,
+                workspace_alias,
                 TitleStatus::ResultReady,
                 TabColor::ResultReady,
                 Progress::Clear,
@@ -416,18 +428,18 @@ impl PresentationPolicy {
         }
         if input.phase() == Phase::Working {
             return PresentationAction::Apply(VisualState::new(
-                repository_alias,
+                workspace_alias,
                 TitleStatus::Working,
                 TabColor::Working,
                 Progress::Indeterminate,
             ));
         }
         if input.phase() == Phase::Ended {
-            return PresentationAction::Reset(VisualState::reset(repository_alias));
+            return PresentationAction::Reset(VisualState::reset(workspace_alias));
         }
 
         PresentationAction::Apply(VisualState::new(
-            repository_alias,
+            workspace_alias,
             TitleStatus::Ready,
             TabColor::Default,
             Progress::Clear,
@@ -575,7 +587,7 @@ pub struct PresentationFixtureCase {
     phase: Phase,
     attention: Attention,
     health: Health,
-    repository_alias: &'static str,
+    workspace_alias: &'static str,
 }
 
 impl PresentationFixtureCase {
@@ -592,7 +604,7 @@ impl PresentationFixtureCase {
             self.phase,
             self.attention,
             self.health,
-            self.repository_alias,
+            self.workspace_alias,
         )
     }
 
@@ -654,70 +666,70 @@ const PRESENTATION_FIXTURES: [PresentationFixtureCase; 10] = [
         phase: Phase::Ready,
         attention: Attention::None,
         health: Health::Normal,
-        repository_alias: "JPC",
+        workspace_alias: "JPC",
     },
     PresentationFixtureCase {
         name: "working",
         phase: Phase::Working,
         attention: Attention::None,
         health: Health::Normal,
-        repository_alias: "OWH",
+        workspace_alias: "OWH",
     },
     PresentationFixtureCase {
         name: "result-ready",
         phase: Phase::WaitingUser,
         attention: Attention::ResultReady,
         health: Health::Normal,
-        repository_alias: "WM",
+        workspace_alias: "WM",
     },
     PresentationFixtureCase {
         name: "approval",
         phase: Phase::WaitingUser,
         attention: Attention::Approval,
         health: Health::Normal,
-        repository_alias: "JPC",
+        workspace_alias: "JPC",
     },
     PresentationFixtureCase {
         name: "question",
         phase: Phase::WaitingUser,
         attention: Attention::Question,
         health: Health::Normal,
-        repository_alias: "OWH",
+        workspace_alias: "OWH",
     },
     PresentationFixtureCase {
         name: "warning-working",
         phase: Phase::Working,
         attention: Attention::None,
         health: Health::Warning,
-        repository_alias: "WM",
+        workspace_alias: "WM",
     },
     PresentationFixtureCase {
         name: "warning-idle",
         phase: Phase::WaitingUser,
         attention: Attention::None,
         health: Health::Warning,
-        repository_alias: "JPC",
+        workspace_alias: "JPC",
     },
     PresentationFixtureCase {
         name: "interrupted",
         phase: Phase::Ready,
         attention: Attention::None,
         health: Health::Interrupted,
-        repository_alias: "OWH",
+        workspace_alias: "OWH",
     },
     PresentationFixtureCase {
         name: "failed",
         phase: Phase::Ready,
         attention: Attention::None,
         health: Health::Failed,
-        repository_alias: "WM",
+        workspace_alias: "WM",
     },
     PresentationFixtureCase {
         name: "reset",
         phase: Phase::Ended,
         attention: Attention::None,
         health: Health::Normal,
-        repository_alias: "JPC",
+        workspace_alias: "JPC",
     },
 ];
 
@@ -789,11 +801,11 @@ fn configured_title(
     let mut title = String::with_capacity(
         status_slot.len()
             + STATUS_IDENTITY_SEPARATOR.len_utf8()
-            + state.repository_alias().as_str().len(),
+            + state.workspace_alias().as_str().len(),
     );
     title.push_str(status_slot);
     title.push(STATUS_IDENTITY_SEPARATOR);
-    title.push_str(state.repository_alias().as_str());
+    title.push_str(state.workspace_alias().as_str());
     TerminalTitle::new(&title)
 }
 

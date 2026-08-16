@@ -11,7 +11,7 @@ use crate::{
         PresentationPolicy, SemanticPresentationInput, WindowsTerminalCapabilities,
         WindowsTerminalRenderer,
     },
-    repo::{RepositoryIdentityResolver, StableAliasRegistry},
+    repo::{StableAliasRegistry, WorkspaceIdentityResolver},
     settings::{PresentationSettings, PresentationSettingsStore},
 };
 
@@ -36,7 +36,12 @@ pub enum HookDispatchOutcome {
     /// Invalid or incomplete input was contained without exposing raw content.
     DegradedInput,
     /// Offline repository identity was unavailable; Codex remains unaffected.
+    ///
+    /// Retained for API compatibility. The generalized runtime reports
+    /// [`Self::DegradedWorkspaceIdentity`] instead.
     DegradedRepositoryIdentity,
+    /// Offline workspace identity was unavailable; Codex remains unaffected.
+    DegradedWorkspaceIdentity,
     /// The terminal output path was unavailable; Codex remains unaffected.
     DegradedPresentationOutput,
     /// No safe per-user `TabBeacon` state root was available.
@@ -48,7 +53,7 @@ pub enum HookDispatchOutcome {
 /// One-shot Codex hook execution through the existing product layers.
 #[derive(Debug, Clone)]
 pub struct CodexHookRuntime {
-    identity_resolver: RepositoryIdentityResolver,
+    identity_resolver: WorkspaceIdentityResolver,
     generation_store: CodexGenerationStore,
     renderer: WindowsTerminalRenderer,
 }
@@ -80,7 +85,7 @@ impl CodexHookRuntime {
     ) -> Self {
         let state_root = state_root.into();
         Self {
-            identity_resolver: RepositoryIdentityResolver::new(&state_root),
+            identity_resolver: WorkspaceIdentityResolver::new(&state_root),
             generation_store: CodexGenerationStore::new(&state_root),
             renderer: WindowsTerminalRenderer::with_settings(
                 WindowsTerminalCapabilities::new(frame_color_supported),
@@ -164,7 +169,7 @@ impl CodexHookRuntime {
             }
         };
         let Ok(resolved) = self.identity_resolver.resolve(normalized.cwd()) else {
-            return HookDispatchOutcome::DegradedRepositoryIdentity;
+            return HookDispatchOutcome::DegradedWorkspaceIdentity;
         };
         let mut reconciler = SessionReconciler::default();
         let snapshot = reconciler.apply(normalized.evidence());
