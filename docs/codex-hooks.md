@@ -185,6 +185,43 @@ the official `rust-v0.147.0` source tag. It is turn-aware, thread-spawn
 subagent-aware, and compact-aware. A newer version does not inherit that
 profile merely because its version number is higher.
 
+## Operational diagnostics
+
+Use `status` for a bounded read-only operational report, or either JSON mode
+for machine consumption:
+
+```powershell
+tabbeacon status
+tabbeacon status --json
+tabbeacon doctor --json
+```
+
+Both JSON documents use stable `schema_version: 1`. `status --json` emits the
+complete operational model: TabBeacon version and binary path, Codex version
+and admitted profile, owned-integration/trust/title state, effective
+presentation choices, lease-based activity counts, workspace identity health,
+and the nested doctor verdict. `doctor --json` emits that same typed doctor
+projection with its checks, aggregate verdict, and structured warnings and
+failures. JSON modes write only the JSON document to stdout; no human prose is
+mixed into it.
+
+Stable enum spellings are lower snake case: doctor and declaration verdicts
+are `pass`, `warning`, or `fail`; Hook trust is `active`, `review_required`,
+`failed`, or `unavailable`; title ownership is `tabbeacon`, `native_or_off`,
+`conflict`, or `unavailable`; settings source is `default`, `configured`,
+`invalid`, or `unavailable`; worker health is `healthy`, `warning`, or
+`unavailable`; and registry health is `absent`, `healthy`, `corrupt`, or
+`unavailable`.
+
+Activity counts are leases, not claims that an operating-system worker process
+is alive. Registry reporting is health and count only. Neither human nor JSON
+diagnostics expose prompt or assistant content, tool input/output, credentials,
+headers, raw Hook payloads, raw session/turn identifiers, alias assignments or
+canonical identities, unrelated Codex configuration, or an environment dump.
+`doctor --json` preserves `doctor` exit behavior (failure is nonzero; warning
+or pass succeeds). `status` is observational and succeeds after it emits a
+valid report even if the nested doctor verdict is failing.
+
 ## State fidelity
 
 The hook backend represents only evidence Codex emits directly:

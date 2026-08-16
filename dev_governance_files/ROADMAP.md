@@ -6,6 +6,11 @@ Roadmap IDs are stable governance identifiers. `X` suffixes denote experimental 
 
 The v0.1 production line is complete through public v0.1.1 distribution.
 
+The accepted Codex-first v0.2 implementation train is complete through
+`TB-G13`: `TB-G10A`, `TB-G11`, `TB-G12`, and `TB-G13` are **COMPLETE**.
+`TB-G14` is **NEXT** for hardening and release preparation; no v0.2 public
+release is implied by this implementation status.
+
 Authoritative v0.1.1 release head:
 
 ```text
@@ -197,13 +202,15 @@ TB-G09
   ↓
 TB-G10
   ↓
+TB-G10A
+  ↓
 TB-G11
   ↓
 TB-G12
   ↓
 TB-G13
   ↓
-TB-G14
+TB-G14 (NEXT)
 ```
 
 Do not parallelize these goals by default. Turn/agent identity decisions in `TB-G10` directly constrain worker identity and stale-event rejection in `TB-G11`.
@@ -276,7 +283,7 @@ COMPLETE metadata head must receive the same final-head gates before merge.
 
 Estimated effective engineering effort: **4–8 h**.
 
-## TB-G11 — Session-Scoped Ephemeral Activity Animator
+## TB-G11 — Session-Scoped Ephemeral Activity Animator — COMPLETE
 
 **Purpose:** replace the v0.1 static title-spinner fallback with real working-state animation without changing the `codex` launch command.
 
@@ -342,7 +349,7 @@ Expected terminal transition example:
 
 Estimated effective engineering effort: **8–16 h** after feasibility admission.
 
-## TB-G12 — Guided Setup and Configuration Wizard v2
+## TB-G12 — Guided Setup and Configuration Wizard v2 — COMPLETE
 
 **Purpose:** turn the existing sequential CLI configuration primitives into a coherent first-run and reconfiguration workflow.
 
@@ -364,7 +371,7 @@ Preferred UX is a compact TUI-like wizard, not a general terminal application.
 
 Estimated effective engineering effort: **4–8 h**.
 
-## TB-G13 — Operational Status and Machine-Readable Diagnostics
+## TB-G13 — Operational Status and Machine-Readable Diagnostics — COMPLETE
 
 **Purpose:** make TabBeacon easy to audit manually and by Codex itself.
 
@@ -381,7 +388,7 @@ The structured interface should be suitable for a Codex maintenance task to cons
 
 Estimated effective engineering effort: **2–4 h**.
 
-## TB-G14 — Codex-Only v0.2 Hardening and Release
+## TB-G14 — Codex-Only v0.2 Hardening and Release — NEXT
 
 **Purpose:** close the Codex-first track with one production release candidate rather than adding another feature.
 

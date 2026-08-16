@@ -37,6 +37,96 @@ const LEASE_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 const FRAME_INTERVAL_MS: u64 = 180;
 const PREDECESSOR_WAIT_MS: u64 = 750;
 const PREDECESSOR_POLL_MS: u64 = 25;
+const MAX_DIAGNOSTIC_LEASE_FILES: usize = 512;
+const MAX_DIAGNOSTIC_LEASE_BYTES: u64 = 128 * 1_024;
+
+/// Safe health classification for a read-only activity-lease inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActivityLeaseHealth {
+    /// The lease directory was read safely and contains no stale or invalid lease.
+    Healthy,
+    /// At least one stale, invalid, or uninspectable lease was observed.
+    Warning,
+    /// The lease directory could not be inspected safely.
+    Unavailable,
+}
+
+impl ActivityLeaseHealth {
+    /// Stable machine-oriented spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::Warning => "warning",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Content-minimal aggregate of the ephemeral worker lease directory.
+///
+/// A non-expired lease proves only that a worker was recently authorized. It
+/// does not prove that an operating-system process is still alive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActivityLeaseDiagnostics {
+    health: ActivityLeaseHealth,
+    active_leases: usize,
+    stale_leases: usize,
+    invalid_leases: usize,
+}
+
+impl ActivityLeaseDiagnostics {
+    /// Overall read-only inspection health.
+    #[must_use]
+    pub const fn health(self) -> ActivityLeaseHealth {
+        self.health
+    }
+
+    /// Count of valid, non-expired active leases.
+    #[must_use]
+    pub const fn active_leases(self) -> usize {
+        self.active_leases
+    }
+
+    /// Count of active leases that are past their expiry timestamp.
+    #[must_use]
+    pub const fn stale_leases(self) -> usize {
+        self.stale_leases
+    }
+
+    /// Count of malformed, unsafe, or bounded-out lease entries.
+    #[must_use]
+    pub const fn invalid_leases(self) -> usize {
+        self.invalid_leases
+    }
+
+    const fn healthy() -> Self {
+        Self {
+            health: ActivityLeaseHealth::Healthy,
+            active_leases: 0,
+            stale_leases: 0,
+            invalid_leases: 0,
+        }
+    }
+
+    const fn unavailable() -> Self {
+        Self {
+            health: ActivityLeaseHealth::Unavailable,
+            active_leases: 0,
+            stale_leases: 0,
+            invalid_leases: 0,
+        }
+    }
+}
+
+/// Inspects the current user's activity leases without creating state or locks.
+#[must_use]
+pub fn inspect_system_activity_leases() -> ActivityLeaseDiagnostics {
+    let Ok(state_root) = crate::repo::StableAliasRegistry::default_state_root() else {
+        return ActivityLeaseDiagnostics::unavailable();
+    };
+    inspect_activity_leases_read_only(&state_root, unix_ms())
+}
 
 /// Minimal provider-neutral identity for one ephemeral worker generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -721,6 +811,79 @@ impl ActivityLeaseStore {
     }
 }
 
+fn inspect_activity_leases_read_only(state_root: &Path, now: u64) -> ActivityLeaseDiagnostics {
+    let directory = state_root.join(STATE_DIRECTORY);
+    let metadata = match fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return ActivityLeaseDiagnostics::unavailable();
+        }
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return ActivityLeaseDiagnostics::healthy();
+        }
+        Err(_) => return ActivityLeaseDiagnostics::unavailable(),
+    };
+    if !metadata.is_dir() {
+        return ActivityLeaseDiagnostics::unavailable();
+    }
+    let Ok(entries) = fs::read_dir(&directory) else {
+        return ActivityLeaseDiagnostics::unavailable();
+    };
+    let mut diagnostics = ActivityLeaseDiagnostics::healthy();
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_DIAGNOSTIC_LEASE_FILES {
+            diagnostics.invalid_leases = diagnostics.invalid_leases.saturating_add(1);
+            break;
+        }
+        let Ok(entry) = entry else {
+            diagnostics.invalid_leases = diagnostics.invalid_leases.saturating_add(1);
+            continue;
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(key_digest) = name
+            .strip_prefix("lease-")
+            .and_then(|value| value.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        let path = entry.path();
+        let valid_entry = fs::symlink_metadata(&path)
+            .ok()
+            .is_some_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
+        if !is_sha256(key_digest)
+            || !valid_entry
+            || fs::metadata(&path)
+                .map_or(true, |metadata| metadata.len() > MAX_DIAGNOSTIC_LEASE_BYTES)
+        {
+            diagnostics.invalid_leases = diagnostics.invalid_leases.saturating_add(1);
+            continue;
+        }
+        let lease = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<WorkerLease>(&bytes).ok());
+        let Some(lease) =
+            lease.filter(|lease| lease.key_sha256 == key_digest && validate_lease(lease).is_ok())
+        else {
+            diagnostics.invalid_leases = diagnostics.invalid_leases.saturating_add(1);
+            continue;
+        };
+        if lease.active {
+            if now > lease.expires_unix_ms {
+                diagnostics.stale_leases = diagnostics.stale_leases.saturating_add(1);
+            } else {
+                diagnostics.active_leases = diagnostics.active_leases.saturating_add(1);
+            }
+        }
+    }
+    if diagnostics.stale_leases > 0 || diagnostics.invalid_leases > 0 {
+        diagnostics.health = ActivityLeaseHealth::Warning;
+    }
+    diagnostics
+}
+
 fn is_stale(generation: u64, event_sequence: u64, current: &WorkerLease) -> bool {
     generation < current.generation
         || (generation == current.generation && event_sequence < current.event_sequence)
@@ -871,8 +1034,9 @@ mod tests {
     use std::{fs, path::PathBuf, time::SystemTime};
 
     use super::{
-        ActivityCoordinator, ActivityExecution, ActivityLeaseStore, ActivityRender,
-        LeaseTransition, WorkerKey, WorkerPresentation,
+        ActivityCoordinator, ActivityExecution, ActivityLeaseHealth, ActivityLeaseStore,
+        ActivityRender, LeaseTransition, WorkerKey, WorkerPresentation,
+        inspect_activity_leases_read_only,
     };
     use crate::{
         core::{Attention, Health, Phase},
@@ -919,6 +1083,58 @@ mod tests {
 
     fn presentation() -> WorkerPresentation {
         WorkerPresentation::working("OWH", SpinnerPreset::Braille)
+    }
+
+    #[test]
+    fn read_only_activity_inspection_preserves_an_absent_state_root() {
+        let root = TestRoot::new("diagnostic-absent");
+
+        let diagnostics = inspect_activity_leases_read_only(&root.0, 1_000);
+
+        assert_eq!(diagnostics.health(), ActivityLeaseHealth::Healthy);
+        assert_eq!(diagnostics.active_leases(), 0);
+        assert_eq!(diagnostics.stale_leases(), 0);
+        assert_eq!(diagnostics.invalid_leases(), 0);
+        assert!(
+            !root.0.exists(),
+            "read-only diagnostics must not create a state root or lock"
+        );
+    }
+
+    #[test]
+    fn read_only_activity_inspection_counts_active_stale_and_invalid_leases() {
+        let root = TestRoot::new("diagnostic-counts");
+        let store = ActivityLeaseStore::new(&root.0);
+        let active_key = key(1, 'a', 'c');
+        let stale_key = key(1, 'e', 'c');
+        let owner = digest('d');
+        store
+            .publish_active(&active_key, 1, &owner, &presentation(), 1_000)
+            .expect("active fixture publishes");
+        store
+            .publish_active(&stale_key, 1, &owner, &presentation(), 1_000)
+            .expect("stale fixture publishes");
+
+        let mut active = store
+            .load(active_key.digest())
+            .expect("active fixture reads")
+            .expect("active fixture exists");
+        active.expires_unix_ms = 2_000;
+        store.write(&active).expect("active fixture updates");
+        let mut stale = store
+            .load(stale_key.digest())
+            .expect("stale fixture reads")
+            .expect("stale fixture exists");
+        stale.expires_unix_ms = 999;
+        store.write(&stale).expect("stale fixture updates");
+        fs::write(store.lease_path(&digest('f')), b"not a lease").expect("invalid fixture writes");
+
+        let diagnostics = inspect_activity_leases_read_only(&root.0, 1_000);
+
+        assert_eq!(diagnostics.health(), ActivityLeaseHealth::Warning);
+        assert_eq!(diagnostics.active_leases(), 1);
+        assert_eq!(diagnostics.stale_leases(), 1);
+        assert_eq!(diagnostics.invalid_leases(), 1);
     }
 
     #[test]

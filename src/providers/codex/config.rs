@@ -121,9 +121,33 @@ pub struct CodexDoctorReport {
     checks: Vec<DoctorCheck>,
     codex_version: Option<String>,
     hook_profile: Option<CodexHookProfile>,
+    owned_hook_count: Option<usize>,
+    title_owned: Option<bool>,
 }
 
 impl CodexDoctorReport {
+    fn from_diagnosis(
+        checks: Vec<DoctorCheck>,
+        codex_version: Option<String>,
+        hook_profile: Option<CodexHookProfile>,
+        owned_hook_count: Option<usize>,
+        title_owned: Option<bool>,
+    ) -> Self {
+        let overall = checks
+            .iter()
+            .map(DoctorCheck::status)
+            .max()
+            .unwrap_or(DoctorStatus::Fail);
+        Self {
+            overall,
+            checks,
+            codex_version,
+            hook_profile,
+            owned_hook_count,
+            title_owned,
+        }
+    }
+
     /// Aggregate severity (the strongest individual check disposition).
     #[must_use]
     pub const fn overall(&self) -> DoctorStatus {
@@ -152,6 +176,18 @@ impl CodexDoctorReport {
     #[must_use]
     pub const fn profile_supported(&self) -> bool {
         self.hook_profile.is_some()
+    }
+
+    /// Count of manifest-owned Hook declarations when the manifest is valid.
+    #[must_use]
+    pub const fn owned_hook_count(&self) -> Option<usize> {
+        self.owned_hook_count
+    }
+
+    /// Whether the valid ownership manifest records `TabBeacon` title control.
+    #[must_use]
+    pub const fn title_owned(&self) -> Option<bool> {
+        self.title_owned
     }
 
     /// Looks up one stable non-sensitive doctor check by identifier.
@@ -359,6 +395,8 @@ impl CodexIntegration {
         });
 
         let manifest = self.load_manifest().ok().flatten();
+        let owned_hook_count = manifest.as_ref().map(|manifest| manifest.hooks.len());
+        let title_owned = manifest.as_ref().map(|manifest| manifest.title_owned);
         checks.push(if manifest.is_some() {
             pass(
                 "ownership.manifest",
@@ -437,17 +475,13 @@ impl CodexIntegration {
             (_, Err(_)) => fail("terminal.title", "Codex config is incompatible"),
         });
 
-        let overall = checks
-            .iter()
-            .map(DoctorCheck::status)
-            .max()
-            .unwrap_or(DoctorStatus::Fail);
-        CodexDoctorReport {
-            overall,
+        CodexDoctorReport::from_diagnosis(
             checks,
             codex_version,
             hook_profile,
-        }
+            owned_hook_count,
+            title_owned,
+        )
     }
 
     fn setup_locked(

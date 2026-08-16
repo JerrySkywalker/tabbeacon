@@ -17,7 +17,9 @@ pub use identity::{
     CanonicalRepositoryIdentity, CanonicalizedRepository, RepositoryDisplayName,
     canonicalize_repository, normalize_remote_url,
 };
-pub use registry::{ResolvedRepositoryIdentity, StableAliasRegistry};
+pub use registry::{
+    AliasRegistryDiagnostics, AliasRegistryHealth, ResolvedRepositoryIdentity, StableAliasRegistry,
+};
 pub use workspace::{ResolvedWorkspaceIdentity, WorkspaceIdentityResolver, WorkspaceKind};
 
 use std::path::Path;

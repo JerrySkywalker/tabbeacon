@@ -42,6 +42,56 @@ pub struct StableAliasRegistry {
     root: PathBuf,
 }
 
+/// Safe health classification for a read-only alias-registry inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AliasRegistryHealth {
+    /// No registry has been created for this user yet.
+    Absent,
+    /// The latest immutable registry generation is valid.
+    Healthy,
+    /// Published generations exist but none can be validated safely.
+    Corrupt,
+    /// The registry location cannot be inspected safely.
+    Unavailable,
+}
+
+impl AliasRegistryHealth {
+    /// Stable machine-oriented spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Healthy => "healthy",
+            Self::Corrupt => "corrupt",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Content-minimal aggregate of the alias registry.
+///
+/// It intentionally exposes only health and assignment count, never aliases,
+/// canonical identities, workspace roots, or registry paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AliasRegistryDiagnostics {
+    health: AliasRegistryHealth,
+    assignment_count: Option<usize>,
+}
+
+impl AliasRegistryDiagnostics {
+    /// Overall read-only inspection health.
+    #[must_use]
+    pub const fn health(self) -> AliasRegistryHealth {
+        self.health
+    }
+
+    /// Number of aliases in the newest valid generation, when available.
+    #[must_use]
+    pub const fn assignment_count(self) -> Option<usize> {
+        self.assignment_count
+    }
+}
+
 impl StableAliasRegistry {
     /// Creates a registry rooted at an explicitly injected local directory.
     #[must_use]
@@ -88,6 +138,43 @@ impl StableAliasRegistry {
     #[must_use]
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    /// Inspects the latest immutable generation without creating a lock or state.
+    #[must_use]
+    pub fn inspect_read_only(&self) -> AliasRegistryDiagnostics {
+        match fs::symlink_metadata(&self.root) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                AliasRegistryDiagnostics {
+                    health: AliasRegistryHealth::Unavailable,
+                    assignment_count: None,
+                }
+            }
+            Ok(_) => match self.load_latest() {
+                Ok(snapshot) => AliasRegistryDiagnostics {
+                    health: AliasRegistryHealth::Healthy,
+                    assignment_count: Some(snapshot.assignments.len()),
+                },
+                Err(RepositoryIdentityError::CorruptRegistry(_)) => AliasRegistryDiagnostics {
+                    health: AliasRegistryHealth::Corrupt,
+                    assignment_count: None,
+                },
+                Err(_) => AliasRegistryDiagnostics {
+                    health: AliasRegistryHealth::Unavailable,
+                    assignment_count: None,
+                },
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                AliasRegistryDiagnostics {
+                    health: AliasRegistryHealth::Absent,
+                    assignment_count: Some(0),
+                }
+            }
+            Err(_) => AliasRegistryDiagnostics {
+                health: AliasRegistryHealth::Unavailable,
+                assignment_count: None,
+            },
+        }
     }
 
     /// Returns an existing alias or atomically assigns a collision-free one.
@@ -344,7 +431,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
 mod tests {
     use std::{fs, time::SystemTime};
 
-    use super::StableAliasRegistry;
+    use super::{AliasRegistryHealth, StableAliasRegistry};
     use crate::repo::{CanonicalRepositoryIdentity, RepositoryDisplayName};
 
     fn temporary_root(name: &str) -> std::path::PathBuf {
@@ -356,6 +443,61 @@ mod tests {
                 .expect("clock after Unix epoch")
                 .as_nanos()
         ))
+    }
+
+    #[test]
+    fn read_only_inspection_preserves_an_absent_registry_root() {
+        let root = temporary_root("diagnostic-absent");
+        let registry = StableAliasRegistry::new(&root);
+
+        let diagnostics = registry.inspect_read_only();
+
+        assert_eq!(diagnostics.health(), AliasRegistryHealth::Absent);
+        assert_eq!(diagnostics.assignment_count(), Some(0));
+        assert!(
+            !root.exists(),
+            "read-only diagnostics must not create a registry directory or lock"
+        );
+    }
+
+    #[test]
+    fn read_only_inspection_reports_only_a_safe_assignment_count() {
+        let root = temporary_root("diagnostic-count");
+        let registry = StableAliasRegistry::new(&root);
+        let first = CanonicalRepositoryIdentity::new("remote:example/one").expect("valid identity");
+        let second =
+            CanonicalRepositoryIdentity::new("remote:example/two").expect("valid identity");
+        let display = RepositoryDisplayName::new("example").expect("valid display name");
+        registry
+            .resolve(&first, &display)
+            .expect("first assignment");
+        registry
+            .resolve(&second, &display)
+            .expect("second assignment");
+
+        let diagnostics = registry.inspect_read_only();
+
+        assert_eq!(diagnostics.health(), AliasRegistryHealth::Healthy);
+        assert_eq!(diagnostics.assignment_count(), Some(2));
+        fs::remove_dir_all(root).expect("test cleanup");
+    }
+
+    #[test]
+    fn read_only_inspection_classifies_unverifiable_generations_as_corrupt() {
+        let root = temporary_root("diagnostic-corrupt");
+        fs::create_dir_all(&root).expect("test state root");
+        fs::write(
+            root.join(format!("registry-v1-{:020}-{}.json", 1, "a".repeat(64))),
+            b"not a registry snapshot",
+        )
+        .expect("corrupt fixture writes");
+        let registry = StableAliasRegistry::new(&root);
+
+        let diagnostics = registry.inspect_read_only();
+
+        assert_eq!(diagnostics.health(), AliasRegistryHealth::Corrupt);
+        assert_eq!(diagnostics.assignment_count(), None);
+        fs::remove_dir_all(root).expect("test cleanup");
     }
 
     #[test]

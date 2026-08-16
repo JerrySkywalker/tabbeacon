@@ -4,6 +4,7 @@
 
 pub mod activity;
 pub mod core;
+pub mod diagnostics;
 pub mod presentation;
 pub mod providers;
 pub mod repo;

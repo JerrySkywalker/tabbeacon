@@ -6,6 +6,10 @@ All notable changes to TabBeacon will be documented here.
 
 ### Changed
 
+- Added `tabbeacon status`, `tabbeacon status --json`, and `tabbeacon doctor
+  --json`, backed by a versioned typed diagnostics model with structured
+  warnings/failures, read-only state inspection, and content-minimal privacy
+  boundaries.
 - Added `tabbeacon setup`, a draft-first guided setup and reconfiguration flow
   that reports bounded environment/integration state, previews typed settings
   before Apply, preserves Cancel, and delegates Hook ownership/trust behavior
