@@ -1529,11 +1529,10 @@ fn title_reconciliation_refuses_a_dangling_codex_config_symlink() {
         // conditioned fixture, but the dedicated release workflow must prove
         // it actually executed on a capable runner.
         Err(error) if error.raw_os_error() == Some(1314) => {
-            if std::env::var_os("TABBEACON_REQUIRE_DANGLING_SYMLINK").is_some() {
-                panic!(
-                    "dangling symbolic-link release fixture requires Windows symbolic-link capability: {error}"
-                );
-            }
+            assert!(
+                std::env::var_os("TABBEACON_REQUIRE_DANGLING_SYMLINK").is_none(),
+                "dangling symbolic-link release fixture requires Windows symbolic-link capability: {error}"
+            );
             eprintln!("skipping symbolic-link fixture: Windows privilege unavailable");
             return;
         }
