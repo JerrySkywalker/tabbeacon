@@ -4,6 +4,8 @@ All notable changes to TabBeacon will be documented here.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-16
+
 ### Changed
 
 - Fixed the native/off title lifecycle when an initially absent Codex

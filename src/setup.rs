@@ -353,7 +353,7 @@ mod tests {
 
     fn discovery() -> SetupDiscovery {
         SetupDiscovery {
-            tabbeacon_version: "0.1.1".to_owned(),
+            tabbeacon_version: env!("CARGO_PKG_VERSION").to_owned(),
             binary_path: "C:\\TabBeacon\\tabbeacon.exe".into(),
             windows_terminal: WindowsTerminalState::CurrentSession,
             codex_version: Some("0.147.0".to_owned()),
