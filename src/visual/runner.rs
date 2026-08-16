@@ -10,6 +10,7 @@ use std::{
 
 use serde::Serialize;
 
+use super::uia::{OwnedTabActivation, OwnedTabTitleReader};
 use super::{
     AnimationThreshold, AssertionKind, AssertionResult, Availability, CaptureBackend,
     ColorClassification, ColorMetrics, ColorSemantic, ColorTolerance, DesktopPreflight,
@@ -162,29 +163,29 @@ fn observe_replay(
         return Ok(());
     }
     let locator = WindowsUiaLocator;
-    let initial_target = match locate_capturable_with_retry(locator, run_id, replay) {
-        Ok(target) => target,
-        Err(error) => {
-            observation.record_uia_failure(&replay.case.fixture_name, error.to_string());
-            return Ok(());
-        }
-    };
     let target = match locate_activated_capturable_with_retry(locator, run_id, replay) {
         Ok(target) => target,
-        Err(error) => {
-            observation.record_target(writer, replay, &initial_target)?;
-            observation.record_capture_blocked(
-                &replay.case.fixture_name,
-                format!("owned-window activation was refused: {error}"),
-            );
+        Err(failure) => {
+            if let Some(target) = failure.last_target {
+                observation.record_target(writer, replay, &target)?;
+                observation.record_capture_blocked(
+                    &replay.case.fixture_name,
+                    format!("owned-window activation was refused: {}", failure.error),
+                );
+            } else {
+                observation
+                    .record_uia_failure(&replay.case.fixture_name, failure.error.to_string());
+            }
             return Ok(());
         }
     };
-    observation.record_target(writer, replay, &target)?;
-    if replay.case.expects_title_animation {
-        observe_title_animation(writer, locator, run_id, replay, observation)?;
+    observation.record_target(writer, replay, &target.dump)?;
+    if replay.case.expects_title_animation
+        && let Some(reader) = target.title_reader.as_ref()
+    {
+        observe_title_animation(writer, reader, replay, observation)?;
     }
-    let Some((window_bounds, tab_bounds)) = capture_bounds(&target) else {
+    let Some((window_bounds, tab_bounds)) = capture_bounds(&target.dump) else {
         observation.record_capture_blocked(
             &replay.case.fixture_name,
             "UIA did not provide owned window/tab bounds",
@@ -192,6 +193,7 @@ fn observe_replay(
         return Ok(());
     };
     if !target
+        .dump
         .activation
         .as_ref()
         .is_some_and(|activation| activation.set_foreground)
@@ -202,7 +204,7 @@ fn observe_replay(
         );
         return Ok(());
     }
-    let capture_target_result = match target.native_window_id {
+    let capture_target_result = match target.dump.native_window_id {
         Some(window_handle) => OwnedWindowCaptureTarget::new(window_handle, window_bounds),
         None => Err(VisualError::Platform(
             "owned UIA target did not expose a native HWND".to_owned(),
@@ -218,31 +220,53 @@ fn observe_replay(
     observe_capture(writer, replay, &capture_target, tab_bounds, observation)
 }
 
+struct ActivationRetryFailure {
+    error: VisualError,
+    last_target: Option<UiaDump>,
+}
+
+struct ActivatedTarget {
+    dump: UiaDump,
+    title_reader: Option<OwnedTabTitleReader>,
+}
+
 fn locate_activated_capturable_with_retry(
     locator: WindowsUiaLocator,
     run_id: &str,
     replay: &super::FixtureReplay,
-) -> VisualResult<UiaDump> {
+) -> Result<ActivatedTarget, Box<ActivationRetryFailure>> {
     let mut last_target = None;
     let mut last_error = None;
     for _ in 0..20 {
-        match locator.locate_and_activate_any(run_id, &replay.case.expected_title_frames) {
-            Ok(target)
+        match locator
+            .locate_and_activate_any_with_title_reader(run_id, &replay.case.expected_title_frames)
+        {
+            Ok(OwnedTabActivation::Activated { dump, title_reader }) => {
+                let target = ActivatedTarget {
+                    dump,
+                    title_reader: replay.case.expects_title_animation.then_some(title_reader),
+                };
                 if target
+                    .dump
                     .activation
                     .as_ref()
                     .is_some_and(|value| value.set_foreground)
-                    && target_has_capturable_geometry(&target) =>
-            {
-                return Ok(target);
+                    && target_has_capturable_geometry(&target.dump)
+                {
+                    return Ok(target);
+                }
+                last_target = Some(target.dump);
             }
-            Ok(target) => last_target = Some(target),
+            Ok(OwnedTabActivation::Refused { dump, detail }) => {
+                last_target = Some(dump);
+                last_error = Some(VisualError::Platform(detail));
+            }
             Err(error) => last_error = Some(error),
         }
         thread::sleep(Duration::from_millis(200));
     }
-    Err(last_error.unwrap_or_else(|| {
-        let detail = last_target.map_or_else(
+    let error = last_error.unwrap_or_else(|| {
+        let detail = last_target.clone().map_or_else(
             || "no activated UIA target was observed".to_owned(),
             |target| {
                 format!(
@@ -254,29 +278,26 @@ fn locate_activated_capturable_with_retry(
         VisualError::Platform(format!(
             "owned-window activation produced no capturable observation: {detail}"
         ))
-    }))
+    });
+    Err(Box::new(ActivationRetryFailure { error, last_target }))
 }
 
 fn observe_title_animation(
     writer: &EvidenceWriter,
-    locator: WindowsUiaLocator,
-    run_id: &str,
+    reader: &OwnedTabTitleReader,
     replay: &super::FixtureReplay,
     observation: &mut Observation,
 ) -> VisualResult<()> {
-    let mut observed = std::collections::BTreeSet::new();
-    for _ in 0..12 {
-        if let Ok(target) = locator.locate_any(run_id, &replay.case.expected_title_frames)
-            && replay.case.expected_title_frames.contains(&target.tab_name)
-        {
-            observed.insert(target.tab_name);
-        }
-        if observed.len() >= 2 {
-            break;
-        }
-        thread::sleep(Duration::from_millis(120));
-    }
-    let observed = observed.into_iter().collect::<Vec<_>>();
+    // A UIA lookup can take longer than the nominal polling cadence on a busy
+    // interactive desktop. Preserve the same two-distinct-frame oracle while
+    // bounding observation by elapsed time rather than an inaccurate count.
+    const TITLE_ANIMATION_OBSERVATION_BUDGET: Duration = Duration::from_secs(30);
+    let observed = reader
+        .observe_frames(
+            &replay.case.expected_title_frames,
+            TITLE_ANIMATION_OBSERVATION_BUDGET,
+        )
+        .unwrap_or_default();
     writer.write_json_document(
         &format!("title-frames-{}.json", replay.case.fixture_name),
         &observed,
@@ -654,38 +675,6 @@ fn selected_replays(
             ),
         None => Ok(all),
     }
-}
-
-fn locate_capturable_with_retry(
-    locator: WindowsUiaLocator,
-    run_id: &str,
-    replay: &super::FixtureReplay,
-) -> VisualResult<UiaDump> {
-    const CAPTURABLE_GEOMETRY_ATTEMPTS: usize = 20;
-    let mut last_target = None;
-    let mut last_error = None;
-    for _ in 0..CAPTURABLE_GEOMETRY_ATTEMPTS {
-        match locator.locate_any(run_id, &replay.case.expected_title_frames) {
-            Ok(target) if target_has_capturable_geometry(&target) => return Ok(target),
-            Ok(target) => last_target = Some(target),
-            Err(error) => last_error = Some(error),
-        }
-        thread::sleep(Duration::from_millis(200));
-    }
-    let detail = last_target.map_or_else(
-        || "no matching UIA target was observed".to_owned(),
-        |target| {
-            format!(
-                "last target had non-capturable geometry: window={:?}; tab={:?}",
-                target.window_bounds, target.tab_bounds
-            )
-        },
-    );
-    Err(last_error.unwrap_or_else(|| {
-        VisualError::Platform(format!(
-            "owned Windows Terminal target did not expose capturable geometry within {CAPTURABLE_GEOMETRY_ATTEMPTS} attempts: {detail}"
-        ))
-    }))
 }
 
 fn capture_frames(
