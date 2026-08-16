@@ -6,9 +6,11 @@ use std::{
     time::Duration,
 };
 
+use tabbeacon::diagnostics::{
+    collect_operational_diagnostics, human_doctor_lines, human_status_lines,
+};
 use tabbeacon::providers::codex::{
-    CodexHookRuntime, CodexIntegration, DoctorStatus, SetupOutcome, TitleOwnershipOutcome,
-    UninstallOutcome,
+    CodexHookRuntime, CodexIntegration, SetupOutcome, TitleOwnershipOutcome, UninstallOutcome,
 };
 use tabbeacon::setup::{
     SetupApplyResult, SetupDecision, SetupDiscovery, SetupPlan, detect_windows_terminal,
@@ -41,7 +43,10 @@ fn main() -> ExitCode {
         }
         [command] if command == "setup" => guided_setup(),
         [command, provider] if command == "setup" && provider == "codex" => setup_codex(),
-        [command] if command == "doctor" => doctor(),
+        [command] if command == "doctor" => doctor(false),
+        [command, option] if command == "doctor" && option == "--json" => doctor(true),
+        [command] if command == "status" => status(false),
+        [command, option] if command == "status" && option == "--json" => status(true),
         [command, provider] if command == "uninstall" && provider == "codex" => uninstall_codex(),
         [command, provider] if command == "hook" && provider == "codex" => run_codex_hook(),
         [command, subcommand] if command == "config" && subcommand == "show" => config_show(),
@@ -210,25 +215,46 @@ fn print_setup_outcome(outcome: SetupOutcome) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn doctor() -> ExitCode {
-    let integration = match CodexIntegration::from_environment() {
-        Ok(integration) => integration,
-        Err(error) => return management_error("DOCTOR", &error),
-    };
-    let report = integration.doctor();
-    for check in report.checks() {
-        println!(
-            "CHECK={} STATUS={} SUMMARY={}",
-            check.id(),
-            check.status(),
-            check.summary()
-        );
+fn doctor(json: bool) -> ExitCode {
+    let report = collect_operational_diagnostics();
+    if json {
+        return match serde_json::to_string(&report.doctor) {
+            Ok(json) => {
+                println!("{json}");
+                if report.doctor.is_failure() {
+                    ExitCode::FAILURE
+                } else {
+                    ExitCode::SUCCESS
+                }
+            }
+            Err(error) => management_error("DOCTOR", &error),
+        };
     }
-    println!("DOCTOR={}", report.overall());
-    match report.overall() {
-        DoctorStatus::Pass | DoctorStatus::Warning => ExitCode::SUCCESS,
-        DoctorStatus::Fail => ExitCode::FAILURE,
+    for line in human_doctor_lines(&report.doctor) {
+        println!("{line}");
     }
+    if report.doctor.is_failure() {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn status(json: bool) -> ExitCode {
+    let report = collect_operational_diagnostics();
+    if json {
+        return match serde_json::to_string(&report) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => management_error("STATUS", &error),
+        };
+    }
+    for line in human_status_lines(&report) {
+        println!("{line}");
+    }
+    ExitCode::SUCCESS
 }
 
 fn uninstall_codex() -> ExitCode {
@@ -666,6 +692,9 @@ fn print_usage() {
     println!("  tabbeacon setup");
     println!("  tabbeacon setup codex");
     println!("  tabbeacon doctor");
+    println!("  tabbeacon doctor --json");
+    println!("  tabbeacon status");
+    println!("  tabbeacon status --json");
     println!("  tabbeacon uninstall codex");
     println!("  tabbeacon preview [--theme <muted-dark|classic>] [--spinner <preset>]");
     println!("  tabbeacon config show|reset|wizard");

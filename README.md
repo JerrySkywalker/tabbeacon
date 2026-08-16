@@ -17,7 +17,8 @@ The project is intentionally narrow: it keeps the user's existing terminal and a
 
 The provider-neutral core, Windows Terminal presentation layer, deterministic
 visual infrastructure, Git and non-Git workspace identity, first Codex hooks
-provider, and session-scoped ephemeral title animator are implemented. See
+provider, session-scoped ephemeral title animator, guided setup flow, and
+read-only operational diagnostics are implemented. See
 [`dev_governance_files/ROADMAP.md`](dev_governance_files/ROADMAP.md) and the
 [`Codex hooks integration guide`](docs/codex-hooks.md).
 
@@ -80,6 +81,26 @@ It previews typed presentation choices before Apply, then reuses the existing
 ownership-safe Codex setup path. `tabbeacon setup codex` remains available for
 scripted provider-only setup. Complete Codex `/hooks` trust review only when
 prompted. Daily agent use remains literally `codex`, not `tabbeacon codex`.
+
+### Operational diagnostics
+
+Use the read-only status commands to inspect the current installation without
+scraping the human `doctor` output:
+
+```powershell
+tabbeacon status
+tabbeacon status --json
+tabbeacon doctor
+tabbeacon doctor --json
+```
+
+The version-1 JSON schemas contain only bounded status, configuration choices,
+safe counts, and the TabBeacon binary path. They never emit prompt or assistant
+content, Hook payloads, credentials, raw session/turn identifiers, alias
+registry identities, or an environment dump. `doctor --json` writes JSON only
+to stdout and keeps the normal doctor exit contract: a failure is nonzero while
+warning and pass are successful. `status --json` remains observational and
+successful even when its nested doctor verdict is a failure.
 
 ### Rust library target
 
