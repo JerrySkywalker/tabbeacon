@@ -1188,19 +1188,36 @@ impl Write for FailingWriter {
 }
 
 #[test]
-fn runtime_failures_and_compact_remain_fail_open() {
+fn non_git_runtime_and_remaining_failures_stay_fail_open() {
     let root = TestRoot::new("fail-open");
     let runtime = CodexHookRuntime::new(root.child("state"), true);
-    let invalid_repo = root.child("not-a-repository");
-    fs::create_dir_all(&invalid_repo).expect("non-repository cwd exists");
-    let prompt = hook_payload("UserPromptSubmit", "session-a", &invalid_repo);
+    let ordinary_workspace = root.child("not-a-repository");
+    fs::create_dir_all(&ordinary_workspace).expect("non-repository cwd exists");
+    let prompt = hook_payload("UserPromptSubmit", "session-a", &ordinary_workspace);
+    let mut ordinary_output = Vec::new();
     assert_eq!(
         runtime.dispatch_to(
             &serde_json::to_vec(&prompt).expect("payload serializes"),
             UNIX_EPOCH,
+            &mut ordinary_output
+        ),
+        HookDispatchOutcome::Applied
+    );
+    let ordinary_output = String::from_utf8(ordinary_output).expect("renderer output is UTF-8");
+    assert!(ordinary_output.contains("]0;○ NAR"));
+    assert!(!ordinary_output.contains(&ordinary_workspace.to_string_lossy().to_string()));
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&hook_payload(
+                "UserPromptSubmit",
+                "missing-session",
+                &root.child("missing-cwd")
+            ))
+            .expect("payload serializes"),
+            UNIX_EPOCH,
             &mut Vec::new()
         ),
-        HookDispatchOutcome::DegradedRepositoryIdentity
+        HookDispatchOutcome::DegradedWorkspaceIdentity
     );
     assert_eq!(
         runtime.dispatch_to(b"broken", UNIX_EPOCH, &mut Vec::new()),

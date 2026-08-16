@@ -8,6 +8,7 @@ mod discovery;
 mod error;
 mod identity;
 mod registry;
+mod workspace;
 
 pub use abbreviation::{AbbreviationPolicy, RepositoryAlias};
 pub use discovery::{DiscoveredRepository, RepositoryDiscovery, RepositoryRemote};
@@ -17,6 +18,7 @@ pub use identity::{
     canonicalize_repository, normalize_remote_url,
 };
 pub use registry::{ResolvedRepositoryIdentity, StableAliasRegistry};
+pub use workspace::{ResolvedWorkspaceIdentity, WorkspaceIdentityResolver, WorkspaceKind};
 
 use std::path::Path;
 
