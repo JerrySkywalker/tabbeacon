@@ -6,6 +6,9 @@ use std::{
     time::Duration,
 };
 
+use tabbeacon::setup::{
+    SetupApplyResult, SetupDecision, SetupDiscovery, SetupPlan, detect_windows_terminal,
+};
 use tabbeacon::providers::codex::{
     CodexHookRuntime, CodexIntegration, DoctorStatus, SetupOutcome, TitleOwnershipOutcome,
     UninstallOutcome,
@@ -36,6 +39,7 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        [command] if command == "setup" => guided_setup(),
         [command, provider] if command == "setup" && provider == "codex" => setup_codex(),
         [command] if command == "doctor" => doctor(),
         [command, provider] if command == "uninstall" && provider == "codex" => uninstall_codex(),
@@ -79,28 +83,118 @@ fn setup_codex() -> ExitCode {
         Err(error) => return management_error("SETUP", &error),
     };
     match integration.setup_with_title_ownership(settings.title().owns_tabbeacon_title()) {
-        Ok(SetupOutcome::InstalledTrustReviewRequired) => {
-            println!("SETUP_IDEMPOTENCE=PASS");
+        Ok(outcome) => print_setup_outcome(outcome),
+        Err(error) => management_error("SETUP", &error),
+    }
+}
+
+fn guided_setup() -> ExitCode {
+    let store = match settings_store() {
+        Ok(store) => store,
+        Err(error) => return management_error("SETUP", &error),
+    };
+    let before = match store.load_read_only() {
+        Ok(settings) => settings,
+        Err(error) => {
+            eprintln!("SETUP=FAIL");
+            eprintln!("REASON={error}");
+            eprintln!("SETTINGS_UNCHANGED=true");
+            return ExitCode::FAILURE;
+        }
+    };
+    let integration = match CodexIntegration::from_environment() {
+        Ok(integration) => integration,
+        Err(error) => return management_error("SETUP", &error),
+    };
+    let binary_path = match std::env::current_exe() {
+        Ok(path) => path,
+        Err(error) => return management_error("SETUP", &error),
+    };
+    let discovery = SetupDiscovery::from_doctor(
+        env!("CARGO_PKG_VERSION"),
+        binary_path,
+        detect_windows_terminal(),
+        &integration.doctor(),
+    );
+    print_setup_discovery(&discovery, before);
+
+    let draft = match prompt_setup_draft(before) {
+        Ok(settings) => settings,
+        Err(error) => return setup_input_error(&error),
+    };
+    let plan = SetupPlan::new(before, discovery).with_draft(draft);
+    println!("Preview");
+    print_preview_result(plan.preview_settings());
+    let decision = match prompt_setup_decision() {
+        Ok(decision) => decision,
+        Err(error) => return setup_input_error(&error),
+    };
+    match decision {
+        SetupDecision::Cancel => {
+            let _ = plan.cancel();
+            println!("SETUP=PASS");
+            println!("SETUP_RESULT=CANCELLED");
+            println!("SETTINGS_UNCHANGED=true");
+            println!("CODEX_CONFIG_UNCHANGED=true");
+            println!("HOOKS_UNCHANGED=true");
+            println!("OWNER_ACTION=none");
+            ExitCode::SUCCESS
+        }
+        SetupDecision::Apply => match plan.apply(&store, |owns_title| {
+            integration
+                .setup_with_title_ownership(owns_title)
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(SetupApplyResult::Applied(outcome)) => {
+                println!("SETUP=PASS");
+                println!("SETUP_RESULT=APPLIED");
+                print_settings(&store, plan.draft());
+                print_setup_outcome(outcome)
+            }
+            Ok(SetupApplyResult::SettingsConflict) => {
+                eprintln!("SETUP=BLOCKED");
+                eprintln!("REASON=settings changed while guided setup was open");
+                eprintln!("SETTINGS_UNCHANGED=true");
+                eprintln!("CODEX_CONFIG_UNCHANGED=true");
+                eprintln!("HOOKS_UNCHANGED=true");
+                ExitCode::from(75)
+            }
+            Ok(SetupApplyResult::SetupFailed {
+                reason,
+                settings_restored,
+            }) => {
+                eprintln!("SETUP=FAIL");
+                eprintln!("REASON={reason}");
+                eprintln!("SETTINGS_RESTORED={settings_restored}");
+                eprintln!("CODEX_CONFIG_UNCHANGED=UNPROVEN");
+                eprintln!("HOOKS_UNCHANGED=UNPROVEN");
+                ExitCode::FAILURE
+            }
+            Ok(SetupApplyResult::Cancelled) => unreachable!("apply path cannot cancel"),
+            Err(error) => management_error("SETUP", &error),
+        },
+    }
+}
+
+fn print_setup_outcome(outcome: SetupOutcome) -> ExitCode {
+    println!("SETUP_IDEMPOTENCE=PASS");
+    match outcome {
+        SetupOutcome::InstalledTrustReviewRequired => {
             println!("CODEX_INTEGRATION=INSTALLED");
             println!("HOOK_TRUST=REVIEW_REQUIRED");
             println!("OWNER_ACTION=launch codex and trust the TabBeacon hooks in /hooks");
-            ExitCode::SUCCESS
         }
-        Ok(SetupOutcome::Upgraded) => {
-            println!("SETUP_IDEMPOTENCE=PASS");
+        SetupOutcome::Upgraded => {
             println!("CODEX_INTEGRATION=UPGRADED");
             println!("HOOK_TRUST=REVIEW_REQUIRED");
             println!("OWNER_ACTION=launch codex and trust the updated TabBeacon hooks in /hooks");
-            ExitCode::SUCCESS
         }
-        Ok(SetupOutcome::AlreadyInstalled) => {
-            println!("SETUP_IDEMPOTENCE=PASS");
+        SetupOutcome::AlreadyInstalled => {
             println!("CODEX_INTEGRATION=ALREADY_INSTALLED");
             println!("OWNER_ACTION=run tabbeacon doctor to verify hook trust");
-            ExitCode::SUCCESS
         }
-        Err(error) => management_error("SETUP", &error),
     }
+    ExitCode::SUCCESS
 }
 
 fn doctor() -> ExitCode {
@@ -280,6 +374,88 @@ fn config_wizard() -> ExitCode {
     )
 }
 
+fn print_setup_discovery(discovery: &SetupDiscovery, settings: PresentationSettings) {
+    println!("TabBeacon Setup");
+    println!();
+    println!("Environment");
+    println!("  Windows Terminal   {}", discovery.windows_terminal().label());
+    println!(
+        "  Codex              {} / profile={} / supported={}",
+        discovery.codex_version().unwrap_or("unavailable"),
+        discovery.hook_profile().unwrap_or("unknown"),
+        discovery.profile_supported(),
+    );
+    println!("  TabBeacon          {}", discovery.tabbeacon_version());
+    println!("  Binary             {}", discovery.binary_path().display());
+    println!("  Hooks              {}", discovery.hooks().label());
+    println!("  Doctor             {}", discovery.doctor_status());
+    println!();
+    println!("Presentation");
+    println!("  Title              {}", settings.title());
+    println!("  Tab color          {}", settings.tab_color());
+    println!("  Activity           {}", settings.activity());
+    println!("  Spinner            {}", settings.spinner());
+    println!("  Theme              {}", settings.theme());
+    println!();
+}
+
+fn prompt_setup_draft(current: PresentationSettings) -> Result<PresentationSettings, String> {
+    println!("Presets: native | minimal | balanced | full | custom");
+    let preset = prompt_line("preset [custom]: ")?;
+    let base = match preset.trim() {
+        "" | "custom" => current,
+        name => PresentationSettings::preset(name)
+            .ok_or_else(|| "unsupported preset choice".to_owned())?,
+    };
+    println!("Title choices: tabbeacon | native | off");
+    let title = prompt_choice("title", base.title().as_str(), TitleMode::parse)?;
+    println!("Tab-color choices: tabbeacon | native | off");
+    let tab_color = prompt_choice(
+        "tab-color",
+        base.tab_color().as_str(),
+        TabColorMode::parse,
+    )?;
+    println!("Activity choices: title-spinner | title-indicator | wt-ring | both | native | off");
+    let activity = prompt_choice("activity", base.activity().as_str(), ActivityMode::parse)?;
+    println!("Spinner choices: codex | braille | quadrant | line | pulse");
+    let spinner = prompt_choice("spinner", base.spinner().as_str(), SpinnerPreset::parse)?;
+    println!("Theme choices: muted-dark | classic");
+    let theme = prompt_choice("theme", base.theme().as_str(), PresentationTheme::parse)?;
+    Ok(PresentationSettings::new(
+        title, tab_color, activity, spinner, theme,
+    ))
+}
+
+fn prompt_setup_decision() -> Result<SetupDecision, String> {
+    let decision = prompt_line("Decision [apply/cancel] (default cancel): ")?;
+    match decision.trim() {
+        "" | "cancel" => Ok(SetupDecision::Cancel),
+        "apply" => Ok(SetupDecision::Apply),
+        _ => Err("decision must be apply or cancel".to_owned()),
+    }
+}
+
+fn prompt_line(prompt: &str) -> Result<String, String> {
+    print!("{prompt}");
+    io::stdout()
+        .flush()
+        .map_err(|_| "cannot write setup prompt".to_owned())?;
+    let mut line = String::new();
+    io::stdin()
+        .read_line(&mut line)
+        .map_err(|_| "cannot read setup response".to_owned())?;
+    Ok(line)
+}
+
+fn setup_input_error(error: &str) -> ExitCode {
+    eprintln!("SETUP=FAIL");
+    eprintln!("REASON={error}");
+    eprintln!("SETTINGS_UNCHANGED=true");
+    eprintln!("CODEX_CONFIG_UNCHANGED=true");
+    eprintln!("HOOKS_UNCHANGED=true");
+    ExitCode::from(2)
+}
+
 fn persist_settings_change(
     store: &PresentationSettingsStore,
     before: PresentationSettings,
@@ -395,11 +571,26 @@ fn preview(arguments: &[String]) -> ExitCode {
         }
         index += 2;
     }
-    let Ok(mut console) = open_preview_console() else {
-        eprintln!("PREVIEW=BLOCKED");
-        eprintln!("REASON=owned terminal output is unavailable");
-        return ExitCode::from(78);
-    };
+    print_preview_result(settings)
+}
+
+fn print_preview_result(settings: PresentationSettings) -> ExitCode {
+    match render_preview(settings) {
+        Ok(()) => {
+            println!("PREVIEW=PASS");
+            println!("TITLE_SPINNER_FEASIBILITY=PRODUCTION");
+            ExitCode::SUCCESS
+        }
+        Err(reason) => {
+            eprintln!("PREVIEW=BLOCKED");
+            eprintln!("REASON={reason}");
+            ExitCode::from(78)
+        }
+    }
+}
+
+fn render_preview(settings: PresentationSettings) -> Result<(), &'static str> {
+    let mut console = open_preview_console().map_err(|_| "owned terminal output is unavailable")?;
     let renderer = WindowsTerminalRenderer::with_settings(
         WindowsTerminalCapabilities::new(std::env::var_os("WT_SESSION").is_some()),
         settings,
@@ -423,15 +614,11 @@ fn preview(arguments: &[String]) -> ExitCode {
             .and_then(|()| console.flush())
             .is_err()
         {
-            eprintln!("PREVIEW=BLOCKED");
-            eprintln!("REASON=terminal output stopped during preview");
-            return ExitCode::from(78);
+            return Err("terminal output stopped during preview");
         }
         thread::sleep(Duration::from_millis(450));
     }
-    println!("PREVIEW=PASS");
-    println!("TITLE_SPINNER_FEASIBILITY=PRODUCTION");
-    ExitCode::SUCCESS
+    Ok(())
 }
 
 fn preview_choice_error(key: &str) -> ExitCode {
@@ -464,6 +651,7 @@ fn management_error(operation: &str, error: &dyn std::error::Error) -> ExitCode 
 fn print_usage() {
     println!("TabBeacon {}", env!("CARGO_PKG_VERSION"));
     println!("Usage:");
+    println!("  tabbeacon setup");
     println!("  tabbeacon setup codex");
     println!("  tabbeacon doctor");
     println!("  tabbeacon uninstall codex");

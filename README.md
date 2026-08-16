@@ -70,14 +70,16 @@ TabBeacon has two first-class installation channels:
   ```
 
 The default Cargo install surface is the public `tabbeacon` command only.
-After installing, configure Codex integration with:
+After installing, start the guided first-run or reconfiguration flow with:
 
 ```powershell
-tabbeacon setup codex
+tabbeacon setup
 ```
 
-Then complete Codex `/hooks` trust review when prompted. Daily agent use remains
-literally `codex`, not `tabbeacon codex`.
+It previews typed presentation choices before Apply, then reuses the existing
+ownership-safe Codex setup path. `tabbeacon setup codex` remains available for
+scripted provider-only setup. Complete Codex `/hooks` trust review only when
+prompted. Daily agent use remains literally `codex`, not `tabbeacon codex`.
 
 ### Rust library target
 
@@ -97,8 +99,8 @@ The repository pins Rust 1.97.1. The local quality gate is:
 pwsh -NoProfile -File ./scripts/ci/run-local-ci.ps1
 ```
 
-For daily presentation choices, use `tabbeacon config show`, the compact
-`tabbeacon config wizard`, or the documented presets in the
+For daily presentation choices, use `tabbeacon setup`, `tabbeacon config show`,
+the compact `tabbeacon config wizard`, or the documented presets in the
 [`Codex hooks integration guide`](docs/codex-hooks.md). Settings are user-global
 under `%LOCALAPPDATA%\TabBeacon`, never in a repository.
 
