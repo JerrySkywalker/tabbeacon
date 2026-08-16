@@ -6,6 +6,10 @@ All notable changes to TabBeacon will be documented here.
 
 ### Changed
 
+- Fixed the native/off title lifecycle when an initially absent Codex
+  `config.toml` is intentionally preserved: repeat setup, title reconciliation,
+  doctor, and ownership-safe uninstall now continue to work without creating a
+  competing title configuration.
 - Added `tabbeacon status`, `tabbeacon status --json`, and `tabbeacon doctor
   --json`, backed by a versioned typed diagnostics model with structured
   warnings/failures, read-only state inspection, and content-minimal privacy

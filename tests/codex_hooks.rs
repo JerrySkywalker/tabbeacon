@@ -1454,6 +1454,100 @@ fn title_preference_reconciliation_restores_native_codex_title_without_losing_ba
 }
 
 #[test]
+fn title_disabled_setup_preserves_an_absent_codex_config_through_lifecycle() {
+    let root = TestRoot::new("absent-title-config");
+    let integration = test_integration(&root);
+    let codex_home = root.child("codex-home");
+
+    assert_eq!(
+        integration
+            .setup_with_title_ownership(false)
+            .expect("native title setup succeeds"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    assert!(codex_home.join("hooks.json").is_file());
+    assert!(
+        !codex_home.join("config.toml").exists(),
+        "native title setup must preserve an originally absent config"
+    );
+    assert_eq!(
+        integration
+            .setup_with_title_ownership(false)
+            .expect("repeat native title setup succeeds"),
+        SetupOutcome::AlreadyInstalled
+    );
+    let report = integration.doctor();
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "terminal.title"
+            && check.status() == DoctorStatus::Pass
+            && check.summary().contains("native")
+    }));
+
+    assert_eq!(
+        integration
+            .reconcile_title_ownership(true)
+            .expect("TabBeacon title acquisition succeeds"),
+        TitleOwnershipOutcome::Updated
+    );
+    assert!(codex_home.join("config.toml").is_file());
+    assert_eq!(
+        integration
+            .reconcile_title_ownership(false)
+            .expect("native title restoration succeeds"),
+        TitleOwnershipOutcome::Updated
+    );
+    assert!(
+        !codex_home.join("config.toml").exists(),
+        "restoring the original empty config must remove it"
+    );
+
+    assert_eq!(
+        integration
+            .uninstall()
+            .expect("native title uninstall succeeds"),
+        UninstallOutcome::Removed
+    );
+    assert!(!root.child("state/integration-v1.json").exists());
+    assert!(!codex_home.join("config.toml").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn title_reconciliation_refuses_a_dangling_codex_config_symlink() {
+    let root = TestRoot::new("dangling-title-config-link");
+    let integration = test_integration(&root);
+    let codex_home = root.child("codex-home");
+    integration
+        .setup_with_title_ownership(false)
+        .expect("native title setup succeeds");
+    let config_path = codex_home.join("config.toml");
+    let missing_target = root.child("missing-config-target.toml");
+    match std::os::windows::fs::symlink_file(&missing_target, &config_path) {
+        Ok(()) => {}
+        // Windows permits unprivileged symbolic links only when Developer Mode
+        // is enabled. This is a capability-conditioned regression fixture, not
+        // a prerequisite for ordinary integration behavior.
+        Err(error) if error.raw_os_error() == Some(1314) => {
+            eprintln!("skipping symbolic-link fixture: Windows privilege unavailable");
+            return;
+        }
+        Err(error) => panic!("dangling config link creates in the isolated fixture: {error}"),
+    }
+
+    assert!(matches!(
+        integration.reconcile_title_ownership(true),
+        Err(CodexIntegrationError::SymbolicLinkTarget)
+    ));
+    assert!(
+        fs::symlink_metadata(&config_path)
+            .expect("config link remains inspectable")
+            .file_type()
+            .is_symlink(),
+        "title reconciliation must not replace the unowned link"
+    );
+}
+
+#[test]
 fn repeated_setup_ten_times_keeps_exactly_eleven_owned_hook_definitions() {
     let root = TestRoot::new("setup-ten-times");
     let integration = test_integration(&root);
