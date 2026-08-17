@@ -2,8 +2,8 @@
 
 ## Status
 
-PLANNED. Final Codex-only v0.3 closure Goal after TB-G18 and TB-G19. No new product
-feature is admitted here.
+RELEASE CANDIDATE. Final Codex-only v0.3 closure Goal after completed TB-G18 and
+TB-G19. No new product feature is admitted here.
 
 ## Purpose
 
