@@ -246,6 +246,7 @@ Invoke-G18Hook 'Stop'
 Start-Sleep -Seconds 6
 Invoke-G18Hook 'PermissionRequest'
 Start-Sleep -Seconds 6
+Invoke-G18Hook 'SessionEnd'
 '@
     $childCommand = $childTemplate.
         Replace('__LOCALAPPDATA__', (ConvertTo-PowerShellLiteral -Value $localAppData)).

@@ -1706,6 +1706,17 @@ mod tests {
             approval.semantic_input(),
             Some((Phase::WaitingUser, Attention::Approval))
         );
+        assert!(matches!(
+            store.publish_stopped(&key, 13, &owner, 1_300),
+            Ok(LeaseTransition::Stopped {
+                predecessor: Some(predecessor)
+            }) if predecessor == approval_lease.ownership()
+        ));
+        let stopped = store
+            .load(key.digest())
+            .expect("stopped lease reads")
+            .expect("stopped lease exists");
+        assert!(!stopped.active);
     }
 
     #[test]
