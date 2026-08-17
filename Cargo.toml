@@ -55,8 +55,8 @@ win-screenshot = "4.0.14"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [lints.rust]
-# One reviewed Windows Unicode-title call is locally allowed in
-# `console_output`; all other unsafe code remains denied.
+# Reviewed Windows console calls are locally allowed in `console_output`; all
+# other unsafe code remains denied.
 unsafe_code = "deny"
 
 [lints.clippy]
