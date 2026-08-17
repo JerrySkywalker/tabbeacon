@@ -46,9 +46,9 @@ The track keeps the stock `codex` + Codex Hooks + Windows Terminal workflow:
 no launcher wrapper, global daemon, App Server dependency, Claude provider, or
 OpenCode provider is admitted by this roadmap transition.
 
-TB-G15, TB-G16, TB-G17, and TB-G18 are **COMPLETE**. G18 is accepted for
-merge as PR #29 after its exact-head hosted CI and actual elevated-PowerShell
-convergence proof. TB-G19 — Codex Compatibility Registry v2 is the canonical
+TB-G15 through TB-G19 are **COMPLETE**. G18 merged through same-SHA recovery
+PR #30 after the GraphQL ready-path outage. G19 merged as PR #31 after its
+exact-head hosted CI. TB-G19R — v0.3 Hardening and Release is the canonical
 next goal.
 Pixel capture remains a latched runner-environment limitation, while exact-tab
 UIA title evidence continues to cover title admission and working-frame motion.
