@@ -3,8 +3,8 @@
 ## Status
 
 ACTIVE IMPLEMENTATION TRACK. v0.2.0 is publicly released and its release
-closeout is merged. TB-G15 and TB-G16 are complete; this frozen sequential
-v0.3 plan now proceeds with TB-G17.
+closeout is merged. TB-G15, TB-G16, and TB-G17 are complete on merge of their
+accepted PRs; this frozen sequential v0.3 plan then proceeds with TB-G18.
 
 Planning baseline when this document was created:
 
