@@ -377,22 +377,22 @@ impl PresentationSettings {
                 TitleMode::Native,
                 TabColorMode::Native,
                 ActivityMode::Native,
-                SpinnerPreset::Codex,
+                SpinnerPreset::Braille,
                 PresentationTheme::MutedDark,
             )),
             "minimal" => Some(Self::new(
                 TitleMode::TabBeacon,
                 TabColorMode::Native,
                 ActivityMode::TitleIndicator,
-                SpinnerPreset::Codex,
+                SpinnerPreset::Braille,
                 PresentationTheme::MutedDark,
             )),
             "balanced" => Some(Self::default()),
             "full" => Some(Self::new(
                 TitleMode::TabBeacon,
                 TabColorMode::TabBeacon,
-                ActivityMode::TitleIndicator,
-                SpinnerPreset::Codex,
+                ActivityMode::Both,
+                SpinnerPreset::Braille,
                 PresentationTheme::MutedDark,
             )),
             _ => None,
@@ -402,14 +402,14 @@ impl PresentationSettings {
 
 impl Default for PresentationSettings {
     fn default() -> Self {
-        // Title animation is intentionally not a default until a durable
-        // per-tab worker can be proven. The selected static indicator remains
-        // readable without CPU use or stale-worker risk.
+        // v0.3 new/default installs use the balanced profile. Existing
+        // documents are parsed as-is and are never silently rewritten merely
+        // because this absent-document fallback advances.
         Self::new(
             TitleMode::TabBeacon,
             TabColorMode::TabBeacon,
-            ActivityMode::TitleIndicator,
-            SpinnerPreset::Codex,
+            ActivityMode::TitleSpinner,
+            SpinnerPreset::Braille,
             PresentationTheme::MutedDark,
         )
     }
@@ -914,21 +914,46 @@ mod tests {
     }
 
     #[test]
-    fn missing_settings_use_the_comfortable_v0_1_defaults() {
+    fn missing_settings_use_the_v03_balanced_defaults_without_creating_a_file() {
         let path = temporary_config("defaults");
         let store = PresentationSettingsStore::new(&path);
         assert_eq!(
             store.load().expect("missing config defaults"),
             PresentationSettings::default()
         );
-        assert_eq!(
-            PresentationSettings::default().theme(),
-            PresentationTheme::MutedDark
+        let defaults = PresentationSettings::default();
+        assert_eq!(defaults.title(), TitleMode::TabBeacon);
+        assert_eq!(defaults.tab_color(), TabColorMode::TabBeacon);
+        assert_eq!(defaults.activity(), ActivityMode::TitleSpinner);
+        assert_eq!(defaults.spinner(), SpinnerPreset::Braille);
+        assert_eq!(defaults.theme(), PresentationTheme::MutedDark);
+        assert!(
+            !path.exists(),
+            "reading absent defaults must not write config"
         );
-        assert_eq!(
-            PresentationSettings::default().activity(),
-            ActivityMode::TitleIndicator
-        );
+    }
+
+    #[test]
+    fn v03_presets_keep_their_declared_channel_boundaries() {
+        let native = PresentationSettings::preset("native").expect("native preset");
+        assert_eq!(native.title(), TitleMode::Native);
+        assert_eq!(native.tab_color(), TabColorMode::Native);
+        assert_eq!(native.activity(), ActivityMode::Native);
+
+        let minimal = PresentationSettings::preset("minimal").expect("minimal preset");
+        assert_eq!(minimal.title(), TitleMode::TabBeacon);
+        assert_eq!(minimal.tab_color(), TabColorMode::Native);
+        assert_eq!(minimal.activity(), ActivityMode::TitleIndicator);
+
+        let balanced = PresentationSettings::preset("balanced").expect("balanced preset");
+        assert_eq!(balanced, PresentationSettings::default());
+        assert_eq!(balanced.spinner(), SpinnerPreset::Braille);
+
+        let full = PresentationSettings::preset("full").expect("full preset");
+        assert_eq!(full.title(), TitleMode::TabBeacon);
+        assert_eq!(full.tab_color(), TabColorMode::TabBeacon);
+        assert_eq!(full.activity(), ActivityMode::Both);
+        assert_eq!(full.spinner(), SpinnerPreset::Braille);
     }
 
     #[test]
@@ -959,12 +984,72 @@ mod tests {
     #[test]
     fn malformed_user_configuration_falls_back_without_breaking_hook_callers() {
         let path = temporary_config("malformed");
-        fs::write(&path, "[presentation\ntitle = \"tabbeacon\"").expect("malformed fixture writes");
+        let malformed = "[presentation\ntitle = \"tabbeacon\"";
+        fs::write(&path, malformed).expect("malformed fixture writes");
         let store = PresentationSettingsStore::new(&path);
         assert!(store.load().is_err());
         assert!(store.load_read_only().is_err());
         assert_eq!(store.load_or_default(), PresentationSettings::default());
+        assert_eq!(
+            fs::read_to_string(&path).expect("malformed fixture remains readable"),
+            malformed,
+            "a fallback must never rewrite malformed existing user configuration"
+        );
         fs::remove_file(path).expect("fixture config removes");
+    }
+
+    #[test]
+    fn existing_v02_static_and_custom_settings_are_never_silently_rewritten() {
+        let path = temporary_config("existing-users");
+        let v02_static = concat!(
+            "[presentation]\n",
+            "title = \"tabbeacon\"\n",
+            "tab_color = \"tabbeacon\"\n",
+            "activity = \"title-indicator\"\n",
+            "spinner = \"codex\"\n",
+            "theme = \"muted-dark\"\n",
+        );
+        fs::write(&path, v02_static).expect("v0.2 fixture writes");
+        let store = PresentationSettingsStore::new(&path);
+        assert_eq!(
+            store.load_or_default(),
+            PresentationSettings::new(
+                TitleMode::TabBeacon,
+                TabColorMode::TabBeacon,
+                ActivityMode::TitleIndicator,
+                SpinnerPreset::Codex,
+                PresentationTheme::MutedDark,
+            )
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("v0.2 fixture rereads"),
+            v02_static
+        );
+
+        let custom = concat!(
+            "[presentation]\n",
+            "title = \"native\"\n",
+            "tab_color = \"off\"\n",
+            "activity = \"wt-ring\"\n",
+            "spinner = \"line\"\n",
+            "theme = \"classic\"\n",
+        );
+        fs::write(&path, custom).expect("custom fixture writes");
+        assert_eq!(
+            store.load_or_default(),
+            PresentationSettings::new(
+                TitleMode::Native,
+                TabColorMode::Off,
+                ActivityMode::WindowsTerminalRing,
+                SpinnerPreset::Line,
+                PresentationTheme::Classic,
+            )
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("custom fixture rereads"),
+            custom
+        );
+        fs::remove_file(path).expect("existing fixture removes");
     }
 
     #[test]

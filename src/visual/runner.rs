@@ -163,7 +163,7 @@ fn observe_replay(
         return Ok(());
     }
     let locator = WindowsUiaLocator;
-    let target = match locate_activated_capturable_with_retry(locator, run_id, replay) {
+    let target = match locate_activated_with_retry(locator, run_id, replay) {
         Ok(target) => target,
         Err(failure) => {
             if let Some(target) = failure.last_target {
@@ -184,6 +184,13 @@ fn observe_replay(
         && let Some(reader) = target.title_reader.as_ref()
     {
         observe_title_animation(writer, reader, replay, observation)?;
+    }
+    if !target_has_capturable_geometry(&target.dump) {
+        observation.record_capture_blocked(
+            &replay.case.fixture_name,
+            "UIA did not provide capturable owned window/tab geometry",
+        );
+        return Ok(());
     }
     let Some((window_bounds, tab_bounds)) = capture_bounds(&target.dump) else {
         observation.record_capture_blocked(
@@ -230,7 +237,7 @@ struct ActivatedTarget {
     title_reader: Option<OwnedTabTitleReader>,
 }
 
-fn locate_activated_capturable_with_retry(
+fn locate_activated_with_retry(
     locator: WindowsUiaLocator,
     run_id: &str,
     replay: &super::FixtureReplay,
@@ -248,16 +255,11 @@ fn locate_activated_capturable_with_retry(
                     dump,
                     title_reader: replay.case.expects_title_animation.then_some(title_reader),
                 };
-                if target
-                    .dump
-                    .activation
-                    .as_ref()
-                    .is_some_and(|value| value.set_foreground)
-                    && target_has_capturable_geometry(&target.dump)
-                {
-                    return Ok(target);
-                }
-                last_target = Some(target.dump);
+                // UIA title evidence is valid after exact owned-tab
+                // correlation even if foreground activation or pixel capture
+                // is unavailable. The caller applies the stricter capture
+                // preconditions only to screenshot/color assertions.
+                return Ok(target);
             }
             Ok(OwnedTabActivation::Refused { dump, detail }) => {
                 last_target = Some(dump);
@@ -278,7 +280,7 @@ fn locate_activated_capturable_with_retry(
             },
         );
         VisualError::Platform(format!(
-            "owned-window activation produced no capturable observation: {detail}"
+            "owned-window activation produced no UIA observation: {detail}"
         ))
     });
     Err(Box::new(ActivationRetryFailure { error, last_target }))
@@ -290,14 +292,15 @@ fn observe_title_animation(
     replay: &super::FixtureReplay,
     observation: &mut Observation,
 ) -> VisualResult<()> {
-    // A UIA lookup can take longer than the nominal polling cadence on a busy
-    // interactive desktop. Preserve the same two-distinct-frame oracle while
-    // bounding observation by elapsed time rather than an inaccurate count.
-    const TITLE_ANIMATION_OBSERVATION_BUDGET: Duration = Duration::from_secs(30);
+    // v0.3 requires at least three distinct working frames in one second. UIA
+    // sampling stays intentionally incommensurate with the frame cadence.
+    const TITLE_ANIMATION_OBSERVATION_BUDGET: Duration = Duration::from_secs(1);
+    const MINIMUM_WORKING_TITLE_FRAMES: usize = 3;
     let observed = reader
         .observe_frames(
             &replay.case.expected_title_frames,
             TITLE_ANIMATION_OBSERVATION_BUDGET,
+            MINIMUM_WORKING_TITLE_FRAMES,
         )
         .unwrap_or_default();
     writer.write_json_document(
@@ -531,7 +534,7 @@ impl Observation {
     }
 
     fn record_title_animation(&mut self, fixture: &str, observed: &[String]) {
-        let disposition = if observed.len() >= 2 {
+        let disposition = if observed.len() >= 3 {
             VisualDisposition::Pass
         } else {
             VisualDisposition::Fail
@@ -543,7 +546,7 @@ impl Observation {
             disposition,
             Some(fixture.to_owned()),
             format!(
-                "distinct_title_frames={}; observed={observed:?}",
+                "distinct_title_frames={}; required=3; observed={observed:?}",
                 observed.len()
             ),
         ));

@@ -46,9 +46,11 @@ The track keeps the stock `codex` + Codex Hooks + Windows Terminal workflow:
 no launcher wrapper, global daemon, App Server dependency, Claude provider, or
 OpenCode provider is admitted by this roadmap transition.
 
-TB-G15 is the accepted implementation candidate in PR #25. Its merge onto
-`main` is the hard predecessor for TB-G16; no remediation or later v0.3 goal
-may begin from the candidate branch.
+TB-G15 merged in PR #25 and is the hard predecessor for TB-G16. TB-G16 is the
+accepted pending-merge animation/defaults candidate; no remediation or later
+v0.3 goal may begin from its candidate branch. Pixel capture remains a latched
+runner-environment limitation, while exact-tab UIA title evidence continues to
+cover title admission and working-frame motion.
 
 ## TB-B00 — Repository Bootstrap — COMPLETE
 
