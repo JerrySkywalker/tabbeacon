@@ -47,6 +47,9 @@ const CLEANUP_OBSERVER_POLL_MS: u64 = 1_000;
 const CLEANUP_OBSERVER_QUERY_TIMEOUT_MS: u64 = 5_000;
 const CLEANUP_OBSERVER_UNKNOWN_MAX_MS: u64 = 30_000;
 const CLEANUP_OBSERVER_REAP_TIMEOUT_MS: u64 = 1_000;
+// A static attention title must outlive the one-shot Hook that set it, but it
+// cannot remain authorized indefinitely if that Hook's host disappears.
+const STATIC_ATTENTION_LEASE_TTL_MS: u64 = CLEANUP_OBSERVER_UNKNOWN_MAX_MS;
 const MAX_DIAGNOSTIC_LEASE_FILES: usize = 512;
 const MAX_DIAGNOSTIC_LEASE_BYTES: u64 = 128 * 1_024;
 
@@ -228,6 +231,13 @@ impl WorkerPresentation {
             "result-ready" => Some((Phase::WaitingUser, Attention::ResultReady)),
             "approval" => Some((Phase::WaitingUser, Attention::Approval)),
             _ => None,
+        }
+    }
+
+    fn lease_ttl_ms(&self) -> u64 {
+        match self.semantic_state.as_str() {
+            "result-ready" | "approval" => STATIC_ATTENTION_LEASE_TTL_MS,
+            _ => LEASE_TTL_MS,
         }
     }
 }
@@ -687,6 +697,7 @@ impl ActivityLeaseStore {
         presentation: &WorkerPresentation,
         now: u64,
     ) -> io::Result<LeaseTransition> {
+        let expires_unix_ms = now.saturating_add(presentation.lease_ttl_ms());
         self.with_lock(|| {
             let current = self.load(key.digest())?;
             if current
@@ -703,7 +714,7 @@ impl ActivityLeaseStore {
             {
                 current.event_sequence = current.event_sequence.max(event_sequence);
                 current.updated_unix_ms = now;
-                current.expires_unix_ms = now.saturating_add(LEASE_TTL_MS);
+                current.expires_unix_ms = expires_unix_ms;
                 self.write(&current)?;
                 return Ok(LeaseTransition::AlreadyActive);
             }
@@ -727,7 +738,7 @@ impl ActivityLeaseStore {
                 active: true,
                 presentation: Some(presentation.clone()),
                 updated_unix_ms: now,
-                expires_unix_ms: now.saturating_add(LEASE_TTL_MS),
+                expires_unix_ms,
             };
             validate_lease(&lease)?;
             self.write(&lease)?;
@@ -917,19 +928,29 @@ impl ActivityLeaseStore {
         let mut frame_index = 0_usize;
         let mut next_frame_deadline = Instant::now();
         loop {
-            let Some(_) = self.load_worker_lease(&ownership, terminal_binding_sha256, unix_ms())
-            else {
-                reason = "superseded_or_expired";
-                break;
-            };
             let bytes = renderer.render_title_spinner_frame(state, frame_index);
-            if console
-                .write_all(&bytes)
-                .and_then(|()| console.flush())
-                .is_err()
-            {
-                reason = "terminal_unavailable";
-                break;
+            // Keep lease validation and the terminal write in one critical section:
+            // a newer event cannot supersede this worker between its authorization
+            // check and the title write.
+            match self.with_lock(|| {
+                let Some(_) =
+                    self.load_worker_lease_locked(&ownership, terminal_binding_sha256, unix_ms())?
+                else {
+                    return Ok(None);
+                };
+                console.write_all(&bytes)?;
+                console.flush()?;
+                Ok(Some(()))
+            }) {
+                Ok(Some(())) => {}
+                Ok(None) => {
+                    reason = "superseded_or_expired";
+                    break;
+                }
+                Err(_) => {
+                    reason = "terminal_unavailable";
+                    break;
+                }
             }
             frame_index = frame_index.saturating_add(1);
             next_frame_deadline =
@@ -949,15 +970,29 @@ impl ActivityLeaseStore {
         terminal_binding_sha256: &str,
         now: u64,
     ) -> Option<WorkerLease> {
-        let lease = self.with_lock(|| self.load(&ownership.key_sha256)).ok()??;
-        (lease.active
+        self.with_lock(|| self.load_worker_lease_locked(ownership, terminal_binding_sha256, now))
+            .ok()
+            .flatten()
+    }
+
+    /// Validates a worker lease while the caller holds this store's lock.
+    fn load_worker_lease_locked(
+        &self,
+        ownership: &WorkerOwnership,
+        terminal_binding_sha256: &str,
+        now: u64,
+    ) -> io::Result<Option<WorkerLease>> {
+        let Some(lease) = self.load(&ownership.key_sha256)? else {
+            return Ok(None);
+        };
+        Ok((lease.active
             && lease.generation == ownership.generation
             && lease.revision == ownership.revision
             && lease.owner_sha256 == ownership.owner_sha256
             && lease.terminal_binding_sha256 == terminal_binding_sha256
             && lease.presentation.is_some()
             && now <= lease.expires_unix_ms)
-            .then_some(lease)
+            .then_some(lease))
     }
 
     fn write_exit(&self, ownership: &WorkerOwnership, reason: &str) -> io::Result<()> {
@@ -1489,9 +1524,9 @@ mod tests {
 
     use super::{
         ActivityCoordinator, ActivityExecution, ActivityLeaseHealth, ActivityLeaseStore,
-        ActivityRender, CleanupObserverAction, LeaseTransition, TARGET_FRAME_INTERVAL_MS,
-        WorkerKey, WorkerPresentation, WorkerProcessLiveness, cleanup_observer_action,
-        command_output_with_timeout, inspect_activity_leases_read_only,
+        ActivityRender, CleanupObserverAction, LeaseTransition, STATIC_ATTENTION_LEASE_TTL_MS,
+        TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation, WorkerProcessLiveness,
+        cleanup_observer_action, command_output_with_timeout, inspect_activity_leases_read_only,
         next_animation_frame_deadline, normalized_windows_path, system_powershell_path,
     };
     use crate::{
@@ -1687,6 +1722,21 @@ mod tests {
         assert_eq!(result_predecessor, initial.ownership());
         assert_eq!(result_lease.presentation.as_ref(), Some(&result));
         assert_eq!(
+            result_lease
+                .expires_unix_ms
+                .saturating_sub(result_lease.updated_unix_ms),
+            STATIC_ATTENTION_LEASE_TTL_MS
+        );
+        assert!(
+            store
+                .load_worker_lease(
+                    &result_lease.ownership(),
+                    &digest('c'),
+                    result_lease.expires_unix_ms.saturating_add(1),
+                )
+                .is_none()
+        );
+        assert_eq!(
             result.semantic_input(),
             Some((Phase::WaitingUser, Attention::ResultReady))
         );
@@ -1702,6 +1752,12 @@ mod tests {
         };
         assert_eq!(approval_predecessor, result_lease.ownership());
         assert_eq!(approval_lease.presentation.as_ref(), Some(&approval));
+        assert_eq!(
+            approval_lease
+                .expires_unix_ms
+                .saturating_sub(approval_lease.updated_unix_ms),
+            STATIC_ATTENTION_LEASE_TTL_MS
+        );
         assert_eq!(
             approval.semantic_input(),
             Some((Phase::WaitingUser, Attention::Approval))
