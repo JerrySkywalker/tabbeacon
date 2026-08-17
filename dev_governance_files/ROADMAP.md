@@ -46,11 +46,10 @@ The track keeps the stock `codex` + Codex Hooks + Windows Terminal workflow:
 no launcher wrapper, global daemon, App Server dependency, Claude provider, or
 OpenCode provider is admitted by this roadmap transition.
 
-TB-G15 merged in PR #25 and is the hard predecessor for TB-G16. TB-G16 is the
-accepted pending-merge animation/defaults candidate; no remediation or later
-v0.3 goal may begin from its candidate branch. Pixel capture remains a latched
-runner-environment limitation, while exact-tab UIA title evidence continues to
-cover title admission and working-frame motion.
+TB-G15 and TB-G16 are **COMPLETE**, merged in PRs #25 and #26 respectively.
+TB-G17 — Title Ownership / Conflict Remediation is the canonical next goal.
+Pixel capture remains a latched runner-environment limitation, while exact-tab
+UIA title evidence continues to cover title admission and working-frame motion.
 
 ## TB-B00 — Repository Bootstrap — COMPLETE
 

@@ -2,14 +2,11 @@
 
 ## Status
 
-ACCEPTED PENDING MERGE. TB-G15 is the accepted predecessor, and the G16
-implementation candidate has passed its focused and all-target local matrix,
-host-independent UIA title-animation oracle, bounded worker performance
-matrix, and required ownership/configuration regressions. Pixel capture remains
-latched as a runner-environment limitation; it does not suppress the exact-tab
-UIA title evidence. G16 inherits the post-release worker and owned-tab UIA
-safety baseline and must not turn diagnosed persistent contention into an
-endless title fight.
+COMPLETE. TB-G16 merged in PR #26. Its focused and all-target local matrix,
+exact-head hosted code CI, UIA title-animation oracle, bounded worker
+performance matrix, and ownership/configuration regressions passed. Pixel
+capture remains latched as a runner-environment limitation; it does not
+suppress exact-tab UIA title evidence. TB-G17 is the canonical next goal.
 
 ## Purpose
 
