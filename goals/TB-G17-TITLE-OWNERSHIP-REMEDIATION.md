@@ -2,7 +2,8 @@
 
 ## Status
 
-PLANNED. Depends on TB-G15 classification and TB-G16 animation behavior.
+PLANNED. Depends on accepted TB-G15 classification and TB-G16 animation
+behavior from the reconciled post-release v0.3 sequence.
 
 ## Purpose
 

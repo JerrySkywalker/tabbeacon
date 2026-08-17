@@ -2,7 +2,10 @@
 
 ## Status
 
-PLANNED. First implementation Goal in the v0.3 Codex Presentation Reliability & Motion track. Start only after v0.2 release closure reaches a terminal accepted baseline.
+PLANNED. First implementation Goal in the v0.3 Codex Presentation Reliability
+& Motion track. Start only after the reconciled v0.3 planning admission is
+merged into post-release `main`; the public v0.2 release SHA remains a distinct
+historical release identity.
 
 ## Purpose
 
@@ -37,7 +40,8 @@ The exact type names may differ, but meanings must remain distinct.
 
 ### Visible-title probe
 
-Build a trusted Windows Terminal observation seam that can:
+Generalize the existing trusted owned-tab UIA seam rather than introduce a
+second independent UIA stack. The active probe must be able to:
 
 1. write a unique safe test title through the production title path;
 2. observe the visible tab title using the existing trusted Windows/UIA infrastructure;
@@ -47,9 +51,30 @@ Build a trusted Windows Terminal observation seam that can:
 
 Do not claim arbitrary shell-writer identity unless evidence supports it.
 
+### Passive diagnostics and explicit active probe
+
+The following principle is canonical:
+
+```text
+PASSIVE_DIAGNOSTICS=READ_ONLY
+ACTIVE_TITLE_PROBE=EXPLICIT_OPT_IN
+COMMON_TYPED_MODEL=true
+```
+
+Ordinary `status`, `status --json`, `doctor`, and `doctor --json` remain
+read-only and must report a not-requested visible probe as `unverified` rather
+than as a passing or failing live check. A separately explicit active title
+probe may create an owned fixture, emit one bounded safe title through the
+production path, observe the exact correlated tab, and clean it up. The exact
+CLI spelling is an implementation decision; it must not rewrite persistent
+configuration or transiently rename the Owner's current tab.
+
 ### Diagnostics integration
 
-Expose the classification in `status`, `status --json`, `doctor`, and `doctor --json` without leaking unrelated Windows Terminal settings or shell-profile contents.
+Expose the common classification in `status`, `status --json`, `doctor`, and
+`doctor --json` without leaking unrelated Windows Terminal settings or
+shell-profile contents. Passive output must distinguish `visible_probe=not_run`
+and `authority=unverified` from a classified active result.
 
 Example machine-oriented fields may include:
 
@@ -99,7 +124,8 @@ TITLE_AUTHORITY_MODEL=PASS
 VISIBLE_TITLE_PROBE=PASS
 SUPPRESSED_VS_CONTENDED_DISTINCTION=PASS
 NORMAL_POWERSHELL_REPRO=PASS
-ADMIN_POWERSHELL_REPRO=PASS
+ADMIN_LABEL_SCENARIO=PASS
+ACTUAL_ELEVATED_SCENARIO=<PASS|UNPROVEN|BLOCKED>
 DIAGNOSTICS_PRIVACY=PASS
 TB_REG_TITLE_OWNERSHIP_001=REPRODUCED_AND_CLASSIFIED
 ```

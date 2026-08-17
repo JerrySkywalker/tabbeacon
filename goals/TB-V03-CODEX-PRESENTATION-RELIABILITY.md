@@ -2,17 +2,45 @@
 
 ## Status
 
-PLANNING ONLY. This track is being recorded while the v0.2.0 release-closure Goal is still running. It MUST NOT change the frozen v0.2 release candidate or authorize v0.3 implementation before the v0.2 closure reaches a terminal disposition.
+ACCEPTED PLANNING BASELINE. v0.2.0 is publicly released and its release
+closeout is merged. This document authorizes the frozen sequential v0.3
+planning order only; implementation still begins with TB-G15.
 
 Planning baseline when this document was created:
 
 ```text
-main=cf52736d4ba527a6d3b258ccda037f92aec728e1
-version=0.2.0 release candidate
-v0.2 publication/closeout=in progress
+public_v0.2_release_sha=0b1d5136833a05bf94b7d32c414a21da2f5ac78e
+public_v0.2_tag=v0.2.0
+post_release_main=9594c7055120cdb0731d2101f502503e4b30c3d4
+v0.2_publication_and_closeout=complete
 ```
 
-After v0.2 publication completes, rebase this planning branch onto the final released main before merging it and then update the canonical `dev_governance_files/ROADMAP.md`.
+The planning branch was reconciled from the frozen pre-release baseline onto
+the post-release `main`. The public release SHA remains the release identity;
+the newer post-release `main` is the implementation predecessor. The canonical
+`dev_governance_files/ROADMAP.md` records the active sequence.
+
+## Reconciled predecessor capabilities
+
+Post-release recovery added terminal-close worker cleanup and an owned live-tab
+UIA seam (`OwnedTabTitleReader`, `observe_frames`, and
+`locate_and_activate_any_with_title_reader`). TB-G15 must generalize this
+trusted, owned-target capability where necessary rather than build a second
+independent Windows UIA stack. The predecessor worker/session changes remain
+the safety baseline for TB-G16.
+
+The diagnostics contract is also fixed before implementation:
+
+```text
+PASSIVE_DIAGNOSTICS=READ_ONLY
+ACTIVE_TITLE_PROBE=EXPLICIT_OPT_IN
+COMMON_TYPED_MODEL=true
+```
+
+Normal `status` and `doctor` invocations, including their JSON forms, never
+temporarily write the active terminal title. An explicitly requested active
+probe may write only to an owned fixture through the production presentation
+path and reports its result through the same typed model.
 
 ## Product objective
 
@@ -128,7 +156,7 @@ Existing configured users are not silently rewritten. `tabbeacon setup` may dete
 ## Goal dependency DAG
 
 ```text
-v0.2 release closure
+v0.2 public release + post-release closeout
         ↓
 TB-G15 — Title Authority Observatory
         ↓

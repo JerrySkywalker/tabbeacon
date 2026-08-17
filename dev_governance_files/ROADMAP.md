@@ -20,9 +20,31 @@ Release, including the verified Windows x64 ZIP and SHA-256 sidecar.
 
 The mandatory v0.1 path is complete: `TB-B00`, `TB-G01`, `TB-G02`, `TB-G03`, `TB-G04`, `TB-G05`, `TB-G07`, and `TB-G08` all landed and were released. The Codex App Server experiment (`TB-G06X`) and future Claude/OpenCode provider tracks (`TB-G20`, `TB-G30`) remain deliberately deferred and do not count as Codex-only product debt.
 
-Near-term product work is now the **Codex-first v0.2 track**: improve the stock `codex` + Codex Hooks + Windows Terminal workflow without adding a launcher wrapper, global daemon, App Server dependency, Claude provider, or OpenCode provider.
+## Active production sequence — v0.3 Codex Presentation Reliability & Motion
 
-Detailed execution plan: [`../goals/TB-V02-CODEX-FIRST-TRACK.md`](../goals/TB-V02-CODEX-FIRST-TRACK.md).
+The released v0.2 line is historical baseline and remains the source of its
+public release record. Near-term implementation is the sequential v0.3
+Codex-first presentation reliability and motion track, beginning only after
+this planning admission:
+
+```text
+TB-G15 — Title Authority Observatory
+  ↓
+TB-G16 — Animation Engine v2 and Defaults
+  ↓
+TB-G17 — Title Ownership / Conflict Remediation
+  ↓
+TB-G18 — Session Convergence and Recovery
+  ↓
+TB-G19 — Codex Compatibility Registry v2
+  ↓
+TB-G19R — v0.3 Hardening and Release
+```
+
+Detailed execution plan: [`../goals/TB-V03-CODEX-PRESENTATION-RELIABILITY.md`](../goals/TB-V03-CODEX-PRESENTATION-RELIABILITY.md).
+The track keeps the stock `codex` + Codex Hooks + Windows Terminal workflow:
+no launcher wrapper, global daemon, App Server dependency, Claude provider, or
+OpenCode provider is admitted by this roadmap transition.
 
 ## TB-B00 — Repository Bootstrap — COMPLETE
 
@@ -431,9 +453,11 @@ Release only after all applicable L0–L4 gates are green at one exact candidate
 
 Estimated effective engineering effort: **3–6 h**.
 
-## Codex-first v0.2 completion definition
+## Codex-first v0.2 historical completion definition
 
-The Codex-only product line may be treated as functionally near-closed when `TB-G09` through `TB-G14` are complete and dogfood shows no P0/P1 defects.
+The Codex-only v0.2 product line is complete: `TB-G09` through `TB-G14` landed
+and v0.2.0 was publicly released. The following estimate is retained as the
+historical completion definition, not current near-term work.
 
 Expected remaining effective engineering effort from v0.1.1 baseline:
 

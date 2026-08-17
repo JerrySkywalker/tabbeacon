@@ -2,7 +2,8 @@
 
 ## Status
 
-PLANNED. Final closure Goal for the Codex-only v0.3 track. No new feature work is admitted here.
+PLANNED. Final closure Goal for the Codex-only v0.3 track after the reconciled
+post-release sequence. No new feature work is admitted here.
 
 ## Purpose
 

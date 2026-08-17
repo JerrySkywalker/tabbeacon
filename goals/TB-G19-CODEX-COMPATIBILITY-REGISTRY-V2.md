@@ -2,7 +2,8 @@
 
 ## Status
 
-PLANNED. Codex-only maintenance Goal after presentation reliability is stable.
+PLANNED. Codex-only maintenance Goal after presentation reliability is stable
+in the reconciled post-release v0.3 sequence.
 
 ## Purpose
 

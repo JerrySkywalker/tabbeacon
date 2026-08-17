@@ -2,7 +2,8 @@
 
 ## Status
 
-PLANNED. Depends on accepted G15–G17 behavior.
+PLANNED. Depends on accepted G15–G17 behavior from the reconciled post-release
+v0.3 sequence.
 
 ## Purpose
 

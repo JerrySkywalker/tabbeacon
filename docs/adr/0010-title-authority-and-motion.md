@@ -2,7 +2,10 @@
 
 ## Status
 
-PROPOSED for the v0.3 Codex-first track. Do not apply to the frozen v0.2 release candidate while v0.2 closure is in progress.
+ACCEPTED for v0.3 planning and sequencing. The public v0.2.0 release remains
+frozen at `0b1d5136833a05bf94b7d32c414a21da2f5ac78e`; v0.3 implementation
+starts from the later post-release `main` after the planning admission is
+merged. This ADR does not authorize TB-G16 before accepted TB-G15 evidence.
 
 ## Context
 
@@ -10,7 +13,7 @@ v0.2 can correctly compute semantic presentation and can write Windows Terminal 
 
 The v0.2 ownership model primarily arbitrates Codex versus TabBeacon by configuring Codex terminal-title output. It does not yet model all title authorities between TabBeacon and the visible tab: Windows Terminal profile policy, shell/profile title writers, or other application writers.
 
-Separately, v0.2 retains pre-G11 defaults: static `title-indicator` and a 180 ms worker frame interval. The production animator exists, but new/default users do not automatically experience it.
+Separately, v0.2 retains pre-G11 defaults: static `title-indicator` and a 180 ms worker frame interval. The production animator exists, but new/default users do not automatically experience it. Post-release recovery also added an owned live-tab UIA reader and terminal-close worker cleanup; v0.3 builds from those capabilities instead of replacing them.
 
 ## Decision
 
@@ -27,6 +30,15 @@ unverified
 ```
 
 The diagnostic classification must distinguish "title was never admitted" from "title appeared and was overwritten later" where the platform can prove that distinction.
+
+### 1a. Passive diagnostics and active probing are separate
+
+`status`, `doctor`, and their JSON forms remain read-only operational
+diagnostics. Active visible-title observation is an explicit opt-in action that
+uses an owned fixture and the same typed title-authority model. A not-requested
+probe is `unverified`, not a failed presentation claim; unavailable and
+classified probe outcomes are represented distinctly. The active probe never
+rewrites persistent user configuration.
 
 ### 2. Default working presentation uses motion
 

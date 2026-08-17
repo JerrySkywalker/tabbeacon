@@ -2,7 +2,10 @@
 
 ## Status
 
-PLANNED. Depends on accepted TB-G15 evidence so animation changes do not mask an unresolved title-authority problem.
+PLANNED. Depends on accepted TB-G15 evidence so animation changes do not mask
+an unresolved title-authority problem. It inherits the post-release worker and
+owned-tab UIA safety baseline and must not turn diagnosed persistent contention
+into an endless title fight.
 
 ## Purpose
 
