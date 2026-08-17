@@ -27,6 +27,7 @@ use tabbeacon::{
         ActivityMode, PresentationSettings, PresentationSettingsStore, PresentationTheme,
         SpinnerPreset, TabColorMode, TitleMode,
     },
+    windows_terminal_policy::WindowsTerminalPolicyStore,
 };
 
 const MAX_HOOK_INPUT_BYTES: u64 = 1024 * 1024;
@@ -94,6 +95,7 @@ fn main() -> ExitCode {
         }
         [command] if command == "status" => status(false),
         [command, option] if command == "status" && option == "--json" => status(true),
+        [command, rest @ ..] if command == "title-policy" => title_policy_command(rest),
         [command, provider] if command == "uninstall" && provider == "codex" => uninstall_codex(),
         [command, provider] if command == "hook" && provider == "codex" => run_codex_hook(),
         [command, subcommand] if command == "config" && subcommand == "show" => config_show(),
@@ -119,6 +121,27 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         _ => {
+            print_usage();
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn title_policy_command(arguments: &[String]) -> ExitCode {
+    let json = arguments
+        .get(1)
+        .is_some_and(|argument| argument == "--json");
+    match arguments.first().map(String::as_str) {
+        Some("inspect") if arguments.len() == 1 || (arguments.len() == 2 && json) => {
+            title_policy_inspect(json)
+        }
+        Some("repair") if arguments.len() == 1 || (arguments.len() == 2 && json) => {
+            title_policy_repair(json)
+        }
+        Some("restore") if arguments.len() == 1 || (arguments.len() == 2 && json) => {
+            title_policy_restore(json)
+        }
+        Some(_) | None => {
             print_usage();
             ExitCode::from(2)
         }
@@ -170,6 +193,7 @@ fn guided_setup() -> ExitCode {
         &integration.doctor(),
     );
     print_setup_discovery(&discovery, before);
+    print_setup_title_policy(&WindowsTerminalPolicyStore::from_environment().inspect());
 
     let draft = match prompt_setup_draft(before) {
         Ok(settings) => settings,
@@ -306,6 +330,112 @@ fn status(json: bool) -> ExitCode {
         println!("{line}");
     }
     ExitCode::SUCCESS
+}
+
+/// Reports Windows Terminal policy without creating state or writing a tab.
+fn title_policy_inspect(json: bool) -> ExitCode {
+    let policy = WindowsTerminalPolicyStore::from_environment().inspect();
+    if json {
+        return match serde_json::to_string(&policy) {
+            Ok(value) => {
+                println!("{value}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => management_error("TITLE_POLICY_INSPECT", &error),
+        };
+    }
+    print_title_policy("INSPECT", &policy, None);
+    ExitCode::SUCCESS
+}
+
+/// Applies the explicit, profile-scoped Windows Terminal remediation.
+fn title_policy_repair(json: bool) -> ExitCode {
+    let store = WindowsTerminalPolicyStore::from_environment();
+    let policy = store.inspect();
+    match store.repair() {
+        Ok(result) if json => match serde_json::to_string(&serde_json::json!({
+            "policy": policy,
+            "result": result,
+        })) {
+            Ok(value) => {
+                println!("{value}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => management_error("TITLE_POLICY_REPAIR", &error),
+        },
+        Ok(result) => {
+            print_title_policy("REPAIR", &policy, Some(result));
+            ExitCode::SUCCESS
+        }
+        Err(error) => management_error("TITLE_POLICY_REPAIR", &error),
+    }
+}
+
+/// Restores only an exact previously-owned policy target.
+fn title_policy_restore(json: bool) -> ExitCode {
+    let store = WindowsTerminalPolicyStore::from_environment();
+    let policy = store.inspect();
+    match store.restore() {
+        Ok(result) if json => match serde_json::to_string(&serde_json::json!({
+            "policy": policy,
+            "result": result,
+        })) {
+            Ok(value) => {
+                println!("{value}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => management_error("TITLE_POLICY_RESTORE", &error),
+        },
+        Ok(result) => {
+            print_title_policy("RESTORE", &policy, Some(result));
+            ExitCode::SUCCESS
+        }
+        Err(error) => management_error("TITLE_POLICY_RESTORE", &error),
+    }
+}
+
+fn print_title_policy(
+    operation: &str,
+    policy: &tabbeacon::windows_terminal_policy::TitlePolicyDiagnostics,
+    result: Option<tabbeacon::windows_terminal_policy::TitleRemediationResult>,
+) {
+    println!("TITLE_POLICY_OPERATION={operation}");
+    println!("WT_SETTINGS_SOURCE={}", policy.settings_source.as_str());
+    println!(
+        "ACTIVE_PROFILE_RESOLUTION={}",
+        policy.active_profile_resolution.as_str()
+    );
+    println!(
+        "APPLICATION_TITLE_POLICY={}",
+        policy.application_title_policy.as_str()
+    );
+    println!("TITLE_POLICY_SOURCE={}", policy.policy_source.as_str());
+    println!("TITLE_REMEDIATION={}", policy.remediation.as_str());
+    println!("TITLE_REMEDIATION_SCOPE={}", policy.remediation_scope);
+    if let Some(result) = result {
+        println!("REMEDIATION_RESULT={}", result.state.as_str());
+        println!("SETTINGS_DOCUMENT_MODIFIED={}", result.document_modified);
+        println!("USER_CONFIG_PRESERVED={}", result.user_config_preserved);
+    }
+    println!("PERSISTENT_REMEDIATION_EXPLICIT=true");
+}
+
+fn print_setup_title_policy(policy: &tabbeacon::windows_terminal_policy::TitlePolicyDiagnostics) {
+    println!("Windows Terminal title policy");
+    println!(
+        "  Application titles {}",
+        policy.application_title_policy.as_str()
+    );
+    println!("  Policy source       {}", policy.policy_source.as_str());
+    println!(
+        "  Active profile      {}",
+        policy.active_profile_resolution.as_str()
+    );
+    println!("  Remediation         {}", policy.remediation.as_str());
+    if policy.remediation.as_str() == "available" {
+        println!("  Next step           tabbeacon title-policy repair (explicit)");
+    }
+    println!();
 }
 
 fn uninstall_codex() -> ExitCode {
@@ -747,6 +877,9 @@ fn print_usage() {
     println!("  tabbeacon doctor --probe-title [--json]");
     println!("  tabbeacon status");
     println!("  tabbeacon status --json");
+    println!("  tabbeacon title-policy inspect [--json]");
+    println!("  tabbeacon title-policy repair [--json]");
+    println!("  tabbeacon title-policy restore [--json]");
     println!("  tabbeacon uninstall codex");
     println!("  tabbeacon preview [--theme <muted-dark|classic>] [--spinner <preset>]");
     println!("  tabbeacon config show|reset|wizard");

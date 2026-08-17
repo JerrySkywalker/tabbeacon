@@ -6,6 +6,11 @@
 
 use serde::Serialize;
 
+use crate::windows_terminal_policy::{
+    ActiveProfileResolution, ApplicationTitlePolicy, PolicySource, TitlePolicyDiagnostics,
+    TitleRemediationState,
+};
+
 /// Result of an explicit visible-title probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -126,6 +131,36 @@ pub enum TitleAuthority {
     Unverified,
 }
 
+/// Safest root-cause class combining visible evidence with Terminal policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleConflictClass {
+    /// An active visible probe was not requested.
+    Unverified,
+    /// The policy itself safely explains a suppressed visible title.
+    WindowsTerminalPolicy,
+    /// A visible title was admitted, then another application/channel won.
+    ExternalOrApplicationWriter,
+    /// Both policy and visible probe prove a healthy title channel.
+    Healthy,
+    /// Evidence is insufficient to name the deepest source safely.
+    Inconclusive,
+}
+
+impl TitleConflictClass {
+    /// Stable machine-readable spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unverified => "unverified",
+            Self::WindowsTerminalPolicy => "windows_terminal_policy",
+            Self::ExternalOrApplicationWriter => "external_or_application_writer",
+            Self::Healthy => "healthy",
+            Self::Inconclusive => "inconclusive",
+        }
+    }
+}
+
 impl TitleAuthority {
     /// Stable machine-readable spelling.
     #[must_use]
@@ -168,26 +203,41 @@ pub struct TitleAuthorityDiagnostics {
     /// Existing Codex terminal-title ownership diagnosis.
     pub codex_writer_state: String,
     /// Windows Terminal policy state when it has been safely inspected.
-    pub application_title_policy: String,
+    pub application_title_policy: ApplicationTitlePolicy,
+    /// Effective policy origin, never a settings path or document content.
+    pub policy_source: PolicySource,
+    /// Exact-profile resolution status, never a profile name or GUID.
+    pub active_profile_resolution: ActiveProfileResolution,
+    /// Whether a narrow explicit repair is safely available.
+    pub remediation_available: TitleRemediationState,
+    /// Scope that an explicit repair would touch, if any.
+    pub remediation_scope: &'static str,
     /// Whether an explicit owned visible probe was run.
     pub visible_probe: VisibleTitleProbe,
     /// Deepest non-sensitive active-probe boundary.
     pub probe_boundary: String,
     /// The end-to-end authority classification.
     pub authority: TitleAuthority,
+    /// Combined policy/probe root-cause classification.
+    pub conflict_class: TitleConflictClass,
 }
 
 impl TitleAuthorityDiagnostics {
     /// Creates the normal passive, read-only diagnosis.
     #[must_use]
-    pub fn not_run(codex_writer_state: impl Into<String>) -> Self {
+    pub fn passive(codex_writer_state: impl Into<String>, policy: TitlePolicyDiagnostics) -> Self {
         Self {
             desired_owner: "tabbeacon".to_owned(),
             codex_writer_state: codex_writer_state.into(),
-            application_title_policy: "not_inspected".to_owned(),
+            application_title_policy: policy.application_title_policy,
+            policy_source: policy.policy_source,
+            active_profile_resolution: policy.active_profile_resolution,
+            remediation_available: policy.remediation,
+            remediation_scope: policy.remediation_scope,
             visible_probe: VisibleTitleProbe::NotRun,
             probe_boundary: TitleProbeBoundary::NotRun.as_str().to_owned(),
             authority: TitleAuthority::Unverified,
+            conflict_class: TitleConflictClass::Unverified,
         }
     }
 
@@ -200,7 +250,36 @@ impl TitleAuthorityDiagnostics {
             .as_str()
             .clone_into(&mut self.probe_boundary);
         self.authority = TitleAuthority::from_probe(result.visible_probe);
+        self.conflict_class =
+            classify_conflict(result.visible_probe, self.application_title_policy);
         self
+    }
+}
+
+const fn classify_conflict(
+    probe: VisibleTitleProbe,
+    policy: ApplicationTitlePolicy,
+) -> TitleConflictClass {
+    match (probe, policy) {
+        (VisibleTitleProbe::NotRun, _) => TitleConflictClass::Unverified,
+        (
+            VisibleTitleProbe::Suppressed,
+            ApplicationTitlePolicy::SuppressedByProfile
+            | ApplicationTitlePolicy::SuppressedByInheritedDefault,
+        ) => TitleConflictClass::WindowsTerminalPolicy,
+        (VisibleTitleProbe::Contended, policy) if policy.permits_application_titles() => {
+            TitleConflictClass::ExternalOrApplicationWriter
+        }
+        (VisibleTitleProbe::Healthy, policy) if policy.permits_application_titles() => {
+            TitleConflictClass::Healthy
+        }
+        (
+            VisibleTitleProbe::Healthy
+            | VisibleTitleProbe::Suppressed
+            | VisibleTitleProbe::Contended
+            | VisibleTitleProbe::Unavailable,
+            _,
+        ) => TitleConflictClass::Inconclusive,
     }
 }
 
@@ -231,6 +310,11 @@ mod tests {
     use super::{
         ActiveTitleProbeResult, TitleAuthority, TitleAuthorityDiagnostics, TitleProbeBoundary,
         TitleProbeSample, VisibleTitleProbe, classify_visible_title_samples,
+    };
+    use crate::windows_terminal_policy::TitlePolicyDiagnostics;
+    use crate::windows_terminal_policy::{
+        ActiveProfileResolution, ApplicationTitlePolicy, PolicySource, SettingsSourceResolution,
+        TitleRemediationState,
     };
 
     #[test]
@@ -289,16 +373,23 @@ mod tests {
 
     #[test]
     fn passive_diagnostics_are_unverified_not_failed() {
-        let title = TitleAuthorityDiagnostics::not_run("tabbeacon");
+        let title = TitleAuthorityDiagnostics::passive(
+            "tabbeacon",
+            TitlePolicyDiagnostics::not_inspected(),
+        );
         assert_eq!(title.visible_probe, VisibleTitleProbe::NotRun);
         assert_eq!(title.authority, TitleAuthority::Unverified);
     }
 
     #[test]
     fn title_diagnostics_serialize_only_classifications() {
-        let title = TitleAuthorityDiagnostics::not_run("tabbeacon").with_active_probe(
-            ActiveTitleProbeResult::complete(VisibleTitleProbe::Contended),
-        );
+        let title = TitleAuthorityDiagnostics::passive(
+            "tabbeacon",
+            TitlePolicyDiagnostics::not_inspected(),
+        )
+        .with_active_probe(ActiveTitleProbeResult::complete(
+            VisibleTitleProbe::Contended,
+        ));
         let json = serde_json::to_string(&title).expect("title diagnostics serialize");
         assert!(json.contains("contended"));
         for forbidden in ["PowerShell", "prompt", "tool", "model", "session_id"] {
@@ -311,10 +402,51 @@ mod tests {
 
     #[test]
     fn unavailable_probe_retains_only_a_safe_deepest_boundary() {
-        let title = TitleAuthorityDiagnostics::not_run("tabbeacon").with_active_probe(
-            ActiveTitleProbeResult::unavailable(TitleProbeBoundary::AnchorCorrelation),
-        );
+        let title = TitleAuthorityDiagnostics::passive(
+            "tabbeacon",
+            TitlePolicyDiagnostics::not_inspected(),
+        )
+        .with_active_probe(ActiveTitleProbeResult::unavailable(
+            TitleProbeBoundary::AnchorCorrelation,
+        ));
         assert_eq!(title.visible_probe, VisibleTitleProbe::Unavailable);
         assert_eq!(title.probe_boundary, "anchor_correlation");
+    }
+
+    #[test]
+    fn visible_evidence_and_effective_policy_produce_conservative_root_causes() {
+        let suppressed_policy = TitlePolicyDiagnostics {
+            settings_source: SettingsSourceResolution::Unavailable,
+            active_profile_resolution: ActiveProfileResolution::Resolved,
+            application_title_policy: ApplicationTitlePolicy::SuppressedByProfile,
+            policy_source: PolicySource::Profile,
+            remediation: TitleRemediationState::Available,
+            remediation_scope: "active_profile",
+        };
+        let suppressed = TitleAuthorityDiagnostics::passive("tabbeacon", suppressed_policy)
+            .with_active_probe(ActiveTitleProbeResult::complete(
+                VisibleTitleProbe::Suppressed,
+            ));
+        assert_eq!(
+            suppressed.conflict_class.as_str(),
+            "windows_terminal_policy"
+        );
+
+        let allowed_policy = TitlePolicyDiagnostics {
+            settings_source: SettingsSourceResolution::Unavailable,
+            active_profile_resolution: ActiveProfileResolution::Resolved,
+            application_title_policy: ApplicationTitlePolicy::ApplicationTitlesAllowed,
+            policy_source: PolicySource::Profile,
+            remediation: TitleRemediationState::NotNeeded,
+            remediation_scope: "none",
+        };
+        let contended = TitleAuthorityDiagnostics::passive("tabbeacon", allowed_policy)
+            .with_active_probe(ActiveTitleProbeResult::complete(
+                VisibleTitleProbe::Contended,
+            ));
+        assert_eq!(
+            contended.conflict_class.as_str(),
+            "external_or_application_writer"
+        );
     }
 }

@@ -14,6 +14,7 @@ use crate::{
     repo::StableAliasRegistry,
     settings::{PresentationSettings, PresentationSettingsStore, SettingsError},
     title_authority::TitleAuthorityDiagnostics,
+    windows_terminal_policy::{TitlePolicyDiagnostics, WindowsTerminalPolicyStore},
 };
 
 /// Stable JSON schema version for `status` and `doctor` diagnostics.
@@ -121,7 +122,10 @@ impl DoctorDiagnostics {
             checks,
             warnings,
             failures,
-            title: TitleAuthorityDiagnostics::not_run("unavailable"),
+            title: TitleAuthorityDiagnostics::passive(
+                "unavailable",
+                TitlePolicyDiagnostics::not_inspected(),
+            ),
         }
     }
 
@@ -355,7 +359,9 @@ pub fn collect_operational_diagnostics() -> OperationalDiagnostics {
         Err(_) => ("unavailable".to_owned(), None),
     };
     let presentation = collect_presentation_diagnostics();
-    let title = TitleAuthorityDiagnostics::not_run(integration.title_ownership.as_str());
+    let title_policy = WindowsTerminalPolicyStore::from_environment().inspect();
+    let title =
+        TitleAuthorityDiagnostics::passive(integration.title_ownership.as_str(), title_policy);
     OperationalDiagnostics {
         schema_version: DIAGNOSTICS_SCHEMA_VERSION,
         tabbeacon: TabBeaconDiagnostics {
@@ -621,11 +627,19 @@ fn human_title_lines(title: &TitleAuthorityDiagnostics) -> Vec<String> {
         format!("CODEX_TITLE_WRITER_STATE={}", title.codex_writer_state),
         format!(
             "APPLICATION_TITLE_POLICY={}",
-            title.application_title_policy
+            title.application_title_policy.as_str()
         ),
+        format!("TITLE_POLICY_SOURCE={}", title.policy_source.as_str()),
+        format!(
+            "ACTIVE_PROFILE_RESOLUTION={}",
+            title.active_profile_resolution.as_str()
+        ),
+        format!("TITLE_REMEDIATION={}", title.remediation_available.as_str()),
+        format!("TITLE_REMEDIATION_SCOPE={}", title.remediation_scope),
         format!("VISIBLE_TITLE_PROBE={}", title.visible_probe.as_str()),
         format!("TITLE_PROBE_BOUNDARY={}", title.probe_boundary),
         format!("TITLE_AUTHORITY={}", title.authority.as_str()),
+        format!("TITLE_CONFLICT_CLASS={}", title.conflict_class.as_str()),
     ]
 }
 
@@ -694,9 +708,14 @@ mod tests {
                 "TITLE_DESIRED_OWNER=tabbeacon".to_owned(),
                 "CODEX_TITLE_WRITER_STATE=unavailable".to_owned(),
                 "APPLICATION_TITLE_POLICY=not_inspected".to_owned(),
+                "TITLE_POLICY_SOURCE=unavailable".to_owned(),
+                "ACTIVE_PROFILE_RESOLUTION=unavailable".to_owned(),
+                "TITLE_REMEDIATION=unavailable".to_owned(),
+                "TITLE_REMEDIATION_SCOPE=none".to_owned(),
                 "VISIBLE_TITLE_PROBE=not_run".to_owned(),
                 "TITLE_PROBE_BOUNDARY=not_run".to_owned(),
                 "TITLE_AUTHORITY=unverified".to_owned(),
+                "TITLE_CONFLICT_CLASS=unverified".to_owned(),
                 "DOCTOR=WARNING".to_owned(),
             ]
         );

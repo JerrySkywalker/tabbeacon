@@ -12,6 +12,7 @@ pub mod settings;
 pub mod setup;
 pub mod title_authority;
 pub mod visual;
+pub mod windows_terminal_policy;
 
 /// Public product name used by bootstrap smoke tests.
 pub const PRODUCT_NAME: &str = "TabBeacon";

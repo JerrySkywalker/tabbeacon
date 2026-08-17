@@ -2,8 +2,9 @@
 
 ## Status
 
-PLANNED. Depends on accepted TB-G15 classification and TB-G16 animation
-behavior from the reconciled post-release v0.3 sequence.
+COMPLETE on merge of PR #28. TB-G17 implements the accepted Windows Terminal
+policy diagnosis and ownership-safe remediation boundary; TB-G18 is the next
+production goal in the reconciled v0.3 sequence.
 
 ## Purpose
 
