@@ -241,7 +241,9 @@ fn locate_activated_capturable_with_retry(
         match locator
             .locate_and_activate_any_with_title_reader(run_id, &replay.case.expected_title_frames)
         {
-            Ok(OwnedTabActivation::Activated { dump, title_reader }) => {
+            Ok(OwnedTabActivation::Activated {
+                dump, title_reader, ..
+            }) => {
                 let target = ActivatedTarget {
                     dump,
                     title_reader: replay.case.expects_title_animation.then_some(title_reader),

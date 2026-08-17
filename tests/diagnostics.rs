@@ -126,6 +126,13 @@ fn status_json_is_structured_private_and_read_only_for_isolated_state() {
     assert_eq!(report["codex"]["version"], "0.147.0");
     assert_eq!(report["codex"]["profile_supported"], true);
     assert_eq!(report["presentation"]["source"], "default");
+    assert_eq!(report["title"]["desired_owner"], "tabbeacon");
+    assert_eq!(report["title"]["codex_writer_state"], "unavailable");
+    assert_eq!(report["title"]["application_title_policy"], "not_inspected");
+    assert_eq!(report["title"]["visible_probe"], "not_run");
+    assert_eq!(report["title"]["probe_boundary"], "not_run");
+    assert_eq!(report["title"]["authority"], "unverified");
+    assert_eq!(report["doctor"]["title"], report["title"]);
     assert_eq!(report["activity"]["observation"], "lease_based");
     assert_eq!(report["activity"]["active_leases"], 0);
     assert_eq!(report["activity"]["stale_leases"], 0);
@@ -138,6 +145,7 @@ fn status_json_is_structured_private_and_read_only_for_isolated_state() {
         "codex-home",
         "local-appdata",
         "repository-identity",
+        "PowerShell",
     ] {
         assert!(
             !serialized.contains(sensitive),

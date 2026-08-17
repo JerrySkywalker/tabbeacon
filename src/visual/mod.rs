@@ -36,6 +36,8 @@ pub mod runner;
 #[cfg(windows)]
 pub mod session;
 #[cfg(windows)]
+mod title_probe;
+#[cfg(windows)]
 pub mod uia;
 
 #[cfg(windows)]
@@ -45,4 +47,17 @@ pub use runner::{LiveVisualRunRequest, LiveVisualRunSummary};
 #[cfg(windows)]
 pub use session::{TerminalTestSession, TerminalTestSessionLauncher};
 #[cfg(windows)]
-pub use uia::{TargetLocator, WindowsUiaLocator};
+pub use title_probe::{emit_title_authority_fixture, run_title_authority_probe};
+#[cfg(windows)]
+pub use uia::{
+    OwnedTabActivation, OwnedTabTitleReader, OwnedWindowTabReader, TargetLocator, WindowsUiaLocator,
+};
+
+#[cfg(not(windows))]
+/// Reports that the explicit Windows Terminal probe cannot run on this platform.
+#[must_use]
+pub fn run_title_authority_probe() -> crate::title_authority::ActiveTitleProbeResult {
+    crate::title_authority::ActiveTitleProbeResult::unavailable(
+        crate::title_authority::TitleProbeBoundary::PlatformUnavailable,
+    )
+}

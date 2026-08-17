@@ -54,36 +54,125 @@ impl TerminalTestSessionLauncher {
         replay: &FixtureReplay,
         run_id: &str,
     ) -> VisualResult<TerminalTestSession> {
-        if !fixture_executable.is_file() {
+        let hold_millis = fixture_hold_millis(replay.case.expects_title_animation);
+        let arguments = [
+            "emit".to_owned(),
+            "--fixture".to_owned(),
+            replay.case.fixture_name.clone(),
+            "--run-id".to_owned(),
+            run_id.to_owned(),
+            "--hold-ms".to_owned(),
+            hold_millis.to_string(),
+        ];
+        self.launch_program(
+            fixture_executable,
+            run_id,
+            &replay.case.fixture_name,
+            &replay.case.expected_title,
+            &[],
+            &arguments,
+        )
+    }
+
+    /// Launches an owned static-title anchor window for a title-authority
+    /// probe. The anchor uses the same production-rendered fixture path as
+    /// the visual runner, so UIA correlation does not depend on a separate
+    /// Windows Terminal launch-title mechanism. A second probe tab then tests
+    /// the profile's ordinary application-title policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualError::Platform`] when Windows Terminal cannot launch
+    /// the owned fixture session.
+    pub fn launch_title_authority_anchor(
+        &self,
+        executable: &Path,
+        run_id: &str,
+        anchor_run_id: &str,
+        anchor_title: &str,
+        hold_millis: u64,
+    ) -> VisualResult<TerminalTestSession> {
+        let arguments = [
+            "__title-probe-fixture-v1".to_owned(),
+            anchor_run_id.to_owned(),
+            hold_millis.to_string(),
+        ];
+        self.launch_program(
+            executable,
+            run_id,
+            "title-authority",
+            anchor_title,
+            &[],
+            &arguments,
+        )
+    }
+
+    /// Launches the short-lived probe child in the exact named anchor window.
+    /// The tab deliberately receives no title-policy override, so the active
+    /// probe observes the profile's ordinary application-title behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualError::Platform`] when the executable is unavailable or
+    /// Windows Terminal cannot create the owned probe tab.
+    pub fn launch_title_authority_probe(
+        &self,
+        executable: &Path,
+        window_name: &str,
+        run_id: &str,
+        hold_millis: u64,
+    ) -> VisualResult<()> {
+        if !executable.is_file() {
             return Err(VisualError::Platform(format!(
                 "fixture executable does not exist: {}",
-                fixture_executable.display()
+                executable.display()
+            )));
+        }
+        Command::new("wt.exe")
+            .args(["-w", window_name])
+            .arg("new-tab")
+            .arg(executable)
+            .args(["__title-probe-fixture-v1", run_id, &hold_millis.to_string()])
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| {
+                VisualError::Platform(format!(
+                    "could not launch owned Windows Terminal probe tab: {error}"
+                ))
+            })
+    }
+
+    fn launch_program(
+        self,
+        executable: &Path,
+        run_id: &str,
+        fixture_name: &str,
+        expected_title: &str,
+        tab_options: &[String],
+        arguments: &[String],
+    ) -> VisualResult<TerminalTestSession> {
+        if !executable.is_file() {
+            return Err(VisualError::Platform(format!(
+                "fixture executable does not exist: {}",
+                executable.display()
             )));
         }
         // A fixture needs its own owned window. Reusing one named window turns
         // later fixtures into additional tabs; then Windows Terminal may retain
         // valid UIA elements for a hidden or expiring earlier tab. That makes a
         // pixel capture target ambiguous even when the title lookup succeeds.
-        let window_name = fixture_window_name(run_id, &replay.case.fixture_name);
+        let window_name = fixture_window_name(run_id, fixture_name);
         let position = format!(
             "{},{}",
             self.requested_position.0, self.requested_position.1
         );
         let size = format!("{},{}", self.requested_size.0, self.requested_size.1);
-        let hold_millis = fixture_hold_millis(replay.case.expects_title_animation);
         Command::new("wt.exe")
             .args(["-w", &window_name, "--pos", &position, "--size", &size])
             .arg("new-tab")
-            .arg(fixture_executable)
-            .args([
-                "emit",
-                "--fixture",
-                &replay.case.fixture_name,
-                "--run-id",
-                run_id,
-                "--hold-ms",
-                &hold_millis.to_string(),
-            ])
+            .args(tab_options)
+            .arg(executable)
+            .args(arguments)
             .spawn()
             .map_err(|error| {
                 VisualError::Platform(format!(
@@ -93,7 +182,7 @@ impl TerminalTestSessionLauncher {
         Ok(TerminalTestSession {
             run_id: run_id.to_owned(),
             window_name,
-            expected_title: replay.case.expected_title.clone(),
+            expected_title: expected_title.to_owned(),
             requested_size: self.requested_size,
         })
     }

@@ -2,10 +2,12 @@
 
 ## Status
 
-PLANNED. First implementation Goal in the v0.3 Codex Presentation Reliability
-& Motion track. Start only after the reconciled v0.3 planning admission is
-merged into post-release `main`; the public v0.2 release SHA remains a distinct
-historical release identity.
+ACCEPTED PENDING MERGE. The focused implementation candidate at
+`0847edb6829b1a1fc859af346071a50bf5568404` has passed its required local,
+owned-fixture, exact-head UIA/title, and hosted code validation. PR #25 remains
+the only admitted merge path. TB-G16 stays unavailable until that PR's merge is
+verified on `main`; the public v0.2 release SHA remains a distinct historical
+release identity.
 
 ## Purpose
 
