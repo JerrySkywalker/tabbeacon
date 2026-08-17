@@ -5,7 +5,7 @@
 ACTIVE IMPLEMENTATION TRACK. v0.2.0 is publicly released and its closeout is merged.
 TB-G15 through TB-G19 are complete. G18 merged through same-SHA recovery PR #30
 after its actual elevated-PowerShell proof; G19 merged as PR #31 after exact-head
-hosted CI. TB-G19R remains the sequential successor.
+hosted CI. TB-G19R is the active release candidate.
 
 Planning baseline when this track was created:
 
@@ -108,7 +108,7 @@ TB-G18 — Session Convergence and Recovery       COMPLETE
         ↓
 TB-G19 — Codex Compatibility Registry v2        COMPLETE
         ↓
-TB-G19R — v0.3 Hardening and Release            PLANNED
+TB-G19R — v0.3 Hardening and Release            RELEASE CANDIDATE
 ```
 
 The sequence remains sequential. Fast Lane v2 changes validation density, not dependency

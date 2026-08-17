@@ -10,7 +10,7 @@ The project is intentionally narrow: it keeps the user's existing terminal and a
 - **Fail open:** if TabBeacon is absent or broken, Codex must remain usable.
 - **Offline-first identity:** repository naming must not require GitHub or network access.
 - **Provider-neutral core:** Codex, Claude, OpenCode, and future agents are adapters beneath one evidence/state model.
-- **Terminal-native presentation:** v0.2 targets Windows Terminal using terminal control sequences rather than replacing the PTY or terminal UI.
+- **Terminal-native presentation:** v0.3 targets Windows Terminal using terminal control sequences rather than replacing the PTY or terminal UI.
 - **Machine-verifiable UI:** title, animation, and color behavior must eventually be covered by visual CI.
 
 ## Current status
@@ -67,7 +67,7 @@ TabBeacon has two first-class installation channels:
   To install this release exactly:
 
   ```powershell
-  cargo install tabbeacon --version 0.2.0 --locked
+  cargo install tabbeacon --version 0.3.0 --locked
   ```
 
 The default Cargo install surface is the public `tabbeacon` command only.
@@ -105,10 +105,10 @@ successful even when its nested doctor verdict is a failure.
 ### Rust library target
 
 The published package includes the `tabbeacon` library target used internally
-by the CLI and its tests. TabBeacon v0.2.x is CLI-first and does not promise a
+by the CLI and its tests. TabBeacon v0.3.x is CLI-first and does not promise a
 mature public Rust library API beyond normal SemVer expectations.
 
-## Non-goals for v0.2
+## Non-goals for v0.3
 
 TabBeacon is not a PTY host, session manager, worktree manager, agent orchestrator, prompt router, remote-control service, terminal replacement, or web dashboard.
 

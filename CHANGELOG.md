@@ -4,6 +4,20 @@ All notable changes to TabBeacon will be documented here.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-18
+
+### Changed
+
+- Added visible title-authority observation and an explicit owned-title probe,
+  with Windows Terminal title-policy diagnosis and ownership-safe remediation.
+- Made the default working title animation a balanced 100 ms braille sequence
+  while retaining a stable offline workspace alias.
+- Hardened session convergence, generation isolation, recovery, and terminal
+  close behavior without changing the daily `codex` command.
+- Replaced the single exact-profile lookup with an offline typed Codex
+  compatibility registry. Only `codex-hooks-rust-v0.147.0` is admitted;
+  newer versions remain explicitly unadmitted or unknown and fail open.
+
 ## [0.2.0] - 2026-08-16
 
 ### Changed
