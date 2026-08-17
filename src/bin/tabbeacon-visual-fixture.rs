@@ -7,6 +7,7 @@ use std::{
 };
 
 use tabbeacon::{
+    activity::next_animation_frame_deadline,
     presentation::presentation_fixture,
     visual::{
         FixtureDriver, LiveVisualRunRequest, VisualDisposition, VisualError, VisualResult,
@@ -54,13 +55,19 @@ fn emit(arguments: &[String]) -> VisualResult<()> {
     } else {
         let deadline = Instant::now() + Duration::from_millis(hold_millis);
         let mut frame_index = 1_usize;
+        let mut next_frame_deadline = Instant::now();
         while Instant::now() < deadline {
             stdout.write_all(
                 &replay.title_frame_bytes[frame_index % replay.title_frame_bytes.len()],
             )?;
             stdout.flush()?;
             frame_index = frame_index.saturating_add(1);
-            thread::sleep(Duration::from_millis(180));
+            next_frame_deadline =
+                next_animation_frame_deadline(next_frame_deadline, Instant::now());
+            let remaining = next_frame_deadline.saturating_duration_since(Instant::now());
+            if !remaining.is_zero() {
+                thread::sleep(remaining);
+            }
         }
     }
     stdout.write_all(&reset.vt_bytes)?;

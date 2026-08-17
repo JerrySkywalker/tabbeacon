@@ -90,8 +90,8 @@ codex
 The following source facts are compatibility inputs for the v0.3 track:
 
 - production activity worker exists and is session/turn/terminal scoped;
-- the worker currently advances title frames every 180 ms;
-- `PresentationSettings::default()` still selects static `title-indicator` rather than the production worker;
+- at planning admission, the worker advanced title frames every 180 ms;
+- at planning admission, `PresentationSettings::default()` selected static `title-indicator` rather than the production worker;
 - the built-in `codex` spinner preset is the reduced `•` / `◦` pair, while `braille` provides a ten-frame spinner;
 - Codex title suppression is managed through `[tui].terminal_title = []`, but TabBeacon does not currently model Windows Terminal profile title policy or shell-side title writers;
 - successful OSC output is therefore not equivalent to proof that the user-visible tab title remained correct.

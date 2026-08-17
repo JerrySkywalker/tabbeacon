@@ -350,7 +350,7 @@ fn fixture_covers_every_named_state_and_replays_without_external_input() {
 }
 
 #[test]
-fn muted_dark_is_resolved_after_semantic_color_and_static_title_activity_is_legible() {
+fn muted_dark_default_uses_the_braille_title_spinner_with_semantic_color() {
     let settings = PresentationSettings::default();
     let terminal_renderer =
         WindowsTerminalRenderer::with_settings(WindowsTerminalCapabilities::new(true), settings);
@@ -358,7 +358,7 @@ fn muted_dark_is_resolved_after_semantic_color_and_static_title_activity_is_legi
     let terminal_output =
         String::from_utf8(terminal_renderer.render(&working)).expect("terminal bytes are UTF-8");
 
-    assert!(terminal_output.contains("]0;• JPC semantic fixture"));
+    assert!(terminal_output.contains("]0;⠋ JPC semantic fixture"));
     assert!(terminal_output.contains("rgb:1b/4e/3a"));
     assert!(terminal_output.contains("]9;4;0;0"));
     assert_eq!(settings.theme(), PresentationTheme::MutedDark);
@@ -414,7 +414,7 @@ fn both_mode_combines_title_frame_zero_with_the_native_progress_ring() {
     let terminal_output =
         String::from_utf8(terminal_renderer.render(&working)).expect("terminal bytes are UTF-8");
 
-    assert!(terminal_output.contains("]0;• JPC semantic fixture"));
+    assert!(terminal_output.contains("]0;⠋ JPC semantic fixture"));
     assert!(terminal_output.contains("]9;4;3;0"));
 }
 
@@ -546,8 +546,9 @@ fn title_and_activity_ownership_modes_preserve_their_existing_boundaries() {
         PresentationAction::Reset(_) => panic!("working unexpectedly reset"),
     };
     for (activity, expected_title) in [
+        (ActivityMode::TitleSpinner, "⠋ JPC semantic fixture"),
         (ActivityMode::TitleIndicator, "• JPC semantic fixture"),
-        (ActivityMode::Both, "• JPC semantic fixture"),
+        (ActivityMode::Both, "⠋ JPC semantic fixture"),
         (ActivityMode::WindowsTerminalRing, "○ JPC semantic fixture"),
         (ActivityMode::Native, "○ JPC semantic fixture"),
         (ActivityMode::Off, "○ JPC semantic fixture"),

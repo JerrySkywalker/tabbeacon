@@ -13,7 +13,12 @@ v0.2 can correctly compute semantic presentation and can write Windows Terminal 
 
 The v0.2 ownership model primarily arbitrates Codex versus TabBeacon by configuring Codex terminal-title output. It does not yet model all title authorities between TabBeacon and the visible tab: Windows Terminal profile policy, shell/profile title writers, or other application writers.
 
-Separately, v0.2 retains pre-G11 defaults: static `title-indicator` and a 180 ms worker frame interval. The production animator exists, but new/default users do not automatically experience it. Post-release recovery also added an owned live-tab UIA reader and terminal-close worker cleanup; v0.3 builds from those capabilities instead of replacing them.
+At v0.3 planning admission, the v0.2 predecessor retained static
+`title-indicator` defaults and a 180 ms worker frame interval. G16 replaces
+those absent-config defaults with the balanced braille animation profile at a
+100 ms target while preserving existing user documents. Post-release recovery
+also added an owned live-tab UIA reader and terminal-close worker cleanup; v0.3
+builds from those capabilities instead of replacing them.
 
 ## Decision
 

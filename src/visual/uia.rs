@@ -105,6 +105,7 @@ impl OwnedTabTitleReader {
         &self,
         expected_titles: &[String],
         budget: Duration,
+        minimum_distinct_frames: usize,
     ) -> VisualResult<Vec<String>> {
         let deadline = Instant::now() + budget;
         let mut observed = BTreeSet::new();
@@ -113,10 +114,10 @@ impl OwnedTabTitleReader {
             if expected_titles.contains(&title) {
                 observed.insert(title);
             }
-            if observed.len() >= 2 {
+            if observed.len() >= minimum_distinct_frames {
                 break;
             }
-            // Deliberately incommensurate with the 180 ms fixture cadence.
+            // Deliberately incommensurate with the 100 ms fixture cadence.
             thread::sleep(Duration::from_millis(137));
         }
         Ok(observed.into_iter().collect())

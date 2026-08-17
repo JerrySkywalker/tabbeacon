@@ -290,14 +290,15 @@ fn observe_title_animation(
     replay: &super::FixtureReplay,
     observation: &mut Observation,
 ) -> VisualResult<()> {
-    // A UIA lookup can take longer than the nominal polling cadence on a busy
-    // interactive desktop. Preserve the same two-distinct-frame oracle while
-    // bounding observation by elapsed time rather than an inaccurate count.
-    const TITLE_ANIMATION_OBSERVATION_BUDGET: Duration = Duration::from_secs(30);
+    // v0.3 requires at least three distinct working frames in one second. UIA
+    // sampling stays intentionally incommensurate with the frame cadence.
+    const TITLE_ANIMATION_OBSERVATION_BUDGET: Duration = Duration::from_secs(1);
+    const MINIMUM_WORKING_TITLE_FRAMES: usize = 3;
     let observed = reader
         .observe_frames(
             &replay.case.expected_title_frames,
             TITLE_ANIMATION_OBSERVATION_BUDGET,
+            MINIMUM_WORKING_TITLE_FRAMES,
         )
         .unwrap_or_default();
     writer.write_json_document(
@@ -531,7 +532,7 @@ impl Observation {
     }
 
     fn record_title_animation(&mut self, fixture: &str, observed: &[String]) {
-        let disposition = if observed.len() >= 2 {
+        let disposition = if observed.len() >= 3 {
             VisualDisposition::Pass
         } else {
             VisualDisposition::Fail
@@ -543,7 +544,7 @@ impl Observation {
             disposition,
             Some(fixture.to_owned()),
             format!(
-                "distinct_title_frames={}; observed={observed:?}",
+                "distinct_title_frames={}; required=3; observed={observed:?}",
                 observed.len()
             ),
         ));

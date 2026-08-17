@@ -47,7 +47,7 @@ An absent settings file uses the new v0.3 defaults automatically.
 
 ### 100 ms cadence
 
-Replace the current nominal 180 ms frame interval with a normative 100 ms target.
+Replace the predecessor's nominal 180 ms frame interval with a normative 100 ms target.
 
 Use monotonic deadline scheduling rather than accumulating `sleep + render` drift. Overrun handling must be bounded and must never busy-loop.
 

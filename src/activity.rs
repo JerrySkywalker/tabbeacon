@@ -37,7 +37,10 @@ const EXIT_SCHEMA: &str = "tabbeacon-activity-worker-exit-v1";
 const STATE_DIRECTORY: &str = "activity-worker-v1";
 const LOCK_FILE: &str = "activity-worker.lock";
 const LEASE_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
-const FRAME_INTERVAL_MS: u64 = 180;
+/// Normative v0.3 activity-frame target. The worker uses monotonic deadlines
+/// and drops overdue frames rather than accumulating catch-up work.
+pub const TARGET_FRAME_INTERVAL_MS: u64 = 100;
+const FRAME_INTERVAL: Duration = Duration::from_millis(TARGET_FRAME_INTERVAL_MS);
 const PREDECESSOR_WAIT_MS: u64 = 750;
 const PREDECESSOR_POLL_MS: u64 = 25;
 const CLEANUP_OBSERVER_POLL_MS: u64 = 1_000;
@@ -862,6 +865,7 @@ impl ActivityLeaseStore {
             PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
         };
         let mut frame_index = 0_usize;
+        let mut next_frame_deadline = Instant::now();
         loop {
             let Some(_) = self.load_worker_lease(&ownership, terminal_binding_sha256, unix_ms())
             else {
@@ -878,7 +882,12 @@ impl ActivityLeaseStore {
                 break;
             }
             frame_index = frame_index.saturating_add(1);
-            thread::sleep(Duration::from_millis(FRAME_INTERVAL_MS));
+            next_frame_deadline =
+                next_animation_frame_deadline(next_frame_deadline, Instant::now());
+            let remaining = next_frame_deadline.saturating_duration_since(Instant::now());
+            if !remaining.is_zero() {
+                thread::sleep(remaining);
+            }
         }
         let _ = self.deactivate_if_owned(&initial, unix_ms());
         let _ = self.write_exit(&ownership, reason);
@@ -1293,6 +1302,19 @@ fn command_output_with_timeout(
     }
 }
 
+/// Schedules one v0.3 animation deadline from the prior deadline. A render
+/// overrun drops missed frames and schedules one future frame, preventing a
+/// busy loop or unbounded catch-up.
+#[must_use]
+pub fn next_animation_frame_deadline(previous_deadline: Instant, now: Instant) -> Instant {
+    let scheduled = previous_deadline.checked_add(FRAME_INTERVAL).unwrap_or(now);
+    if scheduled > now {
+        scheduled
+    } else {
+        now.checked_add(FRAME_INTERVAL).unwrap_or(now)
+    }
+}
+
 fn deadline_after(timeout: Duration) -> Instant {
     Instant::now()
         .checked_add(timeout)
@@ -1413,14 +1435,15 @@ mod tests {
         fs,
         path::PathBuf,
         process::{Command, Stdio},
-        time::{Duration, SystemTime},
+        time::{Duration, Instant, SystemTime},
     };
 
     use super::{
         ActivityCoordinator, ActivityExecution, ActivityLeaseHealth, ActivityLeaseStore,
-        ActivityRender, CleanupObserverAction, LeaseTransition, WorkerKey, WorkerPresentation,
-        WorkerProcessLiveness, cleanup_observer_action, command_output_with_timeout,
-        inspect_activity_leases_read_only, system_powershell_path,
+        ActivityRender, CleanupObserverAction, LeaseTransition, TARGET_FRAME_INTERVAL_MS,
+        WorkerKey, WorkerPresentation, WorkerProcessLiveness, cleanup_observer_action,
+        command_output_with_timeout, inspect_activity_leases_read_only,
+        next_animation_frame_deadline, system_powershell_path,
     };
     use crate::{
         core::{Attention, Health, Phase},
@@ -1467,6 +1490,32 @@ mod tests {
 
     fn presentation() -> WorkerPresentation {
         WorkerPresentation::working("OWH", SpinnerPreset::Braille)
+    }
+
+    #[test]
+    fn v03_worker_uses_the_normative_hundred_millisecond_interval() {
+        assert_eq!(TARGET_FRAME_INTERVAL_MS, 100);
+    }
+
+    #[test]
+    fn animation_deadlines_remain_anchored_when_render_is_faster_than_the_interval() {
+        let start = Instant::now();
+        let after_render = start + Duration::from_millis(20);
+        let next = next_animation_frame_deadline(start, after_render);
+
+        assert_eq!(next.duration_since(start), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn animation_deadline_drops_overrun_frames_without_busy_looping() {
+        let start = Instant::now();
+        let after_overrun = start + Duration::from_millis(250);
+        let next = next_animation_frame_deadline(start, after_overrun);
+
+        assert_eq!(
+            next.duration_since(after_overrun),
+            Duration::from_millis(100)
+        );
     }
 
     #[test]
@@ -1684,6 +1733,56 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().starts_with("lease-"))
             .count();
         assert_eq!(lease_count, 3);
+    }
+
+    #[test]
+    fn performance_matrix_keeps_one_owned_worker_per_active_session_and_cleans_up() {
+        // This is the bounded ownership half of the v0.3 1/4/8-tab
+        // performance matrix. Timing is covered separately by the monotonic
+        // deadline tests above; this proves that increasing active tabs never
+        // multiplies workers for any one session/terminal binding.
+        for active_tabs in [1_usize, 4, 8] {
+            let root = TestRoot::new(&format!("performance-{active_tabs}"));
+            let store = ActivityLeaseStore::new(&root.0);
+            let owner = digest('d');
+            let mut leases = Vec::with_capacity(active_tabs);
+            let sessions = ['1', '2', '3', '4', 'a', 'b', 'e', 'f'];
+
+            for (index, session) in sessions.into_iter().take(active_tabs).enumerate() {
+                let worker = key(1, session, 'c');
+                let LeaseTransition::Published { lease, .. } = store
+                    .publish_active(&worker, 1, &owner, &presentation(), 1_000)
+                    .expect("performance fixture publishes one worker")
+                else {
+                    panic!("new session/terminal binding must publish one worker");
+                };
+                assert_eq!(
+                    store
+                        .publish_active(&worker, 1, &owner, &presentation(), 1_001)
+                        .expect("same worker refreshes"),
+                    LeaseTransition::AlreadyActive,
+                    "tab {index} must not create a duplicate worker"
+                );
+                leases.push(lease);
+            }
+
+            assert_eq!(
+                inspect_activity_leases_read_only(&root.0, 1_001).active_leases(),
+                active_tabs,
+                "{active_tabs} active tabs must have exactly {active_tabs} workers"
+            );
+
+            for lease in &leases {
+                store
+                    .deactivate_if_owned(lease, 1_002)
+                    .expect("owned worker cleanup succeeds");
+            }
+            assert_eq!(
+                inspect_activity_leases_read_only(&root.0, 1_002).active_leases(),
+                0,
+                "owned cleanup must leave no active workers"
+            );
+        }
     }
 
     #[test]
