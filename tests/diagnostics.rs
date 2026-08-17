@@ -77,7 +77,9 @@ fn run_cli(
         .env("CODEX_HOME", root.child("codex-home"))
         .env("LOCALAPPDATA", root.child("local-appdata"))
         .env("USERPROFILE", root.child("user-profile"))
-        .env("XDG_STATE_HOME", root.child("xdg-state"));
+        .env("XDG_STATE_HOME", root.child("xdg-state"))
+        .env_remove("WT_SESSION")
+        .env_remove("WT_PROFILE_ID");
     if let Some(codex_directory) = codex_directory {
         let path = env::join_paths([codex_directory, inherited_path()])
             .expect("fake Codex path joins safely");
@@ -89,6 +91,26 @@ fn run_cli(
         command.env("COMSPEC", comspec);
     }
     command.output().expect("TabBeacon diagnostics CLI starts")
+}
+
+fn run_terminal_cli(root: &TestRoot, arguments: &[&str], codex_directory: Option<&Path>) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tabbeacon"));
+    command
+        .args(arguments)
+        .env("CODEX_HOME", root.child("codex-home"))
+        .env("LOCALAPPDATA", root.child("local-appdata"))
+        .env("USERPROFILE", root.child("user-profile"))
+        .env("XDG_STATE_HOME", root.child("xdg-state"))
+        .env("WT_SESSION", "11111111-1111-1111-1111-111111111111")
+        .env("WT_PROFILE_ID", "{22222222-2222-2222-2222-222222222222}");
+    if let Some(codex_directory) = codex_directory {
+        let path = env::join_paths([codex_directory, inherited_path()])
+            .expect("fake Codex path joins safely");
+        command.env("PATH", path);
+    } else {
+        command.env("PATH", inherited_path());
+    }
+    command.output().expect("TabBeacon title-policy CLI starts")
 }
 
 fn json_output(output: &Output) -> Value {
@@ -128,7 +150,7 @@ fn status_json_is_structured_private_and_read_only_for_isolated_state() {
     assert_eq!(report["presentation"]["source"], "default");
     assert_eq!(report["title"]["desired_owner"], "tabbeacon");
     assert_eq!(report["title"]["codex_writer_state"], "unavailable");
-    assert_eq!(report["title"]["application_title_policy"], "not_inspected");
+    assert_eq!(report["title"]["application_title_policy"], "unavailable");
     assert_eq!(report["title"]["visible_probe"], "not_run");
     assert_eq!(report["title"]["probe_boundary"], "not_run");
     assert_eq!(report["title"]["authority"], "unverified");
@@ -165,6 +187,83 @@ fn status_json_is_structured_private_and_read_only_for_isolated_state() {
             .child("local-appdata/TabBeacon/repository-identity/registry.lock")
             .exists(),
         "status must not create an alias-registry lock"
+    );
+    assert!(
+        !root
+            .child("local-appdata/TabBeacon/windows-terminal-title-policy-v1.json")
+            .exists(),
+        "passive diagnostics must not create a title-policy ownership receipt"
+    );
+}
+
+#[test]
+fn explicit_title_policy_repair_is_fixture_scoped_and_passive_inspection_is_read_only() {
+    let root = TestRoot::new("title-policy");
+    let settings = root
+        .child("local-appdata")
+        .join("Packages")
+        .join("Microsoft.WindowsTerminal_8wekyb3d8bbwe")
+        .join("LocalState")
+        .join("settings.json");
+    fs::create_dir_all(settings.parent().expect("fixture parent"))
+        .expect("fixture settings parent creates");
+    let original = r#"{
+  // retained comment
+  "profiles": {
+    "defaults": {},
+    "list": [
+      { "guid": "{22222222-2222-2222-2222-222222222222}", "name": "PowerShell", "suppressApplicationTitle": true },
+    ],
+  },
+  "unknown": { "kept": true },
+}
+"#;
+    fs::write(&settings, original).expect("fixture settings writes");
+
+    let inspect = run_terminal_cli(&root, &["title-policy", "inspect", "--json"], None);
+    assert!(inspect.status.success());
+    let inspect = json_output(&inspect);
+    assert_eq!(inspect["settings_source"], "stable");
+    assert_eq!(inspect["active_profile_resolution"], "resolved_guid");
+    assert_eq!(inspect["application_title_policy"], "suppressed_by_profile");
+    assert_eq!(inspect["remediation"], "available");
+    assert_eq!(
+        fs::read_to_string(&settings).expect("inspection bytes"),
+        original
+    );
+    assert!(
+        !root
+            .child("local-appdata/TabBeacon/windows-terminal-title-policy-v1.json")
+            .exists(),
+        "inspection must not create an ownership receipt"
+    );
+
+    let repair = run_terminal_cli(&root, &["title-policy", "repair", "--json"], None);
+    assert!(repair.status.success());
+    let repair = json_output(&repair);
+    assert_eq!(repair["result"]["document_modified"], true);
+    assert_eq!(repair["result"]["user_config_preserved"], true);
+    let repaired = fs::read_to_string(&settings).expect("repaired bytes");
+    assert!(repaired.contains("// retained comment"));
+    assert!(repaired.contains("\"unknown\": { \"kept\": true }"));
+    assert!(repaired.contains("\"suppressApplicationTitle\": false"));
+
+    let second = run_terminal_cli(&root, &["title-policy", "repair", "--json"], None);
+    let second = json_output(&second);
+    assert_eq!(second["result"]["state"], "already_owned");
+    assert_eq!(second["result"]["document_modified"], false);
+    assert_eq!(
+        fs::read_to_string(&settings).expect("second bytes"),
+        repaired
+    );
+
+    let restore = run_terminal_cli(&root, &["title-policy", "restore", "--json"], None);
+    assert!(restore.status.success());
+    let restore = json_output(&restore);
+    assert_eq!(restore["result"]["document_modified"], true);
+    assert_eq!(
+        fs::read_to_string(&settings).expect("restored bytes"),
+        original
     );
 }
 
