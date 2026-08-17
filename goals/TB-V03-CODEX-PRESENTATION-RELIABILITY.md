@@ -2,9 +2,9 @@
 
 ## Status
 
-ACCEPTED PLANNING BASELINE. v0.2.0 is publicly released and its release
-closeout is merged. This document authorizes the frozen sequential v0.3
-planning order only; implementation still begins with TB-G15.
+ACTIVE IMPLEMENTATION TRACK. v0.2.0 is publicly released and its release
+closeout is merged. TB-G15 and TB-G16 are complete; this frozen sequential
+v0.3 plan now proceeds with TB-G17.
 
 Planning baseline when this document was created:
 
@@ -24,10 +24,9 @@ the newer post-release `main` is the implementation predecessor. The canonical
 
 Post-release recovery added terminal-close worker cleanup and an owned live-tab
 UIA seam (`OwnedTabTitleReader`, `observe_frames`, and
-`locate_and_activate_any_with_title_reader`). TB-G15 must generalize this
-trusted, owned-target capability where necessary rather than build a second
-independent Windows UIA stack. The predecessor worker/session changes remain
-the safety baseline for TB-G16.
+`locate_and_activate_any_with_title_reader`). TB-G15 generalized this trusted,
+owned-target capability without building a second Windows UIA stack; the
+worker/session changes remain the safety baseline for TB-G17 and TB-G18.
 
 The diagnostics contract is also fixed before implementation:
 
