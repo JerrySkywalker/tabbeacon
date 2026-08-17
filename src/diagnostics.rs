@@ -13,6 +13,7 @@ use crate::{
     providers::codex::{CodexDoctorReport, CodexIntegration, DoctorStatus},
     repo::StableAliasRegistry,
     settings::{PresentationSettings, PresentationSettingsStore, SettingsError},
+    title_authority::TitleAuthorityDiagnostics,
 };
 
 /// Stable JSON schema version for `status` and `doctor` diagnostics.
@@ -83,6 +84,8 @@ pub struct DoctorDiagnostics {
     pub warnings: Vec<DiagnosticIssue>,
     /// Failing checks, represented structurally for automation.
     pub failures: Vec<DiagnosticIssue>,
+    /// Shared visible-title authority facts.
+    pub title: TitleAuthorityDiagnostics,
 }
 
 impl DoctorDiagnostics {
@@ -118,7 +121,13 @@ impl DoctorDiagnostics {
             checks,
             warnings,
             failures,
+            title: TitleAuthorityDiagnostics::not_run("unavailable"),
         }
+    }
+
+    fn with_title(mut self, title: TitleAuthorityDiagnostics) -> Self {
+        self.title = title;
+        self
     }
 
     fn from_codex_report(report: &CodexDoctorReport) -> Self {
@@ -320,6 +329,8 @@ pub struct OperationalDiagnostics {
     pub integration: IntegrationDiagnostics,
     /// Closed presentation preferences.
     pub presentation: PresentationDiagnostics,
+    /// Visible-title authority, kept distinct from Codex configuration ownership.
+    pub title: TitleAuthorityDiagnostics,
     /// Ephemeral activity lease aggregate.
     pub activity: ActivityDiagnostics,
     /// Safe workspace-identity aggregate.
@@ -343,6 +354,8 @@ pub fn collect_operational_diagnostics() -> OperationalDiagnostics {
         }
         Err(_) => ("unavailable".to_owned(), None),
     };
+    let presentation = collect_presentation_diagnostics();
+    let title = TitleAuthorityDiagnostics::not_run(integration.title_ownership.as_str());
     OperationalDiagnostics {
         schema_version: DIAGNOSTICS_SCHEMA_VERSION,
         tabbeacon: TabBeaconDiagnostics {
@@ -351,7 +364,8 @@ pub fn collect_operational_diagnostics() -> OperationalDiagnostics {
         },
         codex,
         integration,
-        presentation: collect_presentation_diagnostics(),
+        presentation,
+        title: title.clone(),
         activity: ActivityDiagnostics {
             observation: "lease_based".to_owned(),
             worker_state_health: activity.health().as_str().to_owned(),
@@ -363,8 +377,23 @@ pub fn collect_operational_diagnostics() -> OperationalDiagnostics {
             identity_subsystem_health: workspace_health,
             alias_registry_count,
         },
-        doctor,
+        doctor: doctor.with_title(title),
     }
+}
+
+/// Collects ordinary diagnostics and explicitly runs the owned visible-title
+/// probe. This is the only diagnostics path that temporarily writes a fixture
+/// title, and it never changes user configuration.
+#[must_use]
+pub fn collect_operational_diagnostics_with_title_probe() -> OperationalDiagnostics {
+    let mut report = collect_operational_diagnostics();
+    let title = report
+        .title
+        .clone()
+        .with_active_probe(crate::visual::run_title_authority_probe());
+    report.title = title.clone();
+    report.doctor = report.doctor.with_title(title);
+    report
 }
 
 fn collect_codex_diagnostics() -> (CodexDiagnostics, IntegrationDiagnostics, DoctorDiagnostics) {
@@ -497,6 +526,7 @@ pub fn human_doctor_lines(report: &DoctorDiagnostics) -> Vec<String> {
             )
         })
         .collect::<Vec<_>>();
+    lines.extend(human_title_lines(&report.title));
     lines.push(format!("DOCTOR={}", report.overall.as_str()));
     lines
 }
@@ -504,7 +534,7 @@ pub fn human_doctor_lines(report: &DoctorDiagnostics) -> Vec<String> {
 /// Renders the shared typed operational report for a human terminal.
 #[must_use]
 pub fn human_status_lines(report: &OperationalDiagnostics) -> Vec<String> {
-    vec![
+    let mut lines = vec![
         format!("STATUS_SCHEMA_VERSION={}", report.schema_version),
         format!("TABBEACON_VERSION={}", report.tabbeacon.version),
         format!(
@@ -580,6 +610,22 @@ pub fn human_status_lines(report: &OperationalDiagnostics) -> Vec<String> {
         format!("DOCTOR={}", report.doctor.overall.as_str()),
         format!("DOCTOR_WARNING_COUNT={}", report.doctor.warnings.len()),
         format!("DOCTOR_FAILURE_COUNT={}", report.doctor.failures.len()),
+    ];
+    lines.extend(human_title_lines(&report.title));
+    lines
+}
+
+fn human_title_lines(title: &TitleAuthorityDiagnostics) -> Vec<String> {
+    vec![
+        format!("TITLE_DESIRED_OWNER={}", title.desired_owner),
+        format!("CODEX_TITLE_WRITER_STATE={}", title.codex_writer_state),
+        format!(
+            "APPLICATION_TITLE_POLICY={}",
+            title.application_title_policy
+        ),
+        format!("VISIBLE_TITLE_PROBE={}", title.visible_probe.as_str()),
+        format!("TITLE_PROBE_BOUNDARY={}", title.probe_boundary),
+        format!("TITLE_AUTHORITY={}", title.authority.as_str()),
     ]
 }
 
@@ -645,6 +691,12 @@ mod tests {
             human_doctor_lines(&report),
             vec![
                 "CHECK=codex.profile STATUS=WARNING SUMMARY=unsupported profile".to_owned(),
+                "TITLE_DESIRED_OWNER=tabbeacon".to_owned(),
+                "CODEX_TITLE_WRITER_STATE=unavailable".to_owned(),
+                "APPLICATION_TITLE_POLICY=not_inspected".to_owned(),
+                "VISIBLE_TITLE_PROBE=not_run".to_owned(),
+                "TITLE_PROBE_BOUNDARY=not_run".to_owned(),
+                "TITLE_AUTHORITY=unverified".to_owned(),
                 "DOCTOR=WARNING".to_owned(),
             ]
         );

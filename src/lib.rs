@@ -10,6 +10,7 @@ pub mod providers;
 pub mod repo;
 pub mod settings;
 pub mod setup;
+pub mod title_authority;
 pub mod visual;
 
 /// Public product name used by bootstrap smoke tests.

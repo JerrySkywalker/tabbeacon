@@ -7,7 +7,8 @@ use std::{
 };
 
 use tabbeacon::diagnostics::{
-    collect_operational_diagnostics, human_doctor_lines, human_status_lines,
+    collect_operational_diagnostics, collect_operational_diagnostics_with_title_probe,
+    human_doctor_lines, human_status_lines,
 };
 use tabbeacon::providers::codex::{
     CodexHookRuntime, CodexIntegration, SetupOutcome, TitleOwnershipOutcome, UninstallOutcome,
@@ -41,6 +42,17 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        [command, run_id, hold_millis] if command == "__title-probe-fixture-v1" => {
+            match hold_millis.parse::<u64>() {
+                Ok(hold_millis) => {
+                    match tabbeacon::visual::emit_title_authority_fixture(run_id, hold_millis) {
+                        Ok(()) => ExitCode::SUCCESS,
+                        Err(_) => ExitCode::FAILURE,
+                    }
+                }
+                Err(_) => ExitCode::FAILURE,
+            }
+        }
         [
             command,
             worker_pid,
@@ -68,8 +80,18 @@ fn main() -> ExitCode {
         }
         [command] if command == "setup" => guided_setup(),
         [command, provider] if command == "setup" && provider == "codex" => setup_codex(),
-        [command] if command == "doctor" => doctor(false),
-        [command, option] if command == "doctor" && option == "--json" => doctor(true),
+        [command] if command == "doctor" => doctor(false, false),
+        [command, option] if command == "doctor" && option == "--json" => doctor(true, false),
+        [command, option] if command == "doctor" && option == "--probe-title" => {
+            doctor(false, true)
+        }
+        [command, first, second]
+            if command == "doctor"
+                && ((first == "--json" && second == "--probe-title")
+                    || (first == "--probe-title" && second == "--json")) =>
+        {
+            doctor(true, true)
+        }
         [command] if command == "status" => status(false),
         [command, option] if command == "status" && option == "--json" => status(true),
         [command, provider] if command == "uninstall" && provider == "codex" => uninstall_codex(),
@@ -240,8 +262,12 @@ fn print_setup_outcome(outcome: SetupOutcome) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn doctor(json: bool) -> ExitCode {
-    let report = collect_operational_diagnostics();
+fn doctor(json: bool, probe_title: bool) -> ExitCode {
+    let report = if probe_title {
+        collect_operational_diagnostics_with_title_probe()
+    } else {
+        collect_operational_diagnostics()
+    };
     if json {
         return match serde_json::to_string(&report.doctor) {
             Ok(json) => {
@@ -718,6 +744,7 @@ fn print_usage() {
     println!("  tabbeacon setup codex");
     println!("  tabbeacon doctor");
     println!("  tabbeacon doctor --json");
+    println!("  tabbeacon doctor --probe-title [--json]");
     println!("  tabbeacon status");
     println!("  tabbeacon status --json");
     println!("  tabbeacon uninstall codex");

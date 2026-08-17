@@ -14,6 +14,7 @@ use uiautomation::{
 use windows::Win32::Foundation::HWND;
 
 use super::{ScreenRect, UiaDump, VisualError, VisualResult, WindowActivation};
+use crate::title_authority::TitleProbeSample;
 
 /// Read-only UIA lookup contract for the dedicated visual-test target.
 pub trait TargetLocator {
@@ -35,6 +36,13 @@ pub struct OwnedTabTitleReader {
     tab: UIElement,
 }
 
+/// A live owned Windows Terminal window already correlated through a unique
+/// static anchor tab. It can select a subsequently opened sibling tab without
+/// using the sibling's mutable title as identity.
+pub struct OwnedWindowTabReader {
+    window: UIElement,
+}
+
 /// Outcome of trying to activate one already-correlated owned tab.
 pub enum OwnedTabActivation {
     /// The owned window accepted foreground and focus activation.
@@ -43,6 +51,8 @@ pub enum OwnedTabActivation {
         dump: UiaDump,
         /// Live title reader pinned to that exact owned tab.
         title_reader: OwnedTabTitleReader,
+        /// Window reader retained for owned sibling-tab correlation.
+        window_reader: OwnedWindowTabReader,
     },
     /// The owned target resolved, but Windows refused a visibility precondition.
     Refused {
@@ -54,6 +64,36 @@ pub enum OwnedTabActivation {
 }
 
 impl OwnedTabTitleReader {
+    /// Samples the exact already-correlated tab on a bounded monotonic
+    /// timeline, reducing each raw title to a non-sensitive classification.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualError::Platform`] when UIA cannot read the live title
+    /// property for the already-correlated tab.
+    pub fn observe_title_samples(
+        &self,
+        desired_title: &str,
+        offsets: &[Duration],
+    ) -> VisualResult<Vec<TitleProbeSample>> {
+        let start = Instant::now();
+        let mut samples = Vec::with_capacity(offsets.len());
+        for offset in offsets {
+            let deadline = start + *offset;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if !remaining.is_zero() {
+                thread::sleep(remaining);
+            }
+            let title = self.tab.get_name().map_err(platform_error)?;
+            samples.push(if title == desired_title {
+                TitleProbeSample::Desired
+            } else {
+                TitleProbeSample::Other
+            });
+        }
+        Ok(samples)
+    }
+
     /// Samples admitted title frames from the exact tab selected during owned
     /// window activation.
     ///
@@ -80,6 +120,40 @@ impl OwnedTabTitleReader {
             thread::sleep(Duration::from_millis(137));
         }
         Ok(observed.into_iter().collect())
+    }
+}
+
+impl OwnedWindowTabReader {
+    /// Returns the one tab in this already-correlated window that is not the
+    /// exact static anchor. Its title may be native, desired, or later
+    /// overwritten; only the anchor establishes ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualError::Platform`] when UIA cannot inspect the retained
+    /// owned window or a tab name.
+    pub fn non_anchor_tab(&self, anchor_title: &str) -> VisualResult<Option<OwnedTabTitleReader>> {
+        let automation = UIAutomation::new().map_err(platform_error)?;
+        let tabs = automation
+            .create_matcher()
+            .from_ref(&self.window)
+            .depth(12)
+            .control_type(ControlType::TabItem)
+            .timeout(0)
+            .find_all()
+            .map_err(platform_error)?;
+        let mut candidate = None;
+        for tab in tabs {
+            if tab.get_name().map_err(platform_error)? != anchor_title {
+                if candidate.is_some() {
+                    return Err(VisualError::Platform(
+                        "owned title probe window has ambiguous non-anchor tabs".to_owned(),
+                    ));
+                }
+                candidate = Some(tab);
+            }
+        }
+        Ok(candidate.map(|tab| OwnedTabTitleReader { tab }))
     }
 }
 
@@ -223,6 +297,7 @@ impl WindowsUiaLocator {
         Ok(OwnedTabActivation::Activated {
             dump,
             title_reader: OwnedTabTitleReader { tab },
+            window_reader: OwnedWindowTabReader { window },
         })
     }
 }
