@@ -3,6 +3,7 @@
 //! Runtime behavior is intentionally not implemented in the repository bootstrap.
 
 pub mod activity;
+pub mod convergence;
 pub mod core;
 pub mod diagnostics;
 pub mod presentation;

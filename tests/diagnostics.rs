@@ -387,3 +387,50 @@ fn doctor_json_and_human_output_share_failure_exit_semantics() {
     assert!(status.contains("STATUS_SCHEMA_VERSION=1"));
     assert!(status.contains("DOCTOR=FAIL"));
 }
+
+#[test]
+fn convergence_matrix_is_typed_bounded_and_read_only() {
+    let root = TestRoot::new("convergence-matrix");
+
+    let output = run_cli(&root, &["convergence", "matrix", "--json"], None, None);
+
+    assert!(
+        output.status.success(),
+        "matrix is an observational contract"
+    );
+    let matrix = json_output(&output);
+    let rows = matrix.as_array().expect("matrix is a JSON array");
+    assert!(rows.len() >= 32, "all G18 contexts are represented");
+    for row in rows {
+        assert!(row["scenario_id"].is_string());
+        assert!(row["event_sequence"].is_array());
+        assert!(row["expected_semantic_state"].is_string());
+        assert!(row["expected_visible_state"].is_string());
+        assert_eq!(row["maximum_convergence_deadline_ms"], 1_000);
+        assert!(row["proof_method"].is_string());
+        assert!(row["cleanup_requirement"].is_string());
+        assert_eq!(row["result"], "pending_evidence");
+    }
+    for required in [
+        "normal_powershell_visible",
+        "actual_elevated_powershell_visible",
+        "same_workspace_parallel_sessions",
+        "linked_worktree",
+        "terminal_close",
+    ] {
+        assert!(
+            rows.iter().any(|row| row["scenario_id"] == required),
+            "matrix is missing {required}"
+        );
+    }
+    assert!(
+        !root.child("local-appdata/TabBeacon/config.toml").exists(),
+        "matrix inspection must not create settings"
+    );
+    assert!(
+        !root
+            .child("local-appdata/TabBeacon/windows-terminal-title-policy-v1.json")
+            .exists(),
+        "matrix inspection must not create a policy receipt"
+    );
+}

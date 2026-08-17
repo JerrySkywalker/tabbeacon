@@ -96,6 +96,7 @@ fn main() -> ExitCode {
         [command] if command == "status" => status(false),
         [command, option] if command == "status" && option == "--json" => status(true),
         [command, rest @ ..] if command == "title-policy" => title_policy_command(rest),
+        [command, rest @ ..] if command == "convergence" => convergence_command(rest),
         [command, provider] if command == "uninstall" && provider == "codex" => uninstall_codex(),
         [command, provider] if command == "hook" && provider == "codex" => run_codex_hook(),
         [command, subcommand] if command == "config" && subcommand == "show" => config_show(),
@@ -146,6 +147,39 @@ fn title_policy_command(arguments: &[String]) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn convergence_command(arguments: &[String]) -> ExitCode {
+    let json = arguments
+        .get(1)
+        .is_some_and(|argument| argument == "--json");
+    if arguments.first().map(String::as_str) != Some("matrix")
+        || !(arguments.len() == 1 || (arguments.len() == 2 && json))
+    {
+        print_usage();
+        return ExitCode::from(2);
+    }
+    let matrix = tabbeacon::convergence::scenario_matrix();
+    if json {
+        return match serde_json::to_string(matrix) {
+            Ok(value) => {
+                println!("{value}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => management_error("CONVERGENCE_MATRIX", &error),
+        };
+    }
+    println!(
+        "CONVERGENCE_DEADLINE_MS={}",
+        tabbeacon::convergence::CONVERGENCE_DEADLINE_MS
+    );
+    println!("CONVERGENCE_SCENARIOS={}", matrix.len());
+    println!(
+        "OWNED_UIA_SCENARIOS={}",
+        tabbeacon::convergence::owned_uia_scenario_count()
+    );
+    println!("ELEVATED_OWNER_SCENARIOS=1");
+    ExitCode::SUCCESS
 }
 
 fn setup_codex() -> ExitCode {
@@ -880,6 +914,7 @@ fn print_usage() {
     println!("  tabbeacon title-policy inspect [--json]");
     println!("  tabbeacon title-policy repair [--json]");
     println!("  tabbeacon title-policy restore [--json]");
+    println!("  tabbeacon convergence matrix [--json]");
     println!("  tabbeacon uninstall codex");
     println!("  tabbeacon preview [--theme <muted-dark|classic>] [--spinner <preset>]");
     println!("  tabbeacon config show|reset|wizard");
