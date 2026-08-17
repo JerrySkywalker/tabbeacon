@@ -46,6 +46,10 @@ The track keeps the stock `codex` + Codex Hooks + Windows Terminal workflow:
 no launcher wrapper, global daemon, App Server dependency, Claude provider, or
 OpenCode provider is admitted by this roadmap transition.
 
+TB-G15 is the accepted implementation candidate in PR #25. Its merge onto
+`main` is the hard predecessor for TB-G16; no remediation or later v0.3 goal
+may begin from the candidate branch.
+
 ## TB-B00 — Repository Bootstrap — COMPLETE
 
 **Purpose:** establish a public, governed Rust repository without implementing runtime product features.
