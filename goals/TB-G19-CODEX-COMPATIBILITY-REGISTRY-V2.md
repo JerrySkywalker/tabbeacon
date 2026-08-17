@@ -2,59 +2,80 @@
 
 ## Status
 
-PLANNED. Codex-only maintenance Goal after presentation reliability is stable
-in the reconciled post-release v0.3 sequence.
+PLANNED after accepted TB-G18. Fast Lane v2 deliberately keeps this v0.3 Goal small.
+A new Codex release/profile is **not** required for v0.3 completion.
 
 ## Purpose
 
-Make Codex compatibility easier to audit and update without weakening the current exact-profile safety model.
-
-v0.2 intentionally binds production behavior to a source-audited Codex profile. v0.3 keeps that principle and adds a maintainable registry plus development-side diff tooling.
-
-## Compatibility model
-
-Introduce a typed registry conceptually similar to:
-
-```text
-CodexCompatibilityRegistry
-  version/profile
-  hook event set
-  required identity/order fields
-  turn awareness
-  subagent awareness
-  compact awareness
-  timeout semantics
-  terminal-title ownership semantics
-```
-
-A newer Codex version MUST NOT inherit support merely because its version number is greater.
+Make the existing exact-profile safety model maintainable without turning compatibility
+maintenance into a second source-analysis product.
 
 ## Current baseline
 
-At v0.2 planning time the admitted production profile is:
+The existing code already has a single-profile compatibility prototype:
 
 ```text
+CodexHookProfile::RUST_V0_147_0
 codex-hooks-rust-v0.147.0
+exact for_version() admission
+unknown event fail-open
 ```
 
-v0.148 prerelease builds exist upstream and require explicit audit before admission. Prerelease availability alone does not justify production support.
+G19 should generalize this into a typed registry rather than replace working provider
+logic.
 
-## Development-side audit tooling
+## Minimal compatibility registry
 
-Add a repository development tool/script that accepts an old admitted Codex source tag and a candidate source tag and produces a bounded compatibility report.
+Introduce a bounded `CodexCompatibilityRegistry` (name may differ) containing explicit
+entries with the already-proven compatibility facts, conceptually:
 
-At minimum compare relevant source surfaces for:
+```text
+version/profile
+hook event set
+required identity/order fields
+turn awareness
+subagent awareness
+compact awareness
+timeout semantics
+terminal-title ownership semantics
+```
+
+For v0.3 it is sufficient for the registry to contain exactly the already admitted
+`0.147.0` production profile.
+
+A newer version MUST NOT inherit support because its number is greater.
+
+## Diagnostics states
+
+`status`/`doctor` should distinguish the equivalent of:
+
+```text
+supported
+known_unadmitted
+unknown_or_unavailable
+```
+
+Runtime remains offline. No release lookup occurs during normal TabBeacon execution.
+
+## Lightweight development-side source diff
+
+Add a repository development script/tool that accepts an admitted source tag and a
+candidate source tag/source checkout and emits one bounded report over only the relevant
+Codex surfaces:
 
 ```text
 Hook event declarations
-Hook payload identity/order fields
+payload identity/order fields
 session/turn/subagent metadata
 compact lifecycle
-hook timeout behavior
+Hook timeout behavior
 terminal-title configuration/ownership behavior
 ```
 
-The report should classify the candidate as something equivalent to:
+A simple bounded `git diff`/source extraction report is preferred over a complex semantic
+diff engine.
+
+Classification may be:
 
 ```text
 SAFE_COMPATIBLE
@@ -62,57 +83,53 @@ REQUIRES_REVIEW
 BREAKING_OR_UNPROVEN
 ```
 
-This is developer tooling; TabBeacon runtime remains offline and does not fetch Codex source or releases.
+The tool informs a human/agent admission decision; it does not automatically admit a
+profile.
 
-## Profile admission
+## New profile admission
 
-A new Codex version/profile is admitted only after:
+New profile admission is optional in G19.
 
-1. source comparison;
-2. deterministic fixture updates/tests;
-3. isolated real-Codex smoke where required;
-4. title-ownership compatibility check;
-5. explicit documentation of supported semantics.
-
-Unknown/new events remain fail-open.
-
-## Diagnostics integration
-
-`status`/`doctor` should report the exact detected/admitted profile and distinguish:
+If no new profile is admitted:
 
 ```text
-supported
-known-but-unadmitted
-unknown/unavailable
+REAL_CODEX_L4=N/A_NO_NEW_PROFILE
 ```
 
-without online lookups.
+If a new profile is deliberately admitted, then source review, focused fixtures,
+title-ownership compatibility, and one isolated real-Codex L4 become required for that
+new profile.
 
-## Non-goals
-
-- automatic support for all future Codex versions;
-- App Server production backend;
-- runtime network compatibility checks;
-- Claude/OpenCode provider work.
+Do not let prerelease availability silently expand v0.3 scope.
 
 ## Validation
 
-- registry unit tests;
-- audit-tool fixture tests;
-- old/current profile regression;
-- candidate-version classification fixture;
+Fast Lane v2:
+
+- focused registry unit tests;
+- focused source-diff fixture tests;
+- current admitted-profile regression;
+- known-unadmitted/unknown diagnostics regression;
 - one final hosted code CI;
-- L4 only when a new real Codex profile is actually admitted.
+- Visual=N/A unless visible diagnostics/presentation semantics materially change;
+- L4=N/A unless a new real profile is admitted.
+
+No generic auditor is required unless provider wire/admission semantics are changed in a
+way not already covered by the exact-profile tests.
 
 ## Exit gate
 
 ```text
 COMPATIBILITY_REGISTRY=PASS
+ADMITTED_PROFILES=codex-hooks-rust-v0.147.0
 EXACT_PROFILE_POLICY_RETAINED=true
 SOURCE_DIFF_TOOL=PASS
+KNOWN_UNADMITTED_STATE=PASS
 UNKNOWN_VERSION_FAIL_OPEN=PASS
 RUNTIME_NETWORK_ACCESS=false
 PROFILE_DIAGNOSTICS=PASS
+CODE_CI=PASS
+L4=N/A_NO_NEW_PROFILE
 ```
 
 ## Exit receipt
@@ -124,8 +141,11 @@ STARTING_MAIN=<sha>
 EXPECTED_HEAD=<sha>
 ADMITTED_PROFILES=<list>
 SOURCE_DIFF_TOOL=<...>
+KNOWN_UNADMITTED=<...>
 UNKNOWN_VERSION=<...>
-L4=<...|N/A>
-CI=<...>
+CODE_CI=<...>
+L4=<PASS|N/A_NO_NEW_PROFILE>
 OWNER_ACTION=<none-or-specific>
 ```
+
+Estimated effective engineering effort: **2–4 h** without a new profile admission.

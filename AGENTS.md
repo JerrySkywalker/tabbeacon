@@ -1,82 +1,100 @@
 # AGENTS.md — TabBeacon development governance
 
-This repository uses an evidence-first workflow adapted for a terminal UI project. The original conservative VMCell-style process remains the safety baseline, while routine post-v0.1 work uses the risk-based Fast Lane in `dev_governance_files/FAST_LANE.md`.
+This repository uses evidence-first, risk-based development governance. The conservative
+VMCell-style ownership model remains the safety baseline; gate selection is governed by
+`dev_governance_files/QUALITY_GATES.md` (Fast Lane v2). `FAST_LANE.md` is only a compact
+execution reference.
 
 ## 1. Writer model
 
 - Ordinary development has exactly one active Implementer writer per worktree/branch.
-- Architect, supervisor, reviewer, and auditor roles are read-oriented unless a goal explicitly transfers write authority.
+- Architect, supervisor, reviewer, and auditor roles are read-oriented unless a Goal explicitly transfers write authority.
 - Do not run competing writers against the same worktree or branch.
 - Preserve foreign/local work; never reset or clean it merely to make a goal proceed.
 - Git writes belong to the active Implementer for the goal.
 
 ## 2. Scope discipline
 
-Every implementation goal must define:
+Every implementation Goal must define:
 
 - exact repository and starting head;
 - allowed files or subsystem scope;
 - acceptance criteria;
-- risk class / required gates;
+- changed-risk vector / required gates;
 - explicit non-goals.
 
-Do not fold unrelated cleanup into a goal because it is nearby.
+Do not fold unrelated cleanup into a Goal because it is nearby.
 
 ## 3. Branch and merge discipline
 
 After bootstrap:
 
-1. start from current authoritative `main`;
+1. start from current authoritative `main` or an explicitly admitted predecessor branch;
 2. require a clean owned worktree;
-3. create a focused branch when the change is independently revertible;
-4. implement and run focused local tests while iterating;
+3. create/use one focused branch when the change is independently revertible;
+4. implement with focused tests while iterating;
 5. settle one final candidate head;
-6. push/open PR;
-7. run only the gates required by the changed risk surface;
-8. accept evidence only when required exact-head bindings match;
-9. merge intentionally;
+6. push/open or update the focused PR;
+7. run only gates selected by `QUALITY_GATES.md`;
+8. reuse accepted evidence when its relevant risk surface is unchanged;
+9. merge intentionally after required gates pass;
 10. verify remote `main` after merge.
 
-Do not split work or create extra commits solely to manufacture more governance checkpoints.
+Do not split work or create extra commits solely to manufacture governance checkpoints.
 
-## 4. Risk-based Fast Lane
+## 4. Fast Lane v2
 
-The authoritative routine-development policy is `dev_governance_files/FAST_LANE.md`.
+Before validation classify:
 
-Default principles:
+```text
+CODE_CHANGED
+PRESENTATION_CHANGED
+PROVIDER_CHANGED
+USER_PERSISTENT_CONFIG_CHANGED
+SECURITY_OR_PRIVACY_CHANGED
+RELEASE_BOUNDARY
+```
 
-- documentation-only changes do not require Rust build/test, Visual CI, or provider L4;
-- ordinary internal code gets focused tests plus one final-head hosted code CI;
-- Visual CI is required only when title/progress/color/VT/animation presentation can change;
-- provider L4 is required only when provider/config/trust boundaries change or a focused real integration behavior cannot be proven synthetically;
-- unchanged blockers latch after one audit and are not re-audited until relevant state changes;
-- dedicated auditors are reserved for destructive configuration, security/privacy, concurrency/ownership, ambiguous defects, and release/publication work;
-- `TB-G14` release closure still uses the full applicable evidence matrix.
+Mandatory principles:
+
+- validation is risk-surface based;
+- one invariant/failure family normally receives one representative proof;
+- a traceability matrix is not automatically a set of independent release gates;
+- ordinary code gets focused tests plus one final hosted code CI;
+- presentation changes add one final owned UIA/Visual pack;
+- provider L4 is required only for a changed real provider/profile/trust boundary or an otherwise unprovable real-provider claim;
+- persistent user-configuration changes add one focused ownership/restore/drift safety family;
+- unchanged-risk evidence may be reused across heads after a bounded risk diff;
+- documentation-only acceptance updates do not invalidate unrelated code/Visual/L4 evidence;
+- dedicated auditors are exceptional, not a default pipeline stage;
+- an unchanged blocker is latched and not repeatedly re-audited.
 
 The goal is fewer repeated checks, not weaker correctness.
 
-## 5. Exact-head evidence
+## 5. Exact-head and reused evidence
 
-For any gate that is required, a green run is insufficient unless its checkout SHA equals the candidate SHA.
+Fresh required evidence binds to the settled candidate:
 
-Use these concepts consistently when applicable:
+```text
+EXPECTED_HEAD == checked_out_head == evidence_head
+```
 
-- `CODE_HEAD`: SHA validated by code/logic CI;
-- `VISUAL_HEAD`: SHA validated by visual CI;
-- `EXPECTED_HEAD`: candidate PR head SHA.
+Reused evidence may come from an earlier accepted head only when the relevant risk diff
+is empty and the receipt records the reuse explicitly.
 
-Cancelled, skipped, neutral, superseded, wrong-runner, wrong-checkout, or wrong-SHA evidence does not count as PASS.
-
-Do not create a new source commit solely to restate already-proven acceptance metadata when PR text or a durable receipt can carry that evidence.
+Do not create a source commit solely to restate already-proven acceptance metadata when
+PR text or durable evidence can carry it.
 
 ## 6. Evidence dispositions
 
-Use only explicit dispositions:
+Use explicit dispositions only:
 
-- `PASS` — requirement proved by evidence;
+- `PASS` — requirement proved;
 - `FAIL` — requirement disproved;
-- `BLOCKED` — required validation could not execute because of an external/precondition blocker;
-- `UNPROVEN` — evidence is insufficient to claim either pass or fail.
+- `BLOCKED` — an external/precondition boundary prevented required execution;
+- `UNPROVEN` — evidence is insufficient for pass or fail;
+- `REUSED` — an accepted prior proof remains valid because the relevant risk surface did not change;
+- `N/A` — the gate is outside the current changed-risk vector.
 
 Do not silently convert `UNPROVEN` into success.
 
@@ -84,63 +102,72 @@ Do not silently convert `UNPROVEN` into success.
 
 Implementations must preserve:
 
-- zero workflow change for daily agent launch (`codex` remains `codex`);
+- daily agent launch remains literally `codex`;
 - fail-open agent usability;
-- offline-first **workspace identity**, with existing Git repository identity preserved as the stable Git specialization;
+- offline-first workspace identity with Git identity as the stable specialization;
 - provider-neutral core state;
 - provider/backend isolation;
 - typed terminal presentation state;
 - visual behavior testability;
-- no hidden launcher, PATH shadow, PTY wrapper, or global resident daemon baseline.
+- no hidden launcher, fake `codex.exe`, PATH shadow, PTY wrapper, or global resident daemon baseline.
 
 ## 8. Provider boundaries
 
-The core consumes normalized evidence. It must not depend on provider-specific event types.
+The core consumes normalized evidence and must not depend on provider-specific event types.
+Provider backends declare their capabilities and evidence authority. Heuristics must not
+masquerade as authoritative state.
 
-Provider implementations may have multiple backends, for example:
-
-- Codex: hooks (default) and app-server (experimental);
-- Claude: hooks, with richer sources added only when needed;
-- OpenCode: plugin and potentially SSE.
-
-A backend must declare its capabilities and evidence authority. Heuristics must not masquerade as authoritative state.
+A newer Codex version does not inherit support from an admitted version merely because
+its version number is greater.
 
 ## 9. Visual changes
 
-Changes that can alter tab title, progress behavior, state palette, VT encoding, animation, or Windows Terminal presentation require exact-head visual evidence.
+Changes that can alter tab title, progress, palette, VT bytes, animation, or the product
+visual oracle require one final representative owned UIA/Visual proof.
 
-Do not run Visual CI for changes that cannot alter presentation, and do not approve an applicable visual change from prose or unit tests alone.
+Do not rerun Visual for non-presentation changes. Do not approve an applicable visible
+change from prose or internal unit tests alone.
 
 ## 10. Destructive/configuration writes
 
-Setup/uninstall/migration code must prove ownership before overwriting or deleting external configuration. Preserve unrelated user hooks and settings. Never bypass hook trust/review mechanisms.
+Setup/uninstall/migration/remediation code must prove exact ownership before overwriting
+or deleting external configuration. Preserve unrelated user hooks/settings and never
+bypass trust/review mechanisms.
 
-Real Owner configuration must not be mutated by unattended tests unless the goal explicitly authorizes that production action.
+Real Owner configuration must not be mutated by unattended tests unless the Goal
+explicitly authorizes that production action.
 
-## 11. Blocker latch
+## 11. Audit and blocker discipline
 
-Once an unchanged blocker is confirmed, record a stable blocker fingerprint and set:
+A separate auditor is required only for changed persistent/destructive external writes,
+security/privacy boundaries, high-risk concurrency/ownership, ambiguous defects,
+release/publication, or explicit Implementer request.
+
+Do not chain auditors over unchanged evidence.
+
+Once an unchanged blocker is confirmed, record a stable fingerprint and:
 
 ```text
 BLOCKER_LATCHED=true
 ```
 
-Re-evaluate only after relevant source head, trust state, Owner evidence, authoritative main, or external prerequisite changes. Repeating the same full audit is not progress.
+Re-evaluate only after relevant source, evidence, trust state, Owner action, or external
+prerequisite changes.
 
 ## 12. Completion format
 
-Use a concise receipt containing only gates relevant to the change. A typical code goal reports:
+Receipts report only gates relevant to the changed risk. Typical form:
 
 ```text
 DISPOSITION=<PASS|FAIL|BLOCKED|UNPROVEN>
 GOAL_ID=<id>
 EXPECTED_HEAD=<sha>
-CODE_HEAD=<sha-or-N/A>
-CI=<PASS|FAIL|BLOCKED|N/A>
-VISUAL_CI=<PASS|FAIL|BLOCKED|N/A>
-L4=<PASS|FAIL|BLOCKED|N/A>
-UNRELATED_DRIFT_TOUCHED=<true|false>
-OWNER_ACTION=<none-or-specific-action>
+CODE_CI=<PASS|FAIL|N/A>
+VISUAL=<PASS|REUSED|N/A>
+L4=<PASS|REUSED|N/A>
+PERSISTENT_CONFIG_SAFETY=<PASS|REUSED|N/A>
+BLOCKER_LATCHED=<true|false>
+OWNER_ACTION=<none-or-specific>
 ```
 
-Do not require irrelevant fields merely for ceremony.
+Do not require irrelevant fields for ceremony.
