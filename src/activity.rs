@@ -1720,6 +1720,95 @@ mod tests {
     }
 
     #[test]
+    fn animated_worker_stops_for_static_native_and_off_settings() {
+        let root = TestRoot::new("activity-mode-transition");
+        let store = ActivityLeaseStore::new(&root.0);
+        let owner = digest('d');
+        let terminal_binding = digest('c');
+        let coordinator = ActivityCoordinator {
+            store: store.clone(),
+            execution: ActivityExecution::System {
+                executable: root.0.join("unused.exe"),
+                owner_sha256: owner.clone(),
+                terminal_binding_sha256: terminal_binding,
+            },
+        };
+        let action = PresentationPolicy::resolve(SemanticPresentationInput::new(
+            Phase::Working,
+            Attention::None,
+            Health::Normal,
+            "OWH",
+        ));
+        let cases = [
+            (
+                'a',
+                PresentationSettings::new(
+                    TitleMode::TabBeacon,
+                    TabColorMode::Off,
+                    ActivityMode::TitleIndicator,
+                    SpinnerPreset::Braille,
+                    PresentationTheme::MutedDark,
+                ),
+            ),
+            (
+                'e',
+                PresentationSettings::new(
+                    TitleMode::Native,
+                    TabColorMode::Native,
+                    ActivityMode::Native,
+                    SpinnerPreset::Braille,
+                    PresentationTheme::MutedDark,
+                ),
+            ),
+            (
+                'f',
+                PresentationSettings::new(
+                    TitleMode::Off,
+                    TabColorMode::Off,
+                    ActivityMode::Off,
+                    SpinnerPreset::Braille,
+                    PresentationTheme::MutedDark,
+                ),
+            ),
+        ];
+
+        for (session, settings) in cases {
+            let worker = key(1, session, 'c');
+            let LeaseTransition::Published { lease, .. } = store
+                .publish_active(&worker, 10, &owner, &presentation(), 1_000)
+                .expect("animated worker publishes")
+            else {
+                panic!("animated worker must be active before a mode transition");
+            };
+            store
+                .write_exit(&lease.ownership(), "superseded_or_expired")
+                .expect("predecessor exit receipt writes");
+
+            assert_eq!(
+                coordinator.reconcile(
+                    &digest(session),
+                    Some(&digest('b')),
+                    1,
+                    11,
+                    "OWH",
+                    &action,
+                    settings,
+                ),
+                ActivityRender::Full,
+                "mode transition for session {session} waits for and retires the animation"
+            );
+            let stopped = store
+                .load(worker.digest())
+                .expect("stopped lease reads")
+                .expect("stopped lease exists");
+            assert!(
+                !stopped.active,
+                "mode transition for {session} leaves no worker"
+            );
+        }
+    }
+
+    #[test]
     fn same_generation_updates_in_place_and_delayed_events_cannot_revive() {
         let root = TestRoot::new("event-order");
         let store = ActivityLeaseStore::new(&root.0);
