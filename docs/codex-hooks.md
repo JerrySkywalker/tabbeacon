@@ -265,6 +265,18 @@ neutralizes a missing or nonzero TabBeacon executable, and the internal hook
 ingress is silent and always successful. Generation, repository, state, or terminal output
 failure loses decoration only; it does not return a Codex block decision.
 
+## Exact compatibility registry
+
+TabBeacon classifies Codex versions through one offline typed registry. v0.3 admits
+only `codex-hooks-rust-v0.147.0`; a numerically newer version never inherits that
+support. Read-only `status` and `doctor` expose `supported`, `known_unadmitted`, or
+`unknown_or_unavailable` alongside the admitted profile identifier when one exists.
+
+`scripts/compare-codex-compatibility.ps1` compares two local source checkouts or two
+Git references over the bounded Hook, identity, lifecycle, timeout, and title-ownership
+surface. Its `SAFE_COMPATIBLE`, `REQUIRES_REVIEW`, and `BREAKING_OR_UNPROVEN` result
+informs a later admission review; it does not update runtime profiles or access a network.
+
 ## Uninstall
 
 ```powershell

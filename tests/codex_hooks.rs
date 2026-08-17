@@ -18,10 +18,10 @@ use sha2::{Digest, Sha256};
 use tabbeacon::{
     core::{Attention, AuthoritySet, FieldUpdate, Health, Phase, StateAxis},
     providers::codex::{
-        CodexHookError, CodexHookEvent, CodexHookNormalizer, CodexHookProfile, CodexHookRuntime,
-        CodexIntegration, CodexIntegrationError, CodexNormalization, DoctorStatus,
-        HookDispatchOutcome, SetupOutcome, TitleOwnershipOutcome, UninstallOutcome,
-        UnknownEventPolicy,
+        CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookError, CodexHookEvent,
+        CodexHookNormalizer, CodexHookProfile, CodexHookRuntime, CodexIntegration,
+        CodexIntegrationError, CodexNormalization, DoctorStatus, HookDispatchOutcome, SetupOutcome,
+        TitleOwnershipOutcome, UninstallOutcome, UnknownEventPolicy,
     },
     settings::{
         ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
@@ -564,12 +564,47 @@ fn exact_release_profile_is_explicit_and_future_versions_are_not_assumed() {
     assert!(profile.turn_aware());
     assert!(profile.agent_aware());
     assert!(profile.compact_aware());
+    assert!(profile.identity().session_id_required());
+    assert!(
+        profile
+            .identity()
+            .turn_id_required_outside_session_lifecycle()
+    );
+    assert!(
+        profile
+            .identity()
+            .subagent_identity_required_for_subagent_lifecycle()
+    );
+    assert!(profile.timeout().synchronous_required());
+    assert_eq!(profile.timeout().declaration_timeout_seconds(), 1);
+    assert_eq!(profile.timeout().maximum_timeout_seconds(), 3);
+    assert!(!profile.timeout().timeout_blocks_operation());
+    assert!(profile.terminal_title_ownership().codex_owns_by_default());
+    assert_eq!(
+        profile
+            .terminal_title_ownership()
+            .tabbeacon_delegation_key(),
+        "[tui].terminal_title = []"
+    );
     assert_eq!(
         profile.unknown_event_policy(),
         UnknownEventPolicy::IgnoreFailOpen
     );
     assert_eq!(CodexHookProfile::for_version((0, 147, 0)), Some(profile));
     assert_eq!(CodexHookProfile::for_version((0, 148, 0)), None);
+    assert_eq!(CodexCompatibilityRegistry::admitted_profiles(), &[profile]);
+    assert!(matches!(
+        CodexCompatibilityRegistry::classify(Some((0, 147, 0))),
+        CodexCompatibilityState::Supported(supported) if supported == profile
+    ));
+    assert!(matches!(
+        CodexCompatibilityRegistry::classify(Some((0, 148, 0))),
+        CodexCompatibilityState::KnownUnadmitted(entry) if entry.version() == (0, 148, 0)
+    ));
+    assert_eq!(
+        CodexCompatibilityRegistry::classify(Some((0, 149, 0))).label(),
+        "unknown_or_unavailable"
+    );
 }
 
 #[test]

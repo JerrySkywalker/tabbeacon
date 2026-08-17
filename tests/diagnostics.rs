@@ -147,6 +147,7 @@ fn status_json_is_structured_private_and_read_only_for_isolated_state() {
     assert_eq!(report["schema_version"], 1);
     assert_eq!(report["codex"]["version"], "0.147.0");
     assert_eq!(report["codex"]["profile_supported"], true);
+    assert_eq!(report["codex"]["profile_state"], "supported");
     assert_eq!(report["presentation"]["source"], "default");
     assert_eq!(report["title"]["desired_owner"], "tabbeacon");
     assert_eq!(report["title"]["codex_writer_state"], "unavailable");
@@ -281,6 +282,7 @@ fn status_distinguishes_missing_and_unsupported_codex_without_failing() {
     let missing = json_output(&missing);
     assert!(missing["codex"]["version"].is_null());
     assert_eq!(missing["codex"]["profile_supported"], false);
+    assert_eq!(missing["codex"]["profile_state"], "unknown_or_unavailable");
 
     let unsupported_root = TestRoot::new("unsupported-codex");
     let fake_codex = fake_codex_directory(&unsupported_root, "0.148.0");
@@ -295,6 +297,7 @@ fn status_distinguishes_missing_and_unsupported_codex_without_failing() {
     assert_eq!(unsupported["codex"]["version"], "0.148.0");
     assert!(unsupported["codex"]["hook_profile"].is_null());
     assert_eq!(unsupported["codex"]["profile_supported"], false);
+    assert_eq!(unsupported["codex"]["profile_state"], "known_unadmitted");
 }
 
 #[test]

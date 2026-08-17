@@ -12,7 +12,11 @@ pub use config::{
     CodexDoctorReport, CodexIntegration, CodexIntegrationError, DoctorStatus, SetupOutcome,
     TitleOwnershipOutcome, UninstallOutcome,
 };
-pub use profile::{CodexHookEvent, CodexHookProfile, UnknownEventPolicy};
+pub use profile::{
+    CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookEvent, CodexHookProfile,
+    HookIdentitySemantics, HookTimeoutSemantics, KnownUnadmittedCodexVersion,
+    TerminalTitleOwnershipSemantics, UnknownEventPolicy,
+};
 pub use runtime::{CodexHookRuntime, HookDispatchOutcome};
 
 use std::{fmt, path::PathBuf, time::SystemTime};
@@ -151,8 +155,8 @@ pub struct CodexHookNormalizer;
 impl CodexHookNormalizer {
     /// Returns the exact release profile implemented by this normalizer.
     #[must_use]
-    pub const fn profile() -> CodexHookProfile {
-        CodexHookProfile::RUST_V0_147_0
+    pub fn profile() -> CodexHookProfile {
+        CodexCompatibilityRegistry::admitted_profiles()[0]
     }
 
     /// Declares exactly the semantic axes and authority available from hooks.

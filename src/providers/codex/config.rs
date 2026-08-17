@@ -13,7 +13,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 
-use super::CodexHookProfile;
+use super::{CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookProfile};
 
 const MANIFEST_SCHEMA: &str = "tabbeacon-codex-integration-v1";
 const MANIFEST_FILE: &str = "integration-v1.json";
@@ -32,7 +32,7 @@ const HOOK_EVENTS: [&str; 11] = [
     "SubagentStop",
     "Stop",
 ];
-type ProbedCodexProfile = (String, Option<CodexHookProfile>);
+type ProbedCodexProfile = (String, CodexCompatibilityState);
 
 /// Result of a setup invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +120,7 @@ pub struct CodexDoctorReport {
     overall: DoctorStatus,
     checks: Vec<DoctorCheck>,
     codex_version: Option<String>,
+    compatibility_state: CodexCompatibilityState,
     hook_profile: Option<CodexHookProfile>,
     owned_hook_count: Option<usize>,
     title_owned: Option<bool>,
@@ -129,6 +130,7 @@ impl CodexDoctorReport {
     fn from_diagnosis(
         checks: Vec<DoctorCheck>,
         codex_version: Option<String>,
+        compatibility_state: CodexCompatibilityState,
         hook_profile: Option<CodexHookProfile>,
         owned_hook_count: Option<usize>,
         title_owned: Option<bool>,
@@ -142,6 +144,7 @@ impl CodexDoctorReport {
             overall,
             checks,
             codex_version,
+            compatibility_state,
             hook_profile,
             owned_hook_count,
             title_owned,
@@ -172,10 +175,16 @@ impl CodexDoctorReport {
         self.hook_profile
     }
 
+    /// Exact registry classification, including unadmitted and unavailable states.
+    #[must_use]
+    pub const fn compatibility_state(&self) -> CodexCompatibilityState {
+        self.compatibility_state
+    }
+
     /// Whether the detected Codex version maps to an admitted Hook profile.
     #[must_use]
     pub const fn profile_supported(&self) -> bool {
-        self.hook_profile.is_some()
+        self.compatibility_state.is_supported()
     }
 
     /// Count of manifest-owned Hook declarations when the manifest is valid.
@@ -385,7 +394,8 @@ impl CodexIntegration {
         let mut checks = Vec::new();
         let version = self.probe_codex_version();
         let codex_version = version.as_ref().map(|(version, _)| version.clone());
-        let hook_profile = version.as_ref().and_then(|(_, profile)| *profile);
+        let compatibility_state = compatibility_state(version.as_ref());
+        let hook_profile = compatibility_state.supported_profile();
         checks.push(codex_version_check(version.as_ref()));
         checks.push(codex_profile_check(version.as_ref()));
         checks.push(if self.tabbeacon_executable.is_file() {
@@ -434,7 +444,7 @@ impl CodexIntegration {
                 ),
             });
             checks.push(match (&version, &config) {
-                (Some((_, Some(_))), Ok(config)) => {
+                (Some((_, state)), Ok(config)) if state.is_supported() => {
                     hook_trust_check(config, &self.hooks_path(), hooks, &manifest.hooks)
                 }
                 _ => fail(
@@ -478,6 +488,7 @@ impl CodexIntegration {
         CodexDoctorReport::from_diagnosis(
             checks,
             codex_version,
+            compatibility_state,
             hook_profile,
             owned_hook_count,
             title_owned,
@@ -755,7 +766,7 @@ impl CodexIntegration {
         }
         let stdout = String::from_utf8(output.stdout).ok()?;
         let version = stdout.split_whitespace().find_map(parse_semver)?;
-        let profile = CodexHookProfile::for_version(version);
+        let profile = CodexCompatibilityRegistry::classify(Some(version));
         Some((
             format!("{}.{}.{}", version.0, version.1, version.2),
             profile,
@@ -1158,34 +1169,54 @@ fn hook_trust_check(
 
 fn codex_version_check(version: Option<&ProbedCodexProfile>) -> DoctorCheck {
     match version {
-        Some((version, Some(_))) => pass(
+        Some((version, CodexCompatibilityState::Supported(_))) => pass(
             "codex.version",
             format!("Codex {version} is source-audited"),
         ),
-        Some((version, None)) => fail(
+        Some((version, CodexCompatibilityState::KnownUnadmitted(_))) => fail(
             "codex.version",
-            format!("Codex {version} is outside the admitted hook contract"),
+            format!("Codex {version} is known but deliberately unadmitted"),
+        ),
+        Some((version, CodexCompatibilityState::UnknownOrUnavailable)) => fail(
+            "codex.version",
+            format!("Codex {version} is outside the bounded hook registry"),
         ),
         None => fail("codex.version", "Codex executable/version is unavailable"),
     }
 }
 
+fn compatibility_state(version: Option<&ProbedCodexProfile>) -> CodexCompatibilityState {
+    version.map_or(
+        CodexCompatibilityState::UnknownOrUnavailable,
+        |(_, state)| *state,
+    )
+}
+
 fn codex_profile_check(version: Option<&ProbedCodexProfile>) -> DoctorCheck {
     match version {
-        Some((_, Some(profile))) => pass(
+        Some((_, CodexCompatibilityState::Supported(profile))) => pass(
             "codex.hook-profile",
             format!(
-                "{}: events={}; turn-aware={}; agent-aware={}; compact-aware={}; unknown=ignore-fail-open",
+                "{}: events={}; turn-aware={}; agent-aware={}; compact-aware={}; synchronous={}; timeout={}s; title={}; unknown=ignore-fail-open",
                 profile.id(),
                 profile.lifecycle_events().len(),
                 profile.turn_aware(),
                 profile.agent_aware(),
-                profile.compact_aware()
+                profile.compact_aware(),
+                profile.timeout().synchronous_required(),
+                profile.timeout().declaration_timeout_seconds(),
+                profile
+                    .terminal_title_ownership()
+                    .tabbeacon_delegation_key()
             ),
         ),
-        Some((version, None)) => fail(
+        Some((version, CodexCompatibilityState::KnownUnadmitted(_))) => fail(
             "codex.hook-profile",
-            format!("no source-audited Hook profile matches Codex {version}"),
+            format!("Codex {version} is known but has no source-audited Hook profile"),
+        ),
+        Some((version, CodexCompatibilityState::UnknownOrUnavailable)) => fail(
+            "codex.hook-profile",
+            format!("no registry entry classifies Codex {version}"),
         ),
         None => fail(
             "codex.hook-profile",

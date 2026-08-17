@@ -179,6 +179,8 @@ pub struct CodexDiagnostics {
     pub version: Option<String>,
     /// Exact source-audited Hook profile identifier when known.
     pub hook_profile: Option<String>,
+    /// Exact offline registry state; never infers support from a version range.
+    pub profile_state: String,
     /// Whether the detected version maps to an admitted Hook profile.
     pub profile_supported: bool,
 }
@@ -408,6 +410,7 @@ fn collect_codex_diagnostics() -> (CodexDiagnostics, IntegrationDiagnostics, Doc
             CodexDiagnostics {
                 version: None,
                 hook_profile: None,
+                profile_state: "unknown_or_unavailable".to_owned(),
                 profile_supported: false,
             },
             IntegrationDiagnostics {
@@ -447,6 +450,7 @@ fn collect_codex_diagnostics() -> (CodexDiagnostics, IntegrationDiagnostics, Doc
         CodexDiagnostics {
             version: report.codex_version().map(ToOwned::to_owned),
             hook_profile: report.hook_profile().map(|profile| profile.id().to_owned()),
+            profile_state: report.compatibility_state().label().to_owned(),
             profile_supported: report.profile_supported(),
         },
         IntegrationDiagnostics {
@@ -555,6 +559,7 @@ pub fn human_status_lines(report: &OperationalDiagnostics) -> Vec<String> {
             "CODEX_HOOK_PROFILE={}",
             option_or_unavailable(report.codex.hook_profile.as_deref())
         ),
+        format!("CODEX_PROFILE_STATE={}", report.codex.profile_state),
         format!("CODEX_PROFILE_SUPPORTED={}", report.codex.profile_supported),
         format!("INTEGRATION_INSTALLED={}", report.integration.installed),
         format!(

@@ -1,4 +1,4 @@
-//! Frozen compatibility facts for admitted Codex Hook releases.
+//! Frozen compatibility facts and exact admission for Codex Hook releases.
 
 /// Forward-compatibility policy for Hook events outside an admitted profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,19 +91,89 @@ impl CodexHookEvent {
     }
 }
 
-const RUST_V0_147_0_EVENTS: [CodexHookEvent; 11] = [
-    CodexHookEvent::PreToolUse,
-    CodexHookEvent::PermissionRequest,
-    CodexHookEvent::PostToolUse,
-    CodexHookEvent::PreCompact,
-    CodexHookEvent::PostCompact,
-    CodexHookEvent::SessionStart,
-    CodexHookEvent::SessionEnd,
-    CodexHookEvent::UserPromptSubmit,
-    CodexHookEvent::SubagentStart,
-    CodexHookEvent::SubagentStop,
-    CodexHookEvent::Stop,
-];
+/// Source-audited identity and ordering requirements for one Hook surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HookIdentitySemantics {
+    session_id_required: bool,
+    turn_id_required_outside_session_lifecycle: bool,
+    subagent_identity_required_for_subagent_lifecycle: bool,
+}
+
+impl HookIdentitySemantics {
+    /// Whether every admitted event has a durable session identity.
+    #[must_use]
+    pub const fn session_id_required(self) -> bool {
+        self.session_id_required
+    }
+
+    /// Whether non-session lifecycle events carry the ordering turn identity.
+    #[must_use]
+    pub const fn turn_id_required_outside_session_lifecycle(self) -> bool {
+        self.turn_id_required_outside_session_lifecycle
+    }
+
+    /// Whether explicit subagent lifecycle events require agent identity and type.
+    #[must_use]
+    pub const fn subagent_identity_required_for_subagent_lifecycle(self) -> bool {
+        self.subagent_identity_required_for_subagent_lifecycle
+    }
+}
+
+/// Bounded Hook execution facts proven for one admitted source release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HookTimeoutSemantics {
+    synchronous_required: bool,
+    declaration_timeout_seconds: u8,
+    maximum_timeout_seconds: u8,
+    timeout_blocks_operation: bool,
+}
+
+impl HookTimeoutSemantics {
+    /// Whether handlers must remain synchronous for the admitted release.
+    #[must_use]
+    pub const fn synchronous_required(self) -> bool {
+        self.synchronous_required
+    }
+
+    /// The minimum owned declaration timeout.
+    #[must_use]
+    pub const fn declaration_timeout_seconds(self) -> u8 {
+        self.declaration_timeout_seconds
+    }
+
+    /// The source-audited upper timeout bound for the terminal lifecycle hook.
+    #[must_use]
+    pub const fn maximum_timeout_seconds(self) -> u8 {
+        self.maximum_timeout_seconds
+    }
+
+    /// Whether a timeout can block ordinary Codex progression.
+    #[must_use]
+    pub const fn timeout_blocks_operation(self) -> bool {
+        self.timeout_blocks_operation
+    }
+}
+
+/// Terminal-title ownership behavior proven for one admitted source release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalTitleOwnershipSemantics {
+    /// Codex owns titles normally; `[tui].terminal_title = []` delegates them.
+    CodexDefaultWithExplicitTabBeaconDelegation,
+}
+
+impl TerminalTitleOwnershipSemantics {
+    /// Whether Codex is the ordinary default title owner.
+    #[must_use]
+    pub const fn codex_owns_by_default(self) -> bool {
+        true
+    }
+
+    /// The supported configuration mechanism when `TabBeacon` owns the title.
+    #[must_use]
+    pub const fn tabbeacon_delegation_key(self) -> &'static str {
+        "[tui].terminal_title = []"
+    }
+}
 
 /// Frozen compatibility contract for one source-audited Codex Hook release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,32 +181,20 @@ pub struct CodexHookProfile {
     id: &'static str,
     version: (u64, u64, u64),
     lifecycle_events: &'static [CodexHookEvent],
+    identity: HookIdentitySemantics,
     turn_aware: bool,
     agent_aware: bool,
     compact_aware: bool,
+    timeout: HookTimeoutSemantics,
+    terminal_title_ownership: TerminalTitleOwnershipSemantics,
     unknown_event_policy: UnknownEventPolicy,
 }
 
 impl CodexHookProfile {
-    /// Profile proven from the official `openai/codex` `rust-v0.147.0` tag.
-    pub const RUST_V0_147_0: Self = Self {
-        id: "codex-hooks-rust-v0.147.0",
-        version: (0, 147, 0),
-        lifecycle_events: &RUST_V0_147_0_EVENTS,
-        turn_aware: true,
-        agent_aware: true,
-        compact_aware: true,
-        unknown_event_policy: UnknownEventPolicy::IgnoreFailOpen,
-    };
-
-    /// Selects an exact source-audited profile without assuming later releases.
+    /// Backward-compatible exact lookup delegated to the authoritative registry.
     #[must_use]
-    pub const fn for_version(version: (u64, u64, u64)) -> Option<Self> {
-        if version.0 == 0 && version.1 == 147 && version.2 == 0 {
-            Some(Self::RUST_V0_147_0)
-        } else {
-            None
-        }
+    pub fn for_version(version: (u64, u64, u64)) -> Option<Self> {
+        CodexCompatibilityRegistry::classify(Some(version)).supported_profile()
     }
 
     /// Stable diagnostic profile identifier.
@@ -157,6 +215,12 @@ impl CodexHookProfile {
         self.lifecycle_events
     }
 
+    /// Required identity and ordering fields.
+    #[must_use]
+    pub const fn identity(self) -> HookIdentitySemantics {
+        self.identity
+    }
+
     /// Whether reliable turn identity is available on turn-scoped events.
     #[must_use]
     pub const fn turn_aware(self) -> bool {
@@ -175,9 +239,154 @@ impl CodexHookProfile {
         self.compact_aware
     }
 
+    /// Synchronous and timeout behavior of the admitted hook surface.
+    #[must_use]
+    pub const fn timeout(self) -> HookTimeoutSemantics {
+        self.timeout
+    }
+
+    /// Title ownership behavior of the admitted Codex release.
+    #[must_use]
+    pub const fn terminal_title_ownership(self) -> TerminalTitleOwnershipSemantics {
+        self.terminal_title_ownership
+    }
+
     /// Policy for events not declared by this profile.
     #[must_use]
     pub const fn unknown_event_policy(self) -> UnknownEventPolicy {
         self.unknown_event_policy
+    }
+}
+
+/// A bounded diagnostic record for a version intentionally not admitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KnownUnadmittedCodexVersion {
+    version: (u64, u64, u64),
+}
+
+impl KnownUnadmittedCodexVersion {
+    /// Version that is deliberately not treated as compatible.
+    #[must_use]
+    pub const fn version(self) -> (u64, u64, u64) {
+        self.version
+    }
+}
+
+/// Exact, offline compatibility classification for the bounded registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexCompatibilityState {
+    /// The detected version has an exact source-audited production profile.
+    Supported(CodexHookProfile),
+    /// The detected version is tracked but remains deliberately unadmitted.
+    KnownUnadmitted(KnownUnadmittedCodexVersion),
+    /// No version was available, or it is outside the bounded registry.
+    UnknownOrUnavailable,
+}
+
+impl CodexCompatibilityState {
+    /// Stable diagnostic spelling with no inferred compatibility.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Supported(_) => "supported",
+            Self::KnownUnadmitted(_) => "known_unadmitted",
+            Self::UnknownOrUnavailable => "unknown_or_unavailable",
+        }
+    }
+
+    /// Exact admitted profile when, and only when, this state is supported.
+    #[must_use]
+    pub const fn supported_profile(self) -> Option<CodexHookProfile> {
+        match self {
+            Self::Supported(profile) => Some(profile),
+            Self::KnownUnadmitted(_) | Self::UnknownOrUnavailable => None,
+        }
+    }
+
+    /// Whether this state authorizes the existing production Hook contract.
+    #[must_use]
+    pub const fn is_supported(self) -> bool {
+        matches!(self, Self::Supported(_))
+    }
+}
+
+const RUST_V0_147_0_EVENTS: [CodexHookEvent; 11] = [
+    CodexHookEvent::PreToolUse,
+    CodexHookEvent::PermissionRequest,
+    CodexHookEvent::PostToolUse,
+    CodexHookEvent::PreCompact,
+    CodexHookEvent::PostCompact,
+    CodexHookEvent::SessionStart,
+    CodexHookEvent::SessionEnd,
+    CodexHookEvent::UserPromptSubmit,
+    CodexHookEvent::SubagentStart,
+    CodexHookEvent::SubagentStop,
+    CodexHookEvent::Stop,
+];
+
+const ADMITTED_PROFILES: [CodexHookProfile; 1] = [CodexHookProfile {
+    id: "codex-hooks-rust-v0.147.0",
+    version: (0, 147, 0),
+    lifecycle_events: &RUST_V0_147_0_EVENTS,
+    identity: HookIdentitySemantics {
+        session_id_required: true,
+        turn_id_required_outside_session_lifecycle: true,
+        subagent_identity_required_for_subagent_lifecycle: true,
+    },
+    turn_aware: true,
+    agent_aware: true,
+    compact_aware: true,
+    timeout: HookTimeoutSemantics {
+        synchronous_required: true,
+        declaration_timeout_seconds: 1,
+        maximum_timeout_seconds: 3,
+        timeout_blocks_operation: false,
+    },
+    terminal_title_ownership:
+        TerminalTitleOwnershipSemantics::CodexDefaultWithExplicitTabBeaconDelegation,
+    unknown_event_policy: UnknownEventPolicy::IgnoreFailOpen,
+}];
+
+// This is a bounded diagnostic marker, not a profile admission or a claim of
+// wire compatibility. It keeps an observed fixture version distinguishable from
+// an entirely unknown version while preserving exact-only support.
+const KNOWN_UNADMITTED: [KnownUnadmittedCodexVersion; 1] = [KnownUnadmittedCodexVersion {
+    version: (0, 148, 0),
+}];
+
+/// The one authoritative offline registry for Codex Hook compatibility.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CodexCompatibilityRegistry;
+
+impl CodexCompatibilityRegistry {
+    /// All and only production-admitted profiles.
+    #[must_use]
+    pub const fn admitted_profiles() -> &'static [CodexHookProfile] {
+        &ADMITTED_PROFILES
+    }
+
+    /// Classifies an observed version without a network lookup or version range.
+    #[must_use]
+    pub fn classify(version: Option<(u64, u64, u64)>) -> CodexCompatibilityState {
+        let Some(version) = version else {
+            return CodexCompatibilityState::UnknownOrUnavailable;
+        };
+        let mut index = 0;
+        while index < ADMITTED_PROFILES.len() {
+            let profile = ADMITTED_PROFILES[index];
+            if profile.version == version {
+                return CodexCompatibilityState::Supported(profile);
+            }
+            index += 1;
+        }
+        let mut index = 0;
+        while index < KNOWN_UNADMITTED.len() {
+            let entry = KNOWN_UNADMITTED[index];
+            if entry.version == version {
+                return CodexCompatibilityState::KnownUnadmitted(entry);
+            }
+            index += 1;
+        }
+        CodexCompatibilityState::UnknownOrUnavailable
     }
 }
