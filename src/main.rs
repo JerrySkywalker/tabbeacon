@@ -1,5 +1,4 @@
 use std::{
-    fs::OpenOptions,
     io::{self, Read, Write},
     process::ExitCode,
     thread,
@@ -96,6 +95,7 @@ fn main() -> ExitCode {
         [command] if command == "status" => status(false),
         [command, option] if command == "status" && option == "--json" => status(true),
         [command, rest @ ..] if command == "title-policy" => title_policy_command(rest),
+        [command, rest @ ..] if command == "convergence" => convergence_command(rest),
         [command, provider] if command == "uninstall" && provider == "codex" => uninstall_codex(),
         [command, provider] if command == "hook" && provider == "codex" => run_codex_hook(),
         [command, subcommand] if command == "config" && subcommand == "show" => config_show(),
@@ -146,6 +146,89 @@ fn title_policy_command(arguments: &[String]) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn convergence_command(arguments: &[String]) -> ExitCode {
+    if arguments.first().map(String::as_str) == Some("verify") {
+        return convergence_verify(&arguments[1..]);
+    }
+    let json = arguments
+        .get(1)
+        .is_some_and(|argument| argument == "--json");
+    if arguments.first().map(String::as_str) != Some("matrix")
+        || !(arguments.len() == 1 || (arguments.len() == 2 && json))
+    {
+        print_usage();
+        return ExitCode::from(2);
+    }
+    let matrix = tabbeacon::convergence::scenario_matrix();
+    if json {
+        return match serde_json::to_string(matrix) {
+            Ok(value) => {
+                println!("{value}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => management_error("CONVERGENCE_MATRIX", &error),
+        };
+    }
+    println!(
+        "CONVERGENCE_DEADLINE_MS={}",
+        tabbeacon::convergence::CONVERGENCE_DEADLINE_MS
+    );
+    println!("CONVERGENCE_SCENARIOS={}", matrix.len());
+    println!(
+        "OWNED_UIA_SCENARIOS={}",
+        tabbeacon::convergence::owned_uia_scenario_count()
+    );
+    println!("ELEVATED_OWNER_SCENARIOS=1");
+    ExitCode::SUCCESS
+}
+
+fn convergence_verify(arguments: &[String]) -> ExitCode {
+    let matrix_path = option_value(arguments, "--matrix");
+    let expected_head = option_value(arguments, "--expected-head");
+    if arguments.len() != 4 || matrix_path.is_none() || expected_head.is_none() {
+        print_usage();
+        return ExitCode::from(2);
+    }
+    let expected_head = expected_head.expect("checked above");
+    let path = std::path::Path::new(matrix_path.expect("checked above"));
+    let run = match tabbeacon::convergence_evidence::load_convergence_run(path) {
+        Ok(run) => run,
+        Err(code) => {
+            eprintln!("CONVERGENCE_VERIFY=FAIL");
+            eprintln!("REASON={code}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut verification = tabbeacon::convergence_evidence::verify_convergence_run(
+        &run,
+        tabbeacon::convergence::scenario_matrix(),
+    );
+    if run.expected_head != *expected_head {
+        verification.valid = false;
+        verification
+            .violations
+            .push("caller_expected_head_mismatch".to_owned());
+        verification.violations.sort();
+        verification.violations.dedup();
+    }
+    match serde_json::to_string(&verification) {
+        Ok(serialized) => println!("{serialized}"),
+        Err(error) => return management_error("CONVERGENCE_VERIFY", &error),
+    }
+    if verification.valid {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn option_value<'a>(arguments: &'a [String], flag: &str) -> Option<&'a String> {
+    arguments
+        .iter()
+        .position(|argument| argument == flag)
+        .and_then(|index| arguments.get(index + 1))
 }
 
 fn setup_codex() -> ExitCode {
@@ -809,7 +892,11 @@ fn print_preview_result(settings: PresentationSettings) -> ExitCode {
 }
 
 fn render_preview(settings: PresentationSettings) -> Result<(), &'static str> {
-    let mut console = open_preview_console().map_err(|_| "owned terminal output is unavailable")?;
+    #[cfg(windows)]
+    let mut console = tabbeacon::console_output::open_owned_console()
+        .map_err(|_| "owned terminal output is unavailable")?;
+    #[cfg(not(windows))]
+    let mut console = io::stdout();
     let renderer = WindowsTerminalRenderer::with_settings(
         WindowsTerminalCapabilities::new(std::env::var_os("WT_SESSION").is_some()),
         settings,
@@ -847,16 +934,6 @@ fn preview_choice_error(key: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
-#[cfg(windows)]
-fn open_preview_console() -> io::Result<std::fs::File> {
-    OpenOptions::new().write(true).open("CONOUT$")
-}
-
-#[cfg(not(windows))]
-fn open_preview_console() -> io::Result<std::io::Stdout> {
-    Ok(io::stdout())
-}
-
 fn settings_store() -> Result<PresentationSettingsStore, tabbeacon::settings::SettingsError> {
     PresentationSettingsStore::from_environment()
 }
@@ -880,6 +957,8 @@ fn print_usage() {
     println!("  tabbeacon title-policy inspect [--json]");
     println!("  tabbeacon title-policy repair [--json]");
     println!("  tabbeacon title-policy restore [--json]");
+    println!("  tabbeacon convergence matrix [--json]");
+    println!("  tabbeacon convergence verify --matrix <path> --expected-head <sha>");
     println!("  tabbeacon uninstall codex");
     println!("  tabbeacon preview [--theme <muted-dark|classic>] [--spinner <preset>]");
     println!("  tabbeacon config show|reset|wizard");

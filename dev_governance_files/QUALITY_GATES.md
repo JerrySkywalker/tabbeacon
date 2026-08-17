@@ -1,149 +1,298 @@
-# Quality Gates
+# Quality Gates — Fast Lane v2
 
-## Principle
+## Authority
 
-TabBeacon uses risk-based validation. `dev_governance_files/FAST_LANE.md` defines the default post-v0.1 execution policy.
+This file is the authoritative gate-selection policy for TabBeacon development.
+`AGENTS.md` defines repository-wide operating constraints. `FAST_LANE.md` is a
+compact execution reference and must not override this file.
 
-A gate is required because the change can invalidate that class of behavior, not because every Goal must mechanically run every lane.
+The governing rule is:
 
-For every gate that is required, exact-head evidence remains mandatory.
+> validate changed risk once, not Goal ceremony repeatedly.
 
-## Gate hierarchy
+A check is required because a change can invalidate that behavior class. A Goal,
+scenario row, documentation update, or new commit does not by itself require every
+lane to run again.
 
-### L0 — Repository policy
+## Risk vector
+
+Before implementation, classify the changed risk surface:
+
+```text
+CODE_CHANGED
+PRESENTATION_CHANGED
+PROVIDER_CHANGED
+USER_PERSISTENT_CONFIG_CHANGED
+SECURITY_OR_PRIVACY_CHANGED
+RELEASE_BOUNDARY
+```
+
+A Goal may activate more than one dimension. Gates are selected from the active
+dimensions only.
+
+### Default mapping
+
+| Changed risk | Required acceptance |
+| --- | --- |
+| Docs/planning/governance only | L0 diff/governance sanity only |
+| Ordinary Rust/code | focused tests while iterating + one final hosted code CI |
+| Presentation | ordinary code gate + one final owned UIA/Visual acceptance pack |
+| Provider/profile/trust | ordinary code gate + one focused L4 only when the real provider boundary changed or cannot be proven synthetically |
+| User persistent configuration | ordinary code gate + ownership/restore/drift fixture + one focused safety review |
+| Security/privacy | focused tests + one focused safety/privacy review |
+| Public release | one release closure train using fresh release-specific gates plus reusable unchanged-risk evidence |
+
+Do not add a lane merely because code for that subsystem exists elsewhere in the
+repository.
+
+## Core efficiency rules
+
+### One risk, one proof
+
+One representative proof may cover a family of scenarios when they exercise the
+same invariant. A traceability matrix is not automatically a list of independent
+release gates.
+
+For example, multiple lifecycle events may be accepted by one Hook-fixture family,
+and multiple workspace identity variants may use deterministic identity coverage plus
+one representative real Windows Terminal/UIA presentation smoke.
+
+Split a family into separate gates only when the scenarios have materially different
+failure modes or authority requirements.
+
+### One settled candidate, one final gate
+
+During implementation use focused local tests. After the candidate settles, run the
+required final gates once:
+
+```text
+focused iteration
+-> settle candidate
+-> one final hosted code CI
+-> one final UIA/L4/safety gate only for activated risk dimensions
+-> merge
+```
+
+Do not run full CI or Visual after every intermediate commit.
+
+### Evidence reuse
+
+Evidence may be reused across heads when the relevant risk surface did not change.
+A new SHA alone does not invalidate unrelated evidence.
+
+Before reuse, compare the prior evidence head and candidate head against the paths or
+subsystems that can affect that gate. A simple bounded `git diff <old>..<new> --
+<risk paths>` is sufficient unless a Goal defines a stronger ownership mechanism.
+
+Record reuse explicitly, for example:
+
+```text
+VISUAL=REUSED
+VISUAL_REUSED_FROM=<sha>
+VISUAL_RISK_DIFF=EMPTY
+```
+
+Typical reuse rules:
+
+- no presentation-path change -> prior Visual/UIA evidence may be reused;
+- no provider/profile/trust change -> prior L4 may be reused;
+- no worker/timing change -> prior performance evidence may be reused;
+- docs/governance-only closeout -> prior Rust/Visual/L4 evidence remains valid;
+- no persistent-config mutation change -> prior ownership fixture may be reused.
+
+Do not reuse evidence when the changed source can plausibly alter the proven behavior.
+
+## L0 — Repository and governance sanity
 
 Typical checks:
 
 - expected files/licenses present;
-- LF/whitespace policy for changed text;
-- no generated runtime state or secret material committed.
+- whitespace/line-ending policy for changed text;
+- no generated runtime state or secret material committed;
+- governance files remain internally consistent.
 
-For docs-only work, this may be the only required gate.
+Docs-only work normally stops here. A governance change that changes future gates
+receives one review/CI cycle under the previously effective rules before it becomes
+active; it does not require Visual or provider L4 unless those product surfaces also
+changed.
 
-### L1 — Rust static/build gate
+## L1 — Code/static gate
 
-Full repository suite:
+During implementation prefer focused tests.
+
+Final ordinary-code acceptance is one hosted exact-candidate CI running the repository
+quality suite. Local repetition of the whole suite is optional when hosted CI will run
+it once at the settled head.
+
+Mechanical formatting failures are fixed mechanically; they do not require an audit.
+
+## L2 — Functional/family gate
+
+Use focused integration tests for the changed invariant or risk family. Do not turn a
+coverage catalog into one executor/artifact per row unless independent execution is
+needed to distinguish real failure modes.
+
+Representative family names may include:
 
 ```text
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
-cargo build --locked --all-targets
+LIFECYCLE_FAMILY
+GENERATION_ISOLATION
+WORKSPACE_IDENTITY
+RECOVERY_FAMILY
 ```
 
-The full suite is mandatory for release candidates and may be delegated to one final-head hosted CI for ordinary code work. During implementation, prefer focused tests over repeatedly running the entire suite.
+One family PASS may be backed by several deterministic tests or fixtures without
+creating separate durable receipts for each test case.
 
-A small Rust change should normally run:
+## L3 — Visible presentation gate
 
-- `cargo fmt --check`;
-- focused affected tests locally;
-- one final-head hosted CI covering the full repository suite.
+Required only when title, progress, color, VT bytes, animation, or the product visual
+oracle can change.
 
-Do not repeat the complete L1 suite after a metadata-only acceptance update when product code did not change.
+Prefer one owned Windows Terminal/UIA acceptance pack that exercises the important
+visible transitions together. For a healthy title channel this normally covers:
 
-### L2 — Functional integration gate
+```text
+working animation
+result-ready
+approval/attention where applicable
+stable workspace alias
+cleanup/title authority
+```
 
-Use focused integration tests for the changed subsystem: provider normalization, reconciliation, workspace/repository identity, setup/uninstall, worker lifecycle, configuration, or diagnostics as applicable.
+Do not require separate full UIA runs for every workspace or lifecycle variant when
+those variants are already proven by deterministic logic and share the same
+presentation path.
 
-L2 is not a requirement to rerun unrelated integration matrices.
+Pixel/screenshot capture is not mandatory for title correctness when the approved
+exact-tab UIA oracle proves the required visible title semantics and a known runner
+capture limitation is latched.
 
-### L3 — Visual gate
+## L4 — Provider gate
 
-Required only for changes that can alter Windows Terminal presentation, including:
+Required only when provider/profile/config/trust semantics changed or when a focused
+real-provider claim cannot be proven by the admitted fixtures.
 
-- title composition/glyphs;
-- activity animation;
-- progress semantics;
-- tab/frame color;
-- VT encoding/reset behavior;
-- product visual fixture/oracle semantics.
+Do not request Owner trust or rerun real Codex merely because an unrelated source head
+changed.
 
-Requires an approved interactive desktop session and exact-head evidence.
+A new Codex release/profile requires explicit admission. Merely restructuring the
+compatibility registry around an already admitted profile does not require fresh L4 if
+wire semantics and trust declarations are unchanged.
 
-Do not run L3 for code/doc changes that cannot change presentation.
+## Persistent configuration safety
 
-### L4 — Provider E2E gate
+Changes that can write external user configuration require focused proof of:
 
-Required when the change crosses a production provider/configuration/trust boundary or when a focused real-provider behavior cannot be proven synthetically.
+```text
+exact ownership
+minimal mutation
+idempotence
+restore/uninstall safety
+concurrent drift refusal
+unrelated-content preservation
+```
 
-Typical triggers:
+This is a safety family, not a reason to rerun unrelated Visual or provider matrices.
 
-- Hook declaration or trusted hash changes;
-- admitted Codex wire/profile changes;
-- setup/uninstall/migration semantics;
-- real Hook lifecycle assumptions;
-- final integrated animator/provider smoke;
-- release closure.
+## Audit policy
 
-Do not run L4 merely because provider code exists in the repository. Do not request Owner trust when Hook declarations are unchanged.
+A separate auditor is not a default development stage.
 
-## Change-class matrix
+Require one focused independent review only when at least one applies:
 
-| Change class | Focused local | Final hosted CI | L3 Visual | L4 Provider |
-| --- | --- | --- | --- | --- |
-| Docs/planning only | diff sanity | optional under Fast Lane | no | no |
-| Ordinary internal Rust | yes | yes, once at final head | no unless visible | no unless provider boundary |
-| Workspace identity fallback | yes | yes | only if title semantics materially change | focused non-Git smoke |
-| Animator production | yes | yes | yes | focused integrated smoke |
-| Setup/trust changes | yes | yes | only if visible | yes when declaration/real integration changes |
-| Diagnostics only | yes | yes | normally no | focused only if needed |
-| Release candidate | full | yes | yes | yes |
+- destructive or persistent external configuration writes changed;
+- security/privacy boundary changed;
+- concurrency/ownership logic changed with plausible cross-session corruption;
+- an ambiguous defect needs independent classification;
+- public release/publication is being closed;
+- the Implementer explicitly requests it.
 
-## Exact-head contract
+Routine code, diagnostics, test-harness, docs, and mechanical fixes do not require a
+separate auditor after relevant tests and gates pass.
 
-For every required lane:
+Do not chain multiple auditors over unchanged evidence.
+
+## Exact-head and risk-head semantics
+
+Fresh required gates bind to the settled candidate:
 
 ```text
 EXPECTED_HEAD == checked_out_head == evidence_head
 ```
 
-For a required visual lane:
+Reused evidence is valid only when its relevant risk diff is empty and the reuse is
+recorded explicitly. Therefore release or Goal receipts may legitimately contain:
 
 ```text
-EXPECTED_HEAD == CODE_HEAD == VISUAL_HEAD
+CODE_HEAD=<current>
+VISUAL=REUSED_FROM_<prior>
 ```
 
-A run is not acceptable evidence when it is cancelled, skipped, neutral, superseded, checked out at a different SHA, or executed on an unapproved runner class.
+when presentation paths are unchanged.
 
-## One-final-head acceptance
-
-Preferred sequence:
-
-```text
-focused implementation tests
--> settle candidate
--> one final hosted code CI
--> optional L3/L4 according to risk
--> merge
-```
-
-Avoid rerunning the same full gates after changes that affect only PR text or external evidence receipts.
-
-## Runner identity
-
-Hosted CI may use GitHub-hosted Windows runners for code gates while the code remains compatible with them.
-
-Visual CI must run in an explicitly approved interactive Windows desktop session. Do not treat a service/Session-0 runner as valid visual evidence merely because the job starts.
-
-When self-hosted runners are used, workflows must assert expected runner/machine identity and relevant toolchain paths rather than trusting labels alone.
+Exact-head means exact for a gate that is freshly required; it does not mean every
+unrelated gate must be rerun after every metadata-only SHA.
 
 ## Failure classification
 
-Record failures as one of:
+Classify failures as:
 
 - product/code defect;
-- test defect;
+- test/harness defect;
 - runner/environment defect;
 - external dependency/service defect;
-- evidence mismatch/wrong SHA;
+- evidence/risk-head mismatch;
 - unproven.
 
-Do not patch product code to compensate for a runner defect without evidence that the product itself is wrong.
+Fix mechanical failures mechanically. Do not create a root-cause audit for a simple
+formatting mismatch unless repetition indicates a deeper toolchain issue.
 
-## Blocker behavior
+## Blocker latch
 
-After one audit identifies the same unchanged external/Owner blocker, latch it and stop repeating the full audit. Re-run only when source/trust/evidence/prerequisite state changes.
+After one sufficient observation of an unchanged external/Owner blocker, record a
+stable fingerprint and set:
 
-## Release exception
+```text
+BLOCKER_LATCHED=true
+```
 
-`TB-G14` intentionally restores the complete closure matrix. Fast Lane is for iteration efficiency; it does not reduce public-release evidence.
+Do not rerun the blocked full lane until source affecting it, Owner evidence, trust
+state, or the external prerequisite changes.
+
+## Release policy
+
+A public release still gets one deliberate closure train. That train does not need to
+re-execute every historical scenario independently.
+
+Required fresh release-specific work normally includes:
+
+- one full locked code/static/build CI at the release candidate;
+- package/dry-run/content inspection;
+- release artifact/checksum creation;
+- publication and public verification.
+
+Presentation, provider, performance, configuration-safety, and convergence evidence
+may be reused when the corresponding risk surfaces have not changed since their
+accepted proof. The release Goal may require a small representative final dogfood
+smoke for integration confidence, but must not recreate every prior Goal's matrix.
+
+## Receipt discipline
+
+Receipts contain only decision-relevant gates. Use `N/A` or `REUSED` instead of
+inventing irrelevant fields.
+
+A typical ordinary code Goal is:
+
+```text
+DISPOSITION=<PASS|FAIL|BLOCKED|UNPROVEN>
+EXPECTED_HEAD=<sha>
+CODE_CI=<PASS|FAIL|N/A>
+VISUAL=<PASS|REUSED|N/A>
+L4=<PASS|REUSED|N/A>
+PERSISTENT_CONFIG_SAFETY=<PASS|REUSED|N/A>
+OWNER_ACTION=<none-or-specific>
+```
+
+The objective is fewer repeated checks while preserving the proof that matters to the
+user-visible and safety-critical behavior.

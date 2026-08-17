@@ -1,206 +1,196 @@
-# Fast Lane — Risk-Based Development Governance
+# Fast Lane v2 — Execution Reference
 
-## Purpose
+## Authority
 
-The repository originally used a deliberately conservative evidence-first process while bootstrap, Windows Terminal visual infrastructure, Hook trust behavior, and release mechanics were still being established. Those foundations now exist.
-
-For routine post-v0.1 development, repeating the complete audit/CI stack after every small change creates more delay than signal. This Fast Lane keeps the safety boundaries that protect users while removing repeated evidence that does not change the decision.
-
-This document supplements `AGENTS.md` and `QUALITY_GATES.md`.
+`dev_governance_files/QUALITY_GATES.md` is the authoritative gate-selection policy.
+This file is a compact execution reference for agents and humans. If the two differ,
+`QUALITY_GATES.md` wins.
 
 ## Core rule
 
-Validation follows **changed risk**, not Goal ceremony.
+```text
+validate changed risk once
+reuse unchanged-risk evidence
+avoid Goal ceremony
+```
 
-Run the smallest set of checks that can falsify the changed behavior, once at the final candidate head. Add stronger gates only when the change crosses the corresponding risk boundary.
+Before work, classify:
 
-Do not repeat a gate merely because a documentation receipt or PR description changed after the already-tested code head. Acceptance metadata should prefer PR text or external receipts instead of creating a new code SHA solely to restate evidence.
+```text
+CODE_CHANGED
+PRESENTATION_CHANGED
+PROVIDER_CHANGED
+USER_PERSISTENT_CONFIG_CHANGED
+SECURITY_OR_PRIVACY_CHANGED
+RELEASE_BOUNDARY
+```
 
-## Change classes
+## Quick classes
 
-### Class D — documentation / planning only
+### Class D — docs/planning/governance
 
-Examples:
+Default:
 
-- roadmap text;
-- ADRs;
-- goal contracts;
-- prose-only README/docs changes.
+```text
+L0 diff/governance sanity
+Rust CI=N/A
+Visual=N/A
+L4=N/A
+```
 
-Default validation:
+A governance rule change receives one normal review/CI cycle under the old rules before
+activation, but does not trigger product-specific lanes by itself.
 
-- diff/format sanity only;
-- no Rust build/test required;
-- no Visual CI;
-- no L4;
-- no separate auditor unless the change modifies security/governance policy materially.
+### Class C — ordinary code
 
-A governance change that alters future gate requirements should receive one ordinary PR review/CI cycle under the rules in effect before that change is merged.
+During iteration:
 
-### Class C — ordinary internal code
+```text
+cargo fmt
+focused affected tests
+```
 
-Examples:
+At the settled candidate:
 
-- pure identity/reconciliation helpers;
-- typed settings logic;
-- internal worker state that does not change visible bytes or external configuration.
+```text
+one hosted code CI
+```
 
-Default validation:
+No Visual or L4 unless another risk dimension is active.
 
-- focused tests for changed subsystem;
-- `cargo fmt --check`;
-- Clippy/build only as needed for changed Rust scope or once through hosted CI;
-- one final-head hosted code CI;
-- no Visual CI unless presentation behavior changes;
-- no L4 unless real provider integration changes.
+### Class V — presentation
 
-### Class V — presentation-visible change
+Add exactly one representative final owned UIA/Visual pack after the candidate settles.
+Prefer one transition pack over separate UIA executions for every traceability row.
 
-Examples:
+### Class P — provider/profile/trust
 
-- title grammar/glyphs;
-- progress semantics;
-- tab/frame color;
-- VT encoding;
-- animation behavior;
-- visual fixtures/oracles that define product appearance.
+Add one focused L4 only when real provider semantics or trusted declarations changed, or
+the claim cannot be proven synthetically. Reuse prior L4 when the provider risk diff is
+empty.
 
-Required additional gate:
+### Class S — persistent configuration / safety
 
-- one exact-final-head L3 Visual CI.
+Add one ownership-safety family covering minimal mutation, restore, drift, idempotence,
+and unrelated-content preservation. Do not automatically add Visual/L4.
 
-Do not run Visual CI for changes that cannot alter presentation.
+### Class R — release
 
-### Class P — provider/configuration/trust boundary change
+Run one release closure train. Freshly prove release-specific code/package/publication
+work. Reuse accepted unchanged-risk Visual, provider, performance, configuration, and
+convergence evidence, plus only a small representative final dogfood smoke where useful.
 
-Examples:
+## One-final-candidate pattern
 
-- Hook declaration set or command hash changes;
-- provider wire-schema/profile changes;
-- setup/uninstall ownership behavior;
-- trust-sensitive migration;
-- real provider ingress semantics.
-
-Required additional gate:
-
-- focused L4/provider smoke at the final candidate head when the changed behavior cannot be proven synthetically;
-- Owner trust only when an actual declaration hash changed and the official product requires review.
-
-Do not re-request Owner trust when declarations are unchanged.
-
-### Class R — release candidate
-
-`TB-G14` and any public release candidate use the full applicable closure matrix:
-
-- L0 policy;
-- full Rust/static/build suite;
-- functional integration;
-- Visual CI;
-- real Codex/provider smoke;
-- packaging/release checks;
-- exact-head source binding.
-
-The full matrix belongs here, not on every intermediate Goal.
-
-## One-final-head rule
-
-During implementation, developers may run focused local tests freely.
-
-The governed acceptance sequence should normally be:
+Preferred flow:
 
 ```text
 implement
--> focused local tests
+-> focused tests
 -> settle candidate
--> push once/few times as needed
--> one final-head hosted CI
--> Visual/L4 only if required by change class
+-> one final code CI
+-> one final additional gate per active risk dimension
 -> merge
 ```
 
 Avoid:
 
 ```text
-full local suite
+full suite
 -> CI
 -> metadata commit
--> full local suite again
+-> full suite again
 -> CI again
--> auditor re-check
--> second auditor re-check
+-> auditor
+-> second auditor
 ```
 
-unless the code or relevant evidence actually changed.
+unless relevant source or evidence actually changed.
 
-## Blocker latch
+## Family acceptance
 
-A blocker is identified by a stable fingerprint containing the blocker class plus the relevant head/evidence root/required Owner action.
+A scenario list is primarily a traceability catalog. Group scenarios by the invariant
+and proof authority they exercise. One family PASS may cover multiple rows.
 
-After one confirmation of an unchanged blocker:
+Do not build one executor, one artifact, and one release gate per row unless independent
+execution is necessary to distinguish materially different failure modes.
+
+## Evidence reuse
+
+Evidence reuse is first-class.
+
+Check the relevant path/risk diff between the old evidence head and new candidate. If it
+is empty, record:
+
+```text
+<GATE>=REUSED
+<GATE>_REUSED_FROM=<sha>
+<GATE>_RISK_DIFF=EMPTY
+```
+
+Common examples:
+
+```text
+presentation unchanged -> Visual REUSED
+provider unchanged -> L4 REUSED
+worker/timing unchanged -> performance REUSED
+ownership mutation unchanged -> config-safety REUSED
+docs-only closeout -> all product evidence REUSED
+```
+
+Do not rerun merely because HEAD advanced.
+
+## Audit policy
+
+Dedicated audit is reserved for:
+
+- changed destructive/persistent external configuration behavior;
+- changed security/privacy boundaries;
+- changed concurrency/ownership with plausible corruption risk;
+- ambiguous defects;
+- release/publication;
+- explicit Implementer request.
+
+No generic audit loop exists for routine work.
+
+## Blockers
+
+One sufficient unchanged blocker observation is enough:
 
 ```text
 BLOCKER_LATCHED=true
 ```
 
-Do not perform another full audit until one of these changes:
+Do not repeatedly rerun the blocked lane until the relevant prerequisite changes.
 
-- source/PR head;
-- trust state;
-- Owner evidence;
-- external prerequisite;
-- authoritative main affecting the goal.
+## Current v0.3 application
 
-Repeated observation of the same unchanged blocker is not progress evidence.
+For TB-G18:
 
-## Audit policy
+```text
+32-row matrix = traceability catalog
+6 risk families = normative acceptance
+1 final code CI
+1 normal owned UIA convergence pack
+1 actual elevated PowerShell pack
+```
 
-A dedicated auditor/reviewer pass is required only when at least one applies:
+For TB-G19:
 
-- destructive external configuration writes;
-- security/privacy boundary changes;
-- concurrency/ownership changes with plausible cross-session corruption;
-- release/publication;
-- a prior test exposed an ambiguous defect;
-- the Implementer explicitly requests independent review.
+```text
+minimal compatibility registry
+one admitted 0.147.0 profile is sufficient
+lightweight source-diff report
+no new profile admission required for v0.3
+L4=N/A unless a new profile is actually admitted
+one final code CI
+```
 
-Routine scoped changes do not need a separate audit role after deterministic tests and the required risk gates pass.
+For TB-G19R:
 
-## PR policy
-
-Use focused PRs for independently revertible production changes, but do not split work solely to manufacture more governance checkpoints.
-
-A sequential train may complete several small, low-risk goals when:
-
-- dependency order is preserved;
-- each milestone is internally testable;
-- no Owner decision/trust gate is crossed silently;
-- the final merged state remains easy to revert or diagnose.
-
-## Evidence policy
-
-Prefer concise receipts. Do not create a source commit only to change `BLOCKED` to `PASS` after external evidence arrives unless source documentation itself must truthfully change for users.
-
-PR body, issue/goal receipt, or durable external evidence may record acceptance without invalidating a tested code SHA.
-
-## Safety rules retained
-
-Fast Lane does NOT relax:
-
-- one active writer per worktree/branch;
-- preservation of foreign work;
-- fail-open Codex usability;
-- no Hook trust bypass;
-- exact ownership before destructive config writes;
-- no secret/prompt/tool-content persistence outside explicit product design;
-- no fake `codex.exe`, PATH shadow, PTY wrapper, or hidden launcher;
-- no global resident daemon as the default animator architecture;
-- exact-head binding for the gates that are actually required;
-- full release closure at `TB-G14`.
-
-## Expected effect for remaining v0.2 work
-
-- `TB-G10A`: focused identity tests + one code CI + one non-Git integration smoke; Visual only if visible composition semantics change.
-- `TB-G11`: focused worker tests + one final code CI + one final Visual CI + focused provider smoke; no repeated full audits between worker iterations.
-- `TB-G12`: focused wizard tests; Visual only for preview/presentation deltas; L4 only for setup/trust behavior actually changed.
-- `TB-G13`: focused schema/diagnostic tests + code CI; no Visual by default.
-- `TB-G14`: full closure matrix.
+```text
+one release train
+reuse accepted unchanged-risk G15-G19 evidence
+one representative final dogfood pack
+package + artifact + publication verification
+```

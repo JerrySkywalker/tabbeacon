@@ -47,6 +47,9 @@ const CLEANUP_OBSERVER_POLL_MS: u64 = 1_000;
 const CLEANUP_OBSERVER_QUERY_TIMEOUT_MS: u64 = 5_000;
 const CLEANUP_OBSERVER_UNKNOWN_MAX_MS: u64 = 30_000;
 const CLEANUP_OBSERVER_REAP_TIMEOUT_MS: u64 = 1_000;
+// A static attention title must outlive the one-shot Hook that set it, but it
+// cannot remain authorized indefinitely if that Hook's host disappears.
+const STATIC_ATTENTION_LEASE_TTL_MS: u64 = CLEANUP_OBSERVER_UNKNOWN_MAX_MS;
 const MAX_DIAGNOSTIC_LEASE_FILES: usize = 512;
 const MAX_DIAGNOSTIC_LEASE_BYTES: u64 = 128 * 1_024;
 
@@ -186,7 +189,7 @@ pub struct WorkerPresentation {
 }
 
 impl WorkerPresentation {
-    /// Creates the only currently admitted worker state: active work.
+    /// Creates an animated working-title presentation.
     #[must_use]
     pub fn working(workspace_alias: &str, spinner: SpinnerPreset) -> Self {
         Self {
@@ -196,8 +199,46 @@ impl WorkerPresentation {
         }
     }
 
+    /// Creates a static result title that remains owned after a one-shot Hook
+    /// returns control to its shell host.
+    #[must_use]
+    fn result_ready(workspace_alias: &str, spinner: SpinnerPreset) -> Self {
+        Self {
+            workspace_alias: workspace_alias.to_owned(),
+            semantic_state: "result-ready".to_owned(),
+            spinner_preset: spinner.as_str().to_owned(),
+        }
+    }
+
+    /// Creates a static approval title that remains owned after a one-shot Hook
+    /// returns control to its shell host.
+    #[must_use]
+    fn approval(workspace_alias: &str, spinner: SpinnerPreset) -> Self {
+        Self {
+            workspace_alias: workspace_alias.to_owned(),
+            semantic_state: "approval".to_owned(),
+            spinner_preset: spinner.as_str().to_owned(),
+        }
+    }
+
     fn spinner(&self) -> Option<SpinnerPreset> {
         SpinnerPreset::parse(&self.spinner_preset)
+    }
+
+    fn semantic_input(&self) -> Option<(Phase, Attention)> {
+        match self.semantic_state.as_str() {
+            "working" => Some((Phase::Working, Attention::None)),
+            "result-ready" => Some((Phase::WaitingUser, Attention::ResultReady)),
+            "approval" => Some((Phase::WaitingUser, Attention::Approval)),
+            _ => None,
+        }
+    }
+
+    fn lease_ttl_ms(&self) -> u64 {
+        match self.semantic_state.as_str() {
+            "result-ready" | "approval" => STATIC_ATTENTION_LEASE_TTL_MS,
+            _ => LEASE_TTL_MS,
+        }
     }
 }
 
@@ -281,17 +322,31 @@ impl ActivityCoordinator {
             generation,
             terminal_binding_sha256,
         );
-        let working = match action {
+        let title_status = match action {
             PresentationAction::Apply(state) | PresentationAction::Reset(state) => {
-                state.title_status() == TitleStatus::Working
+                state.title_status()
             }
         };
-        let worker_managed = working
-            && settings.title() == TitleMode::TabBeacon
-            && settings.activity().uses_worker_animation();
+        let worker_presentation = if settings.title() == TitleMode::TabBeacon {
+            match title_status {
+                TitleStatus::Working if settings.activity().uses_worker_animation() => Some(
+                    WorkerPresentation::working(workspace_alias, settings.spinner()),
+                ),
+                TitleStatus::ResultReady => Some(WorkerPresentation::result_ready(
+                    workspace_alias,
+                    settings.spinner(),
+                )),
+                TitleStatus::Approval => Some(WorkerPresentation::approval(
+                    workspace_alias,
+                    settings.spinner(),
+                )),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let now = unix_ms();
-        if worker_managed {
-            let presentation = WorkerPresentation::working(workspace_alias, settings.spinner());
+        if let Some(presentation) = worker_presentation {
             let Ok(transition) =
                 self.store
                     .publish_active(&key, event_sequence, owner_sha256, &presentation, now)
@@ -642,6 +697,7 @@ impl ActivityLeaseStore {
         presentation: &WorkerPresentation,
         now: u64,
     ) -> io::Result<LeaseTransition> {
+        let expires_unix_ms = now.saturating_add(presentation.lease_ttl_ms());
         self.with_lock(|| {
             let current = self.load(key.digest())?;
             if current
@@ -658,7 +714,7 @@ impl ActivityLeaseStore {
             {
                 current.event_sequence = current.event_sequence.max(event_sequence);
                 current.updated_unix_ms = now;
-                current.expires_unix_ms = now.saturating_add(LEASE_TTL_MS);
+                current.expires_unix_ms = expires_unix_ms;
                 self.write(&current)?;
                 return Ok(LeaseTransition::AlreadyActive);
             }
@@ -682,7 +738,7 @@ impl ActivityLeaseStore {
                 active: true,
                 presentation: Some(presentation.clone()),
                 updated_unix_ms: now,
-                expires_unix_ms: now.saturating_add(LEASE_TTL_MS),
+                expires_unix_ms,
             };
             validate_lease(&lease)?;
             self.write(&lease)?;
@@ -839,6 +895,11 @@ impl ActivityLeaseStore {
             let _ = self.write_exit(&ownership, "invalid_presentation");
             return;
         };
+        let Some((phase, attention)) = presentation.semantic_input() else {
+            let _ = self.deactivate_if_owned(&initial, unix_ms());
+            let _ = self.write_exit(&ownership, "invalid_presentation");
+            return;
+        };
         let Ok(mut console) = open_owned_console() else {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
             let _ = self.write_exit(&ownership, "terminal_unavailable");
@@ -856,8 +917,8 @@ impl ActivityLeaseStore {
             settings,
         );
         let action = PresentationPolicy::resolve(SemanticPresentationInput::new(
-            Phase::Working,
-            Attention::None,
+            phase,
+            attention,
             Health::Normal,
             &presentation.workspace_alias,
         ));
@@ -867,19 +928,29 @@ impl ActivityLeaseStore {
         let mut frame_index = 0_usize;
         let mut next_frame_deadline = Instant::now();
         loop {
-            let Some(_) = self.load_worker_lease(&ownership, terminal_binding_sha256, unix_ms())
-            else {
-                reason = "superseded_or_expired";
-                break;
-            };
             let bytes = renderer.render_title_spinner_frame(state, frame_index);
-            if console
-                .write_all(&bytes)
-                .and_then(|()| console.flush())
-                .is_err()
-            {
-                reason = "terminal_unavailable";
-                break;
+            // Keep lease validation and the terminal write in one critical section:
+            // a newer event cannot supersede this worker between its authorization
+            // check and the title write.
+            match self.with_lock(|| {
+                let Some(_) =
+                    self.load_worker_lease_locked(&ownership, terminal_binding_sha256, unix_ms())?
+                else {
+                    return Ok(None);
+                };
+                console.write_all(&bytes)?;
+                console.flush()?;
+                Ok(Some(()))
+            }) {
+                Ok(Some(())) => {}
+                Ok(None) => {
+                    reason = "superseded_or_expired";
+                    break;
+                }
+                Err(_) => {
+                    reason = "terminal_unavailable";
+                    break;
+                }
             }
             frame_index = frame_index.saturating_add(1);
             next_frame_deadline =
@@ -899,15 +970,29 @@ impl ActivityLeaseStore {
         terminal_binding_sha256: &str,
         now: u64,
     ) -> Option<WorkerLease> {
-        let lease = self.with_lock(|| self.load(&ownership.key_sha256)).ok()??;
-        (lease.active
+        self.with_lock(|| self.load_worker_lease_locked(ownership, terminal_binding_sha256, now))
+            .ok()
+            .flatten()
+    }
+
+    /// Validates a worker lease while the caller holds this store's lock.
+    fn load_worker_lease_locked(
+        &self,
+        ownership: &WorkerOwnership,
+        terminal_binding_sha256: &str,
+        now: u64,
+    ) -> io::Result<Option<WorkerLease>> {
+        let Some(lease) = self.load(&ownership.key_sha256)? else {
+            return Ok(None);
+        };
+        Ok((lease.active
             && lease.generation == ownership.generation
             && lease.revision == ownership.revision
             && lease.owner_sha256 == ownership.owner_sha256
             && lease.terminal_binding_sha256 == terminal_binding_sha256
             && lease.presentation.is_some()
             && now <= lease.expires_unix_ms)
-            .then_some(lease)
+            .then_some(lease))
     }
 
     fn write_exit(&self, ownership: &WorkerOwnership, reason: &str) -> io::Result<()> {
@@ -1070,8 +1155,10 @@ fn is_stale(generation: u64, event_sequence: u64, current: &WorkerLease) -> bool
 
 fn validate_lease(lease: &WorkerLease) -> io::Result<()> {
     let presentation_valid = lease.presentation.as_ref().is_none_or(|presentation| {
-        presentation.semantic_state == "working"
-            && presentation.spinner().is_some()
+        matches!(
+            presentation.semantic_state.as_str(),
+            "working" | "result-ready" | "approval"
+        ) && presentation.spinner().is_some()
             && presentation.workspace_alias.chars().count() <= 80
             && !presentation.workspace_alias.chars().any(char::is_control)
     });
@@ -1159,6 +1246,7 @@ fn worker_process_liveness(
          elseif ([string]::IsNullOrWhiteSpace($process.ExecutablePath)) {{ 'UNKNOWN' }} \
          else {{ \
            $actual = [IO.Path]::GetFullPath($process.ExecutablePath).Replace('\\','/').ToLowerInvariant(); \
+           if ($actual.StartsWith('//?/')) {{ $actual = $actual.Substring(4) }} \
            if (($actual -eq $env:TABBEACON_EXPECTED_WORKER_PATH) -and ($process.CommandLine -match '{expected_pattern}')) {{ 'ALIVE' }} else {{ 'EXITED' }} \
          }}"
     );
@@ -1209,10 +1297,7 @@ fn system_powershell_path() -> Option<PathBuf> {
 
 fn normalized_executable_path(path: &Path) -> io::Result<String> {
     let canonical = fs::canonicalize(path)?;
-    let normalized = canonical
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_lowercase();
+    let normalized = normalized_windows_path(&canonical.to_string_lossy());
     if is_safe_normalized_path(&normalized) {
         Ok(normalized)
     } else {
@@ -1221,6 +1306,14 @@ fn normalized_executable_path(path: &Path) -> io::Result<String> {
             "activity worker executable path is unsafe",
         ))
     }
+}
+
+fn normalized_windows_path(value: &str) -> String {
+    let normalized = value.replace('\\', "/").to_lowercase();
+    normalized
+        .strip_prefix("//?/")
+        .unwrap_or(&normalized)
+        .to_owned()
 }
 
 fn is_safe_normalized_path(path: &str) -> bool {
@@ -1416,17 +1509,8 @@ fn reject_symbolic_link(path: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(windows)]
-fn open_owned_console() -> io::Result<std::fs::File> {
-    OpenOptions::new().write(true).open("CONOUT$")
-}
-
-#[cfg(not(windows))]
-fn open_owned_console() -> io::Result<std::fs::File> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "owned Windows console output is unavailable",
-    ))
+fn open_owned_console() -> io::Result<crate::console_output::OwnedConsole> {
+    crate::console_output::open_owned_console()
 }
 
 #[cfg(test)]
@@ -1440,10 +1524,10 @@ mod tests {
 
     use super::{
         ActivityCoordinator, ActivityExecution, ActivityLeaseHealth, ActivityLeaseStore,
-        ActivityRender, CleanupObserverAction, LeaseTransition, TARGET_FRAME_INTERVAL_MS,
-        WorkerKey, WorkerPresentation, WorkerProcessLiveness, cleanup_observer_action,
-        command_output_with_timeout, inspect_activity_leases_read_only,
-        next_animation_frame_deadline, system_powershell_path,
+        ActivityRender, CleanupObserverAction, LeaseTransition, STATIC_ATTENTION_LEASE_TTL_MS,
+        TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation, WorkerProcessLiveness,
+        cleanup_observer_action, command_output_with_timeout, inspect_activity_leases_read_only,
+        next_animation_frame_deadline, normalized_windows_path, system_powershell_path,
     };
     use crate::{
         core::{Attention, Health, Phase},
@@ -1495,6 +1579,18 @@ mod tests {
     #[test]
     fn v03_worker_uses_the_normative_hundred_millisecond_interval() {
         assert_eq!(TARGET_FRAME_INTERVAL_MS, 100);
+    }
+
+    #[test]
+    fn executable_path_normalization_removes_the_windows_extended_prefix() {
+        assert_eq!(
+            normalized_windows_path(r"\\?\V:\Build\TabBeacon\tabbeacon.exe"),
+            "v:/build/tabbeacon/tabbeacon.exe"
+        );
+        assert_eq!(
+            normalized_windows_path(r"V:\Build\TabBeacon\tabbeacon.exe"),
+            "v:/build/tabbeacon/tabbeacon.exe"
+        );
     }
 
     #[test]
@@ -1596,6 +1692,176 @@ mod tests {
         assert!(text.contains("\"semantic_state\": \"working\""));
         assert!(text.contains("\"spinner_preset\": \"braille\""));
         assert!(text.contains("\"workspace_alias\": \"OWH\""));
+    }
+
+    #[test]
+    fn attention_titles_replace_the_animated_worker_without_overlap() {
+        let root = TestRoot::new("attention-title-owner");
+        let store = ActivityLeaseStore::new(&root.0);
+        let key = key(7, 'a', 'c');
+        let owner = digest('d');
+        let working = presentation();
+        let result = WorkerPresentation::result_ready("OWH", SpinnerPreset::Braille);
+        let approval = WorkerPresentation::approval("OWH", SpinnerPreset::Braille);
+
+        let LeaseTransition::Published { lease: initial, .. } = store
+            .publish_active(&key, 10, &owner, &working, 1_000)
+            .expect("animated worker publishes")
+        else {
+            panic!("first title owner must publish");
+        };
+        let LeaseTransition::Published {
+            lease: result_lease,
+            predecessor: Some(result_predecessor),
+        } = store
+            .publish_active(&key, 11, &owner, &result, 1_100)
+            .expect("result title replaces animation")
+        else {
+            panic!("result title must replace the animated owner");
+        };
+        assert_eq!(result_predecessor, initial.ownership());
+        assert_eq!(result_lease.presentation.as_ref(), Some(&result));
+        assert_eq!(
+            result_lease
+                .expires_unix_ms
+                .saturating_sub(result_lease.updated_unix_ms),
+            STATIC_ATTENTION_LEASE_TTL_MS
+        );
+        assert!(
+            store
+                .load_worker_lease(
+                    &result_lease.ownership(),
+                    &digest('c'),
+                    result_lease.expires_unix_ms.saturating_add(1),
+                )
+                .is_none()
+        );
+        assert_eq!(
+            result.semantic_input(),
+            Some((Phase::WaitingUser, Attention::ResultReady))
+        );
+
+        let LeaseTransition::Published {
+            lease: approval_lease,
+            predecessor: Some(approval_predecessor),
+        } = store
+            .publish_active(&key, 12, &owner, &approval, 1_200)
+            .expect("approval title replaces result")
+        else {
+            panic!("approval title must replace the result owner");
+        };
+        assert_eq!(approval_predecessor, result_lease.ownership());
+        assert_eq!(approval_lease.presentation.as_ref(), Some(&approval));
+        assert_eq!(
+            approval_lease
+                .expires_unix_ms
+                .saturating_sub(approval_lease.updated_unix_ms),
+            STATIC_ATTENTION_LEASE_TTL_MS
+        );
+        assert_eq!(
+            approval.semantic_input(),
+            Some((Phase::WaitingUser, Attention::Approval))
+        );
+        assert!(matches!(
+            store.publish_stopped(&key, 13, &owner, 1_300),
+            Ok(LeaseTransition::Stopped {
+                predecessor: Some(predecessor)
+            }) if predecessor == approval_lease.ownership()
+        ));
+        let stopped = store
+            .load(key.digest())
+            .expect("stopped lease reads")
+            .expect("stopped lease exists");
+        assert!(!stopped.active);
+    }
+
+    #[test]
+    fn animated_worker_stops_for_static_native_and_off_settings() {
+        let root = TestRoot::new("activity-mode-transition");
+        let store = ActivityLeaseStore::new(&root.0);
+        let owner = digest('d');
+        let terminal_binding = digest('c');
+        let coordinator = ActivityCoordinator {
+            store: store.clone(),
+            execution: ActivityExecution::System {
+                executable: root.0.join("unused.exe"),
+                owner_sha256: owner.clone(),
+                terminal_binding_sha256: terminal_binding,
+            },
+        };
+        let action = PresentationPolicy::resolve(SemanticPresentationInput::new(
+            Phase::Working,
+            Attention::None,
+            Health::Normal,
+            "OWH",
+        ));
+        let cases = [
+            (
+                'a',
+                PresentationSettings::new(
+                    TitleMode::TabBeacon,
+                    TabColorMode::Off,
+                    ActivityMode::TitleIndicator,
+                    SpinnerPreset::Braille,
+                    PresentationTheme::MutedDark,
+                ),
+            ),
+            (
+                'e',
+                PresentationSettings::new(
+                    TitleMode::Native,
+                    TabColorMode::Native,
+                    ActivityMode::Native,
+                    SpinnerPreset::Braille,
+                    PresentationTheme::MutedDark,
+                ),
+            ),
+            (
+                'f',
+                PresentationSettings::new(
+                    TitleMode::Off,
+                    TabColorMode::Off,
+                    ActivityMode::Off,
+                    SpinnerPreset::Braille,
+                    PresentationTheme::MutedDark,
+                ),
+            ),
+        ];
+
+        for (session, settings) in cases {
+            let worker = key(1, session, 'c');
+            let LeaseTransition::Published { lease, .. } = store
+                .publish_active(&worker, 10, &owner, &presentation(), 1_000)
+                .expect("animated worker publishes")
+            else {
+                panic!("animated worker must be active before a mode transition");
+            };
+            store
+                .write_exit(&lease.ownership(), "superseded_or_expired")
+                .expect("predecessor exit receipt writes");
+
+            assert_eq!(
+                coordinator.reconcile(
+                    &digest(session),
+                    Some(&digest('b')),
+                    1,
+                    11,
+                    "OWH",
+                    &action,
+                    settings,
+                ),
+                ActivityRender::Full,
+                "mode transition for session {session} waits for and retires the animation"
+            );
+            let stopped = store
+                .load(worker.digest())
+                .expect("stopped lease reads")
+                .expect("stopped lease exists");
+            assert!(
+                !stopped.active,
+                "mode transition for {session} leaves no worker"
+            );
+        }
     }
 
     #[test]

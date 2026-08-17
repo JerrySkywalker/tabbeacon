@@ -2,125 +2,260 @@
 
 ## Status
 
-PLANNED. Depends on accepted G15–G17 behavior from the reconciled post-release
-v0.3 sequence.
+COMPLETE. PR #29 is accepted for merge after the exact-head hosted CI and actual
+elevated-PowerShell convergence proof at
+`250b1d229bb61f9bf160f2b2d2ac739726476344`. TB-G15 through TB-G17 are also
+complete. G18 retains its 32-row traceability catalog plus typed run-bound evidence
+verification, while the initial attempt to make every row an independent
+executor/release gate remains deliberately retired by the Fast Lane v2 amendment below.
 
 ## Purpose
 
-Prove that every important Codex/session lifecycle path converges to the correct *visible* Windows Terminal presentation, not merely correct internal bytes or state.
+Prove that important Codex/session lifecycle paths converge to the correct visible
+Windows Terminal presentation while keeping validation proportional to materially
+different risks.
+
+The goal is not to build a second product whose purpose is validating TabBeacon.
 
 ## Core convergence invariant
 
-For a supported healthy title channel, expected visible presentation must converge within a bounded window.
-
-Nominal v0.3 requirement:
+For a supported healthy title channel:
 
 ```text
-CONVERGENCE_DEADLINE_MS=1000
+CONVERGENCE_DEADLINE_MS<=1000
 ```
 
-The exact implementation may use a tighter bound, but release evidence must not relax beyond one second without an explicit design change.
+Working must show at least three distinct valid spinner frames within that bound and keep
+the workspace alias stable.
 
-## Required lifecycle scenarios
+## 32-row matrix role
 
-At minimum:
+`src/convergence.rs` remains a useful traceability/coverage catalog. It enumerates
+lifecycle, recovery, workspace, isolation, UIA, and elevated obligations.
+
+It is **not** normative that every row have:
+
+- a dedicated executor;
+- a separate durable artifact;
+- an independent release gate;
+- a fresh exact-head UIA run.
+
+`src/convergence_evidence.rs` may remain as a strict diagnostic/evidence tool, but G18
+acceptance is defined by the risk-family gates below. Do not continue building 32
+independent executors merely to satisfy the earlier experimental verifier contract.
+
+## Normative risk-family acceptance
+
+### Family 1 — Lifecycle semantics
+
+Covers the admitted lifecycle surface, including:
 
 ```text
-fresh Codex launch
-SessionStart startup
-SessionStart resume
-SessionStart clear
+SessionStart startup/resume/clear
 UserPromptSubmit
-working animation
-new turn supersession
 PreCompact/PostCompact
-subagent start/stop isolation
+SubagentStart/SubagentStop
 Stop/result-ready
 PermissionRequest/approval
-question where reliable evidence exists
 SessionEnd
-Ctrl+C / interruption only to the fidelity Hooks actually prove
-Codex abnormal disappearance cleanup
-worker crash
-terminal close
+Question/Ctrl+C only to admitted Hook fidelity
 ```
 
-## Required shell/terminal contexts
+Proof: existing deterministic/provider Hook fixtures plus focused tests.
+
+Required result:
 
 ```text
-normal PowerShell
-Administrator: PowerShell
+LIFECYCLE_FAMILY=PASS
+```
+
+No separate durable receipt per event is required.
+
+### Family 2 — Generation and isolation
+
+Covers:
+
+```text
+new-turn supersession
+stale-event rejection
+root/subagent isolation
+different-repository tabs
+same-repository tabs
+same-workspace parallel sessions
+```
+
+Proof: focused deterministic ownership/generation tests. Add real UIA only if this Goal
+changes the presentation/session binding implementation itself.
+
+Required result:
+
+```text
+GENERATION_ISOLATION=PASS
+```
+
+### Family 3 — Workspace identity
+
+Deterministically cover:
+
+```text
 Git workspace
 linked worktree
 non-Git workspace
 HOME
-multiple tabs
-same-workspace parallel sessions
 ```
 
-## Visible animation requirement
+First inspect accepted UIA evidence for a real Git/worktree alias flowing through the
+production presentation path, then compare its head with the candidate across only the
+workspace/presentation paths that could invalidate that proof. If that relevant risk diff is
+empty, the accepted representative UIA proof may be reused; otherwise run one representative
+owned Windows Terminal/UIA workspace smoke.
 
-For Working on a healthy title channel:
+Required result:
 
 ```text
-within 1 second:
-  observe >=3 distinct valid spinner frames
-  workspace alias remains stable
+WORKSPACE_MATRIX=PASS
+REPRESENTATIVE_WORKSPACE_UIA=PASS|REUSED
 ```
 
-For final static states:
+Do not require four independent full UIA runs solely because the identity source differs.
+
+### Family 4 — Normal visible convergence
+
+Reuse accepted normal-PowerShell UIA evidence only when it proves every transition below and
+the candidate has an empty presentation-risk diff. Otherwise run one owned normal-PowerShell
+Windows Terminal/UIA pack on the settled candidate. One bounded pack proves the important
+transitions:
 
 ```text
-within 1 second:
-  result-ready -> stable ✓ <alias>
-  approval     -> stable ! <alias>
-  ready        -> stable ○ <alias> where applicable
+Working -> >=3 distinct braille frames within 1s
+Stop -> stable result-ready title
+PermissionRequest -> stable approval/attention title
+workspace alias stable
+title authority healthy
+owned fixture cleanup
 ```
 
-A temporary write followed by a lasting `PowerShell`-style title is not convergence.
+Required result:
+
+```text
+NORMAL_POWERSHELL_VISIBLE_CONVERGENCE=PASS|REUSED
+VISIBLE_WORKING_FRAMES_GE_3=PASS
+WORKSPACE_ALIAS_STABLE=true
+```
+
+This is the primary visible G18 proof. Do not split it into one UIA gate per lifecycle or
+workspace row.
+
+### Family 5 — Recovery
+
+Covers:
+
+```text
+terminal close
+worker crash
+Codex disappearance
+newer generation
+binary relocation/upgrade
+settings animated -> static/native/off
+```
+
+Proof: focused deterministic worker/ownership tests. Accepted prior terminal-close or
+performance evidence may be reused when worker/cleanup/timing paths are unchanged.
+
+Required result:
+
+```text
+RECOVERY_FAMILY=PASS
+NO_STALE_WORKER=PASS
+```
+
+### Family 6 — Actual elevated PowerShell
+
+One actual elevated Windows token is required. Synthetic `Administrator: PowerShell`
+labels do not count.
+
+Run one bounded elevated owned UIA pack proving:
+
+```text
+actual elevated token=true
+working >=3 frames
+stable alias
+result-ready convergence
+title authority healthy
+cleanup pass
+```
+
+The Owner may perform this with one prepared pasteable elevated PowerShell command.
+Do not bypass UAC or weaken system security.
+
+Required result:
+
+```text
+ADMIN_POWERSHELL=PASS_ACTUAL_ELEVATED
+```
 
 ## Primary regression closure
 
-`TB-REG-TITLE-OWNERSHIP-001` is CLOSED only if normal and elevated PowerShell runs both satisfy one of:
+`TB-REG-TITLE-OWNERSHIP-001` closes when normal and actual elevated PowerShell each show
+healthy visible TabBeacon authority, or when an intentionally unsupported/degraded
+channel is truthfully classified without a false health claim.
 
-1. `TITLE_AUTHORITY=healthy` and the visible title converges to TabBeacon; or
-2. a genuinely degraded/suppressed/contended channel is explicitly detected and truthfully reported without claiming presentation health.
+The intended supported result is healthy authority in both contexts.
 
-The preferred release outcome is healthy authority for both normal and elevated PowerShell.
+## Validation policy
 
-## Recovery and cleanup
+G18 follows Fast Lane v2 in `dev_governance_files/QUALITY_GATES.md`.
 
-Prove bounded cleanup/supersession for:
+During implementation:
 
-- terminal close;
-- worker crash;
-- Codex disappearance;
-- newer turn/generation;
-- binary relocation/upgrade;
-- settings changes from animated to static/native/off.
+- run focused affected tests;
+- fix mechanical formatting directly;
+- do not repeatedly run full CI/UIA;
+- do not add a dedicated auditor unless a qualifying risk boundary changes.
 
-No stale worker may keep overwriting a newer accepted state.
+After the candidate settles:
 
-## Validation
+1. one final hosted code CI;
+2. reuse accepted representative/normal UIA evidence when its exact proof and relevant risk
+   diff permit it; otherwise one combined normal owned UIA convergence pack;
+3. one actual elevated owned UIA pack;
+4. reuse earlier G15–G17 / terminal-close / performance evidence when the relevant risk diff is empty.
 
-Use a scenario matrix rather than repeated generic audits. Reuse deterministic evidence where it genuinely proves an invariant; use trusted Windows Terminal observation for visible convergence.
+The existing `LOCAL_INTERACTIVE_CAPTURE_PREFLIGHT_BLOCKED` pixel-capture limitation remains
+latched unless the environment materially changes. Exact-tab UIA is sufficient for the
+title/motion claims defined here.
 
-Presentation-visible changes require one exact-head Visual acceptance run at the final candidate head.
+## Explicitly retired work
+
+Do not spend further engineering time on:
+
+```text
+31 non-owner independent scenario executors
+31 separate durable scenario artifacts
+mandatory 32/32 per-row proof-method binding for G18 release acceptance
+repeated exact-head UIA for Git/worktree/non-Git/HOME variants
+repeated full CI after documentation-only closeout
+```
+
+The existing matrix/verifier may remain for diagnostics and future deeper testing, but it
+must not block G18 solely because every traceability row lacks a standalone artifact.
 
 ## Exit gate
 
 ```text
 CONVERGENCE_DEADLINE_MS<=1000
+LIFECYCLE_FAMILY=PASS
+GENERATION_ISOLATION=PASS
+WORKSPACE_MATRIX=PASS
+REPRESENTATIVE_WORKSPACE_UIA=PASS|REUSED
+NORMAL_POWERSHELL_VISIBLE_CONVERGENCE=PASS|REUSED
 VISIBLE_WORKING_FRAMES_GE_3=PASS
-NORMAL_POWERSHELL=PASS
-ADMIN_POWERSHELL=PASS
-GIT_WORKSPACE=PASS
-NON_GIT_WORKSPACE=PASS
-MULTI_TAB_ISOLATION=PASS
-NEWER_GENERATION_SUPERSESSION=PASS
-TERMINAL_CLOSE_CLEANUP=PASS
-WORKER_CRASH_FAIL_OPEN=PASS
+WORKSPACE_ALIAS_STABLE=true
+RECOVERY_FAMILY=PASS
+NO_STALE_WORKER=PASS
+ADMIN_POWERSHELL=PASS_ACTUAL_ELEVATED
 TB_REG_TITLE_OWNERSHIP_001=CLOSED
+CODE_CI=PASS
 ```
 
 ## Exit receipt
@@ -131,13 +266,20 @@ DISPOSITION=<PASS|FAIL|BLOCKED|UNPROVEN>
 STARTING_MAIN=<sha>
 EXPECTED_HEAD=<sha>
 CONVERGENCE_DEADLINE_MS=<n>
-NORMAL_POWERSHELL=<...>
-ADMIN_POWERSHELL=<...>
+LIFECYCLE_FAMILY=<...>
+GENERATION_ISOLATION=<...>
+WORKSPACE_MATRIX=<...>
+REPRESENTATIVE_WORKSPACE_UIA=<...>
+NORMAL_POWERSHELL_VISIBLE_CONVERGENCE=<...>
 VISIBLE_WORKING_FRAMES=<n>
-MULTI_TAB=<...>
-TERMINAL_CLOSE=<...>
+WORKSPACE_ALIAS_STABLE=<...>
+RECOVERY_FAMILY=<...>
+ADMIN_POWERSHELL=<...>
 TB_REG_TITLE_OWNERSHIP_001=<...>
-CI=<...>
-VISUAL=<...>
+CODE_CI=<...>
+PIXEL_CAPTURE=<REUSED_BLOCKER|RECOVERED|N/A>
 OWNER_ACTION=<none-or-specific>
 ```
+
+Estimated remaining effective engineering effort after this amendment: **4–7 h**, assuming
+the actual elevated run does not reveal a new platform defect.
