@@ -2,10 +2,12 @@
 
 ## Status
 
-ACTIVE on Draft PR #29. TB-G15 through TB-G17 are complete. G18 has a 32-row
-traceability catalog plus typed run-bound evidence verification, but the initial attempt
-to make every row an independent executor/release gate was deliberately retired by the
-Fast Lane v2 amendment below.
+COMPLETE. PR #29 is accepted for merge after the exact-head hosted CI and actual
+elevated-PowerShell convergence proof at
+`250b1d229bb61f9bf160f2b2d2ac739726476344`. TB-G15 through TB-G17 are also
+complete. G18 retains its 32-row traceability catalog plus typed run-bound evidence
+verification, while the initial attempt to make every row an independent
+executor/release gate remains deliberately retired by the Fast Lane v2 amendment below.
 
 ## Purpose
 

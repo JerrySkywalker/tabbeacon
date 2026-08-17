@@ -3,8 +3,8 @@
 ## Status
 
 ACTIVE IMPLEMENTATION TRACK. v0.2.0 is publicly released and its closeout is merged.
-TB-G15, TB-G16, and TB-G17 are complete. TB-G18 is active on Draft PR #29; TB-G19 and
-TB-G19R remain sequential successors.
+TB-G15 through TB-G18 are complete; G18 is accepted for merge as PR #29 after its
+actual elevated-PowerShell proof. TB-G19 and TB-G19R remain sequential successors.
 
 Planning baseline when this track was created:
 
@@ -103,7 +103,7 @@ TB-G16 — Animation Engine v2 and Defaults       COMPLETE
         ↓
 TB-G17 — Title Ownership / Conflict Remediation COMPLETE
         ↓
-TB-G18 — Session Convergence and Recovery       ACTIVE
+TB-G18 — Session Convergence and Recovery       COMPLETE
         ↓
 TB-G19 — Codex Compatibility Registry v2        PLANNED
         ↓
@@ -172,14 +172,13 @@ The original planning envelope of 22–40 effective engineering hours is retaine
 historical planning context, but it is no longer the operational estimate after G15–G17
 completion and the Fast Lane v2 amendment.
 
-Current remaining estimate from the active G18 state:
+Current remaining estimate after G18 closure:
 
 | Goal | Revised remaining scope | Effective effort |
 | --- | --- | ---: |
-| G18 | six-family convergence closure + one elevated proof | 4–7 h |
 | G19 | minimal registry + lightweight source diff | 2–4 h |
 | G19R | one release train with risk-safe evidence reuse | 3–5 h |
-| **Remaining** | | **9–16 h** |
+| **Remaining** | | **5–9 h** |
 
 Center estimate is roughly **12 h** if real elevated/UIA validation does not reveal a new
 product defect.

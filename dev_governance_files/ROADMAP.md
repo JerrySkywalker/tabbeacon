@@ -46,8 +46,9 @@ The track keeps the stock `codex` + Codex Hooks + Windows Terminal workflow:
 no launcher wrapper, global daemon, App Server dependency, Claude provider, or
 OpenCode provider is admitted by this roadmap transition.
 
-TB-G15, TB-G16, and TB-G17 are **COMPLETE** on merge of PRs #25, #26, and
-#28 respectively. TB-G18 — Session Convergence and Recovery is the canonical
+TB-G15, TB-G16, TB-G17, and TB-G18 are **COMPLETE**. G18 is accepted for
+merge as PR #29 after its exact-head hosted CI and actual elevated-PowerShell
+convergence proof. TB-G19 — Codex Compatibility Registry v2 is the canonical
 next goal.
 Pixel capture remains a latched runner-environment limitation, while exact-tab
 UIA title evidence continues to cover title admission and working-frame motion.
