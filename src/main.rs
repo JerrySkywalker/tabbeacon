@@ -202,11 +202,15 @@ fn convergence_verify(arguments: &[String]) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let mut verification =
-        tabbeacon::convergence_evidence::verify_convergence_run(&run, tabbeacon::convergence::scenario_matrix());
-    if run.expected_head != expected_head {
+    let mut verification = tabbeacon::convergence_evidence::verify_convergence_run(
+        &run,
+        tabbeacon::convergence::scenario_matrix(),
+    );
+    if run.expected_head != *expected_head {
         verification.valid = false;
-        verification.violations.push("caller_expected_head_mismatch".to_owned());
+        verification
+            .violations
+            .push("caller_expected_head_mismatch".to_owned());
         verification.violations.sort();
         verification.violations.dedup();
     }

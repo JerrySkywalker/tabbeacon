@@ -1159,6 +1159,7 @@ fn worker_process_liveness(
          elseif ([string]::IsNullOrWhiteSpace($process.ExecutablePath)) {{ 'UNKNOWN' }} \
          else {{ \
            $actual = [IO.Path]::GetFullPath($process.ExecutablePath).Replace('\\','/').ToLowerInvariant(); \
+           if ($actual.StartsWith('//?/')) {{ $actual = $actual.Substring(4) }} \
            if (($actual -eq $env:TABBEACON_EXPECTED_WORKER_PATH) -and ($process.CommandLine -match '{expected_pattern}')) {{ 'ALIVE' }} else {{ 'EXITED' }} \
          }}"
     );
@@ -1209,10 +1210,7 @@ fn system_powershell_path() -> Option<PathBuf> {
 
 fn normalized_executable_path(path: &Path) -> io::Result<String> {
     let canonical = fs::canonicalize(path)?;
-    let normalized = canonical
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_lowercase();
+    let normalized = normalized_windows_path(&canonical.to_string_lossy());
     if is_safe_normalized_path(&normalized) {
         Ok(normalized)
     } else {
@@ -1221,6 +1219,14 @@ fn normalized_executable_path(path: &Path) -> io::Result<String> {
             "activity worker executable path is unsafe",
         ))
     }
+}
+
+fn normalized_windows_path(value: &str) -> String {
+    let normalized = value.replace('\\', "/").to_lowercase();
+    normalized
+        .strip_prefix("//?/")
+        .unwrap_or(&normalized)
+        .to_owned()
 }
 
 fn is_safe_normalized_path(path: &str) -> bool {
@@ -1443,7 +1449,7 @@ mod tests {
         ActivityRender, CleanupObserverAction, LeaseTransition, TARGET_FRAME_INTERVAL_MS,
         WorkerKey, WorkerPresentation, WorkerProcessLiveness, cleanup_observer_action,
         command_output_with_timeout, inspect_activity_leases_read_only,
-        next_animation_frame_deadline, system_powershell_path,
+        next_animation_frame_deadline, normalized_windows_path, system_powershell_path,
     };
     use crate::{
         core::{Attention, Health, Phase},
@@ -1495,6 +1501,18 @@ mod tests {
     #[test]
     fn v03_worker_uses_the_normative_hundred_millisecond_interval() {
         assert_eq!(TARGET_FRAME_INTERVAL_MS, 100);
+    }
+
+    #[test]
+    fn executable_path_normalization_removes_the_windows_extended_prefix() {
+        assert_eq!(
+            normalized_windows_path(r"\\?\V:\Build\TabBeacon\tabbeacon.exe"),
+            "v:/build/tabbeacon/tabbeacon.exe"
+        );
+        assert_eq!(
+            normalized_windows_path(r"V:\Build\TabBeacon\tabbeacon.exe"),
+            "v:/build/tabbeacon/tabbeacon.exe"
+        );
     }
 
     #[test]

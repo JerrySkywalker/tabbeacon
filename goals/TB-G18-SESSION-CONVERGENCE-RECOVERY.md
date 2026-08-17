@@ -102,22 +102,27 @@ non-Git workspace
 HOME
 ```
 
-Then run one representative owned Windows Terminal/UIA workspace smoke to prove that the
-already-tested workspace identity reaches the production presentation path.
+First inspect accepted UIA evidence for a real Git/worktree alias flowing through the
+production presentation path, then compare its head with the candidate across only the
+workspace/presentation paths that could invalidate that proof. If that relevant risk diff is
+empty, the accepted representative UIA proof may be reused; otherwise run one representative
+owned Windows Terminal/UIA workspace smoke.
 
 Required result:
 
 ```text
 WORKSPACE_MATRIX=PASS
-REPRESENTATIVE_WORKSPACE_UIA=PASS
+REPRESENTATIVE_WORKSPACE_UIA=PASS|REUSED
 ```
 
 Do not require four independent full UIA runs solely because the identity source differs.
 
 ### Family 4 — Normal visible convergence
 
-Run one owned normal-PowerShell Windows Terminal/UIA pack on the settled candidate.
-Within one bounded pack prove the important transitions:
+Reuse accepted normal-PowerShell UIA evidence only when it proves every transition below and
+the candidate has an empty presentation-risk diff. Otherwise run one owned normal-PowerShell
+Windows Terminal/UIA pack on the settled candidate. One bounded pack proves the important
+transitions:
 
 ```text
 Working -> >=3 distinct braille frames within 1s
@@ -131,7 +136,7 @@ owned fixture cleanup
 Required result:
 
 ```text
-NORMAL_POWERSHELL_VISIBLE_CONVERGENCE=PASS
+NORMAL_POWERSHELL_VISIBLE_CONVERGENCE=PASS|REUSED
 VISIBLE_WORKING_FRAMES_GE_3=PASS
 WORKSPACE_ALIAS_STABLE=true
 ```
@@ -209,7 +214,8 @@ During implementation:
 After the candidate settles:
 
 1. one final hosted code CI;
-2. one normal owned UIA convergence pack;
+2. reuse accepted representative/normal UIA evidence when its exact proof and relevant risk
+   diff permit it; otherwise one combined normal owned UIA convergence pack;
 3. one actual elevated owned UIA pack;
 4. reuse earlier G15–G17 / terminal-close / performance evidence when the relevant risk diff is empty.
 
@@ -239,8 +245,8 @@ CONVERGENCE_DEADLINE_MS<=1000
 LIFECYCLE_FAMILY=PASS
 GENERATION_ISOLATION=PASS
 WORKSPACE_MATRIX=PASS
-REPRESENTATIVE_WORKSPACE_UIA=PASS
-NORMAL_POWERSHELL_VISIBLE_CONVERGENCE=PASS
+REPRESENTATIVE_WORKSPACE_UIA=PASS|REUSED
+NORMAL_POWERSHELL_VISIBLE_CONVERGENCE=PASS|REUSED
 VISIBLE_WORKING_FRAMES_GE_3=PASS
 WORKSPACE_ALIAS_STABLE=true
 RECOVERY_FAMILY=PASS

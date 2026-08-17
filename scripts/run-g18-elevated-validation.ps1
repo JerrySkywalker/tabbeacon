@@ -4,7 +4,7 @@ param(
     [ValidatePattern('^[0-9a-f]{40}$')]
     [string]$ExpectedHead,
 
-    [string]$EvidenceRoot = 'V:\build\tabbeacon\TB-V03-G17-G18-OWNERSHIP-CONVERGENCE-TRAIN-001\g18-owner-elevated'
+    [string]$EvidenceRoot = 'V:\build\tabbeacon\TB-G18-FAST-LANE-CLOSEOUT-001'
 )
 
 Set-StrictMode -Version Latest
@@ -45,7 +45,7 @@ Push-Location $repoRoot
 try {
     New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
     $receipt = [ordered]@{
-        RUN_ID = 'TB-V03-G17-G18-OWNERSHIP-CONVERGENCE-TRAIN-001'
+        RUN_ID = 'TB-G18-FAST-LANE-CLOSEOUT-001'
         EXPECTED_HEAD = $ExpectedHead
         ACTUAL_ELEVATED_TOKEN = $false
         ADMIN_POWERSHELL = 'FAIL_NOT_ELEVATED'
@@ -69,19 +69,62 @@ try {
     }
     $receipt.ADMIN_POWERSHELL = 'PASS_ACTUAL_ELEVATED'
 
-    $actualHead = (& git rev-parse HEAD).Trim()
+    $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -eq $gitCommand) {
+        $receipt.VISIBLE_CONVERGENCE = 'BLOCKED_REQUIRED_TOOL_MISSING'
+        Write-CompactReceipt $receipt
+        exit 3
+    }
+
+    $actualHead = (& $gitCommand.Source rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or $actualHead -ne $ExpectedHead) {
         $receipt.VISIBLE_CONVERGENCE = 'BLOCKED_HEAD_MISMATCH'
         Write-CompactReceipt $receipt
         exit 3
     }
 
-    # These process-scoped values select the repository's pinned toolchain;
-    # they do not alter an Owner profile, PATH, or persistent Rust setting.
-    $env:RUSTUP_HOME = 'C:\Users\jerry\.rustup'
-    $env:CARGO_HOME = 'C:\Users\jerry\.cargo'
-    $env:RUSTUP_TOOLCHAIN = '1.97.1-x86_64-pc-windows-msvc'
-    & cargo build --locked --features visual-fixture --bin tabbeacon-visual-fixture --bin tabbeacon
+    $candidateStatus = & $gitCommand.Source status --porcelain
+    if ($LASTEXITCODE -ne 0 -or -not [string]::IsNullOrWhiteSpace(($candidateStatus -join "`n"))) {
+        $receipt.VISIBLE_CONVERGENCE = 'BLOCKED_DIRTY_CANDIDATE'
+        Write-CompactReceipt $receipt
+        exit 3
+    }
+
+    $cargoCommand = Get-Command cargo -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $rustupCommand = Get-Command rustup -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $toolchainLine = Select-String -LiteralPath (Join-Path $repoRoot 'rust-toolchain.toml') `
+        -Pattern '^\s*channel\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if ($null -eq $cargoCommand -or $null -eq $rustupCommand -or $null -eq $toolchainLine) {
+        $receipt.VISIBLE_CONVERGENCE = 'BLOCKED_REQUIRED_TOOL_MISSING'
+        Write-CompactReceipt $receipt
+        exit 3
+    }
+
+    $pinnedToolchain = $toolchainLine.Matches[0].Groups[1].Value
+    $cargoBin = Split-Path -Parent $cargoCommand.Source
+    if ((Split-Path -Leaf $cargoBin) -eq 'bin') {
+        $derivedCargoHome = Split-Path -Parent $cargoBin
+        $derivedRustupHome = Join-Path (Split-Path -Parent $derivedCargoHome) '.rustup'
+        if ((Test-Path -LiteralPath $derivedCargoHome -PathType Container) -and `
+            (Test-Path -LiteralPath $derivedRustupHome -PathType Container)) {
+            $env:CARGO_HOME = $derivedCargoHome
+            $env:RUSTUP_HOME = $derivedRustupHome
+        }
+    }
+    $env:RUSTUP_TOOLCHAIN = $pinnedToolchain
+    $availableToolchains = & $rustupCommand.Source toolchain list 2>&1
+    $toolchainPattern = '^{0}(?:-|\s)' -f [regex]::Escape($pinnedToolchain)
+    if ($LASTEXITCODE -ne 0 -or -not (@($availableToolchains) | Where-Object {
+        $_.ToString().TrimStart() -match $toolchainPattern
+    })) {
+        $receipt.VISIBLE_CONVERGENCE = 'BLOCKED_PINNED_TOOLCHAIN_UNAVAILABLE'
+        Write-CompactReceipt $receipt
+        exit 3
+    }
+
+    # The repository-pinned toolchain and any derived Rust homes above exist
+    # only in this process; neither profiles nor persistent environment state change.
+    & $cargoCommand.Source build --locked --features visual-fixture --bin tabbeacon-visual-fixture --bin tabbeacon
     if ($LASTEXITCODE -ne 0) {
         $receipt.VISIBLE_CONVERGENCE = 'BLOCKED_FIXTURE_BUILD'
         Write-CompactReceipt $receipt
@@ -123,6 +166,7 @@ try {
     $receipt.VISIBLE_CONVERGENCE = if ($allPass) { 'PASS' } else { 'UNPROVEN' }
     Write-CompactReceipt $receipt
     if (-not $allPass) { exit 3 }
+    exit 0
 }
 finally {
     Pop-Location

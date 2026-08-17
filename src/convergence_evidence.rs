@@ -254,7 +254,6 @@ pub fn verify_convergence_run(
         && fail_scenarios == 0
         && unproven_scenarios == 0
         && blocked_scenarios == blocked_owner_scenarios
-        && blocked_owner_scenarios == 1
         && violations.is_empty();
     violations.sort();
     violations.dedup();
@@ -413,6 +412,27 @@ mod tests {
         assert!(verification.valid, "{:?}", verification.violations);
         assert_eq!(verification.pass_scenarios, 31);
         assert_eq!(verification.blocked_owner_scenarios, 1);
+    }
+
+    #[test]
+    fn fully_proven_elevated_run_is_accepted() {
+        let mut run = valid_run();
+        let owner = run
+            .scenarios
+            .iter_mut()
+            .find(|row| row.required_proof_method == ConvergenceProofMethod::OwnerElevated)
+            .expect("owner-elevated row exists");
+        owner.status = ConvergenceEvidenceStatus::Pass;
+        owner.title_authority_healthy = Some(true);
+        owner.actual_elevated_token = Some(true);
+        owner.admin_powershell = Some(true);
+
+        let verification = verify_convergence_run(&run, scenario_matrix());
+
+        assert!(verification.valid, "{:?}", verification.violations);
+        assert_eq!(verification.pass_scenarios, 32);
+        assert_eq!(verification.blocked_scenarios, 0);
+        assert_eq!(verification.blocked_owner_scenarios, 0);
     }
 
     #[test]
