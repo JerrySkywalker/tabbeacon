@@ -2,10 +2,12 @@
 
 ## Status
 
-ACTIVE IMPLEMENTATION TRACK. v0.2.0 is publicly released and its closeout is merged.
-TB-G15 through TB-G19 are complete. G18 merged through same-SHA recovery PR #30
-after its actual elevated-PowerShell proof; G19 merged as PR #31 after exact-head
-hosted CI. TB-G19R is the active release candidate.
+COMPLETE. v0.3.0 is publicly released from
+`ddb2a218b9fe7601a09caaa1c8c3a0c1d0af9419` under `v0.3.0`.
+TB-G15 through TB-G19R are complete: G18 merged through same-SHA recovery PR #30
+after its actual elevated-PowerShell proof, G19 merged as PR #31 after exact-head
+hosted CI, and G19R completed the verified crates.io, GitHub Release, and Windows
+x64 artifact publication.
 
 Planning baseline when this track was created:
 
@@ -108,7 +110,7 @@ TB-G18 — Session Convergence and Recovery       COMPLETE
         ↓
 TB-G19 — Codex Compatibility Registry v2        COMPLETE
         ↓
-TB-G19R — v0.3 Hardening and Release            RELEASE CANDIDATE
+TB-G19R — v0.3 Hardening and Release            COMPLETE
 ```
 
 The sequence remains sequential. Fast Lane v2 changes validation density, not dependency
@@ -173,15 +175,8 @@ The original planning envelope of 22–40 effective engineering hours is retaine
 historical planning context, but it is no longer the operational estimate after G15–G17
 completion and the Fast Lane v2 amendment.
 
-Current remaining estimate after G19 closure:
-
-| Goal | Revised remaining scope | Effective effort |
-| --- | --- | ---: |
-| G19R | one release train with risk-safe evidence reuse | 3–5 h |
-| **Remaining** | | **3–5 h** |
-
-Center estimate is roughly **4 h** if release-specific packaging and publication do not
-reveal a product or external-service blocker.
+The release train completed without a remaining v0.3 delivery goal. Future work begins
+as a separately admitted maintenance or v0.3.1 candidate goal.
 
 ## Execution contract
 
