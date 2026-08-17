@@ -1383,51 +1383,52 @@ mod tests {
 
     #[test]
     fn normalized_hash_matches_codex_0_147_0_hooks_list() {
-        let command = r#""V:\src\tabbeacon\target\debug\tabbeacon.exe" hook codex || exit /b 0"#;
+        let command =
+            r#""C:\tabbeacon-fixture\target\debug\tabbeacon.exe" hook codex || exit /b 0"#;
         let expected = [
             (
                 "PreCompact",
-                "sha256:2a11700970f86f25c3a894ef6f13ccc653c0dbbb786e9a439a9808fdfc1febfa",
+                "sha256:937a9e3ef2059da0b9292da7cb12f704fc94a246cb6a19a154c800654efff69e",
             ),
             (
                 "PostCompact",
-                "sha256:bd9dba3835dcfc8b51ea3dbc075ce23e28f09c3d9190d9ff3af7451d492e69da",
+                "sha256:c2b55408c6a221fbdb073e30f2f3faf7caf3acfb88d9dee41e6f473ac983b873",
             ),
             (
                 "SessionStart",
-                "sha256:db9a01c26f509ce8f06a93e13a2fc19aad3658e1e8a950e16072fbd423565b61",
+                "sha256:9da2b9767770763172e8d8397a3cdd721eb48a06dd39167e031429b513095752",
             ),
             (
                 "UserPromptSubmit",
-                "sha256:3f5a99613c9710c539eea51071addd0bbf7c003dec4941c65409a70abfeec295",
+                "sha256:5153af8574637eca0401fd4f4a1bfe9955f810f87df37c20fbcbbc33cf9abebd",
             ),
             (
                 "PreToolUse",
-                "sha256:deb7ed5d0ad26b0c89257fba71c876db1ce0f1af1aaa24fb1cfaa44855645f8c",
+                "sha256:0ac98ca4ef877b0e1cd1200ba20ca91ea0d67e222b9abce123c4875b27d65a1d",
             ),
             (
                 "PermissionRequest",
-                "sha256:2b0781987fdad32fb28faa76e3e26822c9c94d7f416a2e37bf416f1dbc72e152",
+                "sha256:33f626e4c168e6781d4e7a058f41b0f37ee5bafa2d590e52c0926ce644df9f1e",
             ),
             (
                 "PostToolUse",
-                "sha256:e009a62adb6baf29335b2751ed38d8311d2f05c39038707d97af0e78a0757ef9",
+                "sha256:3bc9cf13b69738ec697bacca756091910f55179a3b94ba7aedf992a1bbfa34e5",
             ),
             (
                 "Stop",
-                "sha256:74332d15fd960bc8eb04f4a792327e320007ca3ebe93ed9863122bbb97ab38ef",
+                "sha256:0a6b5ac721be3f635a3c95a607e802f4469a0af2b36490d18aa168b0524698e6",
             ),
             (
                 "SessionEnd",
-                "sha256:364d9e07702ed4381fe806a253b5b565388d3c857cfff51ea583fde02e325101",
+                "sha256:d05bb545d5ac6bdc29f43fb8f5f74bd5592da686f9382ffaf34ba7222b573b28",
             ),
             (
                 "SubagentStart",
-                "sha256:4338387a6874fe79a5f7a14a09a635ca885a91006f9667f1b48cc23a2ff09206",
+                "sha256:226161dfef45cbc6eea02cf7fb2d739d2bcc7715d6ad8015743a14c1b5a3b28e",
             ),
             (
                 "SubagentStop",
-                "sha256:8c02618ab03d57f168092e445e7b5bc0a11684b52001d017e0f80be5743b4aa8",
+                "sha256:b9a14b7e612bc2a4aea0762c08cf7dabecf082a1892211b98943063b86843a50",
             ),
         ];
         for (event, hash) in expected {

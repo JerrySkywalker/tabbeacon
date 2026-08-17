@@ -1584,12 +1584,12 @@ mod tests {
     #[test]
     fn executable_path_normalization_removes_the_windows_extended_prefix() {
         assert_eq!(
-            normalized_windows_path(r"\\?\V:\Build\TabBeacon\tabbeacon.exe"),
-            "v:/build/tabbeacon/tabbeacon.exe"
+            normalized_windows_path(r"\\?\C:\Build\TabBeacon\tabbeacon.exe"),
+            "c:/build/tabbeacon/tabbeacon.exe"
         );
         assert_eq!(
-            normalized_windows_path(r"V:\Build\TabBeacon\tabbeacon.exe"),
-            "v:/build/tabbeacon/tabbeacon.exe"
+            normalized_windows_path(r"C:\Build\TabBeacon\tabbeacon.exe"),
+            "c:/build/tabbeacon/tabbeacon.exe"
         );
     }
 
