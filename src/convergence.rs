@@ -5,13 +5,13 @@
 //! each lifecycle path, keeps unsupported Hook semantics explicit, and never
 //! treats an internal render or worker as visible-title proof by itself.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// v0.3's maximum time from an admitted lifecycle event to its required state.
 pub const CONVERGENCE_DEADLINE_MS: u16 = 1_000;
 
 /// Evidence method required by a scenario's strongest claim.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConvergenceProofMethod {
     /// Deterministic typed core, renderer, or worker tests.

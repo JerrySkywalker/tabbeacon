@@ -150,6 +150,9 @@ fn title_policy_command(arguments: &[String]) -> ExitCode {
 }
 
 fn convergence_command(arguments: &[String]) -> ExitCode {
+    if arguments.first().map(String::as_str) == Some("verify") {
+        return convergence_verify(&arguments[1..]);
+    }
     let json = arguments
         .get(1)
         .is_some_and(|argument| argument == "--json");
@@ -180,6 +183,49 @@ fn convergence_command(arguments: &[String]) -> ExitCode {
     );
     println!("ELEVATED_OWNER_SCENARIOS=1");
     ExitCode::SUCCESS
+}
+
+fn convergence_verify(arguments: &[String]) -> ExitCode {
+    let matrix_path = option_value(arguments, "--matrix");
+    let expected_head = option_value(arguments, "--expected-head");
+    if arguments.len() != 4 || matrix_path.is_none() || expected_head.is_none() {
+        print_usage();
+        return ExitCode::from(2);
+    }
+    let expected_head = expected_head.expect("checked above");
+    let path = std::path::Path::new(matrix_path.expect("checked above"));
+    let run = match tabbeacon::convergence_evidence::load_convergence_run(path) {
+        Ok(run) => run,
+        Err(code) => {
+            eprintln!("CONVERGENCE_VERIFY=FAIL");
+            eprintln!("REASON={code}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut verification =
+        tabbeacon::convergence_evidence::verify_convergence_run(&run, tabbeacon::convergence::scenario_matrix());
+    if run.expected_head != expected_head {
+        verification.valid = false;
+        verification.violations.push("caller_expected_head_mismatch".to_owned());
+        verification.violations.sort();
+        verification.violations.dedup();
+    }
+    match serde_json::to_string(&verification) {
+        Ok(serialized) => println!("{serialized}"),
+        Err(error) => return management_error("CONVERGENCE_VERIFY", &error),
+    }
+    if verification.valid {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+fn option_value<'a>(arguments: &'a [String], flag: &str) -> Option<&'a String> {
+    arguments
+        .iter()
+        .position(|argument| argument == flag)
+        .and_then(|index| arguments.get(index + 1))
 }
 
 fn setup_codex() -> ExitCode {
@@ -915,6 +961,7 @@ fn print_usage() {
     println!("  tabbeacon title-policy repair [--json]");
     println!("  tabbeacon title-policy restore [--json]");
     println!("  tabbeacon convergence matrix [--json]");
+    println!("  tabbeacon convergence verify --matrix <path> --expected-head <sha>");
     println!("  tabbeacon uninstall codex");
     println!("  tabbeacon preview [--theme <muted-dark|classic>] [--spinner <preset>]");
     println!("  tabbeacon config show|reset|wizard");

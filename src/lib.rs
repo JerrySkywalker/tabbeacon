@@ -4,6 +4,7 @@
 
 pub mod activity;
 pub mod convergence;
+pub mod convergence_evidence;
 pub mod core;
 pub mod diagnostics;
 pub mod presentation;
