@@ -52,10 +52,12 @@ toml_edit = "0.25.13"
 [target.'cfg(windows)'.dependencies]
 uiautomation = "0.25.0"
 win-screenshot = "4.0.14"
-windows = { version = "0.62.2", features = ["Win32_Foundation"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [lints.rust]
-unsafe_code = "forbid"
+# One reviewed Windows Unicode-title call is locally allowed in
+# `console_output`; all other unsafe code remains denied.
+unsafe_code = "deny"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }

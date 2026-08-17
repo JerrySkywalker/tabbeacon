@@ -1,5 +1,4 @@
 use std::{
-    fs::OpenOptions,
     io::{self, Read, Write},
     process::ExitCode,
     thread,
@@ -893,7 +892,11 @@ fn print_preview_result(settings: PresentationSettings) -> ExitCode {
 }
 
 fn render_preview(settings: PresentationSettings) -> Result<(), &'static str> {
-    let mut console = open_preview_console().map_err(|_| "owned terminal output is unavailable")?;
+    #[cfg(windows)]
+    let mut console = tabbeacon::console_output::open_owned_console()
+        .map_err(|_| "owned terminal output is unavailable")?;
+    #[cfg(not(windows))]
+    let mut console = io::stdout();
     let renderer = WindowsTerminalRenderer::with_settings(
         WindowsTerminalCapabilities::new(std::env::var_os("WT_SESSION").is_some()),
         settings,
@@ -929,16 +932,6 @@ fn preview_choice_error(key: &str) -> ExitCode {
     eprintln!("REASON=unsupported {key} override");
     print_config_choices(key);
     ExitCode::from(2)
-}
-
-#[cfg(windows)]
-fn open_preview_console() -> io::Result<std::fs::File> {
-    OpenOptions::new().write(true).open("CONOUT$")
-}
-
-#[cfg(not(windows))]
-fn open_preview_console() -> io::Result<std::io::Stdout> {
-    Ok(io::stdout())
 }
 
 fn settings_store() -> Result<PresentationSettingsStore, tabbeacon::settings::SettingsError> {

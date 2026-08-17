@@ -1,5 +1,4 @@
 use std::{
-    fs::OpenOptions,
     io::{self, Write},
     path::PathBuf,
     time::SystemTime,
@@ -217,15 +216,6 @@ impl CodexHookRuntime {
     }
 }
 
-#[cfg(windows)]
-fn open_owned_console() -> io::Result<std::fs::File> {
-    OpenOptions::new().write(true).open("CONOUT$")
-}
-
-#[cfg(not(windows))]
-fn open_owned_console() -> io::Result<std::fs::File> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "owned Windows console output is unavailable",
-    ))
+fn open_owned_console() -> io::Result<crate::console_output::OwnedConsole> {
+    crate::console_output::open_owned_console()
 }

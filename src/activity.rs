@@ -1422,17 +1422,8 @@ fn reject_symbolic_link(path: &Path) -> io::Result<()> {
     }
 }
 
-#[cfg(windows)]
-fn open_owned_console() -> io::Result<std::fs::File> {
-    OpenOptions::new().write(true).open("CONOUT$")
-}
-
-#[cfg(not(windows))]
-fn open_owned_console() -> io::Result<std::fs::File> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "owned Windows console output is unavailable",
-    ))
+fn open_owned_console() -> io::Result<crate::console_output::OwnedConsole> {
+    crate::console_output::open_owned_console()
 }
 
 #[cfg(test)]
