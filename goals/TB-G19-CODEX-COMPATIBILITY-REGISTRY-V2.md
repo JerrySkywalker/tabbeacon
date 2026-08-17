@@ -2,8 +2,10 @@
 
 ## Status
 
-PLANNED after accepted TB-G18. Fast Lane v2 deliberately keeps this v0.3 Goal small.
-A new Codex release/profile is **not** required for v0.3 completion.
+COMPLETE. Merged as PR #31 at `e19ebb15afa755dc28316e75a9e45abb301c2062` after
+exact-head CI run `32053024676` passed for candidate
+`ec5c44ccfeaea95886986b4cfbb50e325809ee50`. Fast Lane v2 kept this v0.3 Goal small;
+a new Codex release/profile was **not** required.
 
 ## Purpose
 
@@ -12,17 +14,17 @@ maintenance into a second source-analysis product.
 
 ## Current baseline
 
-The existing code already has a single-profile compatibility prototype:
+G19 generalized the single-profile prototype into the current registry:
 
 ```text
-CodexHookProfile::RUST_V0_147_0
+CodexCompatibilityRegistry
 codex-hooks-rust-v0.147.0
-exact for_version() admission
+exact-only admission
+known-unadmitted and unknown diagnostics
 unknown event fail-open
 ```
 
-G19 should generalize this into a typed registry rather than replace working provider
-logic.
+The provider wire behavior remains unchanged.
 
 ## Minimal compatibility registry
 

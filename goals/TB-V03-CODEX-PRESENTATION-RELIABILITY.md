@@ -3,8 +3,9 @@
 ## Status
 
 ACTIVE IMPLEMENTATION TRACK. v0.2.0 is publicly released and its closeout is merged.
-TB-G15 through TB-G18 are complete; G18 is accepted for merge as PR #29 after its
-actual elevated-PowerShell proof. TB-G19 and TB-G19R remain sequential successors.
+TB-G15 through TB-G19 are complete. G18 merged through same-SHA recovery PR #30
+after its actual elevated-PowerShell proof; G19 merged as PR #31 after exact-head
+hosted CI. TB-G19R remains the sequential successor.
 
 Planning baseline when this track was created:
 
@@ -105,7 +106,7 @@ TB-G17 — Title Ownership / Conflict Remediation COMPLETE
         ↓
 TB-G18 — Session Convergence and Recovery       COMPLETE
         ↓
-TB-G19 — Codex Compatibility Registry v2        PLANNED
+TB-G19 — Codex Compatibility Registry v2        COMPLETE
         ↓
 TB-G19R — v0.3 Hardening and Release            PLANNED
 ```
@@ -172,16 +173,15 @@ The original planning envelope of 22–40 effective engineering hours is retaine
 historical planning context, but it is no longer the operational estimate after G15–G17
 completion and the Fast Lane v2 amendment.
 
-Current remaining estimate after G18 closure:
+Current remaining estimate after G19 closure:
 
 | Goal | Revised remaining scope | Effective effort |
 | --- | --- | ---: |
-| G19 | minimal registry + lightweight source diff | 2–4 h |
 | G19R | one release train with risk-safe evidence reuse | 3–5 h |
-| **Remaining** | | **5–9 h** |
+| **Remaining** | | **3–5 h** |
 
-Center estimate is roughly **12 h** if real elevated/UIA validation does not reveal a new
-product defect.
+Center estimate is roughly **4 h** if release-specific packaging and publication do not
+reveal a product or external-service blocker.
 
 ## Execution contract
 
