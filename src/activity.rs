@@ -186,7 +186,7 @@ pub struct WorkerPresentation {
 }
 
 impl WorkerPresentation {
-    /// Creates the only currently admitted worker state: active work.
+    /// Creates an animated working-title presentation.
     #[must_use]
     pub fn working(workspace_alias: &str, spinner: SpinnerPreset) -> Self {
         Self {
@@ -196,8 +196,39 @@ impl WorkerPresentation {
         }
     }
 
+    /// Creates a static result title that remains owned after a one-shot Hook
+    /// returns control to its shell host.
+    #[must_use]
+    fn result_ready(workspace_alias: &str, spinner: SpinnerPreset) -> Self {
+        Self {
+            workspace_alias: workspace_alias.to_owned(),
+            semantic_state: "result-ready".to_owned(),
+            spinner_preset: spinner.as_str().to_owned(),
+        }
+    }
+
+    /// Creates a static approval title that remains owned after a one-shot Hook
+    /// returns control to its shell host.
+    #[must_use]
+    fn approval(workspace_alias: &str, spinner: SpinnerPreset) -> Self {
+        Self {
+            workspace_alias: workspace_alias.to_owned(),
+            semantic_state: "approval".to_owned(),
+            spinner_preset: spinner.as_str().to_owned(),
+        }
+    }
+
     fn spinner(&self) -> Option<SpinnerPreset> {
         SpinnerPreset::parse(&self.spinner_preset)
+    }
+
+    fn semantic_input(&self) -> Option<(Phase, Attention)> {
+        match self.semantic_state.as_str() {
+            "working" => Some((Phase::Working, Attention::None)),
+            "result-ready" => Some((Phase::WaitingUser, Attention::ResultReady)),
+            "approval" => Some((Phase::WaitingUser, Attention::Approval)),
+            _ => None,
+        }
     }
 }
 
@@ -281,17 +312,31 @@ impl ActivityCoordinator {
             generation,
             terminal_binding_sha256,
         );
-        let working = match action {
+        let title_status = match action {
             PresentationAction::Apply(state) | PresentationAction::Reset(state) => {
-                state.title_status() == TitleStatus::Working
+                state.title_status()
             }
         };
-        let worker_managed = working
-            && settings.title() == TitleMode::TabBeacon
-            && settings.activity().uses_worker_animation();
+        let worker_presentation = if settings.title() == TitleMode::TabBeacon {
+            match title_status {
+                TitleStatus::Working if settings.activity().uses_worker_animation() => Some(
+                    WorkerPresentation::working(workspace_alias, settings.spinner()),
+                ),
+                TitleStatus::ResultReady => Some(WorkerPresentation::result_ready(
+                    workspace_alias,
+                    settings.spinner(),
+                )),
+                TitleStatus::Approval => Some(WorkerPresentation::approval(
+                    workspace_alias,
+                    settings.spinner(),
+                )),
+                _ => None,
+            }
+        } else {
+            None
+        };
         let now = unix_ms();
-        if worker_managed {
-            let presentation = WorkerPresentation::working(workspace_alias, settings.spinner());
+        if let Some(presentation) = worker_presentation {
             let Ok(transition) =
                 self.store
                     .publish_active(&key, event_sequence, owner_sha256, &presentation, now)
@@ -839,6 +884,11 @@ impl ActivityLeaseStore {
             let _ = self.write_exit(&ownership, "invalid_presentation");
             return;
         };
+        let Some((phase, attention)) = presentation.semantic_input() else {
+            let _ = self.deactivate_if_owned(&initial, unix_ms());
+            let _ = self.write_exit(&ownership, "invalid_presentation");
+            return;
+        };
         let Ok(mut console) = open_owned_console() else {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
             let _ = self.write_exit(&ownership, "terminal_unavailable");
@@ -856,8 +906,8 @@ impl ActivityLeaseStore {
             settings,
         );
         let action = PresentationPolicy::resolve(SemanticPresentationInput::new(
-            Phase::Working,
-            Attention::None,
+            phase,
+            attention,
             Health::Normal,
             &presentation.workspace_alias,
         ));
@@ -1070,8 +1120,10 @@ fn is_stale(generation: u64, event_sequence: u64, current: &WorkerLease) -> bool
 
 fn validate_lease(lease: &WorkerLease) -> io::Result<()> {
     let presentation_valid = lease.presentation.as_ref().is_none_or(|presentation| {
-        presentation.semantic_state == "working"
-            && presentation.spinner().is_some()
+        matches!(
+            presentation.semantic_state.as_str(),
+            "working" | "result-ready" | "approval"
+        ) && presentation.spinner().is_some()
             && presentation.workspace_alias.chars().count() <= 80
             && !presentation.workspace_alias.chars().any(char::is_control)
     });
@@ -1605,6 +1657,55 @@ mod tests {
         assert!(text.contains("\"semantic_state\": \"working\""));
         assert!(text.contains("\"spinner_preset\": \"braille\""));
         assert!(text.contains("\"workspace_alias\": \"OWH\""));
+    }
+
+    #[test]
+    fn attention_titles_replace_the_animated_worker_without_overlap() {
+        let root = TestRoot::new("attention-title-owner");
+        let store = ActivityLeaseStore::new(&root.0);
+        let key = key(7, 'a', 'c');
+        let owner = digest('d');
+        let working = presentation();
+        let result = WorkerPresentation::result_ready("OWH", SpinnerPreset::Braille);
+        let approval = WorkerPresentation::approval("OWH", SpinnerPreset::Braille);
+
+        let LeaseTransition::Published { lease: initial, .. } = store
+            .publish_active(&key, 10, &owner, &working, 1_000)
+            .expect("animated worker publishes")
+        else {
+            panic!("first title owner must publish");
+        };
+        let LeaseTransition::Published {
+            lease: result_lease,
+            predecessor: Some(result_predecessor),
+        } = store
+            .publish_active(&key, 11, &owner, &result, 1_100)
+            .expect("result title replaces animation")
+        else {
+            panic!("result title must replace the animated owner");
+        };
+        assert_eq!(result_predecessor, initial.ownership());
+        assert_eq!(result_lease.presentation.as_ref(), Some(&result));
+        assert_eq!(
+            result.semantic_input(),
+            Some((Phase::WaitingUser, Attention::ResultReady))
+        );
+
+        let LeaseTransition::Published {
+            lease: approval_lease,
+            predecessor: Some(approval_predecessor),
+        } = store
+            .publish_active(&key, 12, &owner, &approval, 1_200)
+            .expect("approval title replaces result")
+        else {
+            panic!("approval title must replace the result owner");
+        };
+        assert_eq!(approval_predecessor, result_lease.ownership());
+        assert_eq!(approval_lease.presentation.as_ref(), Some(&approval));
+        assert_eq!(
+            approval.semantic_input(),
+            Some((Phase::WaitingUser, Attention::Approval))
+        );
     }
 
     #[test]
