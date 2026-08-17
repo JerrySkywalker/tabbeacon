@@ -65,6 +65,11 @@ impl Write for OwnedConsole {
 ///
 /// On Windows, this intentionally bypasses redirected hook stdout while
 /// retaining Unicode title output through [`OwnedConsole`].
+///
+/// # Errors
+///
+/// Returns an error when the current process cannot open the owned console,
+/// or when the platform does not provide one.
 #[cfg(windows)]
 pub fn open_owned_console() -> io::Result<OwnedConsole> {
     OpenOptions::new()

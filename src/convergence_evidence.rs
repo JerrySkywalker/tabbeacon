@@ -146,7 +146,11 @@ pub fn load_convergence_run(path: &Path) -> Result<ConvergenceRun, &'static str>
 }
 
 /// Verifies every row against the immutable G18 contract.
+///
+/// This retained diagnostic verifier validates the complete frozen scenario
+/// catalog in one pass so violations remain content-minimal and deterministic.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn verify_convergence_run(
     run: &ConvergenceRun,
     frozen_matrix: &[ConvergenceScenario],
@@ -222,7 +226,7 @@ pub fn verify_convergence_run(
             }
             ConvergenceEvidenceStatus::Fail => fail_scenarios = fail_scenarios.saturating_add(1),
             ConvergenceEvidenceStatus::Unproven => {
-                unproven_scenarios = unproven_scenarios.saturating_add(1)
+                unproven_scenarios = unproven_scenarios.saturating_add(1);
             }
             ConvergenceEvidenceStatus::Blocked => {
                 blocked_scenarios = blocked_scenarios.saturating_add(1);
