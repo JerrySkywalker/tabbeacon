@@ -2,7 +2,9 @@
 
 ## Status
 
-PLANNED. First mandatory v0.4 implementation goal.
+COMPLETE. Typed CLI parsing, compatibility output modes, non-TTY admission,
+and PowerShell completion generation are available. The next mandatory goal is
+`TB-G41`.
 
 ## Purpose
 
