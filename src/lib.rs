@@ -5,6 +5,7 @@
 pub mod activity;
 pub mod cli;
 pub mod console_output;
+pub mod control_center;
 pub mod convergence;
 pub mod convergence_evidence;
 pub mod core;

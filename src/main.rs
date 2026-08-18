@@ -58,10 +58,7 @@ fn main() -> ExitCode {
 
 fn dispatch(cli: Cli) -> ExitCode {
     match cli.command {
-        None => {
-            print_usage();
-            ExitCode::SUCCESS
-        }
+        None => ui(),
         Some(Command::ActivityWorker {
             key_digest,
             generation,
@@ -1031,14 +1028,23 @@ fn completions(shell: clap_complete::Shell) -> ExitCode {
 }
 
 fn ui() -> ExitCode {
-    if is_interactive_terminal() {
-        println!("TABBEACON_UI=NOT_YET_AVAILABLE");
-        println!("NEXT_ACTION=use tabbeacon status, tabbeacon doctor, or tabbeacon config");
-    } else {
+    if !is_interactive_terminal() {
         println!("TABBEACON_UI=NON_INTERACTIVE");
         println!("NEXT_ACTION=use tabbeacon status --json or tabbeacon config commands");
+        return ExitCode::SUCCESS;
     }
-    ExitCode::SUCCESS
+    let settings = settings_store().map_or_else(
+        |_| PresentationSettings::default(),
+        |store| store.load_or_default(),
+    );
+    let report = collect_operational_diagnostics();
+    let snapshot = ManagementSnapshot::from_diagnostics(&report);
+    match tabbeacon::control_center::run(tabbeacon::control_center::ControlCenterApp::new(
+        settings, snapshot,
+    )) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => management_error("UI", &error),
+    }
 }
 
 fn print_usage() {

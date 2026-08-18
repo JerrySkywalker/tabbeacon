@@ -2,7 +2,9 @@
 
 ## Status
 
-PLANNED after accepted G43.
+IN PROGRESS. The bounded Ratatui/Crossterm frontend, staged state, all screen
+render paths, and deterministic buffer coverage are in place; final G44
+acceptance remains open.
 
 ## Purpose
 
