@@ -2,7 +2,9 @@
 
 ## Status
 
-PLANNED after accepted G40.
+COMPLETE. `ManagementSnapshot` now projects bounded operational diagnostics into
+typed issues, recommended actions, and non-executing change plans. `TB-G42` is
+next.
 
 ## Purpose
 

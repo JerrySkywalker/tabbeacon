@@ -64,9 +64,9 @@ automation-safe JSON/direct-command interfaces:
 ```text
 TB-G40 — CLI Foundation & Output Contracts — COMPLETE
   ↓
-TB-G41 — Unified Management / Action Model — NEXT
+TB-G41 — Unified Management / Action Model — COMPLETE
   ↓
-TB-G42 — Human Status & Doctor v2
+TB-G42 — Human Status & Doctor v2 — NEXT
   ↓
 TB-G43 — Guided Setup v3
   ↓
