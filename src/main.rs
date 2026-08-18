@@ -36,8 +36,8 @@ use tabbeacon::{
         WindowsTerminalRenderer,
     },
     settings::{
-        ActivityMode, PresentationSettings, PresentationSettingsStore, PresentationTheme,
-        SpinnerPreset, TabColorMode, TitleMode,
+        ActivityMode, PresentationSettings, PresentationSettingsSnapshot,
+        PresentationSettingsStore, PresentationTheme, SpinnerPreset, TabColorMode, TitleMode,
     },
     windows_terminal_policy::WindowsTerminalPolicyStore,
 };
@@ -234,48 +234,16 @@ fn guided_setup(quick: bool, full: bool) -> ExitCode {
             "run tabbeacon setup from an interactive terminal, or use tabbeacon config and tabbeacon setup codex",
         );
     }
-    let store = match settings_store() {
-        Ok(store) => store,
-        Err(error) => return management_error("SETUP", &error),
-    };
-    let snapshot = match store.snapshot_read_only() {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            eprintln!("SETUP=FAIL");
-            eprintln!("REASON={error}");
-            eprintln!("SETTINGS_UNCHANGED=true");
-            return ExitCode::FAILURE;
-        }
-    };
-    let before = snapshot.settings();
-    let integration = match CodexIntegration::from_environment() {
-        Ok(integration) => integration,
-        Err(error) => return management_error("SETUP", &error),
-    };
-    let discovery = match guided_setup_discovery(&integration) {
-        Ok(discovery) => discovery,
+    let (store, snapshot, integration, discovery) = match guided_setup_context() {
+        Ok(context) => context,
         Err(exit_code) => return exit_code,
     };
+    let before = snapshot.settings();
     print_setup_discovery(&discovery, before);
     print_setup_title_policy(&WindowsTerminalPolicyStore::from_environment().inspect());
 
-    if quick
-        && discovery.hooks() == tabbeacon::setup::HookSetupState::Current
-        && discovery.profile_supported()
-    {
-        println!("Nothing to do.");
-        println!("SETUP=PASS");
-        println!("SETUP_MODE=QUICK");
-        println!("OWNER_ACTION=none");
+    if print_guided_setup_intro(quick, full, &discovery) {
         return ExitCode::SUCCESS;
-    }
-    println!(
-        "Welcome — setup keeps prompts, assistant output, and provider session data out of configuration."
-    );
-    if full {
-        println!("Full setup — review the complete presentation flow.");
-    } else if quick {
-        println!("Quick setup — action-required sections only.");
     }
 
     let draft = match prompt_setup_draft_v3(before) {
@@ -352,6 +320,50 @@ fn guided_setup(quick: bool, full: bool) -> ExitCode {
             Err(error) => management_error("SETUP", &error),
         },
     }
+}
+
+fn print_guided_setup_intro(quick: bool, full: bool, discovery: &SetupDiscovery) -> bool {
+    if quick
+        && discovery.hooks() == tabbeacon::setup::HookSetupState::Current
+        && discovery.profile_supported()
+    {
+        println!("Nothing to do.");
+        println!("SETUP=PASS");
+        println!("SETUP_MODE=QUICK");
+        println!("OWNER_ACTION=none");
+        return true;
+    }
+    println!(
+        "Welcome — setup keeps prompts, assistant output, and provider session data out of configuration."
+    );
+    if full {
+        println!("Full setup — review the complete presentation flow.");
+    } else if quick {
+        println!("Quick setup — action-required sections only.");
+    }
+    false
+}
+
+fn guided_setup_context() -> Result<
+    (
+        PresentationSettingsStore,
+        PresentationSettingsSnapshot,
+        CodexIntegration,
+        SetupDiscovery,
+    ),
+    ExitCode,
+> {
+    let store = settings_store().map_err(|error| management_error("SETUP", &error))?;
+    let snapshot = store.snapshot_read_only().map_err(|error| {
+        eprintln!("SETUP=FAIL");
+        eprintln!("REASON={error}");
+        eprintln!("SETTINGS_UNCHANGED=true");
+        ExitCode::FAILURE
+    })?;
+    let integration =
+        CodexIntegration::from_environment().map_err(|error| management_error("SETUP", &error))?;
+    let discovery = guided_setup_discovery(&integration)?;
+    Ok((store, snapshot, integration, discovery))
 }
 
 fn guided_setup_discovery(integration: &CodexIntegration) -> Result<SetupDiscovery, ExitCode> {
