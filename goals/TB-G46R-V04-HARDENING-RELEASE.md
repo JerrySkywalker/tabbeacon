@@ -2,7 +2,7 @@
 
 ## Status
 
-PLANNED final production closure after accepted G40, G41, G42, G43, G44, and G46. G45X is optional and does not block release.
+RELEASE CANDIDATE after accepted G40, G41, G42, G43, G44, and G46. G45X is optional and does not block release.
 
 ## Purpose
 
