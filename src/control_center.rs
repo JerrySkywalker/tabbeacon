@@ -401,6 +401,100 @@ where
     session.restore()
 }
 
+/// Result of the feature-gated real-terminal lifecycle fixture.
+#[cfg(feature = "terminal-smoke-fixture")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalSmokeReport {
+    /// The fixture rendered Overview, Appearance, and Integration in order.
+    pub screens_visited: usize,
+    /// An appearance value changed in the in-memory draft.
+    pub draft_changed: bool,
+    /// Revert restored the draft to the original settings without Apply.
+    pub draft_reverted: bool,
+    /// The normal application event handler returned its clean quit command.
+    pub clean_quit: bool,
+}
+
+/// Runs a deterministic Control Center path through the real Crossterm terminal.
+///
+/// This function exists only with the `terminal-smoke-fixture` Cargo feature. It
+/// has no Apply callback and therefore cannot write settings. The standalone
+/// fixture binary uses it in a disposable Windows Terminal tab to prove the
+/// production alternate-screen, raw-mode, renderer, navigation, Revert, and
+/// cleanup path without synthetic operating-system input.
+///
+/// # Errors
+///
+/// Returns terminal I/O errors or an invariant error if the scripted path stops
+/// exercising the intended production state transitions.
+#[cfg(feature = "terminal-smoke-fixture")]
+pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<TerminalSmokeReport> {
+    fn invariant(condition: bool, message: &'static str) -> io::Result<()> {
+        condition
+            .then_some(())
+            .ok_or_else(|| io::Error::other(message))
+    }
+
+    fn draw(session: &mut TerminalSession, app: &ControlCenterApp) -> io::Result<()> {
+        session.terminal.draw(|frame| render(frame, app))?;
+        std::thread::sleep(Duration::from_millis(50));
+        Ok(())
+    }
+
+    let original = app.current();
+    let mut session = TerminalSession::enter()?;
+    let result = (|| {
+        invariant(
+            app.screen() == Screen::Overview,
+            "fixture did not start on Overview",
+        )?;
+        draw(&mut session, &app)?;
+
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        invariant(
+            app.screen() == Screen::Appearance,
+            "fixture did not reach Appearance",
+        )?;
+        draw(&mut session, &app)?;
+
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let draft_changed = app.dirty() && app.draft() != original;
+        invariant(draft_changed, "fixture did not create an in-memory draft")?;
+        draw(&mut session, &app)?;
+
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        let draft_reverted = !app.dirty() && app.draft() == original && app.current() == original;
+        invariant(draft_reverted, "fixture did not revert its in-memory draft")?;
+
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        invariant(
+            app.screen() == Screen::Integration,
+            "fixture did not reach Integration",
+        )?;
+        draw(&mut session, &app)?;
+
+        let clean_quit = app.handle_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE))
+            == ControlCenterCommand::Quit;
+        invariant(
+            clean_quit,
+            "fixture did not use the production clean-quit path",
+        )?;
+
+        Ok(TerminalSmokeReport {
+            screens_visited: 3,
+            draft_changed,
+            draft_reverted,
+            clean_quit,
+        })
+    })();
+    let restore = session.restore();
+    match (result, restore) {
+        (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        (Ok(report), Ok(())) => Ok(report),
+    }
+}
+
 /// Central owner of raw mode, alternate screen, drawing, and restoration.
 struct TerminalSession {
     terminal: ratatui::Terminal<CrosstermBackend<io::Stdout>>,

@@ -2,7 +2,8 @@
 
 ## Status
 
-PLANNED after accepted G44. Mandatory v0.4 hardening before release closure.
+ACCEPTANCE CANDIDATE after accepted G44. The bounded real Windows Terminal
+fixture passes; merge still requires the one final hosted exact-head code CI.
 
 ## Purpose
 
@@ -55,6 +56,14 @@ Redirected stdout/stderr and automation paths must never enter raw mode or alter
 
 Do not create a large UIA scenario matrix; one representative terminal-state smoke is the risk gate.
 
+The real-terminal proof uses the feature-gated
+`tabbeacon-terminal-smoke-fixture` binary in a disposable `wt.exe` window. It
+drives production app events internally rather than injecting operating-system
+keys, enters and leaves the production Crossterm/Ratatui terminal lifecycle,
+stages and reverts an in-memory appearance draft, and has no Apply callback or
+settings authority. The same child shell writes the post-TUI sentinel; an
+external observer verifies exact-title window and child-process completion.
+
 ## Exit gate
 
 ```text
@@ -66,6 +75,15 @@ NARROW_TERMINAL=PASS
 NON_TTY_NO_FULLSCREEN=true
 WINDOWS_TERMINAL_TUI_SMOKE=PASS
 CODE_CI=PASS
+```
+
+Candidate evidence:
+
+```text
+WINDOWS_TERMINAL_TUI_SMOKE=PASS
+TUI_EXIT_RESTORES_TERMINAL=true
+SHELL_USABLE_AFTER_TUI=true
+OWNER_MUTATIONS=none
 ```
 
 Estimated effort: **3–5 h**.
