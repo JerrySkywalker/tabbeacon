@@ -70,9 +70,9 @@ TB-G42 — Human Status & Doctor v2 — COMPLETE
   ↓
 TB-G43 — Guided Setup v3 — COMPLETE
   ↓
-TB-G44 — Interactive Control Center — IN PROGRESS
+TB-G44 — Interactive Control Center — COMPLETE
   ↓
-TB-G46 — UX Reliability & Accessibility
+TB-G46 — UX Reliability & Accessibility — NEXT
   ↓
 TB-G46R — v0.4 Hardening & Release
 ```
