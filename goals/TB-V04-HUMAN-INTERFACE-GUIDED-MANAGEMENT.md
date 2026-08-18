@@ -2,7 +2,9 @@
 
 ## Status
 
-PLANNED implementation track after public v0.3.0 and its governance closeout.
+COMPLETE. v0.4.0 was publicly released from
+`0e0c81279b4f90c9d67f9b841405401d532e7c24`; post-release G45X subsequently
+landed without changing the release source or tag.
 
 ## Product objective
 
@@ -144,11 +146,14 @@ TB-G46 — UX Reliability & Accessibility
       ↓
 TB-G46R — v0.4 Hardening & Release
 
-optional after G41:
-TB-G45X — Sessions & Live Overview
+post-release:
+v0.4.0 RELEASED
+      ↓
+TB-G45X — Sessions & Live Overview — COMPLETE
 ```
 
-The mandatory production path remains sequential by default. G45X is non-blocking.
+The mandatory production path remained sequential. G45X was non-blocking and
+landed only after v0.4.0 publication and public-consumer verification.
 
 ## Goal summary and effort
 

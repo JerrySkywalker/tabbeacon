@@ -4,23 +4,28 @@ Roadmap IDs are stable governance identifiers. `X` suffixes denote experimental 
 
 ## Current production baseline
 
-The v0.2 production line is complete through public `0.2.0` distribution.
-The Codex-first v0.2 implementation train is complete: `TB-G10A` through
-`TB-G14` are **COMPLETE**.
+The v0.4 production line is complete through public `0.4.0` distribution.
+`TB-G40` through `TB-G46R` are **COMPLETE**. The post-release experimental
+`TB-G45X` read-only Sessions view is also complete on `main`, without changing
+the v0.4.0 release source or tag.
 
-Authoritative v0.2.0 release head and tag:
+Authoritative v0.4.0 release head and tag:
 
 ```text
-RELEASE_SHA=0b1d5136833a05bf94b7d32c414a21da2f5ac78e
-TAG=v0.2.0
+RELEASE_SHA=0e0c81279b4f90c9d67f9b841405401d532e7c24
+TAG=v0.4.0
 ```
 
-Public distribution: crates.io `tabbeacon 0.2.0` and the GitHub `v0.2.0`
-Release, including the verified Windows x64 ZIP and SHA-256 sidecar.
+Public distribution: crates.io `tabbeacon 0.4.0` and the GitHub `v0.4.0`
+Release, including the verified Windows x64 ZIP and SHA-256 sidecar. Clean
+crates.io, GitHub-asset, fresh-install, and v0.3-to-v0.4 consumers passed.
 
-The mandatory v0.1 path is complete: `TB-B00`, `TB-G01`, `TB-G02`, `TB-G03`, `TB-G04`, `TB-G05`, `TB-G07`, and `TB-G08` all landed and were released. The Codex App Server experiment (`TB-G06X`) and future Claude/OpenCode provider tracks (`TB-G20`, `TB-G30`) remain deliberately deferred and do not count as Codex-only product debt.
+The v0.1, v0.2, and v0.3 release lines remain historical baselines. The Codex
+App Server experiment (`TB-G06X`) and future Claude/OpenCode provider tracks
+(`TB-G20`, `TB-G30`) remain deliberately deferred and do not count as
+Codex-only product debt.
 
-## Active production sequence — v0.3 Codex Presentation Reliability & Motion
+## Completed production sequence — v0.3 Codex Presentation Reliability & Motion
 
 The released v0.2 line is historical baseline and remains the source of its
 public release record. Near-term implementation is the sequential v0.3
@@ -55,11 +60,11 @@ sidecar all available.
 Pixel capture remains a latched runner-environment limitation, while exact-tab
 UIA title evidence continues to cover title admission and working-frame motion.
 
-## Active production sequence — v0.4 Human Interface & Guided Management
+## Completed production sequence — v0.4 Human Interface & Guided Management
 
-The released v0.3 line remains the public baseline. v0.4 improves local human
-management while retaining the stock `codex` launch path, Codex Hooks, and
-automation-safe JSON/direct-command interfaces:
+The released v0.4 line improves local human management while retaining the
+stock `codex` launch path, Codex Hooks, and automation-safe JSON/direct-command
+interfaces:
 
 ```text
 TB-G40 — CLI Foundation & Output Contracts — COMPLETE
@@ -74,12 +79,18 @@ TB-G44 — Interactive Control Center — COMPLETE
   ↓
 TB-G46 — UX Reliability & Accessibility — COMPLETE
   ↓
-TB-G46R — v0.4 Hardening & Release — RELEASE CANDIDATE
+TB-G46R — v0.4 Hardening & Release — COMPLETE
+  ↓
+TB-G45X — Sessions & Live Overview — COMPLETE POST-RELEASE
 ```
 
 G46's feature-gated, self-driving real Windows Terminal fixture and hosted
 exact-head CI passed before PR 41 merged. The prior synthetic operating-system
 input mechanism is retired.
+
+G46R released `v0.4.0` from `0e0c81279b4f90c9d67f9b841405401d532e7c24`
+after PR 42 and its exact-head CI. Post-release G45X merged in PR 43 after its
+focused privacy review and exact-head CI; `v0.4.0` remains unchanged.
 
 Detailed plan: [`../goals/TB-V04-HUMAN-INTERFACE-GUIDED-MANAGEMENT.md`](../goals/TB-V04-HUMAN-INTERFACE-GUIDED-MANAGEMENT.md).
 No new provider, launcher wrapper, PATH shadow, global daemon, or hook-trust

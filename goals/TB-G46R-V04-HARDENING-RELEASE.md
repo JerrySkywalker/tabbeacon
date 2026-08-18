@@ -2,7 +2,9 @@
 
 ## Status
 
-RELEASE CANDIDATE after accepted G40, G41, G42, G43, G44, and G46. G45X is optional and does not block release.
+COMPLETE. v0.4.0 was released from
+`0e0c81279b4f90c9d67f9b841405401d532e7c24`; post-release G45X did not change
+that immutable release source or tag.
 
 ## Purpose
 
@@ -68,7 +70,7 @@ TB_G42=COMPLETE
 TB_G43=COMPLETE
 TB_G44=COMPLETE
 TB_G46=COMPLETE
-TB_G45X=OPTIONAL
+TB_G45X=COMPLETE_POST_RELEASE
 
 GUIDED_SETUP=PASS
 GUIDED_SETUP_FULLSCREEN=false
@@ -94,3 +96,18 @@ V0_4_RELEASE=PASS
 ```
 
 Estimated release effort: **3–5 h** after predecessor goals are accepted.
+
+## Release outcome
+
+- G46 real Windows Terminal lifecycle, terminal restoration, and same-shell
+  sentinel: PASS.
+- Hosted exact-head release CI, package dry-run, and package-content review:
+  PASS.
+- Fresh install and isolated v0.3-to-v0.4 upgrade with preserved settings and
+  integration: PASS.
+- crates.io `tabbeacon 0.4.0`, immutable `v0.4.0` tag, and GitHub Release:
+  PASS.
+- Windows x64 ZIP SHA-256:
+  `c8e5c20f7a1c0b944ec86a3515e3d529284a87763031110a38e36794b80e5359`.
+- Clean crates.io and GitHub-asset public consumers: PASS.
+- Owner settings, Hook trust, Windows Terminal, and PowerShell mutations: none.
