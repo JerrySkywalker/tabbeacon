@@ -36,8 +36,9 @@ use tabbeacon::{
         WindowsTerminalRenderer,
     },
     settings::{
-        ActivityMode, PresentationSettings, PresentationSettingsSnapshot,
-        PresentationSettingsStore, PresentationTheme, SpinnerPreset, TabColorMode, TitleMode,
+        ActivityMode, ConditionalSaveOutcome, PresentationSettings, PresentationSettingsSnapshot,
+        PresentationSettingsStore, PresentationTheme, SnapshotSaveOutcome, SpinnerPreset,
+        TabColorMode, TitleMode,
     },
     windows_terminal_policy::WindowsTerminalPolicyStore,
 };
@@ -833,7 +834,13 @@ fn apply_settings_change(
     before: PresentationSettings,
     after: PresentationSettings,
 ) -> io::Result<TitleOwnershipOutcome> {
-    store.save(after).map_err(io::Error::other)?;
+    match store
+        .save_if_unchanged(before, after)
+        .map_err(io::Error::other)?
+    {
+        ConditionalSaveOutcome::Saved => {}
+        ConditionalSaveOutcome::Conflict => return Err(settings_conflict_error()),
+    }
     let title_outcome = if before.title() == after.title() {
         TitleOwnershipOutcome::AlreadyConfigured
     } else {
@@ -842,12 +849,84 @@ fn apply_settings_change(
         }) {
             Ok(outcome) => outcome,
             Err(error) => {
-                let _ = store.save(before);
-                return Err(io::Error::other(error));
+                let restored = matches!(
+                    store.save_if_unchanged(after, before),
+                    Ok(ConditionalSaveOutcome::Saved)
+                );
+                let reason = if restored {
+                    error.to_string()
+                } else {
+                    format!(
+                        "{error}; settings rollback refused because the document changed concurrently"
+                    )
+                };
+                return Err(io::Error::other(reason));
             }
         }
     };
     Ok(title_outcome)
+}
+
+fn apply_control_center_settings_change(
+    store: &PresentationSettingsStore,
+    snapshot: &PresentationSettingsSnapshot,
+    before: PresentationSettings,
+    after: PresentationSettings,
+) -> io::Result<(TitleOwnershipOutcome, PresentationSettingsSnapshot)> {
+    apply_control_center_settings_change_with(store, snapshot, before, after, |owns_title| {
+        CodexIntegration::from_environment()
+            .and_then(|integration| integration.reconcile_title_ownership(owns_title))
+            .map_err(|error| error.to_string())
+    })
+}
+
+fn apply_control_center_settings_change_with(
+    store: &PresentationSettingsStore,
+    snapshot: &PresentationSettingsSnapshot,
+    before: PresentationSettings,
+    after: PresentationSettings,
+    reconcile: impl FnOnce(bool) -> Result<TitleOwnershipOutcome, String>,
+) -> io::Result<(TitleOwnershipOutcome, PresentationSettingsSnapshot)> {
+    if snapshot.settings() != before {
+        return Err(settings_conflict_error());
+    }
+    let receipt = match store
+        .save_snapshot_if_unchanged(snapshot, after)
+        .map_err(io::Error::other)?
+    {
+        SnapshotSaveOutcome::Saved(receipt) => receipt,
+        SnapshotSaveOutcome::Conflict => return Err(settings_conflict_error()),
+    };
+    let title_outcome = if before.title() == after.title() {
+        TitleOwnershipOutcome::AlreadyConfigured
+    } else {
+        match reconcile(after.title().owns_tabbeacon_title()) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let restored = matches!(
+                    store.restore_snapshot_if_unchanged(&receipt, snapshot),
+                    Ok(ConditionalSaveOutcome::Saved)
+                );
+                let reason = if restored {
+                    error
+                } else {
+                    format!(
+                        "{error}; settings rollback refused because the document changed concurrently"
+                    )
+                };
+                return Err(io::Error::other(reason));
+            }
+        }
+    };
+    let next_snapshot = store.snapshot_read_only().map_err(io::Error::other)?;
+    if next_snapshot.settings() != after {
+        return Err(settings_conflict_error());
+    }
+    Ok((title_outcome, next_snapshot))
+}
+
+fn settings_conflict_error() -> io::Error {
+    io::Error::other("settings changed concurrently; the stale draft was not applied")
 }
 
 fn persist_settings_change(
@@ -1046,13 +1125,22 @@ fn ui() -> ExitCode {
         Ok(store) => store,
         Err(error) => return management_error("UI", &error),
     };
-    let settings = store.load_or_default();
+    let mut settings_snapshot = match store.snapshot_read_only() {
+        Ok(snapshot) => snapshot,
+        Err(error) => return management_error("UI", &error),
+    };
+    let settings = settings_snapshot.settings();
     let report = collect_operational_diagnostics();
     let snapshot = ManagementSnapshot::from_diagnostics(&report);
     let overview = tabbeacon::management::ManagementOverview::from_diagnostics(&report);
     match tabbeacon::control_center::run(
         tabbeacon::control_center::ControlCenterApp::new(settings, snapshot, overview),
-        |before, after| apply_settings_change(&store, before, after).map(|_| ()),
+        |before, after| {
+            let (_, next_snapshot) =
+                apply_control_center_settings_change(&store, &settings_snapshot, before, after)?;
+            settings_snapshot = next_snapshot;
+            Ok(())
+        },
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => management_error("UI", &error),
@@ -1082,6 +1170,47 @@ mod tests {
         apply_settings_change(&store, before, after).unwrap();
 
         assert_eq!(store.load().unwrap(), after);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn control_center_apply_refuses_stale_state_and_preserves_concurrent_rollback_writes() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tabbeacon-ui-conflict-{unique}"));
+        let store = PresentationSettingsStore::new(root.join("config.toml"));
+        let before = PresentationSettings::default();
+        let stale_snapshot = store.snapshot_read_only().unwrap();
+        let concurrent = before.with_theme(PresentationTheme::Classic);
+        store.save(concurrent).unwrap();
+
+        let stale = apply_control_center_settings_change_with(
+            &store,
+            &stale_snapshot,
+            before,
+            before.with_title(TitleMode::Native),
+            |_| panic!("a stale draft must not reach title reconciliation"),
+        );
+        assert!(stale.is_err());
+        assert_eq!(store.load().unwrap(), concurrent);
+
+        let current_snapshot = store.snapshot_read_only().unwrap();
+        let after = concurrent.with_title(TitleMode::Native);
+        let concurrent_after_write = concurrent.with_title(TitleMode::Off);
+        let failed = apply_control_center_settings_change_with(
+            &store,
+            &current_snapshot,
+            concurrent,
+            after,
+            |_| {
+                store.save(concurrent_after_write).unwrap();
+                Err("controlled title reconciliation failure".to_owned())
+            },
+        );
+        assert!(failed.is_err());
+        assert_eq!(store.load().unwrap(), concurrent_after_write);
         fs::remove_dir_all(root).unwrap();
     }
 }

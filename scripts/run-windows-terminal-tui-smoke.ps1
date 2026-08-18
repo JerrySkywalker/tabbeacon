@@ -65,6 +65,20 @@ public static class TabBeaconSmokeWindows {
     [DllImport("user32.dll")]
     public static extern bool PostMessage(IntPtr handle, uint message, IntPtr wParam, IntPtr lParam);
 
+    [DllImport("user32.dll")]
+    private static extern bool IsWindow(IntPtr handle);
+
+    public static Record GetRecord(IntPtr handle) {
+        if (!IsWindow(handle)) {
+            return null;
+        }
+        var title = new StringBuilder(512);
+        GetWindowText(handle, title, title.Capacity);
+        uint processId;
+        GetWindowThreadProcessId(handle, out processId);
+        return new Record { Handle = handle, ProcessId = processId, Title = title.ToString() };
+    }
+
     public static Record[] FindExactTitle(string expectedTitle) {
         var records = new List<Record>();
         EnumWindows(delegate (IntPtr handle, IntPtr state) {
@@ -81,6 +95,30 @@ public static class TabBeaconSmokeWindows {
     }
 }
 '@
+
+if ([TabBeaconSmokeWindows]::FindExactTitle($windowTitle).Count -ne 0) {
+    throw 'The unique disposable Windows Terminal title already exists before launch'
+}
+
+function Test-ProcessAncestor {
+    param(
+        [int]$ProcessId,
+        [int]$ExpectedAncestorId
+    )
+    $currentId = $ProcessId
+    for ($depth = 0; $depth -lt 8 -and $currentId -gt 0; $depth++) {
+        $record = Get-CimInstance Win32_Process -Filter "ProcessId = $currentId" -ErrorAction SilentlyContinue
+        if ($null -eq $record) {
+            return $false
+        }
+        $parentId = [int]$record.ParentProcessId
+        if ($parentId -eq $ExpectedAncestorId) {
+            return $true
+        }
+        $currentId = $parentId
+    }
+    return $false
+}
 
 $arguments = @(
     '-w', 'new',
@@ -106,6 +144,9 @@ if ($launchExitCode -ne 0) {
 $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
 $windowObserved = $false
 $windowHandle = [IntPtr]::Zero
+$windowProcessId = $null
+$windowOwnerBound = $false
+$windowChildLineageBound = $false
 $childProcessId = $null
 $sentinelObserved = $false
 $childCompleted = $false
@@ -113,33 +154,54 @@ $windowCompleted = $false
 
 while ([DateTimeOffset]::UtcNow -lt $deadline) {
     $windows = [TabBeaconSmokeWindows]::FindExactTitle($windowTitle)
-    if ($windows.Count -eq 1) {
-        $windowObserved = $true
-        $windowHandle = $windows[0].Handle
+    if (-not $windowObserved -and $windows.Count -eq 1) {
+        $candidateOwner = Get-Process -Id $windows[0].ProcessId -ErrorAction SilentlyContinue
+        if ($null -ne $candidateOwner -and $candidateOwner.ProcessName -eq 'WindowsTerminal') {
+            $windowObserved = $true
+            $windowOwnerBound = $true
+            $windowHandle = $windows[0].Handle
+            $windowProcessId = $windows[0].ProcessId
+        }
     }
     if ($null -eq $childProcessId -and (Test-Path -LiteralPath $processReceiptPath)) {
         $childProcessId = [int](Get-Content -LiteralPath $processReceiptPath -Raw)
+    }
+    if (-not $windowChildLineageBound -and $windowOwnerBound -and $null -ne $childProcessId) {
+        $windowChildLineageBound = Test-ProcessAncestor -ProcessId $childProcessId -ExpectedAncestorId $windowProcessId
     }
     $sentinelObserved = Test-Path -LiteralPath $sentinelPath
     if ($null -ne $childProcessId) {
         $childCompleted = $null -eq (Get-Process -Id $childProcessId -ErrorAction SilentlyContinue)
     }
-    $windowCompleted = $windowObserved -and
-        ([TabBeaconSmokeWindows]::FindExactTitle($windowTitle).Count -eq 0)
+    $boundWindow = if ($windowObserved) {
+        [TabBeaconSmokeWindows]::GetRecord($windowHandle)
+    } else {
+        $null
+    }
+    $boundWindowPresent = $null -ne $boundWindow -and
+        $boundWindow.ProcessId -eq $windowProcessId
+    $windowCompleted = $windowObserved -and -not $boundWindowPresent
     if ($sentinelObserved -and $childCompleted -and $windowCompleted) {
         break
     }
     Start-Sleep -Milliseconds 100
 }
 
-if (-not $windowCompleted -and $windowHandle -ne [IntPtr]::Zero) {
-    # WM_CLOSE is sent only to the exact disposable title-bound window.
-    [void][TabBeaconSmokeWindows]::PostMessage(
-        $windowHandle,
-        0x0010,
-        [IntPtr]::Zero,
-        [IntPtr]::Zero
-    )
+if (-not $windowCompleted -and $windowOwnerBound) {
+    $cleanupWindow = [TabBeaconSmokeWindows]::GetRecord($windowHandle)
+    $cleanupTargetExact = $null -ne $cleanupWindow -and
+        $cleanupWindow.ProcessId -eq $windowProcessId -and
+        $cleanupWindow.Title -eq $windowTitle
+    # WM_CLOSE is sent only after the exact disposable handle, owner PID, and
+    # unique title have all been revalidated immediately before cleanup.
+    if ($cleanupTargetExact) {
+        [void][TabBeaconSmokeWindows]::PostMessage(
+            $windowHandle,
+            0x0010,
+            [IntPtr]::Zero,
+            [IntPtr]::Zero
+        )
+    }
 }
 
 $fixtureExitCode = $null
@@ -152,14 +214,17 @@ if ($sentinelObserved) {
     $shellUsable = $sentinel -contains 'SHELL_USABLE_AFTER_TUI=true'
 }
 
-$passed = $windowObserved -and $windowCompleted -and $childCompleted -and
-    $sentinelObserved -and $shellUsable -and $fixtureExitCode -eq 0
+$passed = $windowObserved -and $windowOwnerBound -and $windowChildLineageBound -and
+    $windowCompleted -and $childCompleted -and $sentinelObserved -and $shellUsable -and
+    $fixtureExitCode -eq 0
 $receipt = @(
     "RUN_ID=$RunId"
     "EXPECTED_HEAD=$ExpectedHead"
     "CHECKED_OUT_HEAD=$checkedOutHead"
     'SMOKE_METHOD=feature-gated deterministic app events in disposable real wt.exe'
     "WINDOW_OBSERVED=$($windowObserved.ToString().ToLowerInvariant())"
+    "WINDOW_OWNER_BOUND=$($windowOwnerBound.ToString().ToLowerInvariant())"
+    "WINDOW_CHILD_LINEAGE_BOUND=$($windowChildLineageBound.ToString().ToLowerInvariant())"
     "WINDOW_COMPLETED=$($windowCompleted.ToString().ToLowerInvariant())"
     "CHILD_PROCESS_COMPLETED=$($childCompleted.ToString().ToLowerInvariant())"
     "SENTINEL_OBSERVED=$($sentinelObserved.ToString().ToLowerInvariant())"
