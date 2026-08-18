@@ -72,14 +72,14 @@ TB-G43 — Guided Setup v3 — COMPLETE
   ↓
 TB-G44 — Interactive Control Center — COMPLETE
   ↓
-TB-G46 — UX Reliability & Accessibility — ACCEPTANCE CANDIDATE
+TB-G46 — UX Reliability & Accessibility — COMPLETE
   ↓
-TB-G46R — v0.4 Hardening & Release
+TB-G46R — v0.4 Hardening & Release — RELEASE CANDIDATE
 ```
 
-G46's feature-gated, self-driving real Windows Terminal fixture is passing. The
-remaining G46 gate is one hosted exact-head code CI on the settled candidate;
-the prior synthetic operating-system input mechanism is retired.
+G46's feature-gated, self-driving real Windows Terminal fixture and hosted
+exact-head CI passed before PR 41 merged. The prior synthetic operating-system
+input mechanism is retired.
 
 Detailed plan: [`../goals/TB-V04-HUMAN-INTERFACE-GUIDED-MANAGEMENT.md`](../goals/TB-V04-HUMAN-INTERFACE-GUIDED-MANAGEMENT.md).
 No new provider, launcher wrapper, PATH shadow, global daemon, or hook-trust

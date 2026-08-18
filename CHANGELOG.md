@@ -4,6 +4,29 @@ All notable changes to TabBeacon will be documented here.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-19
+
+### Added
+
+- Added a typed command-line surface with shell completions, human-first
+  `status` and `doctor` views, retained JSON contracts, and explicit legacy
+  `--plain` output for automation compatibility.
+- Added a unified read-only management projection and guided `setup --quick`
+  presets that preview one atomic typed change before the existing
+  ownership-aware Apply path.
+- Added the keyboard-only Control Center with Overview, Appearance, Codex
+  Integration, Diagnostics, and live Preview screens. Appearance edits remain
+  staged until Apply and can be reverted without touching user state.
+
+### Changed
+
+- Hardened full-screen terminal cleanup across normal exit, Ctrl+C, setup
+  errors, cleanup errors, and unwind paths; narrow terminals now render a
+  bounded minimum-size message and non-TTY use remains non-fullscreen.
+- Kept daily agent launch literally `codex`, retained manual Hook trust, and
+  added no provider, wrapper, PATH interception, daemon, self-update, session
+  control, or remote-control surface.
+
 ## [0.3.0] - 2026-08-18
 
 ### Changed

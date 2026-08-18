@@ -2,8 +2,8 @@
 
 ## Status
 
-ACCEPTANCE CANDIDATE after accepted G44. The bounded real Windows Terminal
-fixture passes; merge still requires the one final hosted exact-head code CI.
+COMPLETE after accepted G44. The bounded real Windows Terminal fixture and the
+final hosted exact-head code CI passed before PR 41 merged.
 
 ## Purpose
 
