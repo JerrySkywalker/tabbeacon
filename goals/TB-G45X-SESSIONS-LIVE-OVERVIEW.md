@@ -2,8 +2,10 @@
 
 ## Status
 
-PROMOTED / POST-v0.4 IMPLEMENTATION CANDIDATE. The released v0.4.0 source and
-tag remain unchanged; this goal uses only the bounded read-only CLI interface.
+COMPLETE POST-v0.4 in PR 43. Candidate
+`a77980fe6370d3768c764909af239ec6ec5dbd8a` passed focused privacy review and
+hosted exact-head CI before merge. The released v0.4.0 source and tag remain
+unchanged.
 
 ## Purpose
 
@@ -67,7 +69,7 @@ REMOTE_CONTROL=false
 
 Estimated optional effort: **4–7 h**.
 
-## Candidate outcome
+## Completed outcome
 
 `tabbeacon sessions` supports human, JSON, and plain output from the existing
 ephemeral worker lease store. It preserves one row per inspectable concurrent
@@ -75,3 +77,13 @@ lease, reports current leases as `recently_authorized` rather than claiming
 process liveness, represents expired leases as `stale_lease`, and counts invalid
 leases without echoing their contents. The inspection creates no root, lock,
 history, or mutation path.
+
+Exit gate:
+
+```text
+SESSIONS_VIEW=PASS
+READ_ONLY=true
+RAW_NATIVE_SESSION_IDS=false
+PROMPT_CONTENT=false
+REMOTE_CONTROL=false
+```
