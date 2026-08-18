@@ -29,6 +29,12 @@ pub enum Command {
     Setup {
         #[command(subcommand)]
         command: Option<SetupCommand>,
+        /// Visit only missing, stale, or action-required setup work.
+        #[arg(long, conflicts_with = "full")]
+        quick: bool,
+        /// Revisit the complete guided setup flow.
+        #[arg(long, conflicts_with = "quick")]
+        full: bool,
     },
     /// Diagnose the current installation.
     Doctor(DoctorArgs),
@@ -227,10 +233,24 @@ mod tests {
 
         let setup = Cli::try_parse_from(["tabbeacon", "setup", "codex"])
             .expect("direct Codex setup parses");
-        let Command::Setup { command } = setup.command.expect("setup command") else {
+        let Command::Setup { command, .. } = setup.command.expect("setup command") else {
             panic!("setup command is typed");
         };
         assert!(matches!(command, Some(SetupCommand::Codex)));
+
+        let quick = Cli::try_parse_from(["tabbeacon", "setup", "--quick"])
+            .expect("quick guided setup parses");
+        let Command::Setup {
+            command,
+            quick,
+            full,
+        } = quick.command.expect("quick setup command")
+        else {
+            panic!("quick setup is typed");
+        };
+        assert!(command.is_none());
+        assert!(quick);
+        assert!(!full);
     }
 
     #[test]

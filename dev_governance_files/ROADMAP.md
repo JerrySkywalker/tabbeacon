@@ -68,9 +68,9 @@ TB-G41 — Unified Management / Action Model — COMPLETE
   ↓
 TB-G42 — Human Status & Doctor v2 — COMPLETE
   ↓
-TB-G43 — Guided Setup v3 — NEXT
+TB-G43 — Guided Setup v3 — COMPLETE
   ↓
-TB-G44 — Interactive Control Center
+TB-G44 — Interactive Control Center — NEXT
   ↓
 TB-G46 — UX Reliability & Accessibility
   ↓

@@ -7,6 +7,7 @@ use std::{
 
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
+use dialoguer::Select;
 use tabbeacon::cli::{
     Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, OutputMode, PreviewArgs, Provider,
     SetupCommand, TitlePolicyCommand,
@@ -15,6 +16,7 @@ use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_title_probe,
     human_doctor_lines, human_status_lines,
 };
+use tabbeacon::guided_setup::{GuidedInput, choose_presentation};
 use tabbeacon::human_diagnostics::{
     human_doctor_lines as human_doctor_v2_lines, human_status_lines as human_status_v2_lines,
     terminal_width,
@@ -34,8 +36,8 @@ use tabbeacon::{
         WindowsTerminalRenderer,
     },
     settings::{
-        ActivityMode, PresentationSettings, PresentationSettingsStore, PresentationTheme,
-        SpinnerPreset, TabColorMode, TitleMode,
+        ActivityMode, PresentationSettings, PresentationSettingsSnapshot,
+        PresentationSettingsStore, PresentationTheme, SpinnerPreset, TabColorMode, TitleMode,
     },
     windows_terminal_policy::WindowsTerminalPolicyStore,
 };
@@ -108,9 +110,14 @@ fn dispatch(cli: Cli) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Some(Command::Setup { command: None }) => guided_setup(),
+        Some(Command::Setup {
+            command: None,
+            quick,
+            full,
+        }) => guided_setup(quick, full),
         Some(Command::Setup {
             command: Some(SetupCommand::Codex),
+            ..
         }) => setup_codex(),
         Some(Command::Doctor(DoctorArgs {
             output,
@@ -219,7 +226,7 @@ fn setup_codex() -> ExitCode {
     }
 }
 
-fn guided_setup() -> ExitCode {
+fn guided_setup(quick: bool, full: bool) -> ExitCode {
     if !is_interactive_terminal() {
         return interactive_terminal_required(
             "SETUP",
@@ -227,36 +234,33 @@ fn guided_setup() -> ExitCode {
             "run tabbeacon setup from an interactive terminal, or use tabbeacon config and tabbeacon setup codex",
         );
     }
-    let store = match settings_store() {
-        Ok(store) => store,
-        Err(error) => return management_error("SETUP", &error),
-    };
-    let snapshot = match store.snapshot_read_only() {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            eprintln!("SETUP=FAIL");
-            eprintln!("REASON={error}");
-            eprintln!("SETTINGS_UNCHANGED=true");
-            return ExitCode::FAILURE;
-        }
-    };
-    let before = snapshot.settings();
-    let integration = match CodexIntegration::from_environment() {
-        Ok(integration) => integration,
-        Err(error) => return management_error("SETUP", &error),
-    };
-    let discovery = match guided_setup_discovery(&integration) {
-        Ok(discovery) => discovery,
+    let (store, snapshot, integration, discovery) = match guided_setup_context() {
+        Ok(context) => context,
         Err(exit_code) => return exit_code,
     };
+    let before = snapshot.settings();
     print_setup_discovery(&discovery, before);
     print_setup_title_policy(&WindowsTerminalPolicyStore::from_environment().inspect());
 
-    let draft = match prompt_setup_draft(before) {
-        Ok(settings) => settings,
+    if print_guided_setup_intro(quick, full, &discovery) {
+        return ExitCode::SUCCESS;
+    }
+
+    let draft = match prompt_setup_draft_v3(before) {
+        Ok(Some(settings)) => settings,
+        Ok(None) => {
+            println!("SETUP=PASS");
+            println!("SETUP_RESULT=CANCELLED");
+            println!("SETTINGS_UNCHANGED=true");
+            println!("CODEX_CONFIG_UNCHANGED=true");
+            println!("HOOKS_UNCHANGED=true");
+            println!("OWNER_ACTION=none");
+            return ExitCode::SUCCESS;
+        }
         Err(error) => return setup_input_error(&error),
     };
     let plan = SetupPlan::new(before, discovery).with_draft(draft);
+    print_setup_change_plan(&plan);
     println!("Preview");
     let preview_exit = print_preview_result(plan.preview_settings());
     if preview_exit != ExitCode::SUCCESS {
@@ -267,7 +271,7 @@ fn guided_setup() -> ExitCode {
         eprintln!("HOOKS_UNCHANGED=true");
         return preview_exit;
     }
-    let decision = match prompt_setup_decision() {
+    let decision = match prompt_setup_decision_v3() {
         Ok(decision) => decision,
         Err(error) => return setup_input_error(&error),
     };
@@ -316,6 +320,50 @@ fn guided_setup() -> ExitCode {
             Err(error) => management_error("SETUP", &error),
         },
     }
+}
+
+fn print_guided_setup_intro(quick: bool, full: bool, discovery: &SetupDiscovery) -> bool {
+    if quick
+        && discovery.hooks() == tabbeacon::setup::HookSetupState::Current
+        && discovery.profile_supported()
+    {
+        println!("Nothing to do.");
+        println!("SETUP=PASS");
+        println!("SETUP_MODE=QUICK");
+        println!("OWNER_ACTION=none");
+        return true;
+    }
+    println!(
+        "Welcome — setup keeps prompts, assistant output, and provider session data out of configuration."
+    );
+    if full {
+        println!("Full setup — review the complete presentation flow.");
+    } else if quick {
+        println!("Quick setup — action-required sections only.");
+    }
+    false
+}
+
+fn guided_setup_context() -> Result<
+    (
+        PresentationSettingsStore,
+        PresentationSettingsSnapshot,
+        CodexIntegration,
+        SetupDiscovery,
+    ),
+    ExitCode,
+> {
+    let store = settings_store().map_err(|error| management_error("SETUP", &error))?;
+    let snapshot = store.snapshot_read_only().map_err(|error| {
+        eprintln!("SETUP=FAIL");
+        eprintln!("REASON={error}");
+        eprintln!("SETTINGS_UNCHANGED=true");
+        ExitCode::FAILURE
+    })?;
+    let integration =
+        CodexIntegration::from_environment().map_err(|error| management_error("SETUP", &error))?;
+    let discovery = guided_setup_discovery(&integration)?;
+    Ok((store, snapshot, integration, discovery))
 }
 
 fn guided_setup_discovery(integration: &CodexIntegration) -> Result<SetupDiscovery, ExitCode> {
@@ -708,48 +756,71 @@ fn print_setup_discovery(discovery: &SetupDiscovery, settings: PresentationSetti
     println!();
 }
 
-fn prompt_setup_draft(current: PresentationSettings) -> Result<PresentationSettings, String> {
-    println!("Presets: native | minimal | balanced | full | custom");
-    let preset = prompt_line("preset [custom]: ")?;
-    let base = match preset.trim() {
-        "" | "custom" => current,
-        name => PresentationSettings::preset(name)
-            .ok_or_else(|| "unsupported preset choice".to_owned())?,
-    };
-    println!("Title choices: tabbeacon | native | off");
-    let title = prompt_choice("title", base.title().as_str(), TitleMode::parse)?;
-    println!("Tab-color choices: tabbeacon | native | off");
-    let tab_color = prompt_choice("tab-color", base.tab_color().as_str(), TabColorMode::parse)?;
-    println!("Activity choices: title-spinner | title-indicator | wt-ring | both | native | off");
-    let activity = prompt_choice("activity", base.activity().as_str(), ActivityMode::parse)?;
-    println!("Spinner choices: codex | braille | quadrant | line | pulse");
-    let spinner = prompt_choice("spinner", base.spinner().as_str(), SpinnerPreset::parse)?;
-    println!("Theme choices: muted-dark | classic");
-    let theme = prompt_choice("theme", base.theme().as_str(), PresentationTheme::parse)?;
-    Ok(PresentationSettings::new(
-        title, tab_color, activity, spinner, theme,
-    ))
-}
-
-fn prompt_setup_decision() -> Result<SetupDecision, String> {
-    let decision = prompt_line("Decision [apply/cancel] (default cancel): ")?;
-    match decision.trim() {
-        "" | "cancel" => Ok(SetupDecision::Cancel),
-        "apply" => Ok(SetupDecision::Apply),
-        _ => Err("decision must be apply or cancel".to_owned()),
+fn print_setup_change_plan(plan: &SetupPlan) {
+    println!("Planned changes");
+    println!(
+        "  Title              {} -> {}",
+        plan.before().title(),
+        plan.draft().title()
+    );
+    println!(
+        "  Tab color          {} -> {}",
+        plan.before().tab_color(),
+        plan.draft().tab_color()
+    );
+    println!(
+        "  Activity           {} -> {}",
+        plan.before().activity(),
+        plan.draft().activity()
+    );
+    println!(
+        "  Spinner            {} -> {}",
+        plan.before().spinner(),
+        plan.draft().spinner()
+    );
+    println!(
+        "  Theme              {} -> {}",
+        plan.before().theme(),
+        plan.draft().theme()
+    );
+    println!("  Unchanged owned state: existing ownership checks remain in effect.");
+    println!(
+        "  TabBeacon will not touch unrelated Codex, Windows Terminal, or PowerShell settings."
+    );
+    if plan.discovery().hooks() == tabbeacon::setup::HookSetupState::ReviewRequired {
+        println!(
+            "  Manual follow-up: launch codex, open /hooks, and review TabBeacon definitions."
+        );
     }
 }
 
-fn prompt_line(prompt: &str) -> Result<String, String> {
-    print!("{prompt}");
-    io::stdout()
-        .flush()
-        .map_err(|_| "cannot write setup prompt".to_owned())?;
-    let mut line = String::new();
-    io::stdin()
-        .read_line(&mut line)
-        .map_err(|_| "cannot read setup response".to_owned())?;
-    Ok(line)
+struct DialoguerInput;
+
+impl GuidedInput for DialoguerInput {
+    fn select(&mut self, prompt: &str, items: &[&str], default: usize) -> Result<usize, String> {
+        Select::new()
+            .with_prompt(prompt)
+            .items(items)
+            .default(default)
+            .interact()
+            .map_err(|_| "guided setup selection was interrupted".to_owned())
+    }
+}
+
+fn prompt_setup_draft_v3(
+    current: PresentationSettings,
+) -> Result<Option<PresentationSettings>, String> {
+    let mut input = DialoguerInput;
+    choose_presentation(&mut input, current)
+}
+
+fn prompt_setup_decision_v3() -> Result<SetupDecision, String> {
+    let mut input = DialoguerInput;
+    match input.select("Apply staged setup", &["Apply", "Cancel"], 1)? {
+        0 => Ok(SetupDecision::Apply),
+        1 => Ok(SetupDecision::Cancel),
+        _ => Err("invalid setup decision".to_owned()),
+    }
 }
 
 fn setup_input_error(error: &str) -> ExitCode {
