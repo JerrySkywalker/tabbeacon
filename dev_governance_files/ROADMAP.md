@@ -66,9 +66,9 @@ TB-G40 — CLI Foundation & Output Contracts — COMPLETE
   ↓
 TB-G41 — Unified Management / Action Model — COMPLETE
   ↓
-TB-G42 — Human Status & Doctor v2 — NEXT
+TB-G42 — Human Status & Doctor v2 — COMPLETE
   ↓
-TB-G43 — Guided Setup v3
+TB-G43 — Guided Setup v3 — NEXT
   ↓
 TB-G44 — Interactive Control Center
   ↓

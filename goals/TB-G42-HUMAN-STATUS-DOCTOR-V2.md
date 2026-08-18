@@ -2,7 +2,9 @@
 
 ## Status
 
-PLANNED after accepted G41.
+COMPLETE. Default `status` and `doctor` render the shared management projection
+for humans, while `--json` and `--plain` retain their established contracts.
+`TB-G43` is next.
 
 ## Purpose
 
