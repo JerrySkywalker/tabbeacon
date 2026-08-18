@@ -55,6 +55,32 @@ sidecar all available.
 Pixel capture remains a latched runner-environment limitation, while exact-tab
 UIA title evidence continues to cover title admission and working-frame motion.
 
+## Active production sequence — v0.4 Human Interface & Guided Management
+
+The released v0.3 line remains the public baseline. v0.4 improves local human
+management while retaining the stock `codex` launch path, Codex Hooks, and
+automation-safe JSON/direct-command interfaces:
+
+```text
+TB-G40 — CLI Foundation & Output Contracts — COMPLETE
+  ↓
+TB-G41 — Unified Management / Action Model — NEXT
+  ↓
+TB-G42 — Human Status & Doctor v2
+  ↓
+TB-G43 — Guided Setup v3
+  ↓
+TB-G44 — Interactive Control Center
+  ↓
+TB-G46 — UX Reliability & Accessibility
+  ↓
+TB-G46R — v0.4 Hardening & Release
+```
+
+Detailed plan: [`../goals/TB-V04-HUMAN-INTERFACE-GUIDED-MANAGEMENT.md`](../goals/TB-V04-HUMAN-INTERFACE-GUIDED-MANAGEMENT.md).
+No new provider, launcher wrapper, PATH shadow, global daemon, or hook-trust
+bypass is admitted by this track.
+
 ## TB-B00 — Repository Bootstrap — COMPLETE
 
 **Purpose:** establish a public, governed Rust repository without implementing runtime product features.

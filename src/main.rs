@@ -1,10 +1,16 @@
 use std::{
-    io::{self, Read, Write},
+    io::{self, IsTerminal, Read, Write},
     process::ExitCode,
     thread,
     time::Duration,
 };
 
+use clap::{CommandFactory, Parser};
+use clap_complete::generate;
+use tabbeacon::cli::{
+    Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, OutputMode, PreviewArgs, Provider,
+    SetupCommand, TitlePolicyCommand,
+};
 use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_title_probe,
     human_doctor_lines, human_status_lines,
@@ -32,36 +38,55 @@ use tabbeacon::{
 const MAX_HOOK_INPUT_BYTES: u64 = 1024 * 1024;
 
 fn main() -> ExitCode {
-    let arguments = std::env::args().skip(1).collect::<Vec<_>>();
-    match arguments.as_slice() {
-        [command, key_digest, generation, revision] if command == "__activity-worker-v1" => {
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(error) => {
+            let exit_code = u8::try_from(error.exit_code()).unwrap_or(1);
+            let _ = error.print();
+            return ExitCode::from(exit_code);
+        }
+    };
+    dispatch(cli)
+}
+
+fn dispatch(cli: Cli) -> ExitCode {
+    match cli.command {
+        None => {
+            print_usage();
+            ExitCode::SUCCESS
+        }
+        Some(Command::ActivityWorker {
+            key_digest,
+            generation,
+            revision,
+        }) => {
             if let (Ok(generation), Ok(revision)) =
                 (generation.parse::<u64>(), revision.parse::<u64>())
             {
-                run_activity_worker_system(key_digest, generation, revision);
+                run_activity_worker_system(&key_digest, generation, revision);
             }
             ExitCode::SUCCESS
         }
-        [command, run_id, hold_millis] if command == "__title-probe-fixture-v1" => {
-            match hold_millis.parse::<u64>() {
-                Ok(hold_millis) => {
-                    match tabbeacon::visual::emit_title_authority_fixture(run_id, hold_millis) {
-                        Ok(()) => ExitCode::SUCCESS,
-                        Err(_) => ExitCode::FAILURE,
-                    }
+        Some(Command::TitleProbeFixture {
+            run_id,
+            hold_millis,
+        }) => match hold_millis.parse::<u64>() {
+            Ok(hold_millis) => {
+                match tabbeacon::visual::emit_title_authority_fixture(&run_id, hold_millis) {
+                    Ok(()) => ExitCode::SUCCESS,
+                    Err(_) => ExitCode::FAILURE,
                 }
-                Err(_) => ExitCode::FAILURE,
             }
-        }
-        [
-            command,
+            Err(_) => ExitCode::FAILURE,
+        },
+        Some(Command::ActivityCleanupObserver {
             worker_pid,
             key_digest,
             generation,
             revision,
             owner_sha256,
             expected_executable,
-        ] if command == "__activity-cleanup-observer-v1" => {
+        }) => {
             if let (Ok(worker_pid), Ok(generation), Ok(revision)) = (
                 worker_pid.parse::<u32>(),
                 generation.parse::<u64>(),
@@ -69,98 +94,56 @@ fn main() -> ExitCode {
             ) {
                 run_activity_cleanup_observer_system(
                     worker_pid,
-                    key_digest,
+                    &key_digest,
                     generation,
                     revision,
-                    owner_sha256,
-                    expected_executable,
+                    &owner_sha256,
+                    &expected_executable,
                 );
             }
             ExitCode::SUCCESS
         }
-        [command] if command == "setup" => guided_setup(),
-        [command, provider] if command == "setup" && provider == "codex" => setup_codex(),
-        [command] if command == "doctor" => doctor(false, false),
-        [command, option] if command == "doctor" && option == "--json" => doctor(true, false),
-        [command, option] if command == "doctor" && option == "--probe-title" => {
-            doctor(false, true)
-        }
-        [command, first, second]
-            if command == "doctor"
-                && ((first == "--json" && second == "--probe-title")
-                    || (first == "--probe-title" && second == "--json")) =>
-        {
-            doctor(true, true)
-        }
-        [command] if command == "status" => status(false),
-        [command, option] if command == "status" && option == "--json" => status(true),
-        [command, rest @ ..] if command == "title-policy" => title_policy_command(rest),
-        [command, rest @ ..] if command == "convergence" => convergence_command(rest),
-        [command, provider] if command == "uninstall" && provider == "codex" => uninstall_codex(),
-        [command, provider] if command == "hook" && provider == "codex" => run_codex_hook(),
-        [command, subcommand] if command == "config" && subcommand == "show" => config_show(),
-        [command, subcommand] if command == "config" && subcommand == "reset" => config_reset(),
-        [command, subcommand] if command == "config" && subcommand == "wizard" => config_wizard(),
-        [command, subcommand, preset] if command == "config" && subcommand == "preset" => {
-            config_preset(preset)
-        }
-        [command, subcommand, key, value] if command == "config" && subcommand == "set" => {
-            config_set(key, value)
-        }
-        [command, rest @ ..] if command == "preview" => preview(rest),
-        [] => {
-            print_usage();
-            ExitCode::SUCCESS
-        }
-        [help] if help == "--help" || help == "-h" => {
-            print_usage();
-            ExitCode::SUCCESS
-        }
-        [version] if version == "--version" || version == "-V" => {
-            println!("tabbeacon {}", env!("CARGO_PKG_VERSION"));
-            ExitCode::SUCCESS
-        }
-        _ => {
-            print_usage();
-            ExitCode::from(2)
-        }
+        Some(Command::Setup { command: None }) => guided_setup(),
+        Some(Command::Setup {
+            command: Some(SetupCommand::Codex),
+        }) => setup_codex(),
+        Some(Command::Doctor(DoctorArgs {
+            output,
+            probe_title,
+        })) => doctor(output.mode(), probe_title),
+        Some(Command::Status(output)) => status(output.mode()),
+        Some(Command::TitlePolicy { command }) => match command {
+            TitlePolicyCommand::Inspect(output) => title_policy_inspect(output.json),
+            TitlePolicyCommand::Repair(output) => title_policy_repair(output.json),
+            TitlePolicyCommand::Restore(output) => title_policy_restore(output.json),
+        },
+        Some(Command::Convergence { command }) => match command {
+            ConvergenceCommand::Matrix(output) => convergence_matrix(output.json),
+            ConvergenceCommand::Verify {
+                matrix,
+                expected_head,
+            } => convergence_verify(&matrix, &expected_head),
+        },
+        Some(Command::Uninstall {
+            provider: Provider::Codex,
+        }) => uninstall_codex(),
+        Some(Command::Hook {
+            provider: Provider::Codex,
+        }) => run_codex_hook(),
+        Some(Command::Config { command }) => match command {
+            ConfigCommand::Show => config_show(),
+            ConfigCommand::Set { key, value } => config_set(&key, &value),
+            ConfigCommand::Preset { name } => config_preset(&name),
+            ConfigCommand::Reset => config_reset(),
+            ConfigCommand::Wizard => config_wizard(),
+        },
+        Some(Command::Preview(arguments)) => preview(arguments),
+        Some(Command::Completions { shell }) => completions(shell),
+        Some(Command::Ui) => ui(),
     }
 }
 
-fn title_policy_command(arguments: &[String]) -> ExitCode {
-    let json = arguments
-        .get(1)
-        .is_some_and(|argument| argument == "--json");
-    match arguments.first().map(String::as_str) {
-        Some("inspect") if arguments.len() == 1 || (arguments.len() == 2 && json) => {
-            title_policy_inspect(json)
-        }
-        Some("repair") if arguments.len() == 1 || (arguments.len() == 2 && json) => {
-            title_policy_repair(json)
-        }
-        Some("restore") if arguments.len() == 1 || (arguments.len() == 2 && json) => {
-            title_policy_restore(json)
-        }
-        Some(_) | None => {
-            print_usage();
-            ExitCode::from(2)
-        }
-    }
-}
-
-fn convergence_command(arguments: &[String]) -> ExitCode {
-    if arguments.first().map(String::as_str) == Some("verify") {
-        return convergence_verify(&arguments[1..]);
-    }
-    let json = arguments
-        .get(1)
-        .is_some_and(|argument| argument == "--json");
-    if arguments.first().map(String::as_str) != Some("matrix")
-        || !(arguments.len() == 1 || (arguments.len() == 2 && json))
-    {
-        print_usage();
-        return ExitCode::from(2);
-    }
+fn convergence_matrix(json: bool) -> ExitCode {
     let matrix = tabbeacon::convergence::scenario_matrix();
     if json {
         return match serde_json::to_string(matrix) {
@@ -184,15 +167,7 @@ fn convergence_command(arguments: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn convergence_verify(arguments: &[String]) -> ExitCode {
-    let matrix_path = option_value(arguments, "--matrix");
-    let expected_head = option_value(arguments, "--expected-head");
-    if arguments.len() != 4 || matrix_path.is_none() || expected_head.is_none() {
-        print_usage();
-        return ExitCode::from(2);
-    }
-    let expected_head = expected_head.expect("checked above");
-    let path = std::path::Path::new(matrix_path.expect("checked above"));
+fn convergence_verify(path: &std::path::Path, expected_head: &str) -> ExitCode {
     let run = match tabbeacon::convergence_evidence::load_convergence_run(path) {
         Ok(run) => run,
         Err(code) => {
@@ -205,7 +180,7 @@ fn convergence_verify(arguments: &[String]) -> ExitCode {
         &run,
         tabbeacon::convergence::scenario_matrix(),
     );
-    if run.expected_head != *expected_head {
+    if run.expected_head != expected_head {
         verification.valid = false;
         verification
             .violations
@@ -224,13 +199,6 @@ fn convergence_verify(arguments: &[String]) -> ExitCode {
     }
 }
 
-fn option_value<'a>(arguments: &'a [String], flag: &str) -> Option<&'a String> {
-    arguments
-        .iter()
-        .position(|argument| argument == flag)
-        .and_then(|index| arguments.get(index + 1))
-}
-
 fn setup_codex() -> ExitCode {
     let settings = settings_store().map_or_else(
         |_| PresentationSettings::default(),
@@ -247,6 +215,13 @@ fn setup_codex() -> ExitCode {
 }
 
 fn guided_setup() -> ExitCode {
+    if !is_interactive_terminal() {
+        return interactive_terminal_required(
+            "SETUP",
+            "guided setup requires an interactive terminal",
+            "run tabbeacon setup from an interactive terminal, or use tabbeacon config and tabbeacon setup codex",
+        );
+    }
     let store = match settings_store() {
         Ok(store) => store,
         Err(error) => return management_error("SETUP", &error),
@@ -265,16 +240,10 @@ fn guided_setup() -> ExitCode {
         Ok(integration) => integration,
         Err(error) => return management_error("SETUP", &error),
     };
-    let binary_path = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(error) => return management_error("SETUP", &error),
+    let discovery = match guided_setup_discovery(&integration) {
+        Ok(discovery) => discovery,
+        Err(exit_code) => return exit_code,
     };
-    let discovery = SetupDiscovery::from_doctor(
-        env!("CARGO_PKG_VERSION"),
-        binary_path,
-        detect_windows_terminal(),
-        &integration.doctor(),
-    );
     print_setup_discovery(&discovery, before);
     print_setup_title_policy(&WindowsTerminalPolicyStore::from_environment().inspect());
 
@@ -344,6 +313,16 @@ fn guided_setup() -> ExitCode {
     }
 }
 
+fn guided_setup_discovery(integration: &CodexIntegration) -> Result<SetupDiscovery, ExitCode> {
+    let binary_path = std::env::current_exe().map_err(|error| management_error("SETUP", &error))?;
+    Ok(SetupDiscovery::from_doctor(
+        env!("CARGO_PKG_VERSION"),
+        binary_path,
+        detect_windows_terminal(),
+        &integration.doctor(),
+    ))
+}
+
 fn print_setup_outcome(outcome: SetupOutcome) -> ExitCode {
     println!("SETUP_IDEMPOTENCE=PASS");
     match outcome {
@@ -369,13 +348,13 @@ fn print_setup_outcome(outcome: SetupOutcome) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn doctor(json: bool, probe_title: bool) -> ExitCode {
+fn doctor(output_mode: OutputMode, probe_title: bool) -> ExitCode {
     let report = if probe_title {
         collect_operational_diagnostics_with_title_probe()
     } else {
         collect_operational_diagnostics()
     };
-    if json {
+    if output_mode == OutputMode::Json {
         return match serde_json::to_string(&report.doctor) {
             Ok(json) => {
                 println!("{json}");
@@ -398,9 +377,9 @@ fn doctor(json: bool, probe_title: bool) -> ExitCode {
     }
 }
 
-fn status(json: bool) -> ExitCode {
+fn status(output_mode: OutputMode) -> ExitCode {
     let report = collect_operational_diagnostics();
-    if json {
+    if output_mode == OutputMode::Json {
         return match serde_json::to_string(&report) {
             Ok(json) => {
                 println!("{json}");
@@ -639,6 +618,13 @@ fn config_preset(name: &str) -> ExitCode {
 }
 
 fn config_wizard() -> ExitCode {
+    if !is_interactive_terminal() {
+        return interactive_terminal_required(
+            "CONFIG",
+            "config wizard requires an interactive terminal",
+            "run tabbeacon config wizard from an interactive terminal, or use tabbeacon config set",
+        );
+    }
     let store = match settings_store() {
         Ok(store) => store,
         Err(error) => return management_error("CONFIG", &error),
@@ -843,35 +829,23 @@ fn wizard_error(error: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
-fn preview(arguments: &[String]) -> ExitCode {
+fn preview(arguments: PreviewArgs) -> ExitCode {
     let store = match settings_store() {
         Ok(store) => store,
         Err(error) => return management_error("PREVIEW", &error),
     };
     let mut settings = store.load_or_default();
-    let mut index = 0_usize;
-    while index < arguments.len() {
-        let Some(value) = arguments.get(index + 1) else {
-            eprintln!("PREVIEW=FAIL");
-            eprintln!("REASON=preview override needs a value");
-            return ExitCode::from(2);
+    if let Some(theme) = arguments.theme {
+        settings = match PresentationTheme::parse(&theme) {
+            Some(theme) => settings.with_theme(theme),
+            None => return preview_choice_error("theme"),
         };
-        match arguments[index].as_str() {
-            "--theme" => match PresentationTheme::parse(value) {
-                Some(theme) => settings = settings.with_theme(theme),
-                None => return preview_choice_error("theme"),
-            },
-            "--spinner" => match SpinnerPreset::parse(value) {
-                Some(spinner) => settings = settings.with_spinner(spinner),
-                None => return preview_choice_error("spinner"),
-            },
-            _ => {
-                eprintln!("PREVIEW=FAIL");
-                eprintln!("REASON=unsupported preview option");
-                return ExitCode::from(2);
-            }
-        }
-        index += 2;
+    }
+    if let Some(spinner) = arguments.spinner {
+        settings = match SpinnerPreset::parse(&spinner) {
+            Some(spinner) => settings.with_spinner(spinner),
+            None => return preview_choice_error("spinner"),
+        };
     }
     print_preview_result(settings)
 }
@@ -944,24 +918,43 @@ fn management_error(operation: &str, error: &dyn std::error::Error) -> ExitCode 
     ExitCode::FAILURE
 }
 
+/// Returns whether this process can safely offer an inline interactive flow.
+///
+/// G40 intentionally does not enter raw or alternate-screen terminal modes;
+/// later UI goals must keep this check as their admission boundary.
+fn is_interactive_terminal() -> bool {
+    io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+fn interactive_terminal_required(operation: &str, reason: &str, next_action: &str) -> ExitCode {
+    eprintln!("{operation}=BLOCKED");
+    eprintln!("REASON={reason}");
+    eprintln!("SETTINGS_UNCHANGED=true");
+    eprintln!("CODEX_CONFIG_UNCHANGED=true");
+    eprintln!("HOOKS_UNCHANGED=true");
+    eprintln!("NEXT_ACTION={next_action}");
+    ExitCode::from(2)
+}
+
+fn completions(shell: clap_complete::Shell) -> ExitCode {
+    let mut command = Cli::command();
+    generate(shell, &mut command, "tabbeacon", &mut io::stdout());
+    ExitCode::SUCCESS
+}
+
+fn ui() -> ExitCode {
+    if is_interactive_terminal() {
+        println!("TABBEACON_UI=NOT_YET_AVAILABLE");
+        println!("NEXT_ACTION=use tabbeacon status, tabbeacon doctor, or tabbeacon config");
+    } else {
+        println!("TABBEACON_UI=NON_INTERACTIVE");
+        println!("NEXT_ACTION=use tabbeacon status --json or tabbeacon config commands");
+    }
+    ExitCode::SUCCESS
+}
+
 fn print_usage() {
-    println!("TabBeacon {}", env!("CARGO_PKG_VERSION"));
-    println!("Usage:");
-    println!("  tabbeacon setup");
-    println!("  tabbeacon setup codex");
-    println!("  tabbeacon doctor");
-    println!("  tabbeacon doctor --json");
-    println!("  tabbeacon doctor --probe-title [--json]");
-    println!("  tabbeacon status");
-    println!("  tabbeacon status --json");
-    println!("  tabbeacon title-policy inspect [--json]");
-    println!("  tabbeacon title-policy repair [--json]");
-    println!("  tabbeacon title-policy restore [--json]");
-    println!("  tabbeacon convergence matrix [--json]");
-    println!("  tabbeacon convergence verify --matrix <path> --expected-head <sha>");
-    println!("  tabbeacon uninstall codex");
-    println!("  tabbeacon preview [--theme <muted-dark|classic>] [--spinner <preset>]");
-    println!("  tabbeacon config show|reset|wizard");
-    println!("  tabbeacon config set <title|tab-color|activity|spinner|theme> <value>");
-    println!("  tabbeacon config preset <native|minimal|balanced|full>");
+    let mut command = Cli::command();
+    let _ = command.print_help();
+    println!();
 }

@@ -43,6 +43,8 @@ required-features = ["visual-fixture"]
 
 [dependencies]
 atomic-write-file = "0.3.1"
+clap = { version = "4.5.60", features = ["derive"] }
+clap_complete = "4.5.66"
 png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
