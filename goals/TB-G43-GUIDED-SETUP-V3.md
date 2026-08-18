@@ -2,7 +2,8 @@
 
 ## Status
 
-PLANNED after accepted G42.
+COMPLETE. Inline guided selection, atomic presets, staged plan rendering, and
+quick/full entry points are accepted. `TB-G44` is next.
 
 ## Purpose
 

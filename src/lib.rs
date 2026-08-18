@@ -9,6 +9,7 @@ pub mod convergence;
 pub mod convergence_evidence;
 pub mod core;
 pub mod diagnostics;
+pub mod guided_setup;
 pub mod human_diagnostics;
 pub mod management;
 pub mod presentation;
