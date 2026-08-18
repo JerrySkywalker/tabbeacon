@@ -15,6 +15,11 @@ use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_title_probe,
     human_doctor_lines, human_status_lines,
 };
+use tabbeacon::human_diagnostics::{
+    human_doctor_lines as human_doctor_v2_lines, human_status_lines as human_status_v2_lines,
+    terminal_width,
+};
+use tabbeacon::management::ManagementSnapshot;
 use tabbeacon::providers::codex::{
     CodexHookRuntime, CodexIntegration, SetupOutcome, TitleOwnershipOutcome, UninstallOutcome,
 };
@@ -367,7 +372,13 @@ fn doctor(output_mode: OutputMode, probe_title: bool) -> ExitCode {
             Err(error) => management_error("DOCTOR", &error),
         };
     }
-    for line in human_doctor_lines(&report.doctor) {
+    let lines = if output_mode == OutputMode::Plain {
+        human_doctor_lines(&report.doctor)
+    } else {
+        let snapshot = ManagementSnapshot::from_diagnostics(&report);
+        human_doctor_v2_lines(&report.doctor, &snapshot, terminal_width())
+    };
+    for line in lines {
         println!("{line}");
     }
     if report.doctor.is_failure() {
@@ -388,7 +399,13 @@ fn status(output_mode: OutputMode) -> ExitCode {
             Err(error) => management_error("STATUS", &error),
         };
     }
-    for line in human_status_lines(&report) {
+    let lines = if output_mode == OutputMode::Plain {
+        human_status_lines(&report)
+    } else {
+        let snapshot = ManagementSnapshot::from_diagnostics(&report);
+        human_status_v2_lines(&report, &snapshot, terminal_width())
+    };
+    for line in lines {
         println!("{line}");
     }
     ExitCode::SUCCESS

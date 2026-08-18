@@ -382,13 +382,31 @@ fn doctor_json_and_human_output_share_failure_exit_semantics() {
     let human = run_cli(&root, &["doctor"], Some(&fake_codex), None);
     assert!(!human.status.success());
     let human = String::from_utf8(human.stdout).expect("human doctor output is UTF-8");
-    assert!(human.contains("DOCTOR=FAIL"));
+    assert!(human.contains("TabBeacon Doctor"));
+    assert!(human.contains("Next:"));
+    assert!(human.contains("TabBeacon did not change:"));
+    assert!(!human.contains("CHECK="));
+
+    let plain_doctor = run_cli(&root, &["doctor", "--plain"], Some(&fake_codex), None);
+    assert!(!plain_doctor.status.success());
+    let plain_doctor =
+        String::from_utf8(plain_doctor.stdout).expect("plain doctor output is UTF-8");
+    assert!(plain_doctor.contains("CHECK="));
+    assert!(plain_doctor.contains("DOCTOR=FAIL"));
 
     let status = run_cli(&root, &["status"], Some(&fake_codex), None);
     assert!(status.status.success());
     let status = String::from_utf8(status.stdout).expect("human status output is UTF-8");
-    assert!(status.contains("STATUS_SCHEMA_VERSION=1"));
-    assert!(status.contains("DOCTOR=FAIL"));
+    assert!(status.contains("TabBeacon Status"));
+    assert!(status.contains("Attention"));
+    assert!(!status.contains("STATUS_SCHEMA_VERSION="));
+
+    let plain_status = run_cli(&root, &["status", "--plain"], Some(&fake_codex), None);
+    assert!(plain_status.status.success());
+    let plain_status =
+        String::from_utf8(plain_status.stdout).expect("plain status output is UTF-8");
+    assert!(plain_status.contains("STATUS_SCHEMA_VERSION=1"));
+    assert!(plain_status.contains("DOCTOR=FAIL"));
 }
 
 #[test]
