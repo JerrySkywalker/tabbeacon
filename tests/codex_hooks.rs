@@ -2,15 +2,15 @@
 use std::os::windows::process::CommandExt;
 use std::{
     env, fs,
-    io::{self, Write},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Output, Stdio},
     sync::{
         Arc, Barrier,
         atomic::{AtomicU64, Ordering},
     },
     thread,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde_json::{Value, json};
@@ -53,6 +53,9 @@ const LEGACY_HOOK_EVENTS: [&str; 7] = [
     "Stop",
     "SessionEnd",
 ];
+
+#[cfg(windows)]
+const WINDOWS_HOOK_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
 
 struct TestRoot {
     path: PathBuf,
@@ -242,6 +245,121 @@ impl CodexWindowsHookShell {
 }
 
 #[cfg(windows)]
+enum HookStream {
+    Stdout(io::Result<Vec<u8>>),
+    Stderr(io::Result<Vec<u8>>),
+}
+
+#[cfg(windows)]
+fn terminate_windows_hook_tree(process_id: u32) {
+    let taskkill = env::var_os("SystemRoot").map_or_else(
+        || PathBuf::from("taskkill.exe"),
+        |root| PathBuf::from(root).join("System32").join("taskkill.exe"),
+    );
+    let _ = Command::new(taskkill)
+        .args(["/PID", &process_id.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(windows)]
+fn receive_hook_stream(
+    receiver: &std::sync::mpsc::Receiver<HookStream>,
+    deadline: Instant,
+    process_id: u32,
+    stage: &str,
+    stdout: &mut Option<Vec<u8>>,
+    stderr: &mut Option<Vec<u8>>,
+) {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let stream = receiver.recv_timeout(remaining).unwrap_or_else(|_| {
+        terminate_windows_hook_tree(process_id);
+        panic!("Windows hook stage {stage} left an output pipe open after its shell exited")
+    });
+    match stream {
+        HookStream::Stdout(Ok(bytes)) => *stdout = Some(bytes),
+        HookStream::Stderr(Ok(bytes)) => *stderr = Some(bytes),
+        HookStream::Stdout(Err(error)) | HookStream::Stderr(Err(error)) => {
+            terminate_windows_hook_tree(process_id);
+            panic!("Windows hook stage {stage} could not collect shell output: {error}");
+        }
+    }
+}
+
+#[cfg(windows)]
+fn write_and_wait_for_windows_hook(mut child: Child, input: &[u8], stage: &str) -> Output {
+    let process_id = child.id();
+    let mut stdin = child
+        .stdin
+        .take()
+        .expect("Codex-compatible hook shell exposes stdin");
+    stdin
+        .write_all(input)
+        .expect("Codex-compatible hook shell accepts stdin");
+    stdin
+        .flush()
+        .expect("Codex-compatible hook shell flushes stdin");
+    drop(stdin);
+
+    let mut stdout_pipe = child
+        .stdout
+        .take()
+        .expect("Codex-compatible hook shell exposes stdout");
+    let mut stderr_pipe = child
+        .stderr
+        .take()
+        .expect("Codex-compatible hook shell exposes stderr");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let stdout_sender = sender.clone();
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout_pipe.read_to_end(&mut bytes).map(|_| bytes);
+        let _ = stdout_sender.send(HookStream::Stdout(result));
+    });
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stderr_pipe.read_to_end(&mut bytes).map(|_| bytes);
+        let _ = sender.send(HookStream::Stderr(result));
+    });
+
+    let deadline = Instant::now() + WINDOWS_HOOK_STAGE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
+            Ok(None) => {
+                terminate_windows_hook_tree(process_id);
+                panic!("Windows hook stage {stage} exceeded {WINDOWS_HOOK_STAGE_TIMEOUT:?}");
+            }
+            Err(error) => {
+                terminate_windows_hook_tree(process_id);
+                panic!("Windows hook stage {stage} could not observe its shell: {error}");
+            }
+        }
+    };
+
+    let mut stdout = None;
+    let mut stderr = None;
+    while stdout.is_none() || stderr.is_none() {
+        receive_hook_stream(
+            &receiver,
+            deadline,
+            process_id,
+            stage,
+            &mut stdout,
+            &mut stderr,
+        );
+    }
+    Output {
+        status,
+        stdout: stdout.expect("stdout is collected"),
+        stderr: stderr.expect("stderr is collected"),
+    }
+}
+
+#[cfg(windows)]
 fn run_codex_windows_hook_with_shell(
     shell: CodexWindowsHookShell,
     command_line: &str,
@@ -287,16 +405,8 @@ fn run_codex_windows_hook_with_shell(
     } else if isolate_runtime_state {
         command.env_remove("LOCALAPPDATA");
     }
-    let mut child = command.spawn().expect("Codex-compatible hook shell starts");
-    child
-        .stdin
-        .take()
-        .expect("Codex-compatible hook shell exposes stdin")
-        .write_all(input)
-        .expect("Codex-compatible hook shell accepts stdin");
-    child
-        .wait_with_output()
-        .expect("Codex-compatible hook shell completes")
+    let child = command.spawn().expect("Codex-compatible hook shell starts");
+    write_and_wait_for_windows_hook(child, input, shell.label())
 }
 
 fn codex_event_key(event: &str) -> &'static str {
@@ -437,7 +547,7 @@ fn shell_independent_owned_handler_count(hooks: &Value) -> usize {
 
 #[cfg(windows)]
 fn assert_real_hook_direct(executable: &Path, payload: &[u8]) {
-    let mut child = Command::new(executable)
+    let child = Command::new(executable)
         .args(["hook", "codex"])
         .env_remove("LOCALAPPDATA")
         .stdin(Stdio::piped())
@@ -445,13 +555,7 @@ fn assert_real_hook_direct(executable: &Path, payload: &[u8]) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("real TabBeacon starts");
-    child
-        .stdin
-        .take()
-        .expect("real TabBeacon exposes stdin")
-        .write_all(payload)
-        .expect("real TabBeacon accepts stdin");
-    let output = child.wait_with_output().expect("real TabBeacon completes");
+    let output = write_and_wait_for_windows_hook(child, payload, "direct real hook");
     assert!(
         output.status.success(),
         "real direct hook failed: {}",
@@ -526,6 +630,58 @@ fn assert_real_hook_ingress(root: &TestRoot, command: &str) {
             }),
         "the real binary must receive Codex stdin and reach repository identity"
     );
+}
+
+#[cfg(windows)]
+fn real_windows_hook_command(root: &TestRoot) -> (PathBuf, String) {
+    let compiled_binary = PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon"));
+    assert!(
+        compiled_binary.is_file(),
+        "real TabBeacon binary is available"
+    );
+    let executable = root.child("real binary & quote'").join("tabbeacon.exe");
+    fs::create_dir_all(executable.parent().expect("hostile binary parent"))
+        .expect("hostile binary parent is created");
+    fs::copy(&compiled_binary, &executable)
+        .expect("real TabBeacon binary is copied to hostile path");
+    let integration = CodexIntegration::new(
+        root.child("codex-home"),
+        root.child("integration-state"),
+        &executable,
+    )
+    .with_codex_program(compile_codex_probe(root));
+    assert_eq!(
+        integration.setup().expect("setup succeeds"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    let hooks: Value =
+        serde_json::from_slice(&fs::read(root.child("codex-home/hooks.json")).expect("hooks read"))
+            .expect("hooks parse");
+    let handler = &hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0];
+    let command = handler["command"]
+        .as_str()
+        .expect("generated command is a string");
+    let command_windows = handler["commandWindows"]
+        .as_str()
+        .expect("generated Windows command is a string");
+    assert_eq!(command, command_windows);
+    assert!(command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand "));
+    assert!(
+        !command.contains(executable.to_str().expect("binary path is UTF-8")),
+        "the outer declaration must not expose shell-sensitive executable quoting"
+    );
+    (executable, command.to_owned())
+}
+
+#[cfg(windows)]
+fn capture_windows_hook_stage(
+    failures: &mut Vec<&'static str>,
+    stage: &'static str,
+    operation: impl FnOnce(),
+) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation)).is_err() {
+        failures.push(stage);
+    }
 }
 
 #[test]
@@ -2028,49 +2184,63 @@ fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
 #[test]
 fn generated_windows_command_runs_the_real_binary_in_the_codex_0_147_shell_model() {
     let root = TestRoot::new("real-command-windows");
-    let compiled_binary = PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon"));
-    assert!(
-        compiled_binary.is_file(),
-        "real TabBeacon binary is available"
-    );
-    let executable = root.child("real binary & quote'").join("tabbeacon.exe");
-    fs::create_dir_all(executable.parent().expect("hostile binary parent"))
-        .expect("hostile binary parent is created");
-    fs::copy(&compiled_binary, &executable)
-        .expect("real TabBeacon binary is copied to hostile path");
-    let integration = CodexIntegration::new(
-        root.child("codex-home"),
-        root.child("integration-state"),
-        &executable,
-    )
-    .with_codex_program(compile_codex_probe(&root));
-    assert_eq!(
-        integration.setup().expect("setup succeeds"),
-        SetupOutcome::InstalledTrustReviewRequired
-    );
-
-    let hooks: Value =
-        serde_json::from_slice(&fs::read(root.child("codex-home/hooks.json")).expect("hooks read"))
-            .expect("hooks parse");
-    let handler = &hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0];
-    let command = handler["command"]
-        .as_str()
-        .expect("generated command is a string");
-    let command_windows = handler["commandWindows"]
-        .as_str()
-        .expect("generated Windows command is a string");
-    assert_eq!(command, command_windows);
-    assert!(command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand "));
-    assert!(
-        !command.contains(executable.to_str().expect("binary path is UTF-8")),
-        "the outer declaration must not expose shell-sensitive executable quoting"
-    );
+    let (executable, command) = real_windows_hook_command(&root);
 
     let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "real-shell", &root.path))
         .expect("Codex-shaped payload serializes");
     assert_real_hook_direct(&executable, &payload);
-    assert_real_hook_shell_matrix(command, &payload);
-    assert_real_hook_ingress(&root, command);
+    assert_real_hook_shell_matrix(&command, &payload);
+    assert_real_hook_ingress(&root, &command);
+}
+
+#[cfg(windows)]
+#[test]
+fn real_windows_hook_shell_stages_are_independently_bounded() {
+    let root = TestRoot::new("real-command-stage-diagnostics");
+    let (executable, command) = real_windows_hook_command(&root);
+    let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "real-shell", &root.path))
+        .expect("Codex-shaped payload serializes");
+    let mut failures = Vec::new();
+    capture_windows_hook_stage(&mut failures, "direct", || {
+        assert_real_hook_direct(&executable, &payload);
+    });
+    for (stage, shell) in [
+        ("Pwsh7", CodexWindowsHookShell::Pwsh7),
+        (
+            "WindowsPowerShell",
+            CodexWindowsHookShell::WindowsPowerShell,
+        ),
+        ("Cmd", CodexWindowsHookShell::Cmd),
+        ("COMSPEC", CodexWindowsHookShell::ComspecFallback),
+    ] {
+        capture_windows_hook_stage(&mut failures, stage, || {
+            let output = run_codex_windows_hook_with_shell(shell, &command, &payload, true, None);
+            assert!(
+                output.status.success(),
+                "{} real hook shell failed: {}",
+                shell.label(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                output.stdout.is_empty(),
+                "{} wrote hook stdout",
+                shell.label()
+            );
+            assert!(
+                output.stderr.is_empty(),
+                "{} wrote hook stderr",
+                shell.label()
+            );
+        });
+    }
+    capture_windows_hook_stage(&mut failures, "Ingress", || {
+        assert_real_hook_ingress(&root, &command);
+    });
+    assert!(
+        failures.is_empty(),
+        "bounded real Windows hook stages failed: {}",
+        failures.join(", ")
+    );
 }
 
 #[cfg(windows)]
