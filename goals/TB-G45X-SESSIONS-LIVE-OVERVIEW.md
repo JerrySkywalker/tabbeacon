@@ -2,7 +2,8 @@
 
 ## Status
 
-OPTIONAL / EXPERIMENTAL / NON-BLOCKING for v0.4. May begin after accepted G41 and land before v0.4 only if scope remains bounded.
+PROMOTED / POST-v0.4 IMPLEMENTATION CANDIDATE. The released v0.4.0 source and
+tag remain unchanged; this goal uses only the bounded read-only CLI interface.
 
 ## Purpose
 
@@ -14,7 +15,8 @@ Expose read-only live TabBeacon runtime observability for users running many con
 tabbeacon sessions
 ```
 
-and/or a Control Center Sessions screen.
+The Control Center screen remains deferred; the CLI proves the complete bounded
+observability contract without adding a second presentation surface.
 
 ## Allowed data
 
@@ -64,3 +66,12 @@ REMOTE_CONTROL=false
 ```
 
 Estimated optional effort: **4–7 h**.
+
+## Candidate outcome
+
+`tabbeacon sessions` supports human, JSON, and plain output from the existing
+ephemeral worker lease store. It preserves one row per inspectable concurrent
+lease, reports current leases as `recently_authorized` rather than claiming
+process liveness, represents expired leases as `stale_lease`, and counts invalid
+leases without echoing their contents. The inspection creates no root, lock,
+history, or mutation path.

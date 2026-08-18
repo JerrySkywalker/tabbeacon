@@ -26,6 +26,7 @@ use crate::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleStatus,
         WindowsTerminalCapabilities, WindowsTerminalRenderer,
     },
+    repo::RepositoryAlias,
     settings::{
         ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
         TitleMode,
@@ -54,7 +55,8 @@ const MAX_DIAGNOSTIC_LEASE_FILES: usize = 512;
 const MAX_DIAGNOSTIC_LEASE_BYTES: u64 = 128 * 1_024;
 
 /// Safe health classification for a read-only activity-lease inspection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActivityLeaseHealth {
     /// The lease directory was read safely and contains no stale or invalid lease.
     Healthy,
@@ -88,6 +90,122 @@ pub struct ActivityLeaseDiagnostics {
     invalid_leases: usize,
 }
 
+/// Stable JSON schema version for the read-only sessions view.
+pub const SESSIONS_SCHEMA_VERSION: u32 = 1;
+
+/// Bounded recency classification derived from a lease update timestamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionRecency {
+    /// Updated no more than ten seconds ago.
+    JustNow,
+    /// Updated no more than five minutes ago.
+    Recent,
+    /// Updated more than five minutes ago.
+    Aging,
+}
+
+impl SessionRecency {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::JustNow => "just_now",
+            Self::Recent => "recent",
+            Self::Aging => "aging",
+        }
+    }
+}
+
+/// Truthful health of one lease-backed session observation.
+///
+/// A current lease is only recently authorized. This view deliberately does
+/// not probe an operating-system process and therefore never reports one as
+/// alive merely because its lease has not expired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionWorkerHealth {
+    /// The lease is valid, active, and has not expired.
+    RecentlyAuthorized,
+    /// The lease is valid and active but its bounded authorization expired.
+    StaleLease,
+}
+
+impl SessionWorkerHealth {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RecentlyAuthorized => "recently_authorized",
+            Self::StaleLease => "stale_lease",
+        }
+    }
+}
+
+/// One privacy-preserving row in the read-only sessions view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionOverview {
+    /// Safe repository alias; never the canonical workspace path or identity.
+    pub workspace_alias: String,
+    /// Provider-neutral presentation state already admitted to the worker.
+    pub semantic_state: String,
+    /// Whole seconds since the lease was last updated.
+    pub age_seconds: u64,
+    /// Bounded human-oriented recency classification.
+    pub recency: SessionRecency,
+    /// Lease-backed worker health without a process-liveness claim.
+    pub worker_health: SessionWorkerHealth,
+}
+
+/// Explicitly absent data and capabilities in the sessions interface.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionsBoundaries {
+    pub raw_native_session_ids: bool,
+    pub prompt_content: bool,
+    pub remote_control: bool,
+}
+
+/// Content-minimal read-only projection of all inspectable activity leases.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SessionsOverview {
+    pub schema_version: u32,
+    pub observation: &'static str,
+    pub health: ActivityLeaseHealth,
+    pub active_sessions: usize,
+    pub stale_sessions: usize,
+    pub invalid_leases: usize,
+    pub sessions: Vec<SessionOverview>,
+    pub read_only: bool,
+    pub boundaries: SessionsBoundaries,
+}
+
+impl SessionsOverview {
+    const fn empty(health: ActivityLeaseHealth) -> Self {
+        Self {
+            schema_version: SESSIONS_SCHEMA_VERSION,
+            observation: "ephemeral_lease_snapshot",
+            health,
+            active_sessions: 0,
+            stale_sessions: 0,
+            invalid_leases: 0,
+            sessions: Vec::new(),
+            read_only: true,
+            boundaries: SessionsBoundaries {
+                raw_native_session_ids: false,
+                prompt_content: false,
+                remote_control: false,
+            },
+        }
+    }
+
+    fn diagnostics(&self) -> ActivityLeaseDiagnostics {
+        ActivityLeaseDiagnostics {
+            health: self.health,
+            active_leases: self.active_sessions,
+            stale_leases: self.stale_sessions,
+            invalid_leases: self.invalid_leases,
+        }
+    }
+}
+
 impl ActivityLeaseDiagnostics {
     /// Overall read-only inspection health.
     #[must_use]
@@ -113,15 +231,6 @@ impl ActivityLeaseDiagnostics {
         self.invalid_leases
     }
 
-    const fn healthy() -> Self {
-        Self {
-            health: ActivityLeaseHealth::Healthy,
-            active_leases: 0,
-            stale_leases: 0,
-            invalid_leases: 0,
-        }
-    }
-
     const fn unavailable() -> Self {
         Self {
             health: ActivityLeaseHealth::Unavailable,
@@ -139,6 +248,17 @@ pub fn inspect_system_activity_leases() -> ActivityLeaseDiagnostics {
         return ActivityLeaseDiagnostics::unavailable();
     };
     inspect_activity_leases_read_only(&state_root, unix_ms())
+}
+
+/// Inspects current-user activity leases as privacy-preserving session rows.
+///
+/// The inspection opens no lock and creates or changes no state.
+#[must_use]
+pub fn inspect_system_sessions() -> SessionsOverview {
+    let Ok(state_root) = crate::repo::StableAliasRegistry::default_state_root() else {
+        return SessionsOverview::empty(ActivityLeaseHealth::Unavailable);
+    };
+    inspect_sessions_read_only(&state_root, unix_ms())
 }
 
 /// Minimal provider-neutral identity for one ephemeral worker generation.
@@ -1076,31 +1196,35 @@ impl ActivityLeaseStore {
 }
 
 fn inspect_activity_leases_read_only(state_root: &Path, now: u64) -> ActivityLeaseDiagnostics {
+    inspect_sessions_read_only(state_root, now).diagnostics()
+}
+
+fn inspect_sessions_read_only(state_root: &Path, now: u64) -> SessionsOverview {
     let directory = state_root.join(STATE_DIRECTORY);
     let metadata = match fs::symlink_metadata(&directory) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-            return ActivityLeaseDiagnostics::unavailable();
+            return SessionsOverview::empty(ActivityLeaseHealth::Unavailable);
         }
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return ActivityLeaseDiagnostics::healthy();
+            return SessionsOverview::empty(ActivityLeaseHealth::Healthy);
         }
-        Err(_) => return ActivityLeaseDiagnostics::unavailable(),
+        Err(_) => return SessionsOverview::empty(ActivityLeaseHealth::Unavailable),
     };
     if !metadata.is_dir() {
-        return ActivityLeaseDiagnostics::unavailable();
+        return SessionsOverview::empty(ActivityLeaseHealth::Unavailable);
     }
     let Ok(entries) = fs::read_dir(&directory) else {
-        return ActivityLeaseDiagnostics::unavailable();
+        return SessionsOverview::empty(ActivityLeaseHealth::Unavailable);
     };
-    let mut diagnostics = ActivityLeaseDiagnostics::healthy();
+    let mut overview = SessionsOverview::empty(ActivityLeaseHealth::Healthy);
     for (index, entry) in entries.enumerate() {
         if index >= MAX_DIAGNOSTIC_LEASE_FILES {
-            diagnostics.invalid_leases = diagnostics.invalid_leases.saturating_add(1);
+            overview.invalid_leases = overview.invalid_leases.saturating_add(1);
             break;
         }
         let Ok(entry) = entry else {
-            diagnostics.invalid_leases = diagnostics.invalid_leases.saturating_add(1);
+            overview.invalid_leases = overview.invalid_leases.saturating_add(1);
             continue;
         };
         let name = entry.file_name();
@@ -1122,7 +1246,7 @@ fn inspect_activity_leases_read_only(state_root: &Path, now: u64) -> ActivityLea
             || fs::metadata(&path)
                 .map_or(true, |metadata| metadata.len() > MAX_DIAGNOSTIC_LEASE_BYTES)
         {
-            diagnostics.invalid_leases = diagnostics.invalid_leases.saturating_add(1);
+            overview.invalid_leases = overview.invalid_leases.saturating_add(1);
             continue;
         }
         let lease = fs::read(&path)
@@ -1131,21 +1255,49 @@ fn inspect_activity_leases_read_only(state_root: &Path, now: u64) -> ActivityLea
         let Some(lease) =
             lease.filter(|lease| lease.key_sha256 == key_digest && validate_lease(lease).is_ok())
         else {
-            diagnostics.invalid_leases = diagnostics.invalid_leases.saturating_add(1);
+            overview.invalid_leases = overview.invalid_leases.saturating_add(1);
             continue;
         };
-        if lease.active {
-            if now > lease.expires_unix_ms {
-                diagnostics.stale_leases = diagnostics.stale_leases.saturating_add(1);
-            } else {
-                diagnostics.active_leases = diagnostics.active_leases.saturating_add(1);
-            }
+        if lease.updated_unix_ms > now {
+            overview.invalid_leases = overview.invalid_leases.saturating_add(1);
+            continue;
         }
+        let Some(presentation) = lease.presentation.filter(|_| lease.active) else {
+            continue;
+        };
+        let age_seconds = now.saturating_sub(lease.updated_unix_ms) / 1_000;
+        let recency = if age_seconds <= 10 {
+            SessionRecency::JustNow
+        } else if age_seconds <= 5 * 60 {
+            SessionRecency::Recent
+        } else {
+            SessionRecency::Aging
+        };
+        let worker_health = if now > lease.expires_unix_ms {
+            overview.stale_sessions = overview.stale_sessions.saturating_add(1);
+            SessionWorkerHealth::StaleLease
+        } else {
+            overview.active_sessions = overview.active_sessions.saturating_add(1);
+            SessionWorkerHealth::RecentlyAuthorized
+        };
+        overview.sessions.push(SessionOverview {
+            workspace_alias: presentation.workspace_alias,
+            semantic_state: presentation.semantic_state,
+            age_seconds,
+            recency,
+            worker_health,
+        });
     }
-    if diagnostics.stale_leases > 0 || diagnostics.invalid_leases > 0 {
-        diagnostics.health = ActivityLeaseHealth::Warning;
+    overview.sessions.sort_by(|left, right| {
+        left.workspace_alias
+            .cmp(&right.workspace_alias)
+            .then(left.semantic_state.cmp(&right.semantic_state))
+            .then(left.age_seconds.cmp(&right.age_seconds))
+    });
+    if overview.stale_sessions > 0 || overview.invalid_leases > 0 {
+        overview.health = ActivityLeaseHealth::Warning;
     }
-    diagnostics
+    overview
 }
 
 fn is_stale(generation: u64, event_sequence: u64, current: &WorkerLease) -> bool {
@@ -1159,8 +1311,7 @@ fn validate_lease(lease: &WorkerLease) -> io::Result<()> {
             presentation.semantic_state.as_str(),
             "working" | "result-ready" | "approval"
         ) && presentation.spinner().is_some()
-            && presentation.workspace_alias.chars().count() <= 80
-            && !presentation.workspace_alias.chars().any(char::is_control)
+            && RepositoryAlias::new(presentation.workspace_alias.clone()).is_ok()
     });
     if lease.schema != LEASE_SCHEMA
         || !is_sha256(&lease.key_sha256)
@@ -1172,6 +1323,8 @@ fn validate_lease(lease: &WorkerLease) -> io::Result<()> {
         || !is_sha256(&lease.terminal_binding_sha256)
         || !is_sha256(&lease.owner_sha256)
         || lease.active != lease.presentation.is_some()
+        || lease.updated_unix_ms > lease.expires_unix_ms
+        || lease.expires_unix_ms.saturating_sub(lease.updated_unix_ms) > LEASE_TTL_MS
         || !presentation_valid
     {
         return Err(io::Error::new(
@@ -1527,7 +1680,8 @@ mod tests {
         ActivityRender, CleanupObserverAction, LeaseTransition, STATIC_ATTENTION_LEASE_TTL_MS,
         TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation, WorkerProcessLiveness,
         cleanup_observer_action, command_output_with_timeout, inspect_activity_leases_read_only,
-        next_animation_frame_deadline, normalized_windows_path, system_powershell_path,
+        inspect_sessions_read_only, next_animation_frame_deadline, normalized_windows_path,
+        system_powershell_path,
     };
     use crate::{
         core::{Attention, Health, Phase},
@@ -1648,22 +1802,109 @@ mod tests {
             .load(active_key.digest())
             .expect("active fixture reads")
             .expect("active fixture exists");
-        active.expires_unix_ms = 2_000;
+        active.expires_unix_ms = 4_000;
         store.write(&active).expect("active fixture updates");
         let mut stale = store
             .load(stale_key.digest())
             .expect("stale fixture reads")
             .expect("stale fixture exists");
-        stale.expires_unix_ms = 999;
+        stale.expires_unix_ms = 2_000;
         store.write(&stale).expect("stale fixture updates");
         fs::write(store.lease_path(&digest('f')), b"not a lease").expect("invalid fixture writes");
 
-        let diagnostics = inspect_activity_leases_read_only(&root.0, 1_000);
+        let diagnostics = inspect_activity_leases_read_only(&root.0, 3_000);
 
         assert_eq!(diagnostics.health(), ActivityLeaseHealth::Warning);
         assert_eq!(diagnostics.active_leases(), 1);
         assert_eq!(diagnostics.stale_leases(), 1);
         assert_eq!(diagnostics.invalid_leases(), 1);
+    }
+
+    #[test]
+    fn sessions_view_preserves_concurrent_rows_and_exposes_only_safe_projection() {
+        let root = TestRoot::new("sessions-safe-projection");
+        let store = ActivityLeaseStore::new(&root.0);
+        let first_key = key(1, 'a', 'c');
+        let second_key = key(1, 'e', 'f');
+        let owner = digest('d');
+        store
+            .publish_active(
+                &first_key,
+                1,
+                &owner,
+                &WorkerPresentation::working("OWH", SpinnerPreset::Braille),
+                95_000,
+            )
+            .expect("first concurrent lease publishes");
+        store
+            .publish_active(
+                &second_key,
+                1,
+                &owner,
+                &WorkerPresentation::approval("OWH", SpinnerPreset::Braille),
+                40_000,
+            )
+            .expect("second concurrent lease publishes");
+        let mut stale = store
+            .load(second_key.digest())
+            .expect("second lease reads")
+            .expect("second lease exists");
+        stale.expires_unix_ms = 99_999;
+        store.write(&stale).expect("stale fixture updates");
+        let invalid_path = store.lease_path(&digest('9'));
+        fs::write(
+            &invalid_path,
+            br#"{"session_id":"session-secret","prompt":"prompt-secret"}"#,
+        )
+        .expect("private invalid fixture writes");
+
+        let first_before = fs::read(store.lease_path(first_key.digest())).expect("first snapshot");
+        let second_before =
+            fs::read(store.lease_path(second_key.digest())).expect("second snapshot");
+        let invalid_before = fs::read(&invalid_path).expect("invalid snapshot");
+        let overview = inspect_sessions_read_only(&root.0, 100_000);
+
+        assert_eq!(overview.active_sessions, 1);
+        assert_eq!(overview.stale_sessions, 1);
+        assert_eq!(overview.invalid_leases, 1);
+        assert_eq!(overview.sessions.len(), 2, "concurrent rows stay isolated");
+        assert_eq!(overview.sessions[0].workspace_alias, "OWH");
+        assert_ne!(
+            overview.sessions[0].semantic_state,
+            overview.sessions[1].semantic_state
+        );
+        assert!(overview.read_only);
+        assert!(!overview.boundaries.raw_native_session_ids);
+        assert!(!overview.boundaries.prompt_content);
+        assert!(!overview.boundaries.remote_control);
+
+        let serialized = serde_json::to_string(&overview).expect("sessions view serializes");
+        for forbidden in [
+            "session-secret",
+            "prompt-secret",
+            &digest('a'),
+            &digest('e'),
+            &digest('c'),
+            &digest('f'),
+            &owner,
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "sessions view leaked {forbidden}"
+            );
+        }
+        assert_eq!(
+            fs::read(store.lease_path(first_key.digest())).expect("first rereads"),
+            first_before
+        );
+        assert_eq!(
+            fs::read(store.lease_path(second_key.digest())).expect("second rereads"),
+            second_before
+        );
+        assert_eq!(
+            fs::read(&invalid_path).expect("invalid rereads"),
+            invalid_before
+        );
     }
 
     #[test]

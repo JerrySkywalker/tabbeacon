@@ -122,6 +122,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             probe_title,
         })) => doctor(output.mode(), probe_title),
         Some(Command::Status(output)) => status(output.mode()),
+        Some(Command::Sessions(output)) => sessions(output.mode()),
         Some(Command::TitlePolicy { command }) => match command {
             TitlePolicyCommand::Inspect(output) => title_policy_inspect(output.json),
             TitlePolicyCommand::Repair(output) => title_policy_repair(output.json),
@@ -453,6 +454,71 @@ fn status(output_mode: OutputMode) -> ExitCode {
     for line in lines {
         println!("{line}");
     }
+    ExitCode::SUCCESS
+}
+
+fn sessions(output_mode: OutputMode) -> ExitCode {
+    let report = tabbeacon::activity::inspect_system_sessions();
+    if output_mode == OutputMode::Json {
+        return match serde_json::to_string(&report) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => management_error("SESSIONS", &error),
+        };
+    }
+
+    if output_mode == OutputMode::Plain {
+        println!("SESSIONS_SCHEMA_VERSION={}", report.schema_version);
+        println!("SESSIONS_OBSERVATION={}", report.observation);
+        println!("SESSIONS_HEALTH={}", report.health.as_str());
+        println!("ACTIVE_SESSIONS={}", report.active_sessions);
+        println!("STALE_SESSIONS={}", report.stale_sessions);
+        println!("INVALID_LEASES={}", report.invalid_leases);
+        for (index, session) in report.sessions.iter().enumerate() {
+            let alias = serde_json::to_string(&session.workspace_alias)
+                .unwrap_or_else(|_| "\"unavailable\"".to_owned());
+            println!(
+                "SESSION={}|workspace_alias={}|semantic_state={}|age_seconds={}|recency={}|worker_health={}",
+                index + 1,
+                alias,
+                session.semantic_state,
+                session.age_seconds,
+                session.recency.as_str(),
+                session.worker_health.as_str(),
+            );
+        }
+        println!("SESSIONS_VIEW=PASS");
+        println!("READ_ONLY=true");
+        println!("RAW_NATIVE_SESSION_IDS=false");
+        println!("PROMPT_CONTENT=false");
+        println!("REMOTE_CONTROL=false");
+        return ExitCode::SUCCESS;
+    }
+
+    println!("Sessions");
+    println!(
+        "  {} current, {} stale, {} invalid lease{}",
+        report.active_sessions,
+        report.stale_sessions,
+        report.invalid_leases,
+        if report.invalid_leases == 1 { "" } else { "s" }
+    );
+    if report.sessions.is_empty() {
+        println!("  No inspectable session leases.");
+    } else {
+        for session in &report.sessions {
+            println!(
+                "  {} — {} — {}s — {}",
+                session.workspace_alias,
+                session.semantic_state,
+                session.age_seconds,
+                session.worker_health.as_str().replace('_', " "),
+            );
+        }
+    }
+    println!("  Lease-based observation only; no process or session control.");
     ExitCode::SUCCESS
 }
 

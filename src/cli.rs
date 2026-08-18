@@ -15,7 +15,7 @@ use clap_complete::Shell;
     name = "tabbeacon",
     version,
     about = "Live identity and status beacons for Codex CLI tabs in Windows Terminal.",
-    after_help = "Common commands:\n  tabbeacon setup codex\n  tabbeacon status --json\n  tabbeacon doctor --json\n  tabbeacon config show\n  tabbeacon completions powershell"
+    after_help = "Common commands:\n  tabbeacon setup codex\n  tabbeacon status --json\n  tabbeacon sessions --json\n  tabbeacon doctor --json\n  tabbeacon config show\n  tabbeacon completions powershell"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -40,6 +40,8 @@ pub enum Command {
     Doctor(DoctorArgs),
     /// Show the current operational state.
     Status(OutputArgs),
+    /// Show privacy-preserving, read-only live session observations.
+    Sessions(OutputArgs),
     /// Inspect or explicitly remediate Windows Terminal title ownership.
     #[command(name = "title-policy")]
     TitlePolicy {
@@ -223,6 +225,13 @@ mod tests {
         };
         assert_eq!(output.mode(), OutputMode::Plain);
 
+        let sessions =
+            Cli::try_parse_from(["tabbeacon", "sessions", "--json"]).expect("JSON sessions parses");
+        let Command::Sessions(output) = sessions.command.expect("sessions command") else {
+            panic!("sessions command is typed");
+        };
+        assert_eq!(output.mode(), OutputMode::Json);
+
         let doctor = Cli::try_parse_from(["tabbeacon", "doctor", "--json", "--probe-title"])
             .expect("doctor options parse in either declared order");
         let Command::Doctor(doctor) = doctor.command.expect("doctor command") else {
@@ -256,6 +265,7 @@ mod tests {
     #[test]
     fn rejects_ambiguous_output_and_requires_convergence_flags() {
         assert!(Cli::try_parse_from(["tabbeacon", "status", "--json", "--plain"]).is_err());
+        assert!(Cli::try_parse_from(["tabbeacon", "sessions", "--json", "--plain"]).is_err());
         assert!(Cli::try_parse_from(["tabbeacon", "convergence", "verify"]).is_err());
 
         let parsed = Cli::try_parse_from([
