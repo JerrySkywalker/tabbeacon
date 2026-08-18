@@ -3,7 +3,8 @@
 use std::{io, time::Duration};
 
 use crossterm::{
-    event::{self, Event, KeyCode},
+    cursor::Show,
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -91,6 +92,8 @@ impl AppearanceField {
 pub enum ControlCenterCommand {
     /// No persistent operation was requested.
     None,
+    /// End the interactive session without persisting a draft.
+    Quit,
     /// Persist one staged settings draft through the caller-owned operation.
     Apply {
         /// Current typed settings expected by the frontend.
@@ -180,6 +183,23 @@ impl ControlCenterApp {
             _ => {}
         }
         ControlCenterCommand::None
+    }
+
+    /// Applies a terminal key event, including the interrupt key path.
+    pub fn handle_event(&mut self, key: KeyEvent) -> ControlCenterCommand {
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if self.dirty {
+                self.confirm_discard = true;
+                return ControlCenterCommand::None;
+            }
+            return ControlCenterCommand::Quit;
+        }
+        let command = self.handle_key(key.code);
+        if key.code == KeyCode::Char('q') && !self.dirty && !self.confirm_discard {
+            ControlCenterCommand::Quit
+        } else {
+            command
+        }
     }
 
     /// Marks a successfully caller-owned persistence operation as accepted.
@@ -364,13 +384,14 @@ where
         }
         if let Event::Key(key) = event::read()? {
             let was_confirming = app.confirm_discard();
-            let command = app.handle_key(key.code);
-            if let ControlCenterCommand::Apply { before, after } = command {
-                apply(before, after)?;
-                app.apply_succeeded();
-            }
-            if key.code == KeyCode::Char('q') && !app.dirty() {
-                break;
+            let command = app.handle_event(key);
+            match command {
+                ControlCenterCommand::Apply { before, after } => {
+                    apply(before, after)?;
+                    app.apply_succeeded();
+                }
+                ControlCenterCommand::Quit => break,
+                ControlCenterCommand::None => {}
             }
             if was_confirming && key.code == KeyCode::Char('d') && !app.confirm_discard() {
                 break;
@@ -380,32 +401,22 @@ where
     session.restore()
 }
 
-/// Central owner of raw mode, alternate screen, drawing, and normal restoration.
+/// Central owner of raw mode, alternate screen, drawing, and restoration.
 struct TerminalSession {
     terminal: ratatui::Terminal<CrosstermBackend<io::Stdout>>,
-    restored: bool,
+    guard: TerminalGuard<CrosstermTerminalLifecycle>,
 }
 
 impl TerminalSession {
     fn enter() -> io::Result<Self> {
-        enable_raw_mode()?;
-        let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        let guard = TerminalGuard::enter(CrosstermTerminalLifecycle)?;
+        let stdout = io::stdout();
         let terminal = ratatui::Terminal::new(CrosstermBackend::new(stdout))?;
-        Ok(Self {
-            terminal,
-            restored: false,
-        })
+        Ok(Self { terminal, guard })
     }
 
     fn restore(&mut self) -> io::Result<()> {
-        if !self.restored {
-            disable_raw_mode()?;
-            execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
-            self.terminal.show_cursor()?;
-            self.restored = true;
-        }
-        Ok(())
+        self.guard.restore()
     }
 }
 
@@ -415,8 +426,114 @@ impl Drop for TerminalSession {
     }
 }
 
+/// The terminal-state operations that must have one owner and one cleanup path.
+trait TerminalLifecycle {
+    fn enable_raw_mode(&mut self) -> io::Result<()>;
+    fn disable_raw_mode(&mut self) -> io::Result<()>;
+    fn enter_alternate_screen(&mut self) -> io::Result<()>;
+    fn leave_alternate_screen(&mut self) -> io::Result<()>;
+    fn show_cursor(&mut self) -> io::Result<()>;
+}
+
+/// Concrete Windows-terminal lifecycle used only by the Control Center session.
+struct CrosstermTerminalLifecycle;
+
+impl TerminalLifecycle for CrosstermTerminalLifecycle {
+    fn enable_raw_mode(&mut self) -> io::Result<()> {
+        enable_raw_mode()
+    }
+
+    fn disable_raw_mode(&mut self) -> io::Result<()> {
+        disable_raw_mode()
+    }
+
+    fn enter_alternate_screen(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), EnterAlternateScreen)
+    }
+
+    fn leave_alternate_screen(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), LeaveAlternateScreen)
+    }
+
+    fn show_cursor(&mut self) -> io::Result<()> {
+        execute!(io::stdout(), Show)
+    }
+}
+
+/// RAII terminal-state guard that restores every entered state on all exit paths.
+struct TerminalGuard<L: TerminalLifecycle> {
+    lifecycle: L,
+    raw_mode_enabled: bool,
+    alternate_screen_entered: bool,
+    restored: bool,
+}
+
+impl<L: TerminalLifecycle> TerminalGuard<L> {
+    fn enter(lifecycle: L) -> io::Result<Self> {
+        let mut guard = Self {
+            lifecycle,
+            raw_mode_enabled: true,
+            alternate_screen_entered: false,
+            restored: false,
+        };
+        guard.lifecycle.enable_raw_mode()?;
+        // Mark before the command so a partially completed terminal write also
+        // receives a best-effort LeaveAlternateScreen during unwinding.
+        guard.alternate_screen_entered = true;
+        guard.lifecycle.enter_alternate_screen()?;
+        Ok(guard)
+    }
+
+    fn restore(&mut self) -> io::Result<()> {
+        if self.restored {
+            return Ok(());
+        }
+        let mut first_error: Option<io::Error> = None;
+        if self.alternate_screen_entered {
+            match self.lifecycle.leave_alternate_screen() {
+                Ok(()) => self.alternate_screen_entered = false,
+                Err(error) => first_error = Some(error),
+            }
+        }
+        if self.raw_mode_enabled {
+            match self.lifecycle.disable_raw_mode() {
+                Ok(()) => self.raw_mode_enabled = false,
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        match self.lifecycle.show_cursor() {
+            Err(error) if first_error.is_none() => first_error = Some(error),
+            Ok(()) | Err(_) => {}
+        }
+        self.restored =
+            !self.raw_mode_enabled && !self.alternate_screen_entered && first_error.is_none();
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
+impl<L: TerminalLifecycle> Drop for TerminalGuard<L> {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+const MIN_TERMINAL_WIDTH: u16 = 24;
+const MIN_TERMINAL_HEIGHT: u16 = 10;
+
 /// Renders all Control Center screens into the active Ratatui frame.
 pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
+    let area = frame.area();
+    if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Terminal too small\nMinimum size: {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}\nResize, then reopen TabBeacon Control Center."
+            ))
+            .block(Block::default().borders(Borders::ALL).title("TabBeacon")),
+            area,
+        );
+        return;
+    }
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -711,8 +828,61 @@ fn human_theme(value: crate::settings::PresentationTheme) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        cell::RefCell,
+        panic::{AssertUnwindSafe, catch_unwind},
+        rc::Rc,
+    };
+
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[derive(Clone)]
+    struct RecordingLifecycle {
+        calls: Rc<RefCell<Vec<&'static str>>>,
+        fail_once: Rc<RefCell<Option<&'static str>>>,
+    }
+
+    impl RecordingLifecycle {
+        fn new(fail_once: Option<&'static str>) -> Self {
+            Self {
+                calls: Rc::new(RefCell::new(Vec::new())),
+                fail_once: Rc::new(RefCell::new(fail_once)),
+            }
+        }
+
+        fn record(&mut self, operation: &'static str) -> io::Result<()> {
+            self.calls.borrow_mut().push(operation);
+            let mut failure = self.fail_once.borrow_mut();
+            if *failure == Some(operation) {
+                *failure = None;
+                return Err(io::Error::other(format!("{operation} failed")));
+            }
+            Ok(())
+        }
+    }
+
+    impl TerminalLifecycle for RecordingLifecycle {
+        fn enable_raw_mode(&mut self) -> io::Result<()> {
+            self.record("enable_raw")
+        }
+
+        fn disable_raw_mode(&mut self) -> io::Result<()> {
+            self.record("disable_raw")
+        }
+
+        fn enter_alternate_screen(&mut self) -> io::Result<()> {
+            self.record("enter_alternate")
+        }
+
+        fn leave_alternate_screen(&mut self) -> io::Result<()> {
+            self.record("leave_alternate")
+        }
+
+        fn show_cursor(&mut self) -> io::Result<()> {
+            self.record("show_cursor")
+        }
+    }
 
     fn app() -> ControlCenterApp {
         ControlCenterApp::new(
@@ -738,6 +908,29 @@ mod tests {
             }
             app.handle_key(KeyCode::Down);
         }
+    }
+
+    #[test]
+    fn buffer_renders_minimum_size_and_explains_below_minimum_size() {
+        let app = app();
+        let mut minimum = Terminal::new(TestBackend::new(MIN_TERMINAL_WIDTH, MIN_TERMINAL_HEIGHT))
+            .expect("minimum test terminal starts");
+        minimum
+            .draw(|frame| render(frame, &app))
+            .expect("minimum terminal renders");
+        assert!(format!("{:?}", minimum.backend().buffer()).contains("Overview"));
+
+        let mut below_minimum = Terminal::new(TestBackend::new(
+            MIN_TERMINAL_WIDTH - 1,
+            MIN_TERMINAL_HEIGHT - 1,
+        ))
+        .expect("below-minimum test terminal starts");
+        below_minimum
+            .draw(|frame| render(frame, &app))
+            .expect("below-minimum terminal renders");
+        let rendered = format!("{:?}", below_minimum.backend().buffer());
+        assert!(rendered.contains("Terminal too small"));
+        assert!(rendered.contains("Minimum size"));
     }
 
     #[test]
@@ -789,6 +982,130 @@ mod tests {
         app.handle_key(KeyCode::Char('q'));
         app.handle_key(KeyCode::Char('d'));
         assert!(!app.dirty());
+    }
+
+    #[test]
+    fn ctrl_c_quits_cleanly_or_requests_an_explicit_dirty_discard() {
+        let mut app = app();
+        assert_eq!(
+            app.handle_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            ControlCenterCommand::Quit
+        );
+
+        app.screen = Screen::Appearance;
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Right);
+        assert_eq!(
+            app.handle_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            ControlCenterCommand::None
+        );
+        assert!(app.confirm_discard());
+        assert!(app.dirty());
+    }
+
+    #[test]
+    fn terminal_guard_restores_every_terminal_state_on_normal_drop() {
+        let lifecycle = RecordingLifecycle::new(None);
+        let calls = Rc::clone(&lifecycle.calls);
+        {
+            let _guard = TerminalGuard::enter(lifecycle).expect("terminal enters");
+        }
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                "enable_raw",
+                "enter_alternate",
+                "leave_alternate",
+                "disable_raw",
+                "show_cursor",
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_guard_restores_partial_setup_and_unwind_paths() {
+        let setup_lifecycle = RecordingLifecycle::new(Some("enter_alternate"));
+        let setup_calls = Rc::clone(&setup_lifecycle.calls);
+        assert!(TerminalGuard::enter(setup_lifecycle).is_err());
+        assert_eq!(
+            setup_calls.borrow().as_slice(),
+            [
+                "enable_raw",
+                "enter_alternate",
+                "leave_alternate",
+                "disable_raw",
+                "show_cursor",
+            ]
+        );
+
+        let unwind_lifecycle = RecordingLifecycle::new(None);
+        let unwind_calls = Rc::clone(&unwind_lifecycle.calls);
+        let unwind = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = TerminalGuard::enter(unwind_lifecycle).expect("terminal enters");
+            panic!("controlled event-loop failure");
+        }));
+        assert!(unwind.is_err());
+        assert_eq!(
+            unwind_calls.borrow().as_slice(),
+            [
+                "enable_raw",
+                "enter_alternate",
+                "leave_alternate",
+                "disable_raw",
+                "show_cursor",
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_guard_attempts_all_cleanup_steps_after_a_cleanup_error() {
+        let lifecycle = RecordingLifecycle::new(Some("leave_alternate"));
+        let calls = Rc::clone(&lifecycle.calls);
+        let mut guard = TerminalGuard::enter(lifecycle).expect("terminal enters");
+        assert!(guard.restore().is_err());
+        assert_eq!(
+            &calls.borrow()[..5],
+            [
+                "enable_raw",
+                "enter_alternate",
+                "leave_alternate",
+                "disable_raw",
+                "show_cursor",
+            ]
+        );
+    }
+
+    #[test]
+    fn monochrome_text_keeps_health_and_manual_action_meaning() {
+        let action = crate::management::RecommendedAction {
+            id: "review-hooks".to_owned(),
+            title: "Review hooks".to_owned(),
+            instruction: "Launch codex and open /hooks.".to_owned(),
+            safety: ActionSafety::ManualAction,
+        };
+        let mut app = ControlCenterApp::new(
+            PresentationSettings::default(),
+            ManagementSnapshot {
+                health: ManagementHealth::Warning,
+                issues: vec![crate::management::HealthIssue {
+                    id: "hook-review".to_owned(),
+                    severity: crate::management::HealthSeverity::Warning,
+                    title: "Hook review required".to_owned(),
+                    explanation: "Trust remains manual.".to_owned(),
+                    remediation: Some(action),
+                }],
+                recommended_actions: Vec::new(),
+                change_plans: Vec::new(),
+            },
+            ManagementOverview::default(),
+        );
+        app.screen = Screen::Diagnostics;
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("test terminal starts");
+        terminal.draw(|frame| render(frame, &app)).expect("renders");
+        let rendered = format!("{:?}", terminal.backend().buffer());
+        assert!(rendered.contains("Attention"));
+        assert!(rendered.contains("Manual action"));
+        assert!(rendered.contains("Launch codex"));
     }
 
     #[test]
