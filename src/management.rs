@@ -104,6 +104,78 @@ pub struct ChangePlan {
     pub manual_follow_up: Vec<String>,
 }
 
+/// Bounded daily facts selected by the management layer for the Control Center.
+///
+/// This is intentionally a projection of already-safe diagnostics. It contains
+/// no configuration text, hook bodies, provider payloads, or session identity.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ManagementOverview {
+    /// Compiled `TabBeacon` version.
+    pub tabbeacon_version: String,
+    /// Detected Codex version or a bounded unavailable label.
+    pub codex_version: String,
+    /// Admitted Codex profile state.
+    pub codex_profile: String,
+    /// Bounded owned-hook declaration state.
+    pub hooks: String,
+    /// Human-readable trust state; trust itself remains manual.
+    pub hook_trust: String,
+    /// Existing title ownership diagnosis.
+    pub title_ownership: String,
+    /// Presentation settings source health.
+    pub settings_source: String,
+    /// Lease-based worker health.
+    pub worker_health: String,
+    /// Count of active safe worker leases.
+    pub active_workers: usize,
+    /// Count of stale safe worker leases.
+    pub stale_workers: usize,
+}
+
+impl ManagementOverview {
+    /// Produces the safe daily summary consumed by the Control Center.
+    #[must_use]
+    pub fn from_diagnostics(report: &OperationalDiagnostics) -> Self {
+        let hooks = report.integration.owned_hook_count.map_or_else(
+            || "Unavailable".to_owned(),
+            |count| format!("{count} managed"),
+        );
+        Self {
+            tabbeacon_version: report.tabbeacon.version.clone(),
+            codex_version: report
+                .codex
+                .version
+                .clone()
+                .unwrap_or_else(|| "Unavailable".to_owned()),
+            codex_profile: report.codex.profile_state.clone(),
+            hooks,
+            hook_trust: report.integration.hook_trust.as_str().to_owned(),
+            title_ownership: report.integration.title_ownership.as_str().to_owned(),
+            settings_source: report.presentation.source.as_str().to_owned(),
+            worker_health: report.activity.worker_state_health.clone(),
+            active_workers: report.activity.active_leases,
+            stale_workers: report.activity.stale_leases,
+        }
+    }
+}
+
+impl Default for ManagementOverview {
+    fn default() -> Self {
+        Self {
+            tabbeacon_version: "Unavailable".to_owned(),
+            codex_version: "Unavailable".to_owned(),
+            codex_profile: "unavailable".to_owned(),
+            hooks: "Unavailable".to_owned(),
+            hook_trust: "unavailable".to_owned(),
+            title_ownership: "unavailable".to_owned(),
+            settings_source: "unavailable".to_owned(),
+            worker_health: "unavailable".to_owned(),
+            active_workers: 0,
+            stale_workers: 0,
+        }
+    }
+}
+
 /// The one management projection consumed by human-facing frontends.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ManagementSnapshot {

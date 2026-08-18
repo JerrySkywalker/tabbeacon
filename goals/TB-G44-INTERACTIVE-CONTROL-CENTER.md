@@ -2,7 +2,11 @@
 
 ## Status
 
-PLANNED after accepted G43.
+COMPLETE. The bounded Ratatui/Crossterm frontend provides all five screens,
+staged Apply/Revert, live preview, dirty-quit confirmation, non-TTY guidance,
+and deterministic buffer coverage. The accepted code candidate passed hosted
+Windows exact-head CI; G46 is next for terminal-state hardening and smoke
+evidence.
 
 ## Purpose
 

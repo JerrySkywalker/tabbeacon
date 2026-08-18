@@ -58,10 +58,7 @@ fn main() -> ExitCode {
 
 fn dispatch(cli: Cli) -> ExitCode {
     match cli.command {
-        None => {
-            print_usage();
-            ExitCode::SUCCESS
-        }
+        None | Some(Command::Ui) => ui(),
         Some(Command::ActivityWorker {
             key_digest,
             generation,
@@ -151,7 +148,6 @@ fn dispatch(cli: Cli) -> ExitCode {
         },
         Some(Command::Preview(arguments)) => preview(arguments),
         Some(Command::Completions { shell }) => completions(shell),
-        Some(Command::Ui) => ui(),
     }
 }
 
@@ -832,14 +828,12 @@ fn setup_input_error(error: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
-fn persist_settings_change(
+fn apply_settings_change(
     store: &PresentationSettingsStore,
     before: PresentationSettings,
     after: PresentationSettings,
-) -> ExitCode {
-    if let Err(error) = store.save(after) {
-        return management_error("CONFIG", &error);
-    }
+) -> io::Result<TitleOwnershipOutcome> {
+    store.save(after).map_err(io::Error::other)?;
     let title_outcome = if before.title() == after.title() {
         TitleOwnershipOutcome::AlreadyConfigured
     } else {
@@ -849,9 +843,21 @@ fn persist_settings_change(
             Ok(outcome) => outcome,
             Err(error) => {
                 let _ = store.save(before);
-                return management_error("CONFIG", &error);
+                return Err(io::Error::other(error));
             }
         }
+    };
+    Ok(title_outcome)
+}
+
+fn persist_settings_change(
+    store: &PresentationSettingsStore,
+    before: PresentationSettings,
+    after: PresentationSettings,
+) -> ExitCode {
+    let title_outcome = match apply_settings_change(store, before, after) {
+        Ok(outcome) => outcome,
+        Err(error) => return management_error("CONFIG", &error),
     };
     println!("CONFIG=PASS");
     println!(
@@ -1031,18 +1037,51 @@ fn completions(shell: clap_complete::Shell) -> ExitCode {
 }
 
 fn ui() -> ExitCode {
-    if is_interactive_terminal() {
-        println!("TABBEACON_UI=NOT_YET_AVAILABLE");
-        println!("NEXT_ACTION=use tabbeacon status, tabbeacon doctor, or tabbeacon config");
-    } else {
+    if !is_interactive_terminal() {
         println!("TABBEACON_UI=NON_INTERACTIVE");
         println!("NEXT_ACTION=use tabbeacon status --json or tabbeacon config commands");
+        return ExitCode::SUCCESS;
     }
-    ExitCode::SUCCESS
+    let store = match settings_store() {
+        Ok(store) => store,
+        Err(error) => return management_error("UI", &error),
+    };
+    let settings = store.load_or_default();
+    let report = collect_operational_diagnostics();
+    let snapshot = ManagementSnapshot::from_diagnostics(&report);
+    let overview = tabbeacon::management::ManagementOverview::from_diagnostics(&report);
+    match tabbeacon::control_center::run(
+        tabbeacon::control_center::ControlCenterApp::new(settings, snapshot, overview),
+        |before, after| apply_settings_change(&store, before, after).map(|_| ()),
+    ) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => management_error("UI", &error),
+    }
 }
 
-fn print_usage() {
-    let mut command = Cli::command();
-    let _ = command.print_help();
-    println!();
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::*;
+
+    #[test]
+    fn control_center_apply_uses_the_existing_typed_settings_store() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tabbeacon-ui-apply-{unique}"));
+        let store = PresentationSettingsStore::new(root.join("config.toml"));
+        let before = PresentationSettings::default();
+        let after = before.with_theme(PresentationTheme::Classic);
+
+        apply_settings_change(&store, before, after).unwrap();
+
+        assert_eq!(store.load().unwrap(), after);
+        fs::remove_dir_all(root).unwrap();
+    }
 }
