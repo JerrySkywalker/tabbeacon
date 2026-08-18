@@ -95,6 +95,8 @@ scraping the human `doctor` output:
 ```powershell
 tabbeacon status
 tabbeacon status --json
+tabbeacon sessions
+tabbeacon sessions --json
 tabbeacon doctor
 tabbeacon doctor --json
 ```
@@ -106,6 +108,13 @@ registry identities, or an environment dump. `doctor --json` writes JSON only
 to stdout and keeps the normal doctor exit contract: a failure is nonzero while
 warning and pass are successful. `status --json` remains observational and
 successful even when its nested doctor verdict is a failure.
+
+Development builds after v0.4.0 add `sessions`, a read-only projection of
+ephemeral activity leases. Each row contains only a safe workspace alias,
+semantic state, age/recency, and lease-backed worker health. A current lease is
+reported as `recently_authorized`, not as proof that an operating-system process
+is alive. Raw session/turn identifiers, canonical workspace identity, content,
+credentials, process control, and session control are outside this interface.
 
 ### Rust library target
 
