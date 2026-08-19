@@ -124,6 +124,93 @@ fn output_modes_preserve_machine_json_and_admit_legacy_plain_output() {
 }
 
 #[test]
+fn config_defaults_to_human_monochrome_output_and_plain_retains_receipts() {
+    let root = TestRoot::new("human-config-output");
+
+    let human = isolated_command(&root)
+        .args(["config", "show"])
+        .output()
+        .expect("human config show starts");
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).expect("human config output is UTF-8");
+    assert!(human.contains("Presentation settings"));
+    assert!(!human.contains("CONFIG_PATH="));
+    assert!(!human.contains("TITLE_MODE="));
+    assert!(!human.contains("TITLE_SPINNER_FEASIBILITY="));
+    assert!(
+        !human.contains('\u{1b}'),
+        "redirected human output must not contain ANSI color"
+    );
+
+    let plain = isolated_command(&root)
+        .args(["config", "show", "--plain"])
+        .output()
+        .expect("plain config show starts");
+    assert!(plain.status.success());
+    let plain = String::from_utf8(plain.stdout).expect("plain config output is UTF-8");
+    assert!(plain.contains("CONFIG_PATH="));
+    assert!(plain.contains("TITLE_MODE="));
+    assert!(plain.contains("TITLE_SPINNER_FEASIBILITY=PRODUCTION"));
+    assert!(!plain.contains('\u{1b}'));
+}
+
+#[test]
+fn uninstall_defaults_to_human_output_and_preserves_plain_receipts() {
+    let root = TestRoot::new("human-uninstall-output");
+
+    let human = isolated_command(&root)
+        .args(["uninstall", "codex"])
+        .output()
+        .expect("human uninstall starts");
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).expect("human uninstall output is UTF-8");
+    assert!(human.contains("No owned Codex integration is installed."));
+    assert!(!human.contains("UNINSTALL_SAFETY="));
+    assert!(!human.contains("OWNER_ACTION="));
+
+    let plain = isolated_command(&root)
+        .args(["uninstall", "codex", "--plain"])
+        .output()
+        .expect("plain uninstall starts");
+    assert!(plain.status.success());
+    let plain = String::from_utf8(plain.stdout).expect("plain uninstall output is UTF-8");
+    assert!(plain.contains("UNINSTALL_SAFETY=PASS"));
+    assert!(plain.contains("CODEX_INTEGRATION=NOT_INSTALLED"));
+    assert!(plain.contains("OWNER_ACTION=none"));
+}
+
+#[test]
+fn setup_codex_defaults_to_human_output_and_plain_retains_receipts() {
+    let root = TestRoot::new("human-setup-output");
+
+    let human = isolated_command(&root)
+        .args(["setup", "codex"])
+        .output()
+        .expect("human setup codex starts");
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).expect("human setup output is UTF-8");
+    assert!(human.contains("Codex integration installed."));
+    assert!(!human.contains("SETUP_IDEMPOTENCE="));
+    assert!(!human.contains("CODEX_INTEGRATION="));
+    assert!(!human.contains("OWNER_ACTION="));
+    assert!(
+        !human.contains('\u{1b}'),
+        "redirected human output must not contain ANSI color"
+    );
+
+    let plain = isolated_command(&root)
+        .args(["setup", "codex", "--plain"])
+        .output()
+        .expect("plain setup codex starts");
+    assert!(plain.status.success());
+    let plain = String::from_utf8(plain.stdout).expect("plain setup output is UTF-8");
+    assert!(plain.contains("SETUP_IDEMPOTENCE=PASS"));
+    assert!(plain.contains("CODEX_INTEGRATION=ALREADY_INSTALLED"));
+    assert!(plain.contains("OWNER_ACTION=run tabbeacon doctor"));
+    assert!(!plain.contains('\u{1b}'));
+}
+
+#[test]
 fn invalid_arguments_keep_usage_exit_code_and_interactive_commands_refuse_pipes() {
     let root = TestRoot::new("non-tty");
 

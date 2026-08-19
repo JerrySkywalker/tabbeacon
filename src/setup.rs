@@ -5,7 +5,7 @@
 //! explicitly applies it, then delegates to the existing typed settings and
 //! ownership-aware integration primitives.
 
-use std::{env, path::PathBuf, process::Command};
+use std::{env, path::PathBuf};
 
 use crate::{
     providers::codex::{CodexDoctorReport, CodexHookProfile, DoctorStatus, SetupOutcome},
@@ -20,10 +20,8 @@ use crate::{
 pub enum WindowsTerminalState {
     /// The current process is inside a Windows Terminal session.
     CurrentSession,
-    /// Windows Terminal was found, but the current process is not inside it.
-    Detected,
-    /// No bounded Windows Terminal probe succeeded.
-    Unavailable,
+    /// Setup is not running inside a Windows Terminal session.
+    NotCurrentSession,
 }
 
 impl WindowsTerminalState {
@@ -32,8 +30,7 @@ impl WindowsTerminalState {
     pub const fn label(self) -> &'static str {
         match self {
             Self::CurrentSession => "detected (current session)",
-            Self::Detected => "detected",
-            Self::Unavailable => "unavailable",
+            Self::NotCurrentSession => "not current session",
         }
     }
 }
@@ -307,20 +304,14 @@ pub enum SetupApplyResult {
 #[must_use]
 pub fn detect_windows_terminal() -> WindowsTerminalState {
     let current_session = env::var_os("WT_SESSION").is_some_and(|value| !value.is_empty());
-    let detected = Command::new("wt.exe")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success());
-    windows_terminal_state(current_session, detected)
+    windows_terminal_state(current_session)
 }
 
-fn windows_terminal_state(current_session: bool, detected: bool) -> WindowsTerminalState {
+fn windows_terminal_state(current_session: bool) -> WindowsTerminalState {
     if current_session {
         WindowsTerminalState::CurrentSession
-    } else if detected {
-        WindowsTerminalState::Detected
     } else {
-        WindowsTerminalState::Unavailable
+        WindowsTerminalState::NotCurrentSession
     }
 }
 
@@ -701,18 +692,14 @@ theme = "muted-dark"
     }
 
     #[test]
-    fn terminal_detection_distinguishes_current_and_unavailable_contexts() {
+    fn terminal_detection_is_current_session_only_and_never_launches_wt() {
         assert_eq!(
-            windows_terminal_state(true, false),
+            windows_terminal_state(true),
             WindowsTerminalState::CurrentSession
         );
         assert_eq!(
-            windows_terminal_state(false, true),
-            WindowsTerminalState::Detected
-        );
-        assert_eq!(
-            windows_terminal_state(false, false),
-            WindowsTerminalState::Unavailable
+            windows_terminal_state(false),
+            WindowsTerminalState::NotCurrentSession
         );
     }
 }

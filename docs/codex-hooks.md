@@ -92,6 +92,12 @@ tabbeacon config reset
 `tabbeacon setup` is the recommended cohesive flow; the compact commands stay
 available for repeatable, scriptable changes.
 
+Default Setup, Config, and Uninstall output is concise Human-facing prose.
+Scripts that intentionally consume the legacy key/value receipts can request
+`--plain`, for example `tabbeacon config show --plain`. Human output uses
+restrained automatic color only on an interactive terminal; redirected output
+remains monochrome.
+
 Supported values are:
 
 | Setting | Values |

@@ -21,6 +21,7 @@ use tabbeacon::human_diagnostics::{
     human_doctor_lines as human_doctor_v2_lines, human_status_lines as human_status_v2_lines,
     terminal_width,
 };
+use tabbeacon::human_output::{HumanTone, auto_color_enabled, style};
 use tabbeacon::management::ManagementSnapshot;
 use tabbeacon::providers::codex::{
     CodexHookRuntime, CodexIntegration, SetupOutcome, TitleOwnershipOutcome, UninstallOutcome,
@@ -112,11 +113,13 @@ fn dispatch(cli: Cli) -> ExitCode {
             command: None,
             quick,
             full,
-        }) => guided_setup(quick, full),
+            output,
+        }) => guided_setup(quick, full, output.mode()),
         Some(Command::Setup {
             command: Some(SetupCommand::Codex),
+            output,
             ..
-        }) => setup_codex(),
+        }) => setup_codex(output.mode()),
         Some(Command::Doctor(DoctorArgs {
             output,
             probe_title,
@@ -137,16 +140,17 @@ fn dispatch(cli: Cli) -> ExitCode {
         },
         Some(Command::Uninstall {
             provider: Provider::Codex,
-        }) => uninstall_codex(),
+            output,
+        }) => uninstall_codex(output.mode()),
         Some(Command::Hook {
             provider: Provider::Codex,
         }) => run_codex_hook(),
-        Some(Command::Config { command }) => match command {
-            ConfigCommand::Show => config_show(),
-            ConfigCommand::Set { key, value } => config_set(&key, &value),
-            ConfigCommand::Preset { name } => config_preset(&name),
-            ConfigCommand::Reset => config_reset(),
-            ConfigCommand::Wizard => config_wizard(),
+        Some(Command::Config { command, output }) => match command {
+            ConfigCommand::Show => config_show(output.mode()),
+            ConfigCommand::Set { key, value } => config_set(&key, &value, output.mode()),
+            ConfigCommand::Preset { name } => config_preset(&name, output.mode()),
+            ConfigCommand::Reset => config_reset(output.mode()),
+            ConfigCommand::Wizard => config_wizard(output.mode()),
         },
         Some(Command::Preview(arguments)) => preview(arguments),
         Some(Command::Completions { shell }) => completions(shell),
@@ -209,7 +213,7 @@ fn convergence_verify(path: &std::path::Path, expected_head: &str) -> ExitCode {
     }
 }
 
-fn setup_codex() -> ExitCode {
+fn setup_codex(output_mode: OutputMode) -> ExitCode {
     let settings = settings_store().map_or_else(
         |_| PresentationSettings::default(),
         |store| store.load_or_default(),
@@ -219,12 +223,12 @@ fn setup_codex() -> ExitCode {
         Err(error) => return management_error("SETUP", &error),
     };
     match integration.setup_with_title_ownership(settings.title().owns_tabbeacon_title()) {
-        Ok(outcome) => print_setup_outcome(outcome),
+        Ok(outcome) => print_setup_outcome(outcome, output_mode),
         Err(error) => management_error("SETUP", &error),
     }
 }
 
-fn guided_setup(quick: bool, full: bool) -> ExitCode {
+fn guided_setup(quick: bool, full: bool, output_mode: OutputMode) -> ExitCode {
     if !is_interactive_terminal() {
         return interactive_terminal_required(
             "SETUP",
@@ -240,19 +244,14 @@ fn guided_setup(quick: bool, full: bool) -> ExitCode {
     print_setup_discovery(&discovery, before);
     print_setup_title_policy(&WindowsTerminalPolicyStore::from_environment().inspect());
 
-    if print_guided_setup_intro(quick, full, &discovery) {
+    if print_guided_setup_intro(quick, full, &discovery, output_mode) {
         return ExitCode::SUCCESS;
     }
 
     let draft = match prompt_setup_draft_v3(before) {
         Ok(Some(settings)) => settings,
         Ok(None) => {
-            println!("SETUP=PASS");
-            println!("SETUP_RESULT=CANCELLED");
-            println!("SETTINGS_UNCHANGED=true");
-            println!("CODEX_CONFIG_UNCHANGED=true");
-            println!("HOOKS_UNCHANGED=true");
-            println!("OWNER_ACTION=none");
+            print_setup_cancelled(output_mode);
             return ExitCode::SUCCESS;
         }
         Err(error) => return setup_input_error(&error),
@@ -276,12 +275,7 @@ fn guided_setup(quick: bool, full: bool) -> ExitCode {
     match decision {
         SetupDecision::Cancel => {
             let _ = plan.cancel();
-            println!("SETUP=PASS");
-            println!("SETUP_RESULT=CANCELLED");
-            println!("SETTINGS_UNCHANGED=true");
-            println!("CODEX_CONFIG_UNCHANGED=true");
-            println!("HOOKS_UNCHANGED=true");
-            println!("OWNER_ACTION=none");
+            print_setup_cancelled(output_mode);
             ExitCode::SUCCESS
         }
         SetupDecision::Apply => match plan.apply(&store, &snapshot, |owns_title| {
@@ -290,10 +284,8 @@ fn guided_setup(quick: bool, full: bool) -> ExitCode {
                 .map_err(|error| error.to_string())
         }) {
             Ok(SetupApplyResult::Applied(outcome)) => {
-                println!("SETUP=PASS");
-                println!("SETUP_RESULT=APPLIED");
-                print_settings(&store, plan.draft());
-                print_setup_outcome(outcome)
+                print_setup_applied(&store, plan.draft(), output_mode);
+                print_setup_outcome(outcome, output_mode)
             }
             Ok(SetupApplyResult::SettingsConflict) => {
                 eprintln!("SETUP=BLOCKED");
@@ -320,15 +312,24 @@ fn guided_setup(quick: bool, full: bool) -> ExitCode {
     }
 }
 
-fn print_guided_setup_intro(quick: bool, full: bool, discovery: &SetupDiscovery) -> bool {
+fn print_guided_setup_intro(
+    quick: bool,
+    full: bool,
+    discovery: &SetupDiscovery,
+    output_mode: OutputMode,
+) -> bool {
     if quick
         && discovery.hooks() == tabbeacon::setup::HookSetupState::Current
         && discovery.profile_supported()
     {
-        println!("Nothing to do.");
-        println!("SETUP=PASS");
-        println!("SETUP_MODE=QUICK");
-        println!("OWNER_ACTION=none");
+        if output_mode == OutputMode::Plain {
+            println!("SETUP=PASS");
+            println!("SETUP_MODE=QUICK");
+            println!("OWNER_ACTION=none");
+        } else {
+            print_human_tone(HumanTone::Success, "Setup is ready.");
+            println!("No changes are needed.");
+        }
         return true;
     }
     println!(
@@ -374,7 +375,37 @@ fn guided_setup_discovery(integration: &CodexIntegration) -> Result<SetupDiscove
     ))
 }
 
-fn print_setup_outcome(outcome: SetupOutcome) -> ExitCode {
+fn print_setup_outcome(outcome: SetupOutcome, output_mode: OutputMode) -> ExitCode {
+    if output_mode != OutputMode::Plain {
+        match outcome {
+            SetupOutcome::InstalledTrustReviewRequired => {
+                print_human_tone(HumanTone::Success, "Codex integration installed.");
+                print_human_tone(
+                    HumanTone::Dim,
+                    "Next: launch codex, review TabBeacon hooks in /hooks, then run tabbeacon doctor.",
+                );
+            }
+            SetupOutcome::Upgraded => {
+                print_human_tone(HumanTone::Success, "Codex integration upgraded.");
+                print_human_tone(
+                    HumanTone::Dim,
+                    "Next: launch codex, review the updated TabBeacon hooks in /hooks, then run tabbeacon doctor.",
+                );
+            }
+            SetupOutcome::AlreadyInstalled => {
+                print_human_tone(
+                    HumanTone::Success,
+                    "Codex integration is already installed.",
+                );
+                print_human_tone(
+                    HumanTone::Dim,
+                    "Next: run tabbeacon doctor to verify hook trust and configuration.",
+                );
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+
     println!("SETUP_IDEMPOTENCE=PASS");
     match outcome {
         SetupOutcome::InstalledTrustReviewRequired => {
@@ -424,8 +455,12 @@ fn doctor(output_mode: OutputMode, probe_title: bool) -> ExitCode {
         let snapshot = ManagementSnapshot::from_diagnostics(&report);
         human_doctor_v2_lines(&report.doctor, &snapshot, terminal_width())
     };
-    for line in lines {
-        println!("{line}");
+    if output_mode == OutputMode::Plain {
+        for line in lines {
+            println!("{line}");
+        }
+    } else {
+        print_human_lines(lines);
     }
     if report.doctor.is_failure() {
         ExitCode::FAILURE
@@ -451,8 +486,12 @@ fn status(output_mode: OutputMode) -> ExitCode {
         let snapshot = ManagementSnapshot::from_diagnostics(&report);
         human_status_v2_lines(&report, &snapshot, terminal_width())
     };
-    for line in lines {
-        println!("{line}");
+    if output_mode == OutputMode::Plain {
+        for line in lines {
+            println!("{line}");
+        }
+    } else {
+        print_human_lines(lines);
     }
     ExitCode::SUCCESS
 }
@@ -497,7 +536,7 @@ fn sessions(output_mode: OutputMode) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    println!("Sessions");
+    print_human_tone(HumanTone::Accent, "Sessions");
     println!(
         "  {} current, {} stale, {} invalid lease{}",
         report.active_sessions,
@@ -506,7 +545,7 @@ fn sessions(output_mode: OutputMode) -> ExitCode {
         if report.invalid_leases == 1 { "" } else { "s" }
     );
     if report.sessions.is_empty() {
-        println!("  No inspectable session leases.");
+        print_human_tone(HumanTone::Dim, "  No inspectable session leases.");
     } else {
         for session in &report.sessions {
             println!(
@@ -518,7 +557,10 @@ fn sessions(output_mode: OutputMode) -> ExitCode {
             );
         }
     }
-    println!("  Lease-based observation only; no process or session control.");
+    print_human_tone(
+        HumanTone::Dim,
+        "  Lease-based observation only; no process or session control.",
+    );
     ExitCode::SUCCESS
 }
 
@@ -628,22 +670,36 @@ fn print_setup_title_policy(policy: &tabbeacon::windows_terminal_policy::TitlePo
     println!();
 }
 
-fn uninstall_codex() -> ExitCode {
+fn uninstall_codex(output_mode: OutputMode) -> ExitCode {
     let integration = match CodexIntegration::from_environment() {
         Ok(integration) => integration,
         Err(error) => return management_error("UNINSTALL", &error),
     };
     match integration.uninstall() {
         Ok(UninstallOutcome::Removed) => {
-            println!("UNINSTALL_SAFETY=PASS");
-            println!("CODEX_INTEGRATION=REMOVED");
-            println!("OWNER_ACTION=none");
+            if output_mode == OutputMode::Plain {
+                println!("UNINSTALL_SAFETY=PASS");
+                println!("CODEX_INTEGRATION=REMOVED");
+                println!("OWNER_ACTION=none");
+            } else {
+                print_human_tone(
+                    HumanTone::Success,
+                    "TabBeacon removed its owned Codex integration.",
+                );
+            }
             ExitCode::SUCCESS
         }
         Ok(UninstallOutcome::NotInstalled) => {
-            println!("UNINSTALL_SAFETY=PASS");
-            println!("CODEX_INTEGRATION=NOT_INSTALLED");
-            println!("OWNER_ACTION=none");
+            if output_mode == OutputMode::Plain {
+                println!("UNINSTALL_SAFETY=PASS");
+                println!("CODEX_INTEGRATION=NOT_INSTALLED");
+                println!("OWNER_ACTION=none");
+            } else {
+                print_human_tone(
+                    HumanTone::Success,
+                    "No owned Codex integration is installed.",
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(error) => management_error("UNINSTALL", &error),
@@ -661,7 +717,7 @@ fn run_codex_hook() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn config_show() -> ExitCode {
+fn config_show(output_mode: OutputMode) -> ExitCode {
     let store = match settings_store() {
         Ok(store) => store,
         Err(error) => return management_error("CONFIG", &error),
@@ -674,11 +730,11 @@ fn config_show() -> ExitCode {
             PresentationSettings::default()
         }
     };
-    print_settings(&store, settings);
+    print_settings(&store, settings, output_mode);
     ExitCode::SUCCESS
 }
 
-fn config_set(key: &str, value: &str) -> ExitCode {
+fn config_set(key: &str, value: &str, output_mode: OutputMode) -> ExitCode {
     let store = match settings_store() {
         Ok(store) => store,
         Err(error) => return management_error("CONFIG", &error),
@@ -696,15 +752,14 @@ fn config_set(key: &str, value: &str) -> ExitCode {
         _ => None,
     };
     let Some(updated) = updated else {
-        eprintln!("CONFIG=FAIL");
-        eprintln!("REASON=unsupported config key or value");
-        print_config_choices(key);
+        print_config_failure(output_mode, "unsupported config key or value");
+        print_config_choices(key, output_mode);
         return ExitCode::from(2);
     };
-    persist_settings_change(&store, current, updated)
+    persist_settings_change(&store, current, updated, output_mode)
 }
 
-fn config_reset() -> ExitCode {
+fn config_reset(output_mode: OutputMode) -> ExitCode {
     let store = match settings_store() {
         Ok(store) => store,
         Err(error) => return management_error("CONFIG", &error),
@@ -718,16 +773,26 @@ fn config_reset() -> ExitCode {
         match CodexIntegration::from_environment()
             .and_then(|integration| integration.reconcile_title_ownership(true))
         {
-            Ok(outcome) => println!("CODEX_TITLE_OWNERSHIP={}", title_ownership_label(outcome)),
+            Ok(outcome) if output_mode == OutputMode::Plain => {
+                println!("CODEX_TITLE_OWNERSHIP={}", title_ownership_label(outcome));
+            }
+            Ok(_) => print_human_tone(HumanTone::Dim, "Title ownership was reconciled."),
             Err(error) => return management_error("CONFIG", &error),
         }
     }
-    println!("CONFIG=PASS");
-    print_settings(&store, defaults);
+    if output_mode == OutputMode::Plain {
+        println!("CONFIG=PASS");
+    } else {
+        print_human_tone(
+            HumanTone::Success,
+            "Presentation settings reset to defaults.",
+        );
+    }
+    print_settings(&store, defaults, output_mode);
     ExitCode::SUCCESS
 }
 
-fn config_preset(name: &str) -> ExitCode {
+fn config_preset(name: &str, output_mode: OutputMode) -> ExitCode {
     let store = match settings_store() {
         Ok(store) => store,
         Err(error) => return management_error("CONFIG", &error),
@@ -737,15 +802,18 @@ fn config_preset(name: &str) -> ExitCode {
         Err(error) => return management_error("CONFIG", &error),
     };
     let Some(preset) = PresentationSettings::preset(name) else {
-        eprintln!("CONFIG=FAIL");
-        eprintln!("REASON=unsupported preset");
-        eprintln!("PRESETS=native|minimal|balanced|full");
+        print_config_failure(output_mode, "unsupported preset");
+        if output_mode == OutputMode::Plain {
+            eprintln!("PRESETS=native|minimal|balanced|full");
+        } else {
+            eprintln!("Supported presets: native, minimal, balanced, full.");
+        }
         return ExitCode::from(2);
     };
-    persist_settings_change(&store, current, preset)
+    persist_settings_change(&store, current, preset, output_mode)
 }
 
-fn config_wizard() -> ExitCode {
+fn config_wizard(output_mode: OutputMode) -> ExitCode {
     if !is_interactive_terminal() {
         return interactive_terminal_required(
             "CONFIG",
@@ -758,7 +826,7 @@ fn config_wizard() -> ExitCode {
         Err(error) => return management_error("CONFIG", &error),
     };
     let current = store.load_or_default();
-    println!("TabBeacon v0.1 presentation wizard (press Enter to keep each current value).");
+    println!("TabBeacon presentation wizard (press Enter to keep each current value).");
     let title = match prompt_choice("title", current.title().as_str(), TitleMode::parse) {
         Ok(value) => value,
         Err(error) => return wizard_error(&error),
@@ -788,29 +856,34 @@ fn config_wizard() -> ExitCode {
         &store,
         current,
         PresentationSettings::new(title, tab_color, activity, spinner, theme),
+        output_mode,
     )
 }
 
 fn print_setup_discovery(discovery: &SetupDiscovery, settings: PresentationSettings) {
-    println!("TabBeacon Setup");
+    print_human_tone(HumanTone::Accent, "TabBeacon Setup");
     println!();
-    println!("Environment");
+    print_human_tone(HumanTone::Accent, "Environment");
     println!(
         "  Windows Terminal   {}",
         discovery.windows_terminal().label()
     );
     println!(
-        "  Codex              {} / profile={} / supported={}",
+        "  Codex              {} — {} ({})",
         discovery.codex_version().unwrap_or("unavailable"),
         discovery.hook_profile().unwrap_or("unknown"),
-        discovery.profile_supported(),
+        if discovery.profile_supported() {
+            "supported"
+        } else {
+            "not admitted"
+        },
     );
     println!("  TabBeacon          {}", discovery.tabbeacon_version());
     println!("  Binary             {}", discovery.binary_path().display());
     println!("  Hooks              {}", discovery.hooks().label());
     println!("  Doctor             {}", discovery.doctor_status());
     println!();
-    println!("Presentation");
+    print_human_tone(HumanTone::Accent, "Presentation");
     println!("  Title              {}", settings.title());
     println!("  Tab color          {}", settings.tab_color());
     println!("  Activity           {}", settings.activity());
@@ -820,7 +893,7 @@ fn print_setup_discovery(discovery: &SetupDiscovery, settings: PresentationSetti
 }
 
 fn print_setup_change_plan(plan: &SetupPlan) {
-    println!("Planned changes");
+    print_human_tone(HumanTone::Accent, "Planned changes");
     println!(
         "  Title              {} -> {}",
         plan.before().title(),
@@ -999,17 +1072,23 @@ fn persist_settings_change(
     store: &PresentationSettingsStore,
     before: PresentationSettings,
     after: PresentationSettings,
+    output_mode: OutputMode,
 ) -> ExitCode {
     let title_outcome = match apply_settings_change(store, before, after) {
         Ok(outcome) => outcome,
         Err(error) => return management_error("CONFIG", &error),
     };
-    println!("CONFIG=PASS");
-    println!(
-        "CODEX_TITLE_OWNERSHIP={}",
-        title_ownership_label(title_outcome)
-    );
-    print_settings(store, after);
+    if output_mode == OutputMode::Plain {
+        println!("CONFIG=PASS");
+        println!(
+            "CODEX_TITLE_OWNERSHIP={}",
+            title_ownership_label(title_outcome)
+        );
+    } else {
+        print_human_tone(HumanTone::Success, "Presentation settings updated.");
+        print_human_tone(HumanTone::Dim, "Title ownership was reconciled safely.");
+    }
+    print_settings(store, after, output_mode);
     ExitCode::SUCCESS
 }
 
@@ -1021,7 +1100,24 @@ fn title_ownership_label(outcome: TitleOwnershipOutcome) -> &'static str {
     }
 }
 
-fn print_settings(store: &PresentationSettingsStore, settings: PresentationSettings) {
+fn print_settings(
+    store: &PresentationSettingsStore,
+    settings: PresentationSettings,
+    output_mode: OutputMode,
+) {
+    if output_mode != OutputMode::Plain {
+        print_human_tone(HumanTone::Accent, "Presentation settings");
+        println!("  Title       {}", settings.title());
+        println!("  Tab color   {}", settings.tab_color());
+        println!("  Activity    {}", settings.activity());
+        println!("  Spinner     {}", settings.spinner());
+        println!("  Theme       {}", settings.theme());
+        print_human_tone(
+            HumanTone::Dim,
+            "Settings are stored only in your user-local TabBeacon state.",
+        );
+        return;
+    }
     println!("CONFIG_PATH={}", store.path().display());
     println!("TITLE_MODE={}", settings.title());
     println!("TAB_COLOR_MODE={}", settings.tab_color());
@@ -1031,7 +1127,11 @@ fn print_settings(store: &PresentationSettingsStore, settings: PresentationSetti
     println!("TITLE_SPINNER_FEASIBILITY=PRODUCTION");
 }
 
-fn print_config_choices(key: &str) {
+fn print_config_choices(key: &str, output_mode: OutputMode) {
+    if output_mode != OutputMode::Plain {
+        eprintln!("Use tabbeacon config show for the current settings and supported values.");
+        return;
+    }
     match key {
         "title" => eprintln!("TITLE_CHOICES=tabbeacon|native|off"),
         "tab-color" => eprintln!("TAB_COLOR_CHOICES=tabbeacon|native|off"),
@@ -1041,6 +1141,74 @@ fn print_config_choices(key: &str) {
         "spinner" => eprintln!("SPINNER_CHOICES=codex|braille|quadrant|line|pulse"),
         "theme" => eprintln!("THEME_CHOICES=muted-dark|classic"),
         _ => {}
+    }
+}
+
+fn print_config_failure(output_mode: OutputMode, reason: &str) {
+    if output_mode == OutputMode::Plain {
+        eprintln!("CONFIG=FAIL");
+        eprintln!("REASON={reason}");
+    } else {
+        eprintln!("Configuration could not be updated: {reason}.");
+    }
+}
+
+fn print_setup_cancelled(output_mode: OutputMode) {
+    if output_mode == OutputMode::Plain {
+        println!("SETUP=PASS");
+        println!("SETUP_RESULT=CANCELLED");
+        println!("SETTINGS_UNCHANGED=true");
+        println!("CODEX_CONFIG_UNCHANGED=true");
+        println!("HOOKS_UNCHANGED=true");
+        println!("OWNER_ACTION=none");
+    } else {
+        print_human_tone(HumanTone::Attention, "Setup cancelled.");
+        println!("No settings, Codex configuration, or hooks were changed.");
+    }
+}
+
+fn print_setup_applied(
+    store: &PresentationSettingsStore,
+    settings: PresentationSettings,
+    output_mode: OutputMode,
+) {
+    if output_mode == OutputMode::Plain {
+        println!("SETUP=PASS");
+        println!("SETUP_RESULT=APPLIED");
+    } else {
+        print_human_tone(HumanTone::Success, "Setup changes applied.");
+    }
+    print_settings(store, settings, output_mode);
+}
+
+fn print_human_tone(tone: HumanTone, line: impl AsRef<str>) {
+    let color_enabled = auto_color_enabled(
+        io::stdout().is_terminal(),
+        std::env::var_os("NO_COLOR").is_some(),
+    );
+    println!("{}", style(tone, line.as_ref(), color_enabled));
+}
+
+fn print_human_lines(lines: impl IntoIterator<Item = String>) {
+    for line in lines {
+        let trimmed = line.trim_start();
+        let tone = if trimmed.starts_with("TabBeacon ") || trimmed == "Sessions" {
+            HumanTone::Accent
+        } else if trimmed.starts_with("OK ") || trimmed.starts_with("No action required") {
+            HumanTone::Success
+        } else if trimmed.starts_with("X ") {
+            HumanTone::Failure
+        } else if trimmed.starts_with('!') || trimmed == "Attention" {
+            HumanTone::Attention
+        } else if trimmed.starts_with("Why:")
+            || trimmed.starts_with("Next:")
+            || trimmed.starts_with("Lease-based observation")
+        {
+            HumanTone::Dim
+        } else {
+            HumanTone::Plain
+        };
+        print_human_tone(tone, line);
     }
 }
 
@@ -1143,7 +1311,7 @@ fn render_preview(settings: PresentationSettings) -> Result<(), &'static str> {
 fn preview_choice_error(key: &str) -> ExitCode {
     eprintln!("PREVIEW=FAIL");
     eprintln!("REASON=unsupported {key} override");
-    print_config_choices(key);
+    print_config_choices(key, OutputMode::Plain);
     ExitCode::from(2)
 }
 

@@ -4,7 +4,7 @@ use std::{io, time::Duration};
 
 use crossterm::{
     cursor::Show,
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -187,6 +187,9 @@ impl ControlCenterApp {
 
     /// Applies a terminal key event, including the interrupt key path.
     pub fn handle_event(&mut self, key: KeyEvent) -> ControlCenterCommand {
+        if key.kind != KeyEventKind::Press {
+            return ControlCenterCommand::None;
+        }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if self.dirty {
                 self.confirm_discard = true;
@@ -1095,6 +1098,52 @@ mod tests {
         );
         assert!(app.confirm_discard());
         assert!(app.dirty());
+    }
+
+    #[test]
+    fn navigation_and_value_changes_are_edge_triggered() {
+        let mut app = app();
+        assert_eq!(
+            app.handle_event(KeyEvent::new_with_kind(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+                KeyEventKind::Press,
+            )),
+            ControlCenterCommand::None
+        );
+        assert_eq!(app.screen(), Screen::Appearance);
+
+        for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+            let _ = app.handle_event(KeyEvent::new_with_kind(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+                kind,
+            ));
+        }
+        assert_eq!(app.screen(), Screen::Appearance);
+
+        let _ = app.handle_event(KeyEvent::new_with_kind(
+            KeyCode::Enter,
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        ));
+        let before = app.draft();
+        let _ = app.handle_event(KeyEvent::new_with_kind(
+            KeyCode::Right,
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        ));
+        let changed = app.draft();
+        assert_ne!(changed, before);
+
+        for kind in [KeyEventKind::Repeat, KeyEventKind::Release] {
+            let _ = app.handle_event(KeyEvent::new_with_kind(
+                KeyCode::Right,
+                KeyModifiers::NONE,
+                kind,
+            ));
+        }
+        assert_eq!(app.draft(), changed);
     }
 
     #[test]
