@@ -4,6 +4,7 @@
 //! no provider, agent-session, presentation, terminal, or network dependency.
 
 mod abbreviation;
+mod adaptive_naming;
 mod discovery;
 mod error;
 mod identity;
@@ -11,6 +12,10 @@ mod registry;
 mod workspace;
 
 pub use abbreviation::{AbbreviationPolicy, RepositoryAlias};
+pub use adaptive_naming::{
+    ADAPTIVE_NAMING_POLICY_ID, AdaptiveNamingPolicy, AliasCandidate, AliasStrategy, NameAnalysis,
+    NameStyleHint, ScoreComponents,
+};
 pub use discovery::{DiscoveredRepository, RepositoryDiscovery, RepositoryRemote};
 pub use error::RepositoryIdentityError;
 pub use identity::{
