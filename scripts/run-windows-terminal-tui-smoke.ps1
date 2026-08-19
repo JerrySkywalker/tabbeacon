@@ -9,7 +9,7 @@ param(
     [string]$ExpectedHead,
     [Parameter(Mandatory = $true)]
     [string]$EvidenceDirectory,
-    [string]$RunId = 'TB-G46-REAL-WT-SMOKE',
+    [string]$RunId = 'TB-G51-REAL-WT-SMOKE',
     [ValidateRange(10, 120)]
     [int]$TimeoutSeconds = 60
 )
@@ -33,10 +33,11 @@ $wtCommand = Get-Command wt.exe -CommandType Application -ErrorAction Stop |
 New-Item -ItemType Directory -Path $EvidenceDirectory -Force | Out-Null
 $resolvedEvidence = (Resolve-Path -LiteralPath $EvidenceDirectory).Path
 $token = [Guid]::NewGuid().ToString('N')
-$windowTitle = "TabBeacon-G46-$token"
+$windowTitle = "TabBeacon-G51-$token"
 $sentinelPath = Join-Path $resolvedEvidence "sentinel-$token.txt"
 $processReceiptPath = Join-Path $resolvedEvidence "child-$token.pid"
-$receiptPath = Join-Path $resolvedEvidence 'g46-real-wt-smoke.txt'
+$fixtureResultPath = Join-Path $resolvedEvidence "fixture-$token.txt"
+$receiptPath = Join-Path $resolvedEvidence 'g51-real-wt-smoke.txt'
 
 Add-Type -TypeDefinition @'
 using System;
@@ -132,6 +133,7 @@ $arguments = @(
     '-BinaryPath', $resolvedBinary,
     '-SentinelPath', $sentinelPath,
     '-ProcessReceiptPath', $processReceiptPath,
+    '-FixtureResultPath', $fixtureResultPath,
     '-RunId', $RunId
 )
 
@@ -214,9 +216,19 @@ if ($sentinelObserved) {
     $shellUsable = $sentinel -contains 'SHELL_USABLE_AFTER_TUI=true'
 }
 
+$localeSwitched = $false
+$interfaceReverted = $false
+$interfaceApplyStaged = $false
+if (Test-Path -LiteralPath $fixtureResultPath) {
+    $fixtureResult = Get-Content -LiteralPath $fixtureResultPath
+    $localeSwitched = $fixtureResult -contains 'TUI_LANGUAGE_LIVE_SWITCH=true'
+    $interfaceReverted = $fixtureResult -contains 'TUI_INTERFACE_REVERT=true'
+    $interfaceApplyStaged = $fixtureResult -contains 'TUI_INTERFACE_STAGED_APPLY=true'
+}
+
 $passed = $windowObserved -and $windowOwnerBound -and $windowChildLineageBound -and
     $windowCompleted -and $childCompleted -and $sentinelObserved -and $shellUsable -and
-    $fixtureExitCode -eq 0
+    $fixtureExitCode -eq 0 -and $localeSwitched -and $interfaceReverted -and $interfaceApplyStaged
 $receipt = @(
     "RUN_ID=$RunId"
     "EXPECTED_HEAD=$ExpectedHead"
@@ -229,7 +241,11 @@ $receipt = @(
     "CHILD_PROCESS_COMPLETED=$($childCompleted.ToString().ToLowerInvariant())"
     "SENTINEL_OBSERVED=$($sentinelObserved.ToString().ToLowerInvariant())"
     "FIXTURE_EXIT_CODE=$fixtureExitCode"
+    "TUI_LANGUAGE_LIVE_SWITCH=$($localeSwitched.ToString().ToLowerInvariant())"
+    "TUI_INTERFACE_REVERT=$($interfaceReverted.ToString().ToLowerInvariant())"
+    "TUI_INTERFACE_STAGED_APPLY=$($interfaceApplyStaged.ToString().ToLowerInvariant())"
     "WINDOWS_TERMINAL_TUI_SMOKE=$(if ($passed) { 'PASS' } else { 'FAIL' })"
+    "WINDOWS_TERMINAL_SMOKE=$(if ($passed) { 'PASS' } else { 'FAIL' })"
     "TUI_EXIT_RESTORES_TERMINAL=$($passed.ToString().ToLowerInvariant())"
     "SHELL_USABLE_AFTER_TUI=$($shellUsable.ToString().ToLowerInvariant())"
     'OWNER_MUTATIONS=none'

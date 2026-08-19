@@ -9,32 +9,35 @@ use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use dialoguer::Select;
 use tabbeacon::cli::{
-    Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, InterfaceCommand,
+    Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, HumanOutputArgs, InterfaceCommand,
     InterfacePreferenceKey, OutputMode, PreviewArgs, Provider, SetupCommand, TitlePolicyCommand,
 };
 use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_title_probe,
     human_doctor_lines, human_status_lines,
 };
-use tabbeacon::guided_setup::{GuidedInput, choose_presentation};
+use tabbeacon::guided_setup::{GuidedInput, choose_interface_preferences, choose_presentation};
 use tabbeacon::human_diagnostics::{render_human_doctor, render_human_status, terminal_width};
 use tabbeacon::human_output::{HumanTone, style};
 use tabbeacon::human_presentation::{
     HumanAction, HumanDocument, HumanField, HumanLine, HumanMessage, HumanMessageKey,
-    HumanRenderer, HumanSection, HumanText, ResolvedLocale, color_enabled, resolve_runtime_locale,
+    HumanRenderer, HumanSection, HumanText, ResolvedLocale, color_enabled, render_human_text,
+    resolve_runtime_locale,
 };
 use tabbeacon::management::ManagementSnapshot;
 use tabbeacon::providers::codex::{
     CodexHookRuntime, CodexIntegration, SetupOutcome, TitleOwnershipOutcome, UninstallOutcome,
 };
 use tabbeacon::setup::{
-    SetupApplyResult, SetupDecision, SetupDiscovery, SetupPlan, detect_windows_terminal,
+    GuidedSetupApplyResult, GuidedSetupPlan, SetupDecision, SetupDiscovery, WindowsTerminalState,
+    detect_windows_terminal,
 };
 use tabbeacon::{
     activity::{run_activity_cleanup_observer_system, run_activity_worker_system},
     core::{Attention, Health, Phase},
     interface_preferences::{
         HumanColor, InterfaceLanguage, InterfacePreferences,
+        InterfacePreferencesConditionalOutcome, InterfacePreferencesSnapshot,
         InterfacePreferencesSnapshotSaveOutcome, InterfacePreferencesStore,
     },
     presentation::{
@@ -119,7 +122,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             quick,
             full,
             output,
-        }) => guided_setup(quick, full, output.mode()),
+        }) => guided_setup(quick, full, output),
         Some(Command::Setup {
             command: Some(SetupCommand::Codex),
             output,
@@ -130,7 +133,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             probe_title,
         })) => doctor(output.mode(), probe_title, output.language.preference()),
         Some(Command::Status(output)) => status(output.mode(), output.language.preference()),
-        Some(Command::Sessions(output)) => sessions(output.mode()),
+        Some(Command::Sessions(output)) => sessions(output.mode(), output.language.preference()),
         Some(Command::TitlePolicy { command }) => match command {
             TitlePolicyCommand::Inspect(output) => title_policy_inspect(output.json),
             TitlePolicyCommand::Repair(output) => title_policy_repair(output.json),
@@ -150,7 +153,9 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Hook {
             provider: Provider::Codex,
         }) => run_codex_hook(),
-        Some(Command::Config { command, output }) => config_command(command, output.mode()),
+        Some(Command::Config { command, output }) => {
+            config_command(command, output.mode(), output.language.preference())
+        }
         Some(Command::Interface { command, output }) => {
             interface_command(command, output.mode(), output.language.preference())
         }
@@ -159,13 +164,17 @@ fn dispatch(cli: Cli) -> ExitCode {
     }
 }
 
-fn config_command(command: ConfigCommand, output_mode: OutputMode) -> ExitCode {
+fn config_command(
+    command: ConfigCommand,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
     match command {
-        ConfigCommand::Show => config_show(output_mode),
-        ConfigCommand::Set { key, value } => config_set(&key, &value, output_mode),
-        ConfigCommand::Preset { name } => config_preset(&name, output_mode),
-        ConfigCommand::Reset => config_reset(output_mode),
-        ConfigCommand::Wizard => config_wizard(output_mode),
+        ConfigCommand::Show => config_show(output_mode, language),
+        ConfigCommand::Set { key, value } => config_set(&key, &value, output_mode, language),
+        ConfigCommand::Preset { name } => config_preset(&name, output_mode, language),
+        ConfigCommand::Reset => config_reset(output_mode, language),
+        ConfigCommand::Wizard => config_wizard(output_mode, language),
     }
 }
 
@@ -243,77 +252,132 @@ fn setup_codex(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> 
     );
     let integration = match CodexIntegration::from_environment() {
         Ok(integration) => integration,
-        Err(error) => return setup_management_error(&error, output_mode),
+        Err(error) => return setup_management_error(&error, output_mode, language),
     };
     match integration.setup_with_title_ownership(settings.title().owns_tabbeacon_title()) {
         Ok(outcome) => print_setup_outcome(outcome, output_mode, language),
-        Err(error) => setup_management_error(&error, output_mode),
+        Err(error) => setup_management_error(&error, output_mode, language),
     }
 }
 
-fn guided_setup(quick: bool, full: bool, output_mode: OutputMode) -> ExitCode {
+#[allow(clippy::too_many_lines)] // Coordinates the intentionally linear interactive setup flow.
+fn guided_setup(quick: bool, full: bool, output: HumanOutputArgs) -> ExitCode {
+    let output_mode = output.mode();
+    let cli_language = output.language.preference();
     if !is_interactive_terminal() {
         return interactive_terminal_required(
             "SETUP",
             "guided setup requires an interactive terminal",
             "run tabbeacon setup from an interactive terminal, or use tabbeacon config and tabbeacon setup codex",
             output_mode,
+            cli_language,
         );
     }
-    let (store, snapshot, integration, discovery) = match guided_setup_context(output_mode) {
-        Ok(context) => context,
-        Err(exit_code) => return exit_code,
-    };
+    let (store, snapshot, interface_store, interface_snapshot, integration, discovery) =
+        match guided_setup_context(output_mode, cli_language) {
+            Ok(context) => context,
+            Err(exit_code) => return exit_code,
+        };
     let before = snapshot.settings();
-    print_setup_discovery(&discovery, before);
-    print_setup_title_policy(&WindowsTerminalPolicyStore::from_environment().inspect());
+    let interface_before = interface_snapshot.preferences();
+    let revisit_interface = should_revisit_interface_preferences(
+        quick,
+        full,
+        snapshot.is_absent(),
+        interface_snapshot.is_absent(),
+    );
+    let auto_locale = resolve_runtime_locale(cli_language, InterfaceLanguage::Auto).locale();
+    let interface_draft =
+        match prompt_setup_interface_draft(interface_before, revisit_interface, auto_locale) {
+            Ok(Some(preferences)) => preferences,
+            Ok(None) => {
+                print_setup_cancelled(output_mode, cli_language);
+                return ExitCode::SUCCESS;
+            }
+            Err(error) => return setup_input_error(&error, output_mode, cli_language),
+        };
+    // A newly staged `auto` must continue from process-local environment/OS
+    // inputs, rather than consulting the still-unwritten previous preference.
+    // Concrete choices deliberately win immediately for the rest of this
+    // scrollback-oriented wizard.
+    let selected_language = Some(match interface_draft.language() {
+        InterfaceLanguage::Auto => {
+            match resolve_runtime_locale(cli_language, InterfaceLanguage::Auto).locale() {
+                ResolvedLocale::EnUs => InterfaceLanguage::EnUs,
+                ResolvedLocale::ZhCn => InterfaceLanguage::ZhCn,
+            }
+        }
+        language => language,
+    });
+    print_setup_discovery(&discovery, before, interface_draft, selected_language);
+    print_setup_title_policy(
+        &WindowsTerminalPolicyStore::from_environment().inspect(),
+        selected_language,
+    );
 
-    if print_guided_setup_intro(quick, full, &discovery, output_mode) {
+    if print_guided_setup_intro(quick, full, &discovery, output_mode, selected_language) {
         return ExitCode::SUCCESS;
     }
 
-    let draft = match prompt_setup_draft_v3(before) {
+    let draft = match prompt_setup_draft_v3(before, selected_language) {
         Ok(Some(settings)) => settings,
         Ok(None) => {
-            print_setup_cancelled(output_mode);
+            print_setup_cancelled(output_mode, selected_language);
             return ExitCode::SUCCESS;
         }
-        Err(error) => return setup_input_error(&error, output_mode),
+        Err(error) => return setup_input_error(&error, output_mode, selected_language),
     };
-    let plan = SetupPlan::new(before, discovery).with_draft(draft);
-    print_setup_change_plan(&plan);
-    println!("Preview");
-    let preview_exit = print_preview_result(plan.preview_settings(), output_mode);
+    let plan = GuidedSetupPlan::new(before, interface_before, discovery)
+        .with_presentation_draft(draft)
+        .with_interface_draft(interface_draft);
+    print_setup_change_plan(&plan, selected_language);
+    let preview_exit =
+        print_preview_result(plan.preview_settings(), output_mode, selected_language);
     if preview_exit != ExitCode::SUCCESS {
-        print_setup_preview_blocked(output_mode);
+        print_setup_preview_blocked(output_mode, selected_language);
         return preview_exit;
     }
-    let decision = match prompt_setup_decision_v3() {
+    let decision = match prompt_setup_decision_v3(selected_language) {
         Ok(decision) => decision,
-        Err(error) => return setup_input_error(&error, output_mode),
+        Err(error) => return setup_input_error(&error, output_mode, selected_language),
     };
     match decision {
         SetupDecision::Cancel => {
             let _ = plan.cancel();
-            print_setup_cancelled(output_mode);
+            print_setup_cancelled(output_mode, selected_language);
             ExitCode::SUCCESS
         }
-        SetupDecision::Apply => match plan.apply(&store, &snapshot, |owns_title| {
-            integration
-                .setup_with_title_ownership(owns_title)
-                .map_err(|error| error.to_string())
-        }) {
-            Ok(SetupApplyResult::Applied(outcome)) => {
-                print_setup_applied(&store, plan.draft(), output_mode);
-                print_setup_outcome(outcome, output_mode, None)
+        SetupDecision::Apply => match plan.apply(
+            &store,
+            &snapshot,
+            &interface_store,
+            &interface_snapshot,
+            |owns_title| {
+                integration
+                    .setup_with_title_ownership(owns_title)
+                    .map_err(|error| error.to_string())
+            },
+        ) {
+            Ok(GuidedSetupApplyResult::Applied(outcome)) => {
+                print_setup_applied(&store, plan.draft(), output_mode, selected_language);
+                print_setup_outcome(outcome, output_mode, selected_language)
             }
-            Ok(SetupApplyResult::SettingsConflict) => print_setup_settings_conflict(output_mode),
-            Ok(SetupApplyResult::SetupFailed {
+            Ok(
+                GuidedSetupApplyResult::SettingsConflict
+                | GuidedSetupApplyResult::InterfaceConflict,
+            ) => print_setup_settings_conflict(output_mode, selected_language),
+            Ok(GuidedSetupApplyResult::SetupFailed {
                 reason,
                 settings_restored,
-            }) => print_setup_apply_failure(&reason, settings_restored, output_mode),
-            Ok(SetupApplyResult::Cancelled) => unreachable!("apply path cannot cancel"),
-            Err(error) => setup_management_error(&error, output_mode),
+                interface_restored,
+            }) => print_setup_apply_failure(
+                &reason,
+                settings_restored && interface_restored,
+                output_mode,
+                selected_language,
+            ),
+            Ok(GuidedSetupApplyResult::Cancelled) => unreachable!("apply path cannot cancel"),
+            Err(error) => setup_management_error(&error, output_mode, selected_language),
         },
     }
 }
@@ -323,6 +387,7 @@ fn print_guided_setup_intro(
     full: bool,
     discovery: &SetupDiscovery,
     output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
 ) -> bool {
     if quick
         && discovery.hooks() == tabbeacon::setup::HookSetupState::Current
@@ -333,49 +398,83 @@ fn print_guided_setup_intro(
             println!("SETUP_MODE=QUICK");
             println!("OWNER_ACTION=none");
         } else {
-            print_human_tone(HumanTone::Success, "Setup is ready.");
-            println!("No changes are needed.");
+            print_human_document(
+                &HumanDocument::new(HumanText::message(HumanMessageKey::SetupReady), None)
+                    .with_section(HumanSection::new(None).with_message(HumanMessage::plain(
+                        HumanText::message(HumanMessageKey::NoChangesNeeded),
+                        HumanTone::Success,
+                    ))),
+                language,
+            );
         }
         return true;
     }
-    println!(
-        "Welcome — setup keeps prompts, assistant output, and provider session data out of configuration."
-    );
+    let mut section = HumanSection::new(None).with_message(HumanMessage::plain(
+        HumanText::message(HumanMessageKey::WelcomeSetup),
+        HumanTone::Plain,
+    ));
     if full {
-        println!("Full setup — review the complete presentation flow.");
+        section = section.with_message(HumanMessage::plain(
+            HumanText::message(HumanMessageKey::FullSetup),
+            HumanTone::Plain,
+        ));
     } else if quick {
-        println!("Quick setup — action-required sections only.");
+        section = section.with_message(HumanMessage::plain(
+            HumanText::message(HumanMessageKey::QuickSetup),
+            HumanTone::Plain,
+        ));
     }
+    print_human_document(
+        &HumanDocument::new(HumanText::message(HumanMessageKey::Setup), None).with_section(section),
+        language,
+    );
     false
 }
 
 fn guided_setup_context(
     output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
 ) -> Result<
     (
         PresentationSettingsStore,
         PresentationSettingsSnapshot,
+        InterfacePreferencesStore,
+        tabbeacon::interface_preferences::InterfacePreferencesSnapshot,
         CodexIntegration,
         SetupDiscovery,
     ),
     ExitCode,
 > {
-    let store = settings_store().map_err(|error| setup_management_error(&error, output_mode))?;
+    let store =
+        settings_store().map_err(|error| setup_management_error(&error, output_mode, language))?;
     let snapshot = store
         .snapshot_read_only()
-        .map_err(|error| print_setup_snapshot_failure(&error, output_mode))?;
+        .map_err(|error| print_setup_snapshot_failure(&error, output_mode, language))?;
+    let interface_store = InterfacePreferencesStore::from_environment()
+        .map_err(|error| setup_management_error(&error, output_mode, language))?;
+    let interface_snapshot = interface_store
+        .snapshot_read_only()
+        .map_err(|error| print_setup_snapshot_failure(&error, output_mode, language))?;
     let integration = CodexIntegration::from_environment()
-        .map_err(|error| setup_management_error(&error, output_mode))?;
-    let discovery = guided_setup_discovery(&integration, output_mode)?;
-    Ok((store, snapshot, integration, discovery))
+        .map_err(|error| setup_management_error(&error, output_mode, language))?;
+    let discovery = guided_setup_discovery(&integration, output_mode, language)?;
+    Ok((
+        store,
+        snapshot,
+        interface_store,
+        interface_snapshot,
+        integration,
+        discovery,
+    ))
 }
 
 fn guided_setup_discovery(
     integration: &CodexIntegration,
     output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
 ) -> Result<SetupDiscovery, ExitCode> {
-    let binary_path =
-        std::env::current_exe().map_err(|error| setup_management_error(&error, output_mode))?;
+    let binary_path = std::env::current_exe()
+        .map_err(|error| setup_management_error(&error, output_mode, language))?;
     Ok(SetupDiscovery::from_doctor(
         env!("CARGO_PKG_VERSION"),
         binary_path,
@@ -516,7 +615,7 @@ fn status(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitC
     ExitCode::SUCCESS
 }
 
-fn sessions(output_mode: OutputMode) -> ExitCode {
+fn sessions(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
     let report = tabbeacon::activity::inspect_system_sessions();
     if output_mode == OutputMode::Json {
         return match serde_json::to_string(&report) {
@@ -556,32 +655,55 @@ fn sessions(output_mode: OutputMode) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    print_human_tone(HumanTone::Accent, "Sessions");
-    println!(
-        "  {} current, {} stale, {} invalid lease{}",
-        report.active_sessions,
-        report.stale_sessions,
-        report.invalid_leases,
-        if report.invalid_leases == 1 { "" } else { "s" }
-    );
+    print_human_document(&sessions_document(&report), language);
+    ExitCode::SUCCESS
+}
+
+fn sessions_document(report: &tabbeacon::activity::SessionsOverview) -> HumanDocument {
+    let mut section = HumanSection::new(None)
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Active),
+            HumanText::literal(report.active_sessions.to_string()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Stale),
+            HumanText::literal(report.stale_sessions.to_string()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::InvalidLeases),
+            HumanText::literal(report.invalid_leases.to_string()),
+            HumanTone::Plain,
+        ));
     if report.sessions.is_empty() {
-        print_human_tone(HumanTone::Dim, "  No inspectable session leases.");
+        section = section.with_message(HumanMessage::plain(
+            HumanText::message(HumanMessageKey::NoInspectableSessionLeases),
+            HumanTone::Dim,
+        ));
     } else {
         for session in &report.sessions {
-            println!(
-                "  {} — {} — {}s — {}",
-                session.workspace_alias,
-                session.semantic_state,
-                session.age_seconds,
-                session.worker_health.as_str().replace('_', " "),
-            );
+            section = section.with_message(HumanMessage::plain(
+                HumanText::literal(format!(
+                    "{} — {} — {}s — {}",
+                    session.workspace_alias,
+                    session.semantic_state,
+                    session.age_seconds,
+                    session.worker_health.as_str().replace('_', " "),
+                )),
+                HumanTone::Plain,
+            ));
         }
     }
-    print_human_tone(
-        HumanTone::Dim,
-        "  Lease-based observation only; no process or session control.",
-    );
-    ExitCode::SUCCESS
+    HumanDocument::new(HumanText::message(HumanMessageKey::Sessions), None).with_section(
+        section.with_message(HumanMessage::plain(
+            HumanText::message(HumanMessageKey::LeaseObservationOnly),
+            HumanTone::Dim,
+        )),
+    )
 }
 
 /// Reports Windows Terminal policy without creating state or writing a tab.
@@ -672,28 +794,50 @@ fn print_title_policy(
     println!("PERSISTENT_REMEDIATION_EXPLICIT=true");
 }
 
-fn print_setup_title_policy(policy: &tabbeacon::windows_terminal_policy::TitlePolicyDiagnostics) {
-    println!("Windows Terminal title policy");
-    println!(
-        "  Application titles {}",
-        policy.application_title_policy.as_str()
-    );
-    println!("  Policy source       {}", policy.policy_source.as_str());
-    println!(
-        "  Active profile      {}",
-        policy.active_profile_resolution.as_str()
-    );
-    println!("  Remediation         {}", policy.remediation.as_str());
+fn print_setup_title_policy(
+    policy: &tabbeacon::windows_terminal_policy::TitlePolicyDiagnostics,
+    language: Option<InterfaceLanguage>,
+) {
+    let mut section = HumanSection::new(None)
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Title),
+            HumanText::literal(policy.application_title_policy.as_str()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Runtime),
+            HumanText::literal(policy.policy_source.as_str()),
+            HumanTone::Plain,
+        ));
     if policy.remediation.as_str() == "available" {
-        println!("  Next step           tabbeacon title-policy repair (explicit)");
+        section = section.with_action(HumanAction::new(
+            HumanText::literal("tabbeacon title-policy repair"),
+            HumanTone::Attention,
+        ));
     }
-    println!();
+    print_human_document(
+        &HumanDocument::new(
+            HumanText::message(HumanMessageKey::WindowsTerminalTitlePolicy),
+            None,
+        )
+        .with_section(section),
+        language,
+    );
 }
 
 fn uninstall_codex(output_mode: OutputMode) -> ExitCode {
     let integration = match CodexIntegration::from_environment() {
         Ok(integration) => integration,
-        Err(error) => return management_error_for_output("UNINSTALL", &error, output_mode),
+        Err(error) => {
+            return management_error_for_output(
+                "UNINSTALL",
+                &error,
+                output_mode,
+                Some(InterfaceLanguage::EnUs),
+            );
+        }
     };
     match integration.uninstall() {
         Ok(UninstallOutcome::Removed) => {
@@ -722,7 +866,12 @@ fn uninstall_codex(output_mode: OutputMode) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(error) => management_error_for_output("UNINSTALL", &error, output_mode),
+        Err(error) => management_error_for_output(
+            "UNINSTALL",
+            &error,
+            output_mode,
+            Some(InterfaceLanguage::EnUs),
+        ),
     }
 }
 
@@ -737,10 +886,10 @@ fn run_codex_hook() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn config_show(output_mode: OutputMode) -> ExitCode {
+fn config_show(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
     let store = match settings_store() {
         Ok(store) => store,
-        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
     };
     let settings = match store.load() {
         Ok(settings) => settings,
@@ -749,26 +898,32 @@ fn config_show(output_mode: OutputMode) -> ExitCode {
                 eprintln!("CONFIG=WARNING");
                 eprintln!("REASON={error}");
             } else {
-                eprint_human_tone(
+                eprint_human_text(
                     HumanTone::Attention,
-                    "Saved presentation settings could not be read; showing defaults.",
+                    &HumanText::message(HumanMessageKey::SavedPresentationSettingsUnreadable),
+                    language,
                 );
             }
             PresentationSettings::default()
         }
     };
-    print_settings(&store, settings, output_mode);
+    print_settings(&store, settings, output_mode, language);
     ExitCode::SUCCESS
 }
 
-fn config_set(key: &str, value: &str, output_mode: OutputMode) -> ExitCode {
+fn config_set(
+    key: &str,
+    value: &str,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
     let store = match settings_store() {
         Ok(store) => store,
-        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
     };
     let current = match store.load() {
         Ok(settings) => settings,
-        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
     };
     let updated = match key {
         "title" => TitleMode::parse(value).map(|mode| current.with_title(mode)),
@@ -779,22 +934,22 @@ fn config_set(key: &str, value: &str, output_mode: OutputMode) -> ExitCode {
         _ => None,
     };
     let Some(updated) = updated else {
-        print_config_failure(output_mode, "unsupported config key or value");
-        print_config_choices(key, output_mode);
+        print_config_failure(output_mode, "unsupported config key or value", language);
+        print_config_choices(key, output_mode, language);
         return ExitCode::from(2);
     };
-    persist_settings_change(&store, current, updated, output_mode)
+    persist_settings_change(&store, current, updated, output_mode, language)
 }
 
-fn config_reset(output_mode: OutputMode) -> ExitCode {
+fn config_reset(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
     let store = match settings_store() {
         Ok(store) => store,
-        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
     };
     let current = store.load_or_default();
     let defaults = match store.reset() {
         Ok(settings) => settings,
-        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
     };
     if current.title() != defaults.title() {
         match CodexIntegration::from_environment()
@@ -803,61 +958,87 @@ fn config_reset(output_mode: OutputMode) -> ExitCode {
             Ok(outcome) if output_mode == OutputMode::Plain => {
                 println!("CODEX_TITLE_OWNERSHIP={}", title_ownership_label(outcome));
             }
-            Ok(_) => print_human_tone(HumanTone::Dim, "Title ownership was reconciled."),
-            Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
+            Ok(_) => print_human_text(
+                HumanTone::Dim,
+                &HumanText::message(HumanMessageKey::TitleOwnershipReconciled),
+                language,
+            ),
+            Err(error) => {
+                return management_error_for_output("CONFIG", &error, output_mode, language);
+            }
         }
     }
     if output_mode == OutputMode::Plain {
         println!("CONFIG=PASS");
     } else {
-        print_human_tone(
-            HumanTone::Success,
-            "Presentation settings reset to defaults.",
+        print_human_document(
+            &HumanDocument::new(
+                HumanText::message(HumanMessageKey::PresentationSettingsReset),
+                None,
+            ),
+            language,
         );
     }
-    print_settings(&store, defaults, output_mode);
+    print_settings(&store, defaults, output_mode, language);
     ExitCode::SUCCESS
 }
 
-fn config_preset(name: &str, output_mode: OutputMode) -> ExitCode {
+fn config_preset(
+    name: &str,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
     let store = match settings_store() {
         Ok(store) => store,
-        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
     };
     let current = match store.load() {
         Ok(settings) => settings,
-        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
     };
     let Some(preset) = PresentationSettings::preset(name) else {
-        print_config_failure(output_mode, "unsupported preset");
+        print_config_failure(output_mode, "unsupported preset", language);
         if output_mode == OutputMode::Plain {
             eprintln!("PRESETS=native|minimal|balanced|full");
         } else {
-            eprintln!("Supported presets: native, minimal, balanced, full.");
+            eprint_human_text(
+                HumanTone::Dim,
+                &HumanText::message(HumanMessageKey::SupportedPresets),
+                language,
+            );
         }
         return ExitCode::from(2);
     };
-    persist_settings_change(&store, current, preset, output_mode)
+    persist_settings_change(&store, current, preset, output_mode, language)
 }
 
-fn config_wizard(output_mode: OutputMode) -> ExitCode {
+fn config_wizard(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
     if !is_interactive_terminal() {
         return interactive_terminal_required(
             "CONFIG",
             "config wizard requires an interactive terminal",
             "run tabbeacon config wizard from an interactive terminal, or use tabbeacon config set",
             output_mode,
+            language,
         );
     }
     let store = match settings_store() {
         Ok(store) => store,
-        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
     };
     let current = store.load_or_default();
-    println!("TabBeacon presentation wizard (press Enter to keep each current value).");
+    if output_mode == OutputMode::Plain {
+        println!("TabBeacon presentation wizard (press Enter to keep each current value).");
+    } else {
+        print_human_text(
+            HumanTone::Plain,
+            &HumanText::message(HumanMessageKey::PresentationWizard),
+            language,
+        );
+    }
     let title = match prompt_choice("title", current.title().as_str(), TitleMode::parse) {
         Ok(value) => value,
-        Err(error) => return wizard_error(&error, output_mode),
+        Err(error) => return wizard_error(&error, output_mode, language),
     };
     let tab_color = match prompt_choice(
         "tab-color",
@@ -865,106 +1046,189 @@ fn config_wizard(output_mode: OutputMode) -> ExitCode {
         TabColorMode::parse,
     ) {
         Ok(value) => value,
-        Err(error) => return wizard_error(&error, output_mode),
+        Err(error) => return wizard_error(&error, output_mode, language),
     };
     let activity = match prompt_choice("activity", current.activity().as_str(), ActivityMode::parse)
     {
         Ok(value) => value,
-        Err(error) => return wizard_error(&error, output_mode),
+        Err(error) => return wizard_error(&error, output_mode, language),
     };
     let spinner = match prompt_choice("spinner", current.spinner().as_str(), SpinnerPreset::parse) {
         Ok(value) => value,
-        Err(error) => return wizard_error(&error, output_mode),
+        Err(error) => return wizard_error(&error, output_mode, language),
     };
     let theme = match prompt_choice("theme", current.theme().as_str(), PresentationTheme::parse) {
         Ok(value) => value,
-        Err(error) => return wizard_error(&error, output_mode),
+        Err(error) => return wizard_error(&error, output_mode, language),
     };
     persist_settings_change(
         &store,
         current,
         PresentationSettings::new(title, tab_color, activity, spinner, theme),
         output_mode,
+        language,
     )
 }
 
-fn print_setup_discovery(discovery: &SetupDiscovery, settings: PresentationSettings) {
-    print_human_tone(HumanTone::Accent, "TabBeacon Setup");
-    println!();
-    print_human_tone(HumanTone::Accent, "Environment");
-    println!(
-        "  Windows Terminal   {}",
-        discovery.windows_terminal().label()
+#[allow(clippy::too_many_lines)] // One grouped document mirrors the visible Setup summary.
+fn print_setup_discovery(
+    discovery: &SetupDiscovery,
+    settings: PresentationSettings,
+    interface: InterfacePreferences,
+    language: Option<InterfaceLanguage>,
+) {
+    let locale = human_runtime_presentation(language).locale;
+    let terminal_state = match discovery.windows_terminal() {
+        WindowsTerminalState::CurrentSession => HumanMessageKey::WindowsTerminalCurrentSession,
+        WindowsTerminalState::NotCurrentSession => {
+            HumanMessageKey::WindowsTerminalNotCurrentSession
+        }
+    };
+    let profile_status = if discovery.profile_supported() {
+        HumanMessageKey::Supported
+    } else {
+        HumanMessageKey::NotAdmitted
+    };
+    let environment = HumanSection::new(Some(HumanText::message(HumanMessageKey::Environment)))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::WindowsTerminal),
+            HumanText::message(terminal_state),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Codex),
+            HumanText::template(
+                HumanMessageKey::SetupCodexSummary,
+                [
+                    discovery
+                        .codex_version()
+                        .unwrap_or(tabbeacon::human_presentation::catalog(
+                            locale,
+                            HumanMessageKey::Unavailable,
+                        ))
+                        .to_owned(),
+                    discovery
+                        .hook_profile()
+                        .unwrap_or(tabbeacon::human_presentation::catalog(
+                            locale,
+                            HumanMessageKey::Unknown,
+                        ))
+                        .to_owned(),
+                    tabbeacon::human_presentation::catalog(locale, profile_status).to_owned(),
+                ],
+            ),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::TabBeacon),
+            HumanText::literal(discovery.tabbeacon_version()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Binary),
+            HumanText::literal(discovery.binary_path().display().to_string()),
+            HumanTone::Dim,
+        ));
+    let presentation = HumanSection::new(Some(HumanText::message(HumanMessageKey::Presentation)))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Title),
+            human_title_text(settings.title()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::TabColor),
+            human_tab_color_text(settings.tab_color()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Activity),
+            human_activity_text(settings.activity()),
+            HumanTone::Plain,
+        ));
+    let interface_section = HumanSection::new(Some(HumanText::message(HumanMessageKey::Interface)))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Language),
+            human_interface_language_text(interface.language()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Color),
+            human_color_text(interface.color()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::ReducedMotion),
+            human_boolean_text(interface.reduced_motion()),
+            HumanTone::Plain,
+        ));
+    print_human_document(
+        &HumanDocument::new(HumanText::message(HumanMessageKey::Setup), None)
+            .with_section(environment)
+            .with_section(presentation)
+            .with_section(interface_section),
+        language,
     );
-    println!(
-        "  Codex              {} — {} ({})",
-        discovery.codex_version().unwrap_or("unavailable"),
-        discovery.hook_profile().unwrap_or("unknown"),
-        if discovery.profile_supported() {
-            "supported"
-        } else {
-            "not admitted"
-        },
-    );
-    println!("  TabBeacon          {}", discovery.tabbeacon_version());
-    println!("  Binary             {}", discovery.binary_path().display());
-    println!("  Hooks              {}", discovery.hooks().label());
-    println!("  Doctor             {}", discovery.doctor_status());
-    println!();
-    print_human_tone(HumanTone::Accent, "Presentation");
-    println!("  Title              {}", settings.title());
-    println!("  Tab color          {}", settings.tab_color());
-    println!("  Activity           {}", settings.activity());
-    println!("  Spinner            {}", settings.spinner());
-    println!("  Theme              {}", settings.theme());
-    println!();
 }
 
-fn print_setup_change_plan(plan: &SetupPlan) {
-    print_human_tone(HumanTone::Accent, "Planned changes");
-    println!(
-        "  Title              {} -> {}",
-        plan.before().title(),
-        plan.draft().title()
+fn print_setup_change_plan(plan: &GuidedSetupPlan, language: Option<InterfaceLanguage>) {
+    let section = HumanSection::new(Some(HumanText::message(HumanMessageKey::PlannedChanges)))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Title),
+            HumanText::literal(format!(
+                "{} → {}",
+                plan.before().title(),
+                plan.draft().title()
+            )),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Language),
+            HumanText::literal(format!(
+                "{} → {}",
+                plan.interface_before().language(),
+                plan.interface_draft().language()
+            )),
+            HumanTone::Plain,
+        ))
+        .with_message(HumanMessage::plain(
+            HumanText::message(HumanMessageKey::UnchangedOwnedState),
+            HumanTone::Dim,
+        ))
+        .with_message(HumanMessage::plain(
+            HumanText::message(HumanMessageKey::PreservedExternalSettings),
+            HumanTone::Dim,
+        ));
+    print_human_document(
+        &HumanDocument::new(HumanText::message(HumanMessageKey::Setup), None).with_section(section),
+        language,
     );
-    println!(
-        "  Tab color          {} -> {}",
-        plan.before().tab_color(),
-        plan.draft().tab_color()
-    );
-    println!(
-        "  Activity           {} -> {}",
-        plan.before().activity(),
-        plan.draft().activity()
-    );
-    println!(
-        "  Spinner            {} -> {}",
-        plan.before().spinner(),
-        plan.draft().spinner()
-    );
-    println!(
-        "  Theme              {} -> {}",
-        plan.before().theme(),
-        plan.draft().theme()
-    );
-    println!("  Unchanged owned state: existing ownership checks remain in effect.");
-    println!(
-        "  TabBeacon will not touch unrelated Codex, Windows Terminal, or PowerShell settings."
-    );
-    if plan.discovery().hooks() == tabbeacon::setup::HookSetupState::ReviewRequired {
-        println!(
-            "  Manual follow-up: launch codex, open /hooks, and review TabBeacon definitions."
-        );
-    }
 }
 
-struct DialoguerInput;
+struct DialoguerInput {
+    locale: ResolvedLocale,
+}
 
 impl GuidedInput for DialoguerInput {
     fn select(&mut self, prompt: &str, items: &[&str], default: usize) -> Result<usize, String> {
+        let localized_items = items
+            .iter()
+            .map(|item| localize_setup_choice(self.locale, item))
+            .collect::<Vec<_>>();
         Select::new()
-            .with_prompt(prompt)
-            .items(items)
+            .with_prompt(localize_setup_choice(self.locale, prompt))
+            .items(&localized_items)
             .default(default)
             .interact()
             .map_err(|_| "guided setup selection was interrupted".to_owned())
@@ -973,13 +1237,39 @@ impl GuidedInput for DialoguerInput {
 
 fn prompt_setup_draft_v3(
     current: PresentationSettings,
+    language: Option<InterfaceLanguage>,
 ) -> Result<Option<PresentationSettings>, String> {
-    let mut input = DialoguerInput;
+    let mut input = DialoguerInput {
+        locale: human_runtime_presentation(language).locale,
+    };
     choose_presentation(&mut input, current)
 }
 
-fn prompt_setup_decision_v3() -> Result<SetupDecision, String> {
-    let mut input = DialoguerInput;
+#[allow(clippy::fn_params_excessive_bools)] // Bounded setup admission facts are clearer as booleans.
+const fn should_revisit_interface_preferences(
+    quick: bool,
+    full: bool,
+    presentation_is_absent: bool,
+    interface_is_absent: bool,
+) -> bool {
+    full || presentation_is_absent || (!quick && interface_is_absent)
+}
+
+fn prompt_setup_interface_draft(
+    current: InterfacePreferences,
+    revisit: bool,
+    auto_locale: ResolvedLocale,
+) -> Result<Option<InterfacePreferences>, String> {
+    let mut input = DialoguerInput {
+        locale: auto_locale,
+    };
+    choose_interface_preferences(&mut input, current, revisit, auto_locale)
+}
+
+fn prompt_setup_decision_v3(language: Option<InterfaceLanguage>) -> Result<SetupDecision, String> {
+    let mut input = DialoguerInput {
+        locale: human_runtime_presentation(language).locale,
+    };
     match input.select("Apply staged setup", &["Apply", "Cancel"], 1)? {
         0 => Ok(SetupDecision::Apply),
         1 => Ok(SetupDecision::Cancel),
@@ -987,7 +1277,45 @@ fn prompt_setup_decision_v3() -> Result<SetupDecision, String> {
     }
 }
 
-fn setup_input_error(error: &str, output_mode: OutputMode) -> ExitCode {
+fn localize_setup_choice(locale: ResolvedLocale, value: &str) -> &str {
+    if locale == ResolvedLocale::EnUs {
+        return value;
+    }
+    match value {
+        "Choose presentation" => "选择外观呈现",
+        "Recommended" => "推荐",
+        "Minimal" => "简洁",
+        "Full" => "完整",
+        "Native" => "原生",
+        "Customize" => "自定义",
+        "Back" => "返回",
+        "Preset" => "预设",
+        "Use this preset" => "使用此预设",
+        "Title" => "标题",
+        "Tab color" => "标签颜色",
+        "Activity" => "活动",
+        "Spinner" => "旋转指示器",
+        "Theme" => "主题",
+        "Done" => "完成",
+        "Title spinner" => "标题旋转指示器",
+        "Title indicator" => "标题指示器",
+        "Terminal ring" => "终端圆环",
+        "Both" => "两者",
+        "Off" => "关闭",
+        "Muted Dark" => "低调深色",
+        "Classic" => "经典",
+        "Apply staged setup" => "应用暂存设置",
+        "Apply" => "应用",
+        "Cancel" => "取消",
+        _ => value,
+    }
+}
+
+fn setup_input_error(
+    error: &str,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
     if output_mode == OutputMode::Plain {
         eprintln!("SETUP=FAIL");
         eprintln!("REASON={error}");
@@ -995,8 +1323,16 @@ fn setup_input_error(error: &str, output_mode: OutputMode) -> ExitCode {
         eprintln!("CODEX_CONFIG_UNCHANGED=true");
         eprintln!("HOOKS_UNCHANGED=true");
     } else {
-        eprint_human_tone(HumanTone::Failure, format!("Setup input failed: {error}."));
-        eprintln!("No settings, Codex configuration, or hooks were changed.");
+        eprint_human_text(
+            HumanTone::Failure,
+            &HumanText::template(HumanMessageKey::SetupInputFailed, [error]),
+            language,
+        );
+        eprint_human_text(
+            HumanTone::Dim,
+            &HumanText::message(HumanMessageKey::NoSetupChangesMade),
+            language,
+        );
     }
     ExitCode::from(2)
 }
@@ -1106,10 +1442,11 @@ fn persist_settings_change(
     before: PresentationSettings,
     after: PresentationSettings,
     output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
 ) -> ExitCode {
     let title_outcome = match apply_settings_change(store, before, after) {
         Ok(outcome) => outcome,
-        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
     };
     if output_mode == OutputMode::Plain {
         println!("CONFIG=PASS");
@@ -1118,10 +1455,20 @@ fn persist_settings_change(
             title_ownership_label(title_outcome)
         );
     } else {
-        print_human_tone(HumanTone::Success, "Presentation settings updated.");
-        print_human_tone(HumanTone::Dim, "Title ownership was reconciled safely.");
+        print_human_document(
+            &HumanDocument::new(
+                HumanText::message(HumanMessageKey::PresentationSettingsUpdated),
+                None,
+            ),
+            language,
+        );
+        print_human_text(
+            HumanTone::Dim,
+            &HumanText::message(HumanMessageKey::TitleOwnershipReconciled),
+            language,
+        );
     }
-    print_settings(store, after, output_mode);
+    print_settings(store, after, output_mode, language);
     ExitCode::SUCCESS
 }
 
@@ -1137,18 +1484,10 @@ fn print_settings(
     store: &PresentationSettingsStore,
     settings: PresentationSettings,
     output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
 ) {
     if output_mode != OutputMode::Plain {
-        print_human_tone(HumanTone::Accent, "Presentation settings");
-        println!("  Title       {}", settings.title());
-        println!("  Tab color   {}", settings.tab_color());
-        println!("  Activity    {}", settings.activity());
-        println!("  Spinner     {}", settings.spinner());
-        println!("  Theme       {}", settings.theme());
-        print_human_tone(
-            HumanTone::Dim,
-            "Settings are stored only in your user-local TabBeacon state.",
-        );
+        print_human_document(&presentation_settings_document(settings), language);
         return;
     }
     println!("CONFIG_PATH={}", store.path().display());
@@ -1160,9 +1499,127 @@ fn print_settings(
     println!("TITLE_SPINNER_FEASIBILITY=PRODUCTION");
 }
 
-fn print_config_choices(key: &str, output_mode: OutputMode) {
+fn presentation_settings_document(settings: PresentationSettings) -> HumanDocument {
+    HumanDocument::new(
+        HumanText::message(HumanMessageKey::PresentationSettings),
+        None,
+    )
+    .with_section(
+        HumanSection::new(None)
+            .with_field(HumanField::new(
+                None::<String>,
+                HumanText::message(HumanMessageKey::Title),
+                human_title_text(settings.title()),
+                HumanTone::Plain,
+            ))
+            .with_field(HumanField::new(
+                None::<String>,
+                HumanText::message(HumanMessageKey::TabColor),
+                human_tab_color_text(settings.tab_color()),
+                HumanTone::Plain,
+            ))
+            .with_field(HumanField::new(
+                None::<String>,
+                HumanText::message(HumanMessageKey::Activity),
+                human_activity_text(settings.activity()),
+                HumanTone::Plain,
+            ))
+            .with_field(HumanField::new(
+                None::<String>,
+                HumanText::message(HumanMessageKey::Spinner),
+                human_spinner_text(settings.spinner()),
+                HumanTone::Plain,
+            ))
+            .with_field(HumanField::new(
+                None::<String>,
+                HumanText::message(HumanMessageKey::Theme),
+                human_theme_text(settings.theme()),
+                HumanTone::Plain,
+            ))
+            .with_message(HumanMessage::plain(
+                HumanText::message(HumanMessageKey::UserLocalState),
+                HumanTone::Dim,
+            )),
+    )
+}
+
+fn human_title_text(value: TitleMode) -> HumanText {
+    HumanText::message(match value {
+        TitleMode::TabBeacon => HumanMessageKey::TabBeacon,
+        TitleMode::Native => HumanMessageKey::Native,
+        TitleMode::Off => HumanMessageKey::Disabled,
+    })
+}
+
+fn human_tab_color_text(value: TabColorMode) -> HumanText {
+    HumanText::message(match value {
+        TabColorMode::TabBeacon => HumanMessageKey::TabBeaconColors,
+        TabColorMode::Native => HumanMessageKey::NativeColors,
+        TabColorMode::Off => HumanMessageKey::Disabled,
+    })
+}
+
+fn human_activity_text(value: ActivityMode) -> HumanText {
+    HumanText::message(match value {
+        ActivityMode::TitleSpinner => HumanMessageKey::TitleSpinner,
+        ActivityMode::TitleIndicator => HumanMessageKey::TitleIndicator,
+        ActivityMode::WindowsTerminalRing => HumanMessageKey::TerminalRing,
+        ActivityMode::Both => HumanMessageKey::TitleSpinnerAndRing,
+        ActivityMode::Native => HumanMessageKey::Native,
+        ActivityMode::Off => HumanMessageKey::Disabled,
+    })
+}
+
+fn human_spinner_text(value: SpinnerPreset) -> HumanText {
+    HumanText::message(match value {
+        SpinnerPreset::Codex => HumanMessageKey::Codex,
+        SpinnerPreset::Braille => HumanMessageKey::BrailleSpinner,
+        SpinnerPreset::Quadrant => HumanMessageKey::QuadrantSpinner,
+        SpinnerPreset::Line => HumanMessageKey::LineSpinner,
+        SpinnerPreset::Pulse => HumanMessageKey::PulseSpinner,
+    })
+}
+
+fn human_theme_text(value: PresentationTheme) -> HumanText {
+    HumanText::message(match value {
+        PresentationTheme::MutedDark => HumanMessageKey::MutedDark,
+        PresentationTheme::Classic => HumanMessageKey::ClassicTheme,
+    })
+}
+
+fn human_interface_language_text(value: InterfaceLanguage) -> HumanText {
+    HumanText::message(match value {
+        InterfaceLanguage::Auto => HumanMessageKey::Auto,
+        InterfaceLanguage::EnUs => HumanMessageKey::English,
+        InterfaceLanguage::ZhCn => HumanMessageKey::SimplifiedChinese,
+    })
+}
+
+fn human_color_text(value: HumanColor) -> HumanText {
+    HumanText::message(match value {
+        HumanColor::Auto => HumanMessageKey::Auto,
+        HumanColor::Always => HumanMessageKey::Always,
+        HumanColor::Never => HumanMessageKey::Never,
+    })
+}
+
+fn human_boolean_text(value: bool) -> HumanText {
+    HumanText::message(if value {
+        HumanMessageKey::Enabled
+    } else {
+        HumanMessageKey::Disabled
+    })
+}
+
+fn print_config_choices(key: &str, output_mode: OutputMode, language: Option<InterfaceLanguage>) {
     if output_mode != OutputMode::Plain {
-        eprintln!("Use tabbeacon config show for the current settings and supported values.");
+        eprintln!(
+            "{}",
+            tabbeacon::human_presentation::catalog(
+                human_runtime_presentation(language).locale,
+                HumanMessageKey::UseConfigShow,
+            )
+        );
         return;
     }
     match key {
@@ -1177,16 +1634,26 @@ fn print_config_choices(key: &str, output_mode: OutputMode) {
     }
 }
 
-fn print_config_failure(output_mode: OutputMode, reason: &str) {
+fn print_config_failure(
+    output_mode: OutputMode,
+    reason: &str,
+    language: Option<InterfaceLanguage>,
+) {
     if output_mode == OutputMode::Plain {
         eprintln!("CONFIG=FAIL");
         eprintln!("REASON={reason}");
     } else {
-        eprintln!("Configuration could not be updated: {reason}.");
+        eprintln!(
+            "{}: {reason}.",
+            tabbeacon::human_presentation::catalog(
+                human_runtime_presentation(language).locale,
+                HumanMessageKey::ConfigurationCouldNotBeUpdated,
+            )
+        );
     }
 }
 
-fn print_setup_cancelled(output_mode: OutputMode) {
+fn print_setup_cancelled(output_mode: OutputMode, language: Option<InterfaceLanguage>) {
     if output_mode == OutputMode::Plain {
         println!("SETUP=PASS");
         println!("SETUP_RESULT=CANCELLED");
@@ -1195,8 +1662,14 @@ fn print_setup_cancelled(output_mode: OutputMode) {
         println!("HOOKS_UNCHANGED=true");
         println!("OWNER_ACTION=none");
     } else {
-        print_human_tone(HumanTone::Attention, "Setup cancelled.");
-        println!("No settings, Codex configuration, or hooks were changed.");
+        print_human_document(
+            &HumanDocument::new(HumanText::message(HumanMessageKey::SetupCancelled), None)
+                .with_section(HumanSection::new(None).with_message(HumanMessage::plain(
+                    HumanText::message(HumanMessageKey::NoSetupChangesMade),
+                    HumanTone::Attention,
+                ))),
+            language,
+        );
     }
 }
 
@@ -1204,17 +1677,24 @@ fn print_setup_applied(
     store: &PresentationSettingsStore,
     settings: PresentationSettings,
     output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
 ) {
     if output_mode == OutputMode::Plain {
         println!("SETUP=PASS");
         println!("SETUP_RESULT=APPLIED");
     } else {
-        print_human_tone(HumanTone::Success, "Setup changes applied.");
+        print_human_document(
+            &HumanDocument::new(
+                HumanText::message(HumanMessageKey::SetupChangesApplied),
+                None,
+            ),
+            language,
+        );
     }
-    print_settings(store, settings, output_mode);
+    print_settings(store, settings, output_mode, language);
 }
 
-fn print_setup_preview_blocked(output_mode: OutputMode) {
+fn print_setup_preview_blocked(output_mode: OutputMode, language: Option<InterfaceLanguage>) {
     if output_mode == OutputMode::Plain {
         eprintln!("SETUP=BLOCKED");
         eprintln!("REASON=preview must succeed before setup can apply changes");
@@ -1222,15 +1702,23 @@ fn print_setup_preview_blocked(output_mode: OutputMode) {
         eprintln!("CODEX_CONFIG_UNCHANGED=true");
         eprintln!("HOOKS_UNCHANGED=true");
     } else {
-        eprint_human_tone(
+        eprint_human_text(
             HumanTone::Failure,
-            "Setup was not applied because the preview did not complete.",
+            &HumanText::message(HumanMessageKey::SetupPreviewBlocked),
+            language,
         );
-        eprintln!("No settings, Codex configuration, or hooks were changed.");
+        eprint_human_text(
+            HumanTone::Dim,
+            &HumanText::message(HumanMessageKey::NoSetupChangesMade),
+            language,
+        );
     }
 }
 
-fn print_setup_settings_conflict(output_mode: OutputMode) -> ExitCode {
+fn print_setup_settings_conflict(
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
     if output_mode == OutputMode::Plain {
         eprintln!("SETUP=BLOCKED");
         eprintln!("REASON=settings changed while guided setup was open");
@@ -1238,11 +1726,16 @@ fn print_setup_settings_conflict(output_mode: OutputMode) -> ExitCode {
         eprintln!("CODEX_CONFIG_UNCHANGED=true");
         eprintln!("HOOKS_UNCHANGED=true");
     } else {
-        eprint_human_tone(
+        eprint_human_text(
             HumanTone::Attention,
-            "Setup was not applied because your settings changed while it was open.",
+            &HumanText::message(HumanMessageKey::SetupSettingsChanged),
+            language,
         );
-        eprintln!("Review the current settings and run setup again.");
+        eprint_human_text(
+            HumanTone::Dim,
+            &HumanText::message(HumanMessageKey::ReviewSettingsAndRunSetupAgain),
+            language,
+        );
     }
     ExitCode::from(75)
 }
@@ -1251,6 +1744,7 @@ fn print_setup_apply_failure(
     reason: &str,
     settings_restored: bool,
     output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
 ) -> ExitCode {
     if output_mode == OutputMode::Plain {
         eprintln!("SETUP=FAIL");
@@ -1259,18 +1753,28 @@ fn print_setup_apply_failure(
         eprintln!("CODEX_CONFIG_UNCHANGED=UNPROVEN");
         eprintln!("HOOKS_UNCHANGED=UNPROVEN");
     } else {
-        eprint_human_tone(
+        eprint_human_text(
             HumanTone::Failure,
-            format!("Setup could not be applied: {reason}."),
+            &HumanText::template(HumanMessageKey::SetupCouldNotApply, [reason]),
+            language,
         );
         if settings_restored {
-            eprintln!("Your presentation settings were restored.");
+            eprint_human_text(
+                HumanTone::Plain,
+                &HumanText::message(HumanMessageKey::PresentationSettingsRestored),
+                language,
+            );
         } else {
-            eprintln!("TabBeacon could not verify that presentation settings were restored.");
+            eprint_human_text(
+                HumanTone::Attention,
+                &HumanText::message(HumanMessageKey::PresentationSettingsRestoreUnproven),
+                language,
+            );
         }
-        eprint_human_tone(
+        eprint_human_text(
             HumanTone::Dim,
-            "Run tabbeacon doctor before making another setup attempt.",
+            &HumanText::message(HumanMessageKey::RunDoctorBeforeSetup),
+            language,
         );
     }
     ExitCode::FAILURE
@@ -1279,23 +1783,33 @@ fn print_setup_apply_failure(
 fn print_setup_snapshot_failure(
     error: &dyn std::error::Error,
     output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
 ) -> ExitCode {
     if output_mode == OutputMode::Plain {
         eprintln!("SETUP=FAIL");
         eprintln!("REASON={error}");
         eprintln!("SETTINGS_UNCHANGED=true");
     } else {
-        eprint_human_tone(
+        eprint_human_text(
             HumanTone::Failure,
-            format!("Setup could not read the current presentation settings: {error}."),
+            &HumanText::template(HumanMessageKey::SetupCouldNotReadState, [error.to_string()]),
+            language,
         );
-        eprintln!("No settings were changed.");
+        eprint_human_text(
+            HumanTone::Dim,
+            &HumanText::message(HumanMessageKey::NoSetupChangesMade),
+            language,
+        );
     }
     ExitCode::FAILURE
 }
 
-fn setup_management_error(error: &dyn std::error::Error, output_mode: OutputMode) -> ExitCode {
-    management_error_for_output("SETUP", error, output_mode)
+fn setup_management_error(
+    error: &dyn std::error::Error,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
+    management_error_for_output("SETUP", error, output_mode, language)
 }
 
 #[derive(Clone, Copy)]
@@ -1333,6 +1847,28 @@ fn print_human_tone(tone: HumanTone, line: impl AsRef<str>) {
         active_interface_preferences().color(),
         io::stdout().is_terminal(),
         false,
+    );
+}
+
+fn print_human_text(tone: HumanTone, text: &HumanText, language: Option<InterfaceLanguage>) {
+    let presentation = human_runtime_presentation(language);
+    print_human_tone_with_color(
+        tone,
+        render_human_text(presentation.locale, text),
+        presentation.color,
+        io::stdout().is_terminal(),
+        false,
+    );
+}
+
+fn eprint_human_text(tone: HumanTone, text: &HumanText, language: Option<InterfaceLanguage>) {
+    let presentation = human_runtime_presentation(language);
+    print_human_tone_with_color(
+        tone,
+        render_human_text(presentation.locale, text),
+        presentation.color,
+        io::stderr().is_terminal(),
+        true,
     );
 }
 
@@ -1395,14 +1931,19 @@ fn prompt_choice<T: Copy>(
         .ok_or_else(|| format!("unsupported {name} choice"))
 }
 
-fn wizard_error(error: &str, output_mode: OutputMode) -> ExitCode {
+fn wizard_error(
+    error: &str,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
     if output_mode == OutputMode::Plain {
         eprintln!("CONFIG=FAIL");
         eprintln!("REASON={error}");
     } else {
-        eprint_human_tone(
+        eprint_human_text(
             HumanTone::Failure,
-            format!("Configuration input failed: {error}."),
+            &HumanText::template(HumanMessageKey::ConfigurationInputFailed, [error]),
+            language,
         );
     }
     ExitCode::from(2)
@@ -1426,20 +1967,32 @@ fn preview(arguments: PreviewArgs) -> ExitCode {
             None => return preview_choice_error("spinner"),
         };
     }
-    print_preview_result(settings, OutputMode::Plain)
+    print_preview_result(settings, OutputMode::Plain, None)
 }
 
-fn print_preview_result(settings: PresentationSettings, output_mode: OutputMode) -> ExitCode {
+fn print_preview_result(
+    settings: PresentationSettings,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
     match render_preview(settings) {
         Ok(()) => {
             if output_mode == OutputMode::Plain {
                 println!("PREVIEW=PASS");
                 println!("TITLE_SPINNER_FEASIBILITY=PRODUCTION");
             } else {
-                print_human_tone(HumanTone::Success, "Preview completed.");
-                print_human_tone(
-                    HumanTone::Dim,
-                    "The staged presentation was rendered without saving changes.",
+                print_human_document(
+                    &HumanDocument::new(
+                        HumanText::message(HumanMessageKey::PreviewResult),
+                        Some(HumanText::message(HumanMessageKey::Healthy)),
+                    )
+                    .with_section(HumanSection::new(None).with_message(
+                        HumanMessage::plain(
+                            HumanText::message(HumanMessageKey::NoChangesNeeded),
+                            HumanTone::Dim,
+                        ),
+                    )),
+                    language,
                 );
             }
             ExitCode::SUCCESS
@@ -1449,9 +2002,10 @@ fn print_preview_result(settings: PresentationSettings, output_mode: OutputMode)
                 eprintln!("PREVIEW=BLOCKED");
                 eprintln!("REASON={reason}");
             } else {
-                eprint_human_tone(
+                eprint_human_text(
                     HumanTone::Failure,
-                    format!("Preview could not complete: {reason}."),
+                    &HumanText::template(HumanMessageKey::PreviewCouldNotComplete, [reason]),
+                    language,
                 );
             }
             ExitCode::from(78)
@@ -1498,18 +2052,22 @@ fn render_preview(settings: PresentationSettings) -> Result<(), &'static str> {
 fn preview_choice_error(key: &str) -> ExitCode {
     eprintln!("PREVIEW=FAIL");
     eprintln!("REASON=unsupported {key} override");
-    print_config_choices(key, OutputMode::Plain);
+    print_config_choices(key, OutputMode::Plain, None);
     ExitCode::from(2)
 }
 
 fn interface_show(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
     let store = match interface_store() {
         Ok(store) => store,
-        Err(error) => return management_error_for_output("INTERFACE", &error, output_mode),
+        Err(error) => {
+            return management_error_for_output("INTERFACE", &error, output_mode, language);
+        }
     };
     let preferences = match store.load_read_only() {
         Ok(preferences) => preferences,
-        Err(error) => return management_error_for_output("INTERFACE", &error, output_mode),
+        Err(error) => {
+            return management_error_for_output("INTERFACE", &error, output_mode, language);
+        }
     };
     if output_mode == OutputMode::Plain {
         print_interface_plain(store.path(), preferences, None);
@@ -1527,11 +2085,15 @@ fn interface_set(
 ) -> ExitCode {
     let store = match interface_store() {
         Ok(store) => store,
-        Err(error) => return management_error_for_output("INTERFACE", &error, output_mode),
+        Err(error) => {
+            return management_error_for_output("INTERFACE", &error, output_mode, language);
+        }
     };
     let snapshot = match store.snapshot_read_only() {
         Ok(snapshot) => snapshot,
-        Err(error) => return management_error_for_output("INTERFACE", &error, output_mode),
+        Err(error) => {
+            return management_error_for_output("INTERFACE", &error, output_mode, language);
+        }
     };
     let preferences = snapshot.preferences();
     let replacement = match key {
@@ -1547,7 +2109,7 @@ fn interface_set(
             .map(|reduced_motion| preferences.with_reduced_motion(reduced_motion)),
     };
     let Some(replacement) = replacement else {
-        return interface_value_error(key, value, output_mode);
+        return interface_value_error(key, value, output_mode, language);
     };
     match store.save_snapshot_if_unchanged(&snapshot, replacement) {
         Ok(InterfacePreferencesSnapshotSaveOutcome::Saved(_)) => {
@@ -1576,7 +2138,7 @@ fn interface_set(
             }
             ExitCode::from(2)
         }
-        Err(error) => management_error_for_output("INTERFACE", &error, output_mode),
+        Err(error) => management_error_for_output("INTERFACE", &error, output_mode, language),
     }
 }
 
@@ -1588,19 +2150,19 @@ fn interface_preferences_document(
         .with_field(HumanField::new(
             None::<String>,
             HumanText::message(HumanMessageKey::Language),
-            HumanText::literal(preferences.language().as_str()),
+            human_interface_language_text(preferences.language()),
             HumanTone::Plain,
         ))
         .with_field(HumanField::new(
             None::<String>,
             HumanText::message(HumanMessageKey::Color),
-            HumanText::literal(preferences.color().as_str()),
+            human_color_text(preferences.color()),
             HumanTone::Plain,
         ))
         .with_field(HumanField::new(
             None::<String>,
             HumanText::message(HumanMessageKey::ReducedMotion),
-            HumanText::literal(preferences.reduced_motion().to_string()),
+            human_boolean_text(preferences.reduced_motion()),
             HumanTone::Plain,
         ));
     let document = HumanDocument::new(
@@ -1634,14 +2196,19 @@ fn interface_value_error(
     key: InterfacePreferenceKey,
     value: &str,
     output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
 ) -> ExitCode {
     if output_mode == OutputMode::Plain {
         eprintln!("INTERFACE=FAIL");
         eprintln!("REASON=unsupported {key:?} value: {value}");
     } else {
-        eprint_human_tone(
+        eprint_human_text(
             HumanTone::Attention,
-            format!("Unsupported Interface preference value: {value}."),
+            &HumanText::template(
+                HumanMessageKey::UnsupportedInterfacePreferenceValue,
+                [value],
+            ),
+            language,
         );
     }
     ExitCode::from(2)
@@ -1666,20 +2233,42 @@ fn management_error_for_output(
     operation: &str,
     error: &dyn std::error::Error,
     output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
 ) -> ExitCode {
     if output_mode == OutputMode::Plain {
         return management_error(operation, error);
     }
+    let presentation = human_runtime_presentation(language);
     let label = match operation {
-        "SETUP" => "Setup",
-        "CONFIG" => "Configuration",
-        "INTERFACE" => "Interface preferences",
-        "UNINSTALL" => "Uninstall",
+        "SETUP" => tabbeacon::human_presentation::catalog(
+            presentation.locale,
+            HumanMessageKey::SetupOperation,
+        ),
+        "CONFIG" => tabbeacon::human_presentation::catalog(
+            presentation.locale,
+            HumanMessageKey::Configuration,
+        ),
+        "INTERFACE" => tabbeacon::human_presentation::catalog(
+            presentation.locale,
+            HumanMessageKey::InterfacePreferences,
+        ),
+        "UNINSTALL" => {
+            tabbeacon::human_presentation::catalog(presentation.locale, HumanMessageKey::Uninstall)
+        }
         _ => operation,
     };
-    eprint_human_tone(
+    print_human_tone_with_color(
         HumanTone::Failure,
-        format!("{label} could not be completed: {error}."),
+        render_human_text(
+            presentation.locale,
+            &HumanText::template(
+                HumanMessageKey::OperationCouldNotComplete,
+                [label.to_owned(), error.to_string()],
+            ),
+        ),
+        presentation.color,
+        io::stderr().is_terminal(),
+        true,
     );
     ExitCode::FAILURE
 }
@@ -1697,6 +2286,7 @@ fn interactive_terminal_required(
     reason: &str,
     next_action: &str,
     output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
 ) -> ExitCode {
     if output_mode == OutputMode::Plain {
         eprintln!("{operation}=BLOCKED");
@@ -1706,16 +2296,26 @@ fn interactive_terminal_required(
         eprintln!("HOOKS_UNCHANGED=true");
         eprintln!("NEXT_ACTION={next_action}");
     } else {
+        let locale = human_runtime_presentation(language).locale;
         let label = match operation {
-            "SETUP" => "Setup",
-            "CONFIG" => "Configuration",
+            "SETUP" => {
+                tabbeacon::human_presentation::catalog(locale, HumanMessageKey::SetupOperation)
+            }
+            "CONFIG" => {
+                tabbeacon::human_presentation::catalog(locale, HumanMessageKey::Configuration)
+            }
             _ => operation,
         };
-        eprint_human_tone(
+        eprint_human_text(
             HumanTone::Attention,
-            format!("{label} needs an interactive terminal."),
+            &HumanText::template(HumanMessageKey::InteractiveTerminalRequired, [label]),
+            language,
         );
-        eprint_human_tone(HumanTone::Dim, format!("Next: {next_action}."));
+        eprint_human_text(
+            HumanTone::Dim,
+            &HumanText::template(HumanMessageKey::NextAction, [next_action]),
+            language,
+        );
     }
     ExitCode::from(2)
 }
@@ -1741,22 +2341,140 @@ fn ui() -> ExitCode {
         Err(error) => return management_error("UI", &error),
     };
     let settings = settings_snapshot.settings();
+    let interface_store = match InterfacePreferencesStore::from_environment() {
+        Ok(store) => store,
+        Err(error) => return management_error("UI", &error),
+    };
+    let mut interface_snapshot = match interface_store.snapshot_read_only() {
+        Ok(snapshot) => snapshot,
+        Err(error) => return management_error("UI", &error),
+    };
+    let interface = interface_snapshot.preferences();
     let report = collect_operational_diagnostics();
     let snapshot = ManagementSnapshot::from_diagnostics(&report);
     let overview = tabbeacon::management::ManagementOverview::from_diagnostics(&report);
     match tabbeacon::control_center::run(
         tabbeacon::control_center::ControlCenterApp::new(settings, snapshot, overview)
-            .with_locale(human_runtime_presentation(None).locale),
+            .with_interface_preferences(interface)
+            .with_locale(resolve_runtime_locale(None, interface.language()).locale()),
         |before, after| {
-            let (_, next_snapshot) =
-                apply_control_center_settings_change(&store, &settings_snapshot, before, after)?;
-            settings_snapshot = next_snapshot;
-            Ok(())
+            apply_control_center_drafts(
+                &store,
+                &mut settings_snapshot,
+                &interface_store,
+                &mut interface_snapshot,
+                before,
+                after,
+            )
         },
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => management_error("UI", &error),
     }
+}
+
+fn apply_control_center_drafts(
+    settings_store: &PresentationSettingsStore,
+    settings_snapshot: &mut PresentationSettingsSnapshot,
+    interface_store: &InterfacePreferencesStore,
+    interface_snapshot: &mut InterfacePreferencesSnapshot,
+    before: tabbeacon::control_center::ControlCenterDraft,
+    after: tabbeacon::control_center::ControlCenterDraft,
+) -> io::Result<()> {
+    if settings_snapshot.settings() != before.presentation
+        || interface_snapshot.preferences() != before.interface
+    {
+        return Err(settings_conflict_error());
+    }
+
+    let interface_receipt = if before.interface == after.interface {
+        None
+    } else {
+        match interface_store
+            .save_snapshot_if_unchanged(interface_snapshot, after.interface)
+            .map_err(io::Error::other)?
+        {
+            InterfacePreferencesSnapshotSaveOutcome::Saved(receipt) => Some(receipt),
+            InterfacePreferencesSnapshotSaveOutcome::Conflict => {
+                return Err(settings_conflict_error());
+            }
+        }
+    };
+
+    // Verify the first per-store write before entering the second store. If
+    // this readback cannot prove the Interface draft, no Presentation write
+    // has occurred and the exact receipt can still compensate safely.
+    let next_interface_snapshot = if before.interface == after.interface {
+        None
+    } else {
+        match interface_store.snapshot_read_only() {
+            Ok(snapshot) if snapshot.preferences() == after.interface => Some(snapshot),
+            Ok(_) => {
+                let restored = interface_receipt.as_ref().is_some_and(|receipt| {
+                    matches!(
+                        interface_store.restore_snapshot_if_unchanged(receipt, interface_snapshot),
+                        Ok(InterfacePreferencesConditionalOutcome::Saved)
+                    )
+                });
+                if restored {
+                    return Err(interface_conflict_error());
+                }
+                return Err(io::Error::other(
+                    "Interface preferences changed concurrently; rollback was refused",
+                ));
+            }
+            Err(error) => {
+                let restored = interface_receipt.as_ref().is_some_and(|receipt| {
+                    matches!(
+                        interface_store.restore_snapshot_if_unchanged(receipt, interface_snapshot),
+                        Ok(InterfacePreferencesConditionalOutcome::Saved)
+                    )
+                });
+                let reason = if restored {
+                    error.to_string()
+                } else {
+                    format!(
+                        "{error}; Interface rollback refused because the document could not be verified"
+                    )
+                };
+                return Err(io::Error::other(reason));
+            }
+        }
+    };
+
+    if before.presentation != after.presentation {
+        match apply_control_center_settings_change(
+            settings_store,
+            settings_snapshot,
+            before.presentation,
+            after.presentation,
+        ) {
+            Ok((_, next_snapshot)) => *settings_snapshot = next_snapshot,
+            Err(error) => {
+                if let Some(receipt) = interface_receipt.as_ref() {
+                    let restored = matches!(
+                        interface_store.restore_snapshot_if_unchanged(receipt, interface_snapshot),
+                        Ok(InterfacePreferencesConditionalOutcome::Saved)
+                    );
+                    if !restored {
+                        return Err(io::Error::other(format!(
+                            "{error}; Interface rollback refused because the document changed concurrently"
+                        )));
+                    }
+                }
+                return Err(error);
+            }
+        }
+    }
+
+    if let Some(next_snapshot) = next_interface_snapshot {
+        *interface_snapshot = next_snapshot;
+    }
+    Ok(())
+}
+
+fn interface_conflict_error() -> io::Error {
+    io::Error::other("Interface preferences changed concurrently; the stale draft was not applied")
 }
 
 #[cfg(test)]
@@ -1767,6 +2485,31 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn guided_setup_revisit_policy_distinguishes_fresh_quick_and_full_paths() {
+        assert!(should_revisit_interface_preferences(
+            false, false, true, false
+        ));
+        assert!(should_revisit_interface_preferences(
+            false, false, false, true
+        ));
+        assert!(should_revisit_interface_preferences(
+            false, true, false, false
+        ));
+        assert!(
+            should_revisit_interface_preferences(true, false, true, false),
+            "a fresh presentation setup remains language-first even in quick mode"
+        );
+        assert!(
+            !should_revisit_interface_preferences(true, false, false, true),
+            "quick setup keeps a valid implicit auto default prompt-free"
+        );
+        assert!(
+            !should_revisit_interface_preferences(true, false, false, false),
+            "returning quick setup has no language prompt"
+        );
+    }
 
     #[test]
     fn control_center_apply_uses_the_existing_typed_settings_store() {
@@ -1782,6 +2525,85 @@ mod tests {
         apply_settings_change(&store, before, after).unwrap();
 
         assert_eq!(store.load().unwrap(), after);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn control_center_interface_only_apply_uses_its_separate_snapshot_store() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tabbeacon-ui-interface-{unique}"));
+        let settings_store = PresentationSettingsStore::new(root.join("config.toml"));
+        let interface_store = InterfacePreferencesStore::new(root.join("interface.toml"));
+        let mut settings_snapshot = settings_store.snapshot_read_only().unwrap();
+        let mut interface_snapshot = interface_store.snapshot_read_only().unwrap();
+        let before = tabbeacon::control_center::ControlCenterDraft {
+            presentation: settings_snapshot.settings(),
+            interface: interface_snapshot.preferences(),
+        };
+        let after = tabbeacon::control_center::ControlCenterDraft {
+            presentation: before.presentation,
+            interface: before.interface.with_language(InterfaceLanguage::ZhCn),
+        };
+
+        apply_control_center_drafts(
+            &settings_store,
+            &mut settings_snapshot,
+            &interface_store,
+            &mut interface_snapshot,
+            before,
+            after,
+        )
+        .unwrap();
+
+        assert!(!settings_store.path().exists());
+        assert_eq!(
+            interface_store.load_read_only().unwrap().language(),
+            InterfaceLanguage::ZhCn
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn control_center_combined_failure_restores_interface_before_preserving_settings_conflict() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tabbeacon-ui-combined-{unique}"));
+        let settings_store = PresentationSettingsStore::new(root.join("config.toml"));
+        let interface_store = InterfacePreferencesStore::new(root.join("interface.toml"));
+        let mut settings_snapshot = settings_store.snapshot_read_only().unwrap();
+        let mut interface_snapshot = interface_store.snapshot_read_only().unwrap();
+        let before = tabbeacon::control_center::ControlCenterDraft {
+            presentation: settings_snapshot.settings(),
+            interface: interface_snapshot.preferences(),
+        };
+        let concurrent = before.presentation.with_theme(PresentationTheme::Classic);
+        settings_store.save(concurrent).unwrap();
+        let after = tabbeacon::control_center::ControlCenterDraft {
+            presentation: before.presentation.with_title(TitleMode::Native),
+            interface: before.interface.with_language(InterfaceLanguage::ZhCn),
+        };
+
+        assert!(
+            apply_control_center_drafts(
+                &settings_store,
+                &mut settings_snapshot,
+                &interface_store,
+                &mut interface_snapshot,
+                before,
+                after,
+            )
+            .is_err()
+        );
+        assert_eq!(settings_store.load().unwrap(), concurrent);
+        assert!(
+            !interface_store.path().exists(),
+            "the guarded Interface write is compensated when presentation conflicts"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

@@ -7,12 +7,15 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$ProcessReceiptPath,
     [Parameter(Mandatory = $true)]
+    [string]$FixtureResultPath,
+    [Parameter(Mandatory = $true)]
     [string]$RunId
 )
 
 $ErrorActionPreference = 'Stop'
 [System.IO.File]::WriteAllText($ProcessReceiptPath, [string]$PID)
 
+$env:TABBEACON_TUI_SMOKE_RESULT_PATH = $FixtureResultPath
 & $BinaryPath
 $fixtureExitCode = $LASTEXITCODE
 

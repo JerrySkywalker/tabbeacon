@@ -12,7 +12,7 @@ use ratatui::{
     Frame,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
 };
@@ -20,8 +20,11 @@ use ratatui::{
 use crate::{
     core::{Attention, Health, Phase},
     human_presentation::{
-        HumanMessageKey, ResolvedLocale, catalog, health_label as shared_health_label,
+        HumanMessageKey, ManagementTextKind, ResolvedLocale, catalog, color_enabled,
+        health_label as shared_health_label, management_action_text, management_text,
+        pad_display_width, render_human_text,
     },
+    interface_preferences::{HumanColor, InterfaceLanguage, InterfacePreferences},
     management::{ActionSafety, ManagementHealth, ManagementOverview, ManagementSnapshot},
     presentation::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput,
@@ -35,15 +38,17 @@ use crate::{
 pub enum Screen {
     Overview,
     Appearance,
+    Interface,
     Integration,
     Diagnostics,
     Preview,
 }
 
 impl Screen {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Overview,
         Self::Appearance,
+        Self::Interface,
         Self::Integration,
         Self::Diagnostics,
         Self::Preview,
@@ -54,6 +59,7 @@ impl Screen {
         match self {
             Self::Overview => "Overview",
             Self::Appearance => "Appearance",
+            Self::Interface => "Interface",
             Self::Integration => "Codex Integration",
             Self::Diagnostics => "Diagnostics",
             Self::Preview => "Preview",
@@ -64,6 +70,7 @@ impl Screen {
         match self {
             Self::Overview => HumanMessageKey::Overview,
             Self::Appearance => HumanMessageKey::Appearance,
+            Self::Interface => HumanMessageKey::Interface,
             Self::Integration => HumanMessageKey::CodexIntegration,
             Self::Diagnostics => HumanMessageKey::Diagnostics,
             Self::Preview => HumanMessageKey::Preview,
@@ -94,15 +101,47 @@ impl AppearanceField {
         Self::Theme,
     ];
 
-    const fn label(self) -> &'static str {
+    const fn message_key(self) -> HumanMessageKey {
         match self {
-            Self::Title => "Title",
-            Self::TabColor => "Tab color",
-            Self::Activity => "Activity",
-            Self::Spinner => "Spinner",
-            Self::Theme => "Theme",
+            Self::Title => HumanMessageKey::Title,
+            Self::TabColor => HumanMessageKey::TabColor,
+            Self::Activity => HumanMessageKey::Activity,
+            Self::Spinner => HumanMessageKey::Spinner,
+            Self::Theme => HumanMessageKey::Theme,
         }
     }
+}
+
+/// One staged Interface preference that can be selected in the TUI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InterfaceField {
+    Language,
+    Color,
+    ReducedMotion,
+}
+
+impl InterfaceField {
+    const ALL: [Self; 3] = [Self::Language, Self::Color, Self::ReducedMotion];
+
+    const fn message_key(self) -> HumanMessageKey {
+        match self {
+            Self::Language => HumanMessageKey::Language,
+            Self::Color => HumanMessageKey::Color,
+            Self::ReducedMotion => HumanMessageKey::ReducedMotion,
+        }
+    }
+}
+
+/// One aggregate in-memory Control Center draft.
+///
+/// Persistence remains separately ownership-aware per user-local store. This
+/// type only makes both staged domains explicit to the UI caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControlCenterDraft {
+    /// Presentation settings staged for the existing settings store.
+    pub presentation: PresentationSettings,
+    /// Human Interface preferences staged for the separate Interface store.
+    pub interface: InterfacePreferences,
 }
 
 /// A frontend request that must be executed by an existing ownership-aware API.
@@ -114,25 +153,28 @@ pub enum ControlCenterCommand {
     Quit,
     /// Persist one staged settings draft through the caller-owned operation.
     Apply {
-        /// Current typed settings expected by the frontend.
-        before: PresentationSettings,
-        /// Staged typed settings to apply.
-        after: PresentationSettings,
+        /// Current typed state expected by the frontend.
+        before: ControlCenterDraft,
+        /// Staged typed state to apply.
+        after: ControlCenterDraft,
     },
 }
 
 /// In-memory frontend state. No mutation authority is stored here.
 #[derive(Clone, Debug)]
 pub struct ControlCenterApp {
-    locale: ResolvedLocale,
+    base_locale: ResolvedLocale,
     screen: Screen,
     snapshot: ManagementSnapshot,
     overview: ManagementOverview,
     current: PresentationSettings,
     draft: PresentationSettings,
+    current_interface: InterfacePreferences,
+    interface_draft: InterfacePreferences,
     dirty: bool,
     confirm_discard: bool,
     appearance_field: Option<AppearanceField>,
+    interface_field: Option<InterfaceField>,
 }
 
 impl ControlCenterApp {
@@ -144,29 +186,44 @@ impl ControlCenterApp {
         overview: ManagementOverview,
     ) -> Self {
         Self {
-            locale: ResolvedLocale::EnUs,
+            base_locale: ResolvedLocale::EnUs,
             screen: Screen::Overview,
             snapshot,
             overview,
             current,
             draft: current,
+            current_interface: InterfacePreferences::default(),
+            interface_draft: InterfacePreferences::default(),
             dirty: false,
             confirm_discard: false,
             appearance_field: None,
+            interface_field: None,
         }
     }
 
     /// Selects one resolved Human locale for the bounded Control Center surface.
     #[must_use]
     pub fn with_locale(mut self, locale: ResolvedLocale) -> Self {
-        self.locale = locale;
+        self.base_locale = locale;
+        self
+    }
+
+    /// Supplies the read-only Interface baseline used for the staged screen.
+    #[must_use]
+    pub fn with_interface_preferences(mut self, preferences: InterfacePreferences) -> Self {
+        self.current_interface = preferences;
+        self.interface_draft = preferences;
         self
     }
 
     /// The selected Human locale for the bounded Control Center surface.
     #[must_use]
-    pub const fn locale(&self) -> ResolvedLocale {
-        self.locale
+    pub fn locale(&self) -> ResolvedLocale {
+        match self.interface_draft.language() {
+            InterfaceLanguage::EnUs => ResolvedLocale::EnUs,
+            InterfaceLanguage::ZhCn => ResolvedLocale::ZhCn,
+            InterfaceLanguage::Auto => self.base_locale,
+        }
     }
 
     /// Current active screen.
@@ -193,10 +250,44 @@ impl ControlCenterApp {
         self.draft
     }
 
+    /// Current persisted/effective Interface preferences.
+    #[must_use]
+    pub const fn current_interface(&self) -> InterfacePreferences {
+        self.current_interface
+    }
+
+    /// In-memory Interface preferences used for live Human rendering.
+    #[must_use]
+    pub const fn interface_draft(&self) -> InterfacePreferences {
+        self.interface_draft
+    }
+
+    /// Current aggregate state bound to the caller's snapshots.
+    #[must_use]
+    pub const fn current_draft(&self) -> ControlCenterDraft {
+        ControlCenterDraft {
+            presentation: self.current,
+            interface: self.current_interface,
+        }
+    }
+
+    /// Aggregate staged state requested for an Apply operation.
+    #[must_use]
+    pub const fn staged_draft(&self) -> ControlCenterDraft {
+        ControlCenterDraft {
+            presentation: self.draft,
+            interface: self.interface_draft,
+        }
+    }
+
     /// Whether quit requires an explicit discard response.
     #[must_use]
     pub const fn confirm_discard(&self) -> bool {
         self.confirm_discard
+    }
+
+    fn editing(&self) -> bool {
+        self.appearance_field.is_some() || self.interface_field.is_some()
     }
 
     /// Applies one event to staged state and returns a caller-owned action request.
@@ -210,6 +301,7 @@ impl ControlCenterApp {
             KeyCode::Left => self.change_focused(-1),
             KeyCode::Right => self.change_focused(1),
             KeyCode::Enter if self.screen == Screen::Appearance => self.toggle_appearance_focus(),
+            KeyCode::Enter if self.screen == Screen::Interface => self.toggle_interface_focus(),
             KeyCode::Char('r') => self.revert(),
             KeyCode::Char('a') => return self.request_apply(),
             KeyCode::Char('q') if self.dirty => self.confirm_discard = true,
@@ -241,6 +333,7 @@ impl ControlCenterApp {
     /// Marks a successfully caller-owned persistence operation as accepted.
     pub fn apply_succeeded(&mut self) {
         self.current = self.draft;
+        self.current_interface = self.interface_draft;
         self.dirty = false;
     }
 
@@ -259,8 +352,8 @@ impl ControlCenterApp {
     fn request_apply(&self) -> ControlCenterCommand {
         if self.dirty {
             ControlCenterCommand::Apply {
-                before: self.current,
-                after: self.draft,
+                before: self.current_draft(),
+                after: self.staged_draft(),
             }
         } else {
             ControlCenterCommand::None
@@ -269,8 +362,10 @@ impl ControlCenterApp {
 
     fn revert(&mut self) {
         self.draft = self.current;
+        self.interface_draft = self.current_interface;
         self.dirty = false;
         self.appearance_field = None;
+        self.interface_field = None;
     }
 
     fn toggle_appearance_focus(&mut self) {
@@ -282,6 +377,10 @@ impl ControlCenterApp {
     fn step(&mut self, offset: isize) {
         if self.appearance_field.is_some() {
             self.step_appearance_field(offset);
+            return;
+        }
+        if self.interface_field.is_some() {
+            self.step_interface_field(offset);
             return;
         }
         let index = Screen::ALL
@@ -301,7 +400,20 @@ impl ControlCenterApp {
             Some(AppearanceField::ALL[shifted_index(index, AppearanceField::ALL.len(), offset)]);
     }
 
+    fn step_interface_field(&mut self, offset: isize) {
+        let index = InterfaceField::ALL
+            .iter()
+            .position(|field| Some(*field) == self.interface_field)
+            .unwrap_or(0);
+        self.interface_field =
+            Some(InterfaceField::ALL[shifted_index(index, InterfaceField::ALL.len(), offset)]);
+    }
+
     fn change_focused(&mut self, offset: isize) {
+        if self.interface_field.is_some() {
+            self.change_focused_interface(offset);
+            return;
+        }
         let Some(field) = self.appearance_field else {
             return;
         };
@@ -322,7 +434,35 @@ impl ControlCenterApp {
                 .draft
                 .with_theme(cycle_theme(self.draft.theme(), offset)),
         };
-        self.dirty = self.draft != self.current;
+        self.update_dirty();
+    }
+
+    fn toggle_interface_focus(&mut self) {
+        self.interface_field = self
+            .interface_field
+            .map_or(Some(InterfaceField::Language), |_| None);
+    }
+
+    fn change_focused_interface(&mut self, offset: isize) {
+        let Some(field) = self.interface_field else {
+            return;
+        };
+        self.interface_draft = match field {
+            InterfaceField::Language => self.interface_draft.with_language(
+                cycle_interface_language(self.interface_draft.language(), offset),
+            ),
+            InterfaceField::Color => self
+                .interface_draft
+                .with_color(cycle_human_color(self.interface_draft.color(), offset)),
+            InterfaceField::ReducedMotion => self
+                .interface_draft
+                .with_reduced_motion(!self.interface_draft.reduced_motion()),
+        };
+        self.update_dirty();
+    }
+
+    fn update_dirty(&mut self) {
+        self.dirty = self.draft != self.current || self.interface_draft != self.current_interface;
     }
 }
 
@@ -397,6 +537,26 @@ fn cycle_theme(
     )
 }
 
+fn cycle_interface_language(value: InterfaceLanguage, offset: isize) -> InterfaceLanguage {
+    cycle(
+        [
+            InterfaceLanguage::Auto,
+            InterfaceLanguage::ZhCn,
+            InterfaceLanguage::EnUs,
+        ],
+        value,
+        offset,
+    )
+}
+
+fn cycle_human_color(value: HumanColor, offset: isize) -> HumanColor {
+    cycle(
+        [HumanColor::Auto, HumanColor::Always, HumanColor::Never],
+        value,
+        offset,
+    )
+}
+
 fn cycle<T: Copy + Eq>(values: impl AsRef<[T]>, value: T, offset: isize) -> T {
     let values = values.as_ref();
     let index = values.iter().position(|item| *item == value).unwrap_or(0);
@@ -410,7 +570,7 @@ fn cycle<T: Copy + Eq>(values: impl AsRef<[T]>, value: T, offset: isize) -> T {
 /// Returns terminal I/O errors or an Apply error after the terminal has been restored.
 pub fn run<F>(mut app: ControlCenterApp, mut apply: F) -> io::Result<()>
 where
-    F: FnMut(PresentationSettings, PresentationSettings) -> io::Result<()>,
+    F: FnMut(ControlCenterDraft, ControlCenterDraft) -> io::Result<()>,
 {
     let mut session = TerminalSession::enter()?;
     loop {
@@ -439,14 +599,21 @@ where
 
 /// Result of the feature-gated real-terminal lifecycle fixture.
 #[cfg(feature = "terminal-smoke-fixture")]
+#[allow(clippy::struct_excessive_bools)] // Receipt fields stay independently auditable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalSmokeReport {
-    /// The fixture rendered Overview, Appearance, and Integration in order.
+    /// The fixture rendered Overview, Appearance, Interface, and Integration in order.
     pub screens_visited: usize,
     /// An appearance value changed in the in-memory draft.
     pub draft_changed: bool,
     /// Revert restored the draft to the original settings without Apply.
     pub draft_reverted: bool,
+    /// A concrete Interface language changed the following rendered frame.
+    pub interface_locale_switched: bool,
+    /// Revert restored the Interface language draft before any persistence request.
+    pub interface_draft_reverted: bool,
+    /// Apply remained a staged caller request with no fixture mutation authority.
+    pub interface_apply_staged: bool,
     /// The normal application event handler returned its clean quit command.
     pub clean_quit: bool,
 }
@@ -478,6 +645,8 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
     }
 
     let original = app.current();
+    let original_interface = app.current_interface();
+    let original_locale = app.locale();
     let mut session = TerminalSession::enter()?;
     let result = (|| {
         invariant(
@@ -505,6 +674,49 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
 
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(
+            app.screen() == Screen::Interface,
+            "fixture did not reach Interface",
+        )?;
+        draw(&mut session, &app)?;
+
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let interface_locale_switched = app.interface_draft().language() == InterfaceLanguage::ZhCn
+            && app.locale() == ResolvedLocale::ZhCn
+            && app.current_interface() == original_interface;
+        invariant(
+            interface_locale_switched,
+            "fixture did not live-switch the Interface locale",
+        )?;
+        draw(&mut session, &app)?;
+
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        let interface_draft_reverted = !app.dirty()
+            && app.interface_draft() == original_interface
+            && app.current_interface() == original_interface
+            && app.locale() == original_locale;
+        invariant(
+            interface_draft_reverted,
+            "fixture did not revert its Interface language draft",
+        )?;
+
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let interface_apply_staged = matches!(
+            app.handle_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            ControlCenterCommand::Apply { before, after }
+                if before.interface == original_interface
+                    && after.interface.language() == InterfaceLanguage::ZhCn
+                    && before.presentation == after.presentation
+        );
+        invariant(
+            interface_apply_staged,
+            "fixture did not request a staged Interface apply",
+        )?;
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        invariant(
             app.screen() == Screen::Integration,
             "fixture did not reach Integration",
         )?;
@@ -518,9 +730,12 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         )?;
 
         Ok(TerminalSmokeReport {
-            screens_visited: 3,
+            screens_visited: 4,
             draft_changed,
             draft_reverted,
+            interface_locale_switched,
+            interface_draft_reverted,
+            interface_apply_staged,
             clean_quit,
         })
     })();
@@ -653,14 +868,26 @@ const MIN_TERMINAL_HEIGHT: u16 = 10;
 
 /// Renders all Control Center screens into the active Ratatui frame.
 pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
+    let style = tui_human_style(
+        app.interface_draft.color(),
+        std::env::var_os("NO_COLOR").is_some(),
+    );
     let area = frame.area();
     if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
         frame.render_widget(
             Paragraph::new(format!(
-                "{}\nMinimum size: {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}\nResize, then reopen TabBeacon Control Center.",
+                "{}\n{}: {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}\n{}",
                 catalog(app.locale(), HumanMessageKey::TerminalTooSmall),
+                catalog(app.locale(), HumanMessageKey::MinimumSize),
+                catalog(app.locale(), HumanMessageKey::ResizeAndReopen),
             ))
-            .block(Block::default().borders(Borders::ALL).title("TabBeacon")),
+            .style(style)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("TabBeacon")
+                    .style(style),
+            ),
             area,
         );
         return;
@@ -677,13 +904,14 @@ pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
         Paragraph::new(Line::from(vec![
             Span::styled(
                 catalog(app.locale(), HumanMessageKey::ControlCenter),
-                Style::default().add_modifier(Modifier::BOLD),
+                style.add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
                 " — {}",
                 shared_health_label(app.locale(), app.snapshot.health)
             )),
-        ])),
+        ]))
+        .style(style),
         areas[0],
     );
     let body = Layout::default()
@@ -701,24 +929,26 @@ pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        List::new(nav).block(
+        List::new(nav).style(style).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(catalog(app.locale(), HumanMessageKey::Sections)),
+                .title(catalog(app.locale(), HumanMessageKey::Sections))
+                .style(style),
         ),
         body[0],
     );
     frame.render_widget(
-        content(app).block(
+        content(app).style(style).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(app.screen.localized_title(app.locale())),
+                .title(app.screen.localized_title(app.locale()))
+                .style(style),
         ),
         body[1],
     );
     let footer = if app.confirm_discard {
         catalog(app.locale(), HumanMessageKey::FooterDiscard).to_owned()
-    } else if app.appearance_field.is_some() {
+    } else if app.editing() {
         catalog(app.locale(), HumanMessageKey::FooterEditing).to_owned()
     } else {
         let footer = catalog(app.locale(), HumanMessageKey::FooterNavigation);
@@ -734,13 +964,22 @@ pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
             }
         )
     };
-    frame.render_widget(Paragraph::new(footer), areas[2]);
+    frame.render_widget(Paragraph::new(footer).style(style), areas[2]);
+}
+
+fn tui_human_style(color: HumanColor, no_color_is_set: bool) -> Style {
+    if color_enabled(color, true, no_color_is_set) {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
+    }
 }
 
 fn content(app: &ControlCenterApp) -> Paragraph<'static> {
     Paragraph::new(match app.screen {
         Screen::Overview => overview_lines(app),
         Screen::Appearance => appearance_lines(app),
+        Screen::Interface => interface_lines(app),
         Screen::Integration => integration_lines(app),
         Screen::Diagnostics => diagnostics_lines(app),
         Screen::Preview => preview_lines(app),
@@ -749,7 +988,7 @@ fn content(app: &ControlCenterApp) -> Paragraph<'static> {
 
 fn overview_lines(app: &ControlCenterApp) -> String {
     format!(
-        "{}: {}\n\n{}  {}\n{}      {} · {}\n{}      {} · trust {}\n{}      {}\n\n{}\n  {}      {}\n  {}  {}\n  {}   {}\n  {}    {}\n  {}      {}\n\n{}    {} · {} {} · {} {}",
+        "{}: {}\n\n{}  {}\n{}      {} · {}\n{}      {} · {} {}\n{}      {}\n\n{}\n  {}      {}\n  {}  {}\n  {}   {}\n  {}    {}\n  {}      {}\n\n{}    {} · {} {} · {} {}",
         catalog(app.locale(), HumanMessageKey::OverallHealth),
         shared_health_label(app.locale(), app.snapshot.health),
         catalog(app.locale(), HumanMessageKey::TabBeacon),
@@ -759,20 +998,21 @@ fn overview_lines(app: &ControlCenterApp) -> String {
         app.overview.codex_profile,
         catalog(app.locale(), HumanMessageKey::Hooks),
         app.overview.hooks,
+        catalog(app.locale(), HumanMessageKey::Trust),
         app.overview.hook_trust,
         catalog(app.locale(), HumanMessageKey::Title),
         app.overview.title_ownership,
         catalog(app.locale(), HumanMessageKey::Presentation),
         catalog(app.locale(), HumanMessageKey::Title),
-        human_title(app.current.title()),
+        human_title(app.locale(), app.current.title()),
         catalog(app.locale(), HumanMessageKey::TabColor),
-        human_tab_color(app.current.tab_color()),
+        human_tab_color(app.locale(), app.current.tab_color()),
         catalog(app.locale(), HumanMessageKey::Activity),
-        human_activity(app.current.activity()),
+        human_activity(app.locale(), app.current.activity()),
         catalog(app.locale(), HumanMessageKey::Spinner),
-        human_spinner(app.current.spinner()),
+        human_spinner(app.locale(), app.current.spinner()),
         catalog(app.locale(), HumanMessageKey::Theme),
-        human_theme(app.current.theme()),
+        human_theme(app.locale(), app.current.theme()),
         catalog(app.locale(), HumanMessageKey::Workers),
         app.overview.worker_health,
         catalog(app.locale(), HumanMessageKey::Active),
@@ -789,91 +1029,185 @@ fn appearance_lines(app: &ControlCenterApp) -> String {
         } else {
             " "
         };
-        format!("{marker} {:10} {value}", field.label())
+        format!(
+            "{marker} {} {value}",
+            pad_display_width(catalog(app.locale(), field.message_key()), 12)
+        )
     };
     format!(
-        "Draft appearance — staged only\n\n{}\n{}\n{}\n{}\n{}\n\n{}",
+        "{}\n\n{}\n{}\n{}\n{}\n{}\n\n{}",
+        catalog(app.locale(), HumanMessageKey::DraftAppearance),
         field_line(
             AppearanceField::Title,
-            human_title(app.draft.title()).to_owned()
+            human_title(app.locale(), app.draft.title()).to_owned()
         ),
         field_line(
             AppearanceField::TabColor,
-            human_tab_color(app.draft.tab_color()).to_owned()
+            human_tab_color(app.locale(), app.draft.tab_color()).to_owned()
         ),
         field_line(
             AppearanceField::Activity,
-            human_activity(app.draft.activity()).to_owned()
+            human_activity(app.locale(), app.draft.activity()).to_owned()
         ),
         field_line(
             AppearanceField::Spinner,
-            human_spinner(app.draft.spinner()).to_owned()
+            human_spinner(app.locale(), app.draft.spinner()).to_owned()
         ),
         field_line(
             AppearanceField::Theme,
-            human_theme(app.draft.theme()).to_owned()
+            human_theme(app.locale(), app.draft.theme()).to_owned()
         ),
-        if app.appearance_field.is_some() {
-            "Use ← → to change this in-memory draft."
+        if app.editing() {
+            catalog(app.locale(), HumanMessageKey::UseArrowsToChange)
         } else {
-            "Press Enter to select a setting; no enum typing is required."
+            catalog(app.locale(), HumanMessageKey::PressEnterToSelect)
+        }
+    )
+}
+
+fn interface_lines(app: &ControlCenterApp) -> String {
+    let field_line = |field: InterfaceField, value: &str| {
+        let marker = if app.interface_field == Some(field) {
+            ">"
+        } else {
+            " "
+        };
+        format!(
+            "{marker} {} {value}",
+            pad_display_width(catalog(app.locale(), field.message_key()), 12)
+        )
+    };
+    format!(
+        "{}\n\n{}\n{}\n{}\n\n{}",
+        catalog(app.locale(), HumanMessageKey::DraftInterface),
+        field_line(
+            InterfaceField::Language,
+            human_language(app.locale(), app.interface_draft.language()),
+        ),
+        field_line(
+            InterfaceField::Color,
+            human_color(app.locale(), app.interface_draft.color()),
+        ),
+        field_line(
+            InterfaceField::ReducedMotion,
+            human_boolean(app.locale(), app.interface_draft.reduced_motion()),
+        ),
+        if app.editing() {
+            catalog(app.locale(), HumanMessageKey::UseArrowsToChange)
+        } else {
+            catalog(app.locale(), HumanMessageKey::PressEnterToSelect)
         }
     )
 }
 
 fn integration_lines(app: &ControlCenterApp) -> String {
     let actions = if app.snapshot.recommended_actions.is_empty() {
-        "No action required.".to_owned()
+        catalog(app.locale(), HumanMessageKey::NoAutomatedAction).to_owned()
     } else {
         app.snapshot
             .recommended_actions
             .iter()
             .map(|action| {
+                let instruction = app
+                    .snapshot
+                    .issues
+                    .iter()
+                    .find_map(|issue| {
+                        issue
+                            .remediation
+                            .as_ref()
+                            .filter(|remediation| remediation.id == action.id)
+                            .map(|_| {
+                                render_human_text(
+                                    app.locale(),
+                                    &management_action_text(
+                                        &issue.id,
+                                        &action.id,
+                                        action.instruction.clone(),
+                                    ),
+                                )
+                            })
+                    })
+                    .unwrap_or_else(|| action.instruction.clone());
                 format!(
                     "• {} [{}]\n  {}",
                     action.title,
-                    safety_label(action.safety),
-                    action.instruction
+                    safety_label(app.locale(), action.safety),
+                    instruction
                 )
             })
             .collect::<Vec<_>>()
             .join("\n")
     };
     format!(
-        "Codex       {} · profile {}\nHooks       {}\nCurrentness {}\nTrust       {} (manual only)\nTitle       {}\n\nRecommended actions\n{}",
+        "{}       {} · {} {}\n{}       {}\n{} {}\n{}       {} ({})\n{}       {}\n\n{}\n{}",
+        catalog(app.locale(), HumanMessageKey::Codex),
         app.overview.codex_version,
+        catalog(app.locale(), HumanMessageKey::Profile),
         app.overview.codex_profile,
+        catalog(app.locale(), HumanMessageKey::Hooks),
         app.overview.hooks,
-        health_label(app.snapshot.health),
+        catalog(app.locale(), HumanMessageKey::Currentness),
+        health_label(app.locale(), app.snapshot.health),
+        catalog(app.locale(), HumanMessageKey::Trust),
         app.overview.hook_trust,
+        catalog(app.locale(), HumanMessageKey::ManualOnly),
+        catalog(app.locale(), HumanMessageKey::Title),
         app.overview.title_ownership,
+        catalog(app.locale(), HumanMessageKey::RecommendedActions),
         actions
     )
 }
 
 fn diagnostics_lines(app: &ControlCenterApp) -> String {
     if app.snapshot.issues.is_empty() {
-        return "✓ Healthy\n\nNo action required.".to_owned();
+        return format!(
+            "✓ {}\n\n{}",
+            catalog(app.locale(), HumanMessageKey::Healthy),
+            catalog(app.locale(), HumanMessageKey::NoAutomatedAction)
+        );
     }
     app.snapshot
         .issues
         .iter()
         .map(|issue| {
             let next = issue.remediation.as_ref().map_or_else(
-                || "No automated action is available.".to_owned(),
+                || catalog(app.locale(), HumanMessageKey::NoAutomatedActionAvailable).to_owned(),
                 |action| {
                     format!(
-                        "Next: {} [{}]",
-                        action.instruction,
-                        safety_label(action.safety)
+                        "{}: {} [{}]",
+                        catalog(app.locale(), HumanMessageKey::Next),
+                        render_human_text(
+                            app.locale(),
+                            &management_action_text(
+                                &issue.id,
+                                &action.id,
+                                action.instruction.clone(),
+                            ),
+                        ),
+                        safety_label(app.locale(), action.safety)
                     )
                 },
             );
             format!(
                 "{} {}\n{}\n{}",
-                severity_label(issue.severity),
-                issue.title,
-                issue.explanation,
+                severity_label(app.locale(), issue.severity),
+                render_human_text(
+                    app.locale(),
+                    &management_text(
+                        ManagementTextKind::IssueTitle,
+                        &issue.id,
+                        issue.title.clone(),
+                    ),
+                ),
+                render_human_text(
+                    app.locale(),
+                    &management_text(
+                        ManagementTextKind::IssueExplanation,
+                        &issue.id,
+                        issue.explanation.clone(),
+                    ),
+                ),
                 next
             )
         })
@@ -885,10 +1219,18 @@ fn preview_lines(app: &ControlCenterApp) -> String {
     let renderer =
         WindowsTerminalRenderer::with_settings(WindowsTerminalCapabilities::new(true), app.draft);
     [
-        ("Ready", Phase::Ready, Attention::None),
-        ("Working", Phase::Working, Attention::None),
-        ("Result ready", Phase::WaitingUser, Attention::ResultReady),
-        ("Approval", Phase::WaitingUser, Attention::Approval),
+        (HumanMessageKey::Ready, Phase::Ready, Attention::None),
+        (HumanMessageKey::Working, Phase::Working, Attention::None),
+        (
+            HumanMessageKey::ResultReady,
+            Phase::WaitingUser,
+            Attention::ResultReady,
+        ),
+        (
+            HumanMessageKey::Approval,
+            Phase::WaitingUser,
+            Attention::Approval,
+        ),
     ]
     .into_iter()
     .map(|(label, phase, attention)| {
@@ -901,84 +1243,118 @@ fn preview_lines(app: &ControlCenterApp) -> String {
         let (title, progress) = match action {
             PresentationAction::Apply(state) | PresentationAction::Reset(state) => (
                 renderer.title_for(&state).map_or_else(
-                    || "Native title".to_owned(),
+                    || catalog(app.locale(), HumanMessageKey::NativeTitle).to_owned(),
                     |title| title.as_str().to_owned(),
                 ),
                 format!("{:?}", state.progress()),
             ),
         };
-        format!("{label:12} {title} · {progress}")
+        format!(
+            "{} {title} · {progress}",
+            pad_display_width(catalog(app.locale(), label), 12)
+        )
     })
     .collect::<Vec<_>>()
     .join("\n")
 }
 
-fn health_label(health: ManagementHealth) -> &'static str {
+fn health_label(locale: ResolvedLocale, health: ManagementHealth) -> &'static str {
     match health {
-        ManagementHealth::Healthy => "Healthy",
-        ManagementHealth::Warning => "Attention",
-        ManagementHealth::Error => "Failure",
+        ManagementHealth::Healthy => catalog(locale, HumanMessageKey::Healthy),
+        ManagementHealth::Warning => catalog(locale, HumanMessageKey::Attention),
+        ManagementHealth::Error => catalog(locale, HumanMessageKey::Failure),
     }
 }
 
-fn severity_label(severity: crate::management::HealthSeverity) -> &'static str {
+fn severity_label(
+    locale: ResolvedLocale,
+    severity: crate::management::HealthSeverity,
+) -> &'static str {
     match severity {
-        crate::management::HealthSeverity::Warning => "! Attention:",
-        crate::management::HealthSeverity::Error => "× Failure:",
+        crate::management::HealthSeverity::Warning => catalog(locale, HumanMessageKey::Attention),
+        crate::management::HealthSeverity::Error => catalog(locale, HumanMessageKey::Failure),
     }
 }
 
-fn safety_label(safety: ActionSafety) -> &'static str {
+fn safety_label(locale: ResolvedLocale, safety: ActionSafety) -> &'static str {
     match safety {
-        ActionSafety::ReadOnly => "Read only",
-        ActionSafety::ManualAction => "Manual action",
-        ActionSafety::PreviewableSafeRepair => "Previewable repair",
-        ActionSafety::OwnerExplicitRequired => "Owner apply required",
-        ActionSafety::UnsupportedAutomation => "Not automated",
+        ActionSafety::ReadOnly => catalog(locale, HumanMessageKey::ReadOnly),
+        ActionSafety::ManualAction => catalog(locale, HumanMessageKey::ManualAction),
+        ActionSafety::PreviewableSafeRepair => catalog(locale, HumanMessageKey::PreviewableRepair),
+        ActionSafety::OwnerExplicitRequired => catalog(locale, HumanMessageKey::OwnerApplyRequired),
+        ActionSafety::UnsupportedAutomation => catalog(locale, HumanMessageKey::NotAutomated),
     }
 }
 
-fn human_title(value: TitleMode) -> &'static str {
+fn human_title(locale: ResolvedLocale, value: TitleMode) -> &'static str {
     match value {
-        TitleMode::TabBeacon => "TabBeacon",
-        TitleMode::Native => "Native",
-        TitleMode::Off => "Off",
+        TitleMode::TabBeacon => catalog(locale, HumanMessageKey::TabBeacon),
+        TitleMode::Native => catalog(locale, HumanMessageKey::Native),
+        TitleMode::Off => catalog(locale, HumanMessageKey::Disabled),
     }
 }
 
-fn human_tab_color(value: TabColorMode) -> &'static str {
+fn human_tab_color(locale: ResolvedLocale, value: TabColorMode) -> &'static str {
     match value {
-        TabColorMode::TabBeacon => "TabBeacon colors",
-        TabColorMode::Native => "Native colors",
-        TabColorMode::Off => "Off",
+        TabColorMode::TabBeacon => catalog(locale, HumanMessageKey::TabBeaconColors),
+        TabColorMode::Native => catalog(locale, HumanMessageKey::NativeColors),
+        TabColorMode::Off => catalog(locale, HumanMessageKey::Disabled),
     }
 }
 
-fn human_activity(value: ActivityMode) -> &'static str {
+fn human_activity(locale: ResolvedLocale, value: ActivityMode) -> &'static str {
     match value {
-        ActivityMode::TitleSpinner => "Title spinner",
-        ActivityMode::TitleIndicator => "Title indicator",
-        ActivityMode::WindowsTerminalRing => "Windows Terminal ring",
-        ActivityMode::Both => "Title spinner + ring",
-        ActivityMode::Native => "Native",
-        ActivityMode::Off => "Off",
+        ActivityMode::TitleSpinner => catalog(locale, HumanMessageKey::TitleSpinner),
+        ActivityMode::TitleIndicator => catalog(locale, HumanMessageKey::TitleIndicator),
+        ActivityMode::WindowsTerminalRing => catalog(locale, HumanMessageKey::TerminalRing),
+        ActivityMode::Both => catalog(locale, HumanMessageKey::TitleSpinnerAndRing),
+        ActivityMode::Native => catalog(locale, HumanMessageKey::Native),
+        ActivityMode::Off => catalog(locale, HumanMessageKey::Disabled),
     }
 }
 
-fn human_spinner(value: SpinnerPreset) -> &'static str {
+fn human_spinner(locale: ResolvedLocale, value: SpinnerPreset) -> &'static str {
     match value {
-        SpinnerPreset::Codex => "Codex",
-        SpinnerPreset::Braille => "Braille",
-        SpinnerPreset::Quadrant => "Quadrant",
-        SpinnerPreset::Line => "Line",
-        SpinnerPreset::Pulse => "Pulse",
+        SpinnerPreset::Codex => catalog(locale, HumanMessageKey::Codex),
+        SpinnerPreset::Braille => catalog(locale, HumanMessageKey::BrailleSpinner),
+        SpinnerPreset::Quadrant => catalog(locale, HumanMessageKey::QuadrantSpinner),
+        SpinnerPreset::Line => catalog(locale, HumanMessageKey::LineSpinner),
+        SpinnerPreset::Pulse => catalog(locale, HumanMessageKey::PulseSpinner),
     }
 }
 
-fn human_theme(value: crate::settings::PresentationTheme) -> &'static str {
+fn human_theme(locale: ResolvedLocale, value: crate::settings::PresentationTheme) -> &'static str {
     match value {
-        crate::settings::PresentationTheme::MutedDark => "Muted Dark",
-        crate::settings::PresentationTheme::Classic => "Classic",
+        crate::settings::PresentationTheme::MutedDark => {
+            catalog(locale, HumanMessageKey::MutedDark)
+        }
+        crate::settings::PresentationTheme::Classic => {
+            catalog(locale, HumanMessageKey::ClassicTheme)
+        }
+    }
+}
+
+fn human_language(locale: ResolvedLocale, value: InterfaceLanguage) -> &'static str {
+    match value {
+        InterfaceLanguage::Auto => catalog(locale, HumanMessageKey::Auto),
+        InterfaceLanguage::EnUs => catalog(locale, HumanMessageKey::English),
+        InterfaceLanguage::ZhCn => catalog(locale, HumanMessageKey::SimplifiedChinese),
+    }
+}
+
+fn human_color(locale: ResolvedLocale, value: HumanColor) -> &'static str {
+    match value {
+        HumanColor::Auto => catalog(locale, HumanMessageKey::Auto),
+        HumanColor::Always => catalog(locale, HumanMessageKey::Always),
+        HumanColor::Never => catalog(locale, HumanMessageKey::Never),
+    }
+}
+
+fn human_boolean(locale: ResolvedLocale, value: bool) -> &'static str {
+    if value {
+        catalog(locale, HumanMessageKey::Enabled)
+    } else {
+        catalog(locale, HumanMessageKey::Disabled)
     }
 }
 
@@ -1125,17 +1501,150 @@ mod tests {
         app.screen = Screen::Appearance;
         app.handle_key(KeyCode::Enter);
         app.handle_key(KeyCode::Right);
-        let before = app.current();
-        let after = app.draft();
+        let before = app.current_draft();
+        let after = app.staged_draft();
         assert_eq!(
             app.handle_key(KeyCode::Char('a')),
             ControlCenterCommand::Apply { before, after }
         );
         assert!(app.dirty());
-        assert_eq!(app.current(), before);
+        assert_eq!(app.current_draft(), before);
         app.apply_succeeded();
         assert!(!app.dirty());
-        assert_eq!(app.current(), after);
+        assert_eq!(app.current_draft(), after);
+    }
+
+    #[test]
+    fn interface_language_changes_the_live_frame_then_revert_and_apply_remain_staged() {
+        let mut app = app()
+            .with_locale(ResolvedLocale::EnUs)
+            .with_interface_preferences(InterfacePreferences::default());
+        app.screen = Screen::Interface;
+        let before = app.current_draft();
+
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Right);
+        assert_eq!(app.interface_draft().language(), InterfaceLanguage::ZhCn);
+        assert_eq!(app.locale(), ResolvedLocale::ZhCn);
+        assert!(app.dirty());
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("test terminal starts");
+        terminal
+            .draw(|frame| render(frame, &app))
+            .expect("Chinese frame renders");
+        let rendered = format!("{:?}", terminal.backend().buffer());
+        assert!(rendered.contains("界面草稿"));
+        assert!(rendered.contains("简体中文"));
+
+        app.handle_key(KeyCode::Char('r'));
+        assert_eq!(app.current_draft(), before);
+        assert_eq!(app.locale(), ResolvedLocale::EnUs);
+        assert!(!app.dirty());
+
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Right);
+        assert!(matches!(
+            app.handle_key(KeyCode::Char('a')),
+            ControlCenterCommand::Apply { before: requested_before, after }
+                if requested_before == before
+                    && after.interface.language() == InterfaceLanguage::ZhCn
+                    && after.presentation == before.presentation
+        ));
+        assert_eq!(
+            app.current_draft(),
+            before,
+            "request does not persist itself"
+        );
+    }
+
+    #[test]
+    fn interface_color_and_reduced_motion_cycle_without_changing_domain_settings() {
+        let mut app = app();
+        let presentation = app.current();
+        app.screen = Screen::Interface;
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Down);
+        for expected in [HumanColor::Always, HumanColor::Never, HumanColor::Auto] {
+            app.handle_key(KeyCode::Right);
+            assert_eq!(app.interface_draft().color(), expected);
+        }
+        app.handle_key(KeyCode::Down);
+        app.handle_key(KeyCode::Right);
+        assert!(app.interface_draft().reduced_motion());
+        assert_eq!(app.draft(), presentation);
+        assert!(app.dirty());
+    }
+
+    #[test]
+    fn interface_color_changes_the_live_tui_style_without_persistence() {
+        assert_eq!(
+            tui_human_style(HumanColor::Never, false),
+            Style::default(),
+            "never disables the TUI accent"
+        );
+        assert_eq!(
+            tui_human_style(HumanColor::Auto, true),
+            Style::default(),
+            "NO_COLOR disables automatic terminal styling"
+        );
+        assert_ne!(
+            tui_human_style(HumanColor::Always, false),
+            Style::default(),
+            "always enables the visible TUI accent"
+        );
+
+        let mut app = app().with_interface_preferences(
+            InterfacePreferences::default().with_color(HumanColor::Always),
+        );
+        let before = app.current_interface();
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("test terminal starts");
+        terminal.draw(|frame| render(frame, &app)).expect("renders");
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .any(|cell| cell.fg == Color::Cyan),
+            "the current frame receives the staged Always color"
+        );
+
+        app.interface_draft = app.interface_draft.with_color(HumanColor::Never);
+        terminal
+            .draw(|frame| render(frame, &app))
+            .expect("rerenders");
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .all(|cell| cell.fg != Color::Cyan),
+            "the current frame removes the accent immediately for Never"
+        );
+        assert_eq!(
+            app.current_interface(),
+            before,
+            "rendering never persists a draft"
+        );
+    }
+
+    #[test]
+    fn every_screen_renders_a_narrow_chinese_frame_without_broken_borders() {
+        let mut app = app()
+            .with_locale(ResolvedLocale::EnUs)
+            .with_interface_preferences(
+                InterfacePreferences::default().with_language(InterfaceLanguage::ZhCn),
+            );
+        for _ in 0..Screen::ALL.len() {
+            let mut terminal =
+                Terminal::new(TestBackend::new(24, 12)).expect("test terminal starts");
+            terminal
+                .draw(|frame| render(frame, &app))
+                .expect("narrow Chinese frame renders");
+            let rendered = format!("{:?}", terminal.backend().buffer());
+            assert!(rendered.contains("TabBeacon"));
+            app.handle_key(KeyCode::Down);
+        }
     }
 
     #[test]
@@ -1321,6 +1830,40 @@ mod tests {
         assert!(rendered.contains("Attention"));
         assert!(rendered.contains("Manual action"));
         assert!(rendered.contains("Launch codex"));
+    }
+
+    #[test]
+    fn known_management_diagnostics_render_from_the_chinese_catalog() {
+        let mut app = ControlCenterApp::new(
+            PresentationSettings::default(),
+            ManagementSnapshot {
+                health: ManagementHealth::Warning,
+                issues: vec![crate::management::HealthIssue {
+                    id: "integration.not_installed".to_owned(),
+                    severity: crate::management::HealthSeverity::Warning,
+                    title: "Codex integration is not installed".to_owned(),
+                    explanation: "TabBeacon did not find an owned Codex integration.".to_owned(),
+                    remediation: Some(crate::management::RecommendedAction {
+                        id: "integration.setup_codex".to_owned(),
+                        title: "Install Codex integration".to_owned(),
+                        instruction: "Run tabbeacon setup codex.".to_owned(),
+                        safety: ActionSafety::ManualAction,
+                    }),
+                }],
+                recommended_actions: Vec::new(),
+                change_plans: Vec::new(),
+            },
+            ManagementOverview::default(),
+        )
+        .with_locale(ResolvedLocale::ZhCn);
+        app.screen = Screen::Diagnostics;
+        let mut terminal = Terminal::new(TestBackend::new(100, 16)).expect("test terminal starts");
+        terminal
+            .draw(|frame| render(frame, &app))
+            .expect("Chinese diagnostics render");
+        let rendered = format!("{:?}", terminal.backend().buffer());
+        assert!(rendered.contains("尚未安装 TabBeacon 集成"));
+        assert!(rendered.contains("请运行 tabbeacon setup codex"));
     }
 
     #[test]

@@ -379,7 +379,12 @@ fn doctor_json_and_human_output_share_failure_exit_semantics() {
         "doctor failures must be represented structurally"
     );
 
-    let human = run_cli(&root, &["doctor"], Some(&fake_codex), None);
+    let human = run_cli(
+        &root,
+        &["doctor", "--lang", "en-US"],
+        Some(&fake_codex),
+        None,
+    );
     assert!(!human.status.success());
     let human = String::from_utf8(human.stdout).expect("human doctor output is UTF-8");
     assert!(human.contains("TabBeacon Doctor"));
@@ -394,7 +399,12 @@ fn doctor_json_and_human_output_share_failure_exit_semantics() {
     assert!(plain_doctor.contains("CHECK="));
     assert!(plain_doctor.contains("DOCTOR=FAIL"));
 
-    let status = run_cli(&root, &["status"], Some(&fake_codex), None);
+    let status = run_cli(
+        &root,
+        &["status", "--lang", "en-US"],
+        Some(&fake_codex),
+        None,
+    );
     assert!(status.status.success());
     let status = String::from_utf8(status.stdout).expect("human status output is UTF-8");
     assert!(status.contains("TabBeacon Status"));

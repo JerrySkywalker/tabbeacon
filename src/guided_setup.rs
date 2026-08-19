@@ -3,6 +3,10 @@
 use crate::settings::{
     ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode, TitleMode,
 };
+use crate::{
+    human_presentation::ResolvedLocale,
+    interface_preferences::{HumanColor, InterfaceLanguage, InterfacePreferences},
+};
 
 /// Selection boundary that keeps the setup flow deterministic in tests.
 pub trait GuidedInput {
@@ -62,6 +66,117 @@ pub fn choose_presentation(
             5 => return Ok(None),
             _ => return Err("invalid presentation choice".to_owned()),
         }
+    }
+}
+
+/// Resolves the bounded Interface draft before any normal setup summary is
+/// rendered. The initial language selector is intentionally bilingual so a
+/// fresh user never needs to understand the current locale to proceed.
+///
+/// `revisit` is true for fresh setup and explicit full setup. A returning
+/// quick setup can preserve its current valid Interface draft without an
+/// unnecessary prompt.
+///
+/// # Errors
+///
+/// Returns a bounded selection error when the input adapter is interrupted or
+/// returns an index outside the offered visible choices.
+pub fn choose_interface_preferences(
+    input: &mut impl GuidedInput,
+    current: InterfacePreferences,
+    revisit: bool,
+    auto_locale: ResolvedLocale,
+) -> Result<Option<InterfacePreferences>, String> {
+    if !revisit {
+        return Ok(Some(current));
+    }
+    let language = match input.select(
+        "Language / 语言",
+        &["Auto / 自动", "简体中文", "English", "Back / 返回"],
+        language_index(current.language()),
+    )? {
+        0 => InterfaceLanguage::Auto,
+        1 => InterfaceLanguage::ZhCn,
+        2 => InterfaceLanguage::EnUs,
+        3 => return Ok(None),
+        _ => return Err("invalid Interface language choice".to_owned()),
+    };
+    let locale = concrete_locale(language, auto_locale);
+    let color = match input.select(
+        label(locale, "Color", "颜色"),
+        color_choices(locale),
+        color_index(current.color()),
+    )? {
+        0 => HumanColor::Auto,
+        1 => HumanColor::Always,
+        2 => HumanColor::Never,
+        _ => return Err("invalid Interface color choice".to_owned()),
+    };
+    let reduced_motion = match input.select(
+        label(locale, "Reduced motion", "减少动画"),
+        boolean_choices(locale),
+        usize::from(current.reduced_motion()),
+    )? {
+        0 => false,
+        1 => true,
+        _ => return Err("invalid reduced-motion choice".to_owned()),
+    };
+    Ok(Some(InterfacePreferences::new(
+        language,
+        color,
+        reduced_motion,
+    )))
+}
+
+const fn concrete_locale(
+    language: InterfaceLanguage,
+    auto_locale: ResolvedLocale,
+) -> ResolvedLocale {
+    match language {
+        InterfaceLanguage::ZhCn => ResolvedLocale::ZhCn,
+        InterfaceLanguage::Auto => auto_locale,
+        InterfaceLanguage::EnUs => ResolvedLocale::EnUs,
+    }
+}
+
+const fn label(
+    locale: ResolvedLocale,
+    english: &'static str,
+    chinese: &'static str,
+) -> &'static str {
+    match locale {
+        ResolvedLocale::EnUs => english,
+        ResolvedLocale::ZhCn => chinese,
+    }
+}
+
+const fn color_choices(locale: ResolvedLocale) -> &'static [&'static str] {
+    match locale {
+        ResolvedLocale::EnUs => &["Auto", "Always", "Never"],
+        ResolvedLocale::ZhCn => &["自动", "始终", "从不"],
+    }
+}
+
+const fn boolean_choices(locale: ResolvedLocale) -> &'static [&'static str] {
+    match locale {
+        ResolvedLocale::EnUs => &["Off", "On"],
+        ResolvedLocale::ZhCn => &["关闭", "开启"],
+    }
+}
+
+const fn language_index(language: InterfaceLanguage) -> usize {
+    match language {
+        InterfaceLanguage::Auto => 0,
+        InterfaceLanguage::ZhCn => 1,
+        InterfaceLanguage::EnUs => 2,
+    }
+}
+
+const fn color_index(color: HumanColor) -> usize {
+    match color {
+        HumanColor::Auto => 0,
+        HumanColor::Always => 1,
+        HumanColor::Never => 2,
     }
 }
 
@@ -160,7 +275,9 @@ fn select_value<T: Copy>(
 
 #[cfg(test)]
 mod tests {
-    use super::{GuidedInput, choose_presentation};
+    use super::{GuidedInput, choose_interface_preferences, choose_presentation};
+    use crate::human_presentation::ResolvedLocale;
+    use crate::interface_preferences::{HumanColor, InterfaceLanguage, InterfacePreferences};
     use crate::settings::{PresentationSettings, SpinnerPreset, TitleMode};
 
     struct ScriptedInput {
@@ -224,5 +341,84 @@ mod tests {
             choose_presentation(&mut input, PresentationSettings::default()).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn fresh_interface_choice_starts_bilingual_then_uses_the_selected_language() {
+        let mut input = ScriptedInput::new(&[1, 2, 1]);
+        let result = choose_interface_preferences(
+            &mut input,
+            InterfacePreferences::default(),
+            true,
+            ResolvedLocale::EnUs,
+        )
+        .expect("choices resolve")
+        .expect("back was not selected");
+        assert_eq!(result.language(), InterfaceLanguage::ZhCn);
+        assert_eq!(result.color(), HumanColor::Never);
+        assert!(result.reduced_motion());
+        assert_eq!(input.prompts[0], "Language / 语言");
+        assert_eq!(input.prompts[1], "颜色");
+        assert_eq!(input.prompts[2], "减少动画");
+    }
+
+    #[test]
+    fn fresh_english_interface_choice_localizes_following_prompts_to_english() {
+        let mut input = ScriptedInput::new(&[2, 0, 0]);
+        let result = choose_interface_preferences(
+            &mut input,
+            InterfacePreferences::default(),
+            true,
+            ResolvedLocale::EnUs,
+        )
+        .expect("choices resolve")
+        .expect("back was not selected");
+        assert_eq!(result.language(), InterfaceLanguage::EnUs);
+        assert_eq!(
+            input.prompts,
+            ["Language / 语言", "Color", "Reduced motion"]
+        );
+    }
+
+    #[test]
+    fn returning_quick_setup_keeps_the_current_interface_draft_without_prompting() {
+        let current = InterfacePreferences::new(InterfaceLanguage::EnUs, HumanColor::Always, true);
+        let mut input = ScriptedInput::new(&[]);
+        assert_eq!(
+            choose_interface_preferences(&mut input, current, false, ResolvedLocale::EnUs)
+                .expect("quick draft"),
+            Some(current)
+        );
+        assert!(input.prompts.is_empty());
+    }
+
+    #[test]
+    fn bilingual_back_cancels_before_any_draft_is_created() {
+        let mut input = ScriptedInput::new(&[3]);
+        assert_eq!(
+            choose_interface_preferences(
+                &mut input,
+                InterfacePreferences::default(),
+                true,
+                ResolvedLocale::EnUs,
+            )
+            .expect("back resolves"),
+            None
+        );
+    }
+
+    #[test]
+    fn auto_language_uses_the_resolved_chinese_fallback_for_following_prompts() {
+        let mut input = ScriptedInput::new(&[0, 0, 0]);
+        let result = choose_interface_preferences(
+            &mut input,
+            InterfacePreferences::default(),
+            true,
+            ResolvedLocale::ZhCn,
+        )
+        .expect("choices resolve")
+        .expect("back was not selected");
+        assert_eq!(result.language(), InterfaceLanguage::Auto);
+        assert_eq!(input.prompts, ["Language / 语言", "颜色", "减少动画"]);
     }
 }
