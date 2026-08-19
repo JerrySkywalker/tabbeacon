@@ -5,9 +5,14 @@
 //! explicitly applies it, then delegates to the existing typed settings and
 //! ownership-aware integration primitives.
 
-use std::{env, path::PathBuf};
+use std::{env, fmt, path::PathBuf};
 
 use crate::{
+    interface_preferences::{
+        InterfacePreferences, InterfacePreferencesConditionalOutcome, InterfacePreferencesError,
+        InterfacePreferencesSnapshot, InterfacePreferencesSnapshotSaveOutcome,
+        InterfacePreferencesStore,
+    },
     providers::codex::{CodexDoctorReport, CodexHookProfile, DoctorStatus, SetupOutcome},
     settings::{
         ConditionalSaveOutcome, PresentationSettings, PresentationSettingsSnapshot,
@@ -282,6 +287,245 @@ impl SetupPlan {
     }
 }
 
+/// Error returned while composing the separately owned presentation and
+/// Interface preference stores for guided setup.
+#[derive(Debug)]
+pub enum GuidedSetupError {
+    /// The existing presentation settings store could not complete a guarded operation.
+    Settings(SettingsError),
+    /// The separate user-local Interface store could not complete a guarded operation.
+    Interface(InterfacePreferencesError),
+}
+
+impl fmt::Display for GuidedSetupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Settings(error) => write!(formatter, "presentation settings: {error}"),
+            Self::Interface(error) => write!(formatter, "Interface preferences: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for GuidedSetupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Settings(error) => Some(error),
+            Self::Interface(error) => Some(error),
+        }
+    }
+}
+
+impl From<SettingsError> for GuidedSetupError {
+    fn from(error: SettingsError) -> Self {
+        Self::Settings(error)
+    }
+}
+
+impl From<InterfacePreferencesError> for GuidedSetupError {
+    fn from(error: InterfacePreferencesError) -> Self {
+        Self::Interface(error)
+    }
+}
+
+/// One composite, still-unpersisted guided setup draft.
+///
+/// Presentation and Interface preferences deliberately remain separate files.
+/// This coordinator applies each only through its byte-exact snapshot API and
+/// conditionally compensates the first write if a later step fails.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuidedSetupPlan {
+    before: PresentationSettings,
+    draft: PresentationSettings,
+    interface_before: InterfacePreferences,
+    interface_draft: InterfacePreferences,
+    discovery: SetupDiscovery,
+}
+
+impl GuidedSetupPlan {
+    /// Starts a composite draft from read-only snapshots.
+    #[must_use]
+    pub fn new(
+        before: PresentationSettings,
+        interface_before: InterfacePreferences,
+        discovery: SetupDiscovery,
+    ) -> Self {
+        Self {
+            before,
+            draft: before,
+            interface_before,
+            interface_draft: interface_before,
+            discovery,
+        }
+    }
+
+    /// Replaces the presentation portion of the in-memory draft.
+    #[must_use]
+    pub fn with_presentation_draft(mut self, draft: PresentationSettings) -> Self {
+        self.draft = draft;
+        self
+    }
+
+    /// Replaces the Interface portion of the in-memory draft.
+    #[must_use]
+    pub fn with_interface_draft(mut self, draft: InterfacePreferences) -> Self {
+        self.interface_draft = draft;
+        self
+    }
+
+    /// Original presentation settings bound to the read-only snapshot.
+    #[must_use]
+    pub const fn before(&self) -> PresentationSettings {
+        self.before
+    }
+
+    /// Original Interface preferences bound to the read-only snapshot.
+    #[must_use]
+    pub const fn interface_before(&self) -> InterfacePreferences {
+        self.interface_before
+    }
+
+    /// Staged presentation settings.
+    #[must_use]
+    pub const fn draft(&self) -> PresentationSettings {
+        self.draft
+    }
+
+    /// Staged Interface preferences.
+    #[must_use]
+    pub const fn interface_draft(&self) -> InterfacePreferences {
+        self.interface_draft
+    }
+
+    /// Typed discovery data rendered by the guided setup surface.
+    #[must_use]
+    pub fn discovery(&self) -> &SetupDiscovery {
+        &self.discovery
+    }
+
+    /// Returns the uncommitted presentation settings to preview.
+    #[must_use]
+    pub const fn preview_settings(&self) -> PresentationSettings {
+        self.draft
+    }
+
+    /// Cancels without creating a lock, file, or user preference directory.
+    #[must_use]
+    pub const fn cancel(&self) -> GuidedSetupApplyResult {
+        GuidedSetupApplyResult::Cancelled
+    }
+
+    /// Applies both drafts with per-store atomic compare-and-save semantics.
+    ///
+    /// There is intentionally no false claim of a cross-file transaction. If
+    /// the second guarded write or provider step fails, only the exact first
+    /// write is conditionally restored; concurrent edits always win.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed store error when either snapshot-guarded operation
+    /// cannot be safely read, written, or restored.
+    pub fn apply(
+        &self,
+        settings_store: &PresentationSettingsStore,
+        settings_snapshot: &PresentationSettingsSnapshot,
+        interface_store: &InterfacePreferencesStore,
+        interface_snapshot: &InterfacePreferencesSnapshot,
+        setup: impl FnOnce(bool) -> Result<SetupOutcome, String>,
+    ) -> Result<GuidedSetupApplyResult, GuidedSetupError> {
+        if settings_snapshot.settings() != self.before {
+            return Ok(GuidedSetupApplyResult::SettingsConflict);
+        }
+        if interface_snapshot.preferences() != self.interface_before {
+            return Ok(GuidedSetupApplyResult::InterfaceConflict);
+        }
+
+        let interface_receipt = if self.interface_draft == self.interface_before {
+            None
+        } else {
+            match interface_store
+                .save_snapshot_if_unchanged(interface_snapshot, self.interface_draft)?
+            {
+                InterfacePreferencesSnapshotSaveOutcome::Saved(receipt) => Some(receipt),
+                InterfacePreferencesSnapshotSaveOutcome::Conflict => {
+                    return Ok(GuidedSetupApplyResult::InterfaceConflict);
+                }
+            }
+        };
+
+        let settings_receipt = if self.draft == self.before {
+            None
+        } else {
+            let settings_save =
+                settings_store.save_snapshot_if_unchanged(settings_snapshot, self.draft);
+            match settings_save {
+                Ok(SnapshotSaveOutcome::Saved(receipt)) => Some(receipt),
+                Ok(SnapshotSaveOutcome::Conflict) => {
+                    if let Some(receipt) = interface_receipt.as_ref() {
+                        let _ = interface_store
+                            .restore_snapshot_if_unchanged(receipt, interface_snapshot);
+                    }
+                    return Ok(GuidedSetupApplyResult::SettingsConflict);
+                }
+                Err(error) => {
+                    // The Interface write is already complete at this point.  A
+                    // failed second write must not silently strand the first
+                    // draft; its receipt is the only authority to compensate it.
+                    if let Some(receipt) = interface_receipt.as_ref() {
+                        let _ = interface_store
+                            .restore_snapshot_if_unchanged(receipt, interface_snapshot);
+                    }
+                    return Err(error.into());
+                }
+            }
+        };
+
+        match setup(self.draft.title().owns_tabbeacon_title()) {
+            Ok(outcome) => Ok(GuidedSetupApplyResult::Applied(outcome)),
+            Err(reason) => {
+                let settings_restored = settings_receipt.as_ref().is_none_or(|receipt| {
+                    matches!(
+                        settings_store.restore_snapshot_if_unchanged(receipt, settings_snapshot),
+                        Ok(ConditionalSaveOutcome::Saved)
+                    )
+                });
+                let interface_restored = interface_receipt.as_ref().is_none_or(|receipt| {
+                    matches!(
+                        interface_store.restore_snapshot_if_unchanged(receipt, interface_snapshot),
+                        Ok(InterfacePreferencesConditionalOutcome::Saved)
+                    )
+                });
+                Ok(GuidedSetupApplyResult::SetupFailed {
+                    reason,
+                    settings_restored,
+                    interface_restored,
+                })
+            }
+        }
+    }
+}
+
+/// Result of applying or cancelling the combined guided setup draft.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuidedSetupApplyResult {
+    /// The user discarded the in-memory draft.
+    Cancelled,
+    /// Both guarded writes (if changed) and the existing provider setup completed.
+    Applied(SetupOutcome),
+    /// A presentation settings document changed after its snapshot.
+    SettingsConflict,
+    /// An Interface preferences document changed after its snapshot.
+    InterfaceConflict,
+    /// Provider setup failed after any changed documents were conditionally restored.
+    SetupFailed {
+        /// Safe provider/setup failure reason.
+        reason: String,
+        /// Whether the exact original presentation document was restored.
+        settings_restored: bool,
+        /// Whether the exact original Interface document was restored.
+        interface_restored: bool,
+    },
+}
+
 /// Result of applying or cancelling a guided setup plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetupApplyResult {
@@ -324,6 +568,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::interface_preferences::{HumanColor, InterfaceLanguage, InterfacePreferencesStore};
     use crate::settings::{
         ActivityMode, PresentationTheme, SpinnerPreset, TabColorMode, TitleMode,
     };
@@ -701,5 +946,189 @@ theme = "muted-dark"
             windows_terminal_state(false),
             WindowsTerminalState::NotCurrentSession
         );
+    }
+
+    #[test]
+    fn composite_cancel_preserves_absent_presentation_and_interface_roots() {
+        let config = temporary_config("composite-cancel");
+        let interface = config.with_file_name("interface.toml");
+        let root = config
+            .parent()
+            .expect("state parent")
+            .parent()
+            .expect("state root");
+        let settings_store = PresentationSettingsStore::new(&config);
+        let interface_store = InterfacePreferencesStore::new(&interface);
+        let settings_snapshot = settings_store
+            .snapshot_read_only()
+            .expect("settings snapshot");
+        let interface_snapshot = interface_store
+            .snapshot_read_only()
+            .expect("Interface snapshot");
+        let plan = GuidedSetupPlan::new(
+            settings_snapshot.settings(),
+            interface_snapshot.preferences(),
+            discovery(),
+        )
+        .with_interface_draft(
+            interface_snapshot
+                .preferences()
+                .with_language(InterfaceLanguage::ZhCn),
+        );
+
+        assert_eq!(plan.cancel(), GuidedSetupApplyResult::Cancelled);
+        assert!(
+            !root.exists(),
+            "cancel must not create a state root or lock"
+        );
+    }
+
+    #[test]
+    fn composite_interface_only_apply_leaves_presentation_document_absent() {
+        let config = temporary_config("composite-interface-only");
+        let interface = config.with_file_name("interface.toml");
+        let root = config
+            .parent()
+            .expect("state parent")
+            .parent()
+            .expect("state root");
+        let settings_store = PresentationSettingsStore::new(&config);
+        let interface_store = InterfacePreferencesStore::new(&interface);
+        let settings_snapshot = settings_store
+            .snapshot_read_only()
+            .expect("settings snapshot");
+        let interface_snapshot = interface_store
+            .snapshot_read_only()
+            .expect("Interface snapshot");
+        let draft = interface_snapshot
+            .preferences()
+            .with_language(InterfaceLanguage::ZhCn)
+            .with_color(HumanColor::Never);
+        let plan = GuidedSetupPlan::new(
+            settings_snapshot.settings(),
+            interface_snapshot.preferences(),
+            discovery(),
+        )
+        .with_interface_draft(draft);
+
+        assert_eq!(
+            plan.apply(
+                &settings_store,
+                &settings_snapshot,
+                &interface_store,
+                &interface_snapshot,
+                |_| Ok(SetupOutcome::AlreadyInstalled),
+            )
+            .expect("Interface-only apply"),
+            GuidedSetupApplyResult::Applied(SetupOutcome::AlreadyInstalled)
+        );
+        assert!(
+            !config.exists(),
+            "an Interface-only setup Apply must not create presentation config.toml"
+        );
+        assert_eq!(
+            interface_store.load_read_only().expect("Interface reread"),
+            draft
+        );
+        fs::remove_dir_all(root).expect("state root removes");
+    }
+
+    #[test]
+    fn composite_provider_failure_restores_both_originally_absent_documents() {
+        let config = temporary_config("composite-restore");
+        let interface = config.with_file_name("interface.toml");
+        let root = config
+            .parent()
+            .expect("state parent")
+            .parent()
+            .expect("state root");
+        let settings_store = PresentationSettingsStore::new(&config);
+        let interface_store = InterfacePreferencesStore::new(&interface);
+        let settings_snapshot = settings_store
+            .snapshot_read_only()
+            .expect("settings snapshot");
+        let interface_snapshot = interface_store
+            .snapshot_read_only()
+            .expect("Interface snapshot");
+        let plan = GuidedSetupPlan::new(
+            settings_snapshot.settings(),
+            interface_snapshot.preferences(),
+            discovery(),
+        )
+        .with_presentation_draft(PresentationSettings::preset("native").expect("preset"))
+        .with_interface_draft(
+            interface_snapshot
+                .preferences()
+                .with_language(InterfaceLanguage::ZhCn),
+        );
+
+        assert!(matches!(
+            plan.apply(
+                &settings_store,
+                &settings_snapshot,
+                &interface_store,
+                &interface_snapshot,
+                |_| Err("controlled provider failure".to_owned()),
+            )
+            .expect("guarded writes and rollback"),
+            GuidedSetupApplyResult::SetupFailed {
+                settings_restored: true,
+                interface_restored: true,
+                ..
+            }
+        ));
+        assert!(!config.exists());
+        assert!(!interface.exists());
+        fs::remove_dir_all(root).expect("state root removes");
+    }
+
+    #[test]
+    fn composite_second_store_error_restores_the_interface_write() {
+        let config = temporary_config("composite-second-store-error");
+        let interface = config.with_file_name("interface.toml");
+        let root = config
+            .parent()
+            .expect("state parent")
+            .parent()
+            .expect("state root");
+        let settings_store = PresentationSettingsStore::new(&config);
+        let interface_store = InterfacePreferencesStore::new(&interface);
+        let settings_snapshot = settings_store
+            .snapshot_read_only()
+            .expect("settings snapshot");
+        let interface_snapshot = interface_store
+            .snapshot_read_only()
+            .expect("Interface snapshot");
+        let plan = GuidedSetupPlan::new(
+            settings_snapshot.settings(),
+            interface_snapshot.preferences(),
+            discovery(),
+        )
+        .with_presentation_draft(PresentationSettings::preset("native").expect("preset"))
+        .with_interface_draft(
+            interface_snapshot
+                .preferences()
+                .with_language(InterfaceLanguage::ZhCn),
+        );
+
+        // Snapshot first, then introduce a path that can be read but cannot be
+        // atomically replaced as a settings document. The Interface write is
+        // earlier in the prescribed order and therefore must be compensated.
+        fs::create_dir_all(&config).expect("settings path becomes a directory");
+        assert!(
+            plan.apply(
+                &settings_store,
+                &settings_snapshot,
+                &interface_store,
+                &interface_snapshot,
+                |_| Ok(SetupOutcome::AlreadyInstalled),
+            )
+            .is_err()
+        );
+        assert!(
+            !interface.exists(),
+            "a failed second store write must restore the Interface document"
+        );
+        fs::remove_dir_all(root).expect("state root removes");
     }
 }

@@ -186,6 +186,48 @@ fn machine_transports_are_locale_independent() {
             .expect("Chinese doctor JSON parses"),
         "doctor JSON must not depend on Human locale"
     );
+
+    let sessions_json_en = isolated_command(&root)
+        .args(["sessions", "--json", "--lang", "en-US"])
+        .output()
+        .expect("English JSON sessions starts");
+    let sessions_json_zh = isolated_command(&root)
+        .args(["sessions", "--json", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese JSON sessions starts");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&sessions_json_en.stdout)
+            .expect("English sessions JSON parses"),
+        serde_json::from_slice::<serde_json::Value>(&sessions_json_zh.stdout)
+            .expect("Chinese sessions JSON parses"),
+        "sessions JSON must not depend on Human locale"
+    );
+
+    let sessions_plain_en = isolated_command(&root)
+        .args(["sessions", "--plain", "--lang", "en-US"])
+        .output()
+        .expect("English plain sessions starts");
+    let sessions_plain_zh = isolated_command(&root)
+        .args(["sessions", "--plain", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese plain sessions starts");
+    assert_eq!(
+        sessions_plain_en.stdout, sessions_plain_zh.stdout,
+        "sessions plain receipts must not depend on Human locale"
+    );
+
+    let config_plain_en = isolated_command(&root)
+        .args(["config", "show", "--plain", "--lang", "en-US"])
+        .output()
+        .expect("English plain config starts");
+    let config_plain_zh = isolated_command(&root)
+        .args(["config", "show", "--plain", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese plain config starts");
+    assert_eq!(
+        config_plain_en.stdout, config_plain_zh.stdout,
+        "config plain receipts must not depend on Human locale"
+    );
 }
 
 #[test]
@@ -247,11 +289,37 @@ fn human_locale_and_interface_state_stay_user_local() {
 }
 
 #[test]
+fn sessions_human_output_localizes_without_exposing_machine_receipts() {
+    let root = TestRoot::new("localized-sessions-output");
+    let chinese = isolated_command(&root)
+        .args(["sessions", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese sessions starts");
+    assert!(chinese.status.success());
+    let chinese = String::from_utf8(chinese.stdout).expect("Chinese sessions output is UTF-8");
+    assert!(chinese.contains("会话"));
+    assert!(chinese.contains("仅基于租约进行观察"));
+    assert!(!chinese.contains("SESSIONS_SCHEMA_VERSION="));
+}
+
+#[test]
+fn doctor_human_output_honors_explicit_chinese_locale() {
+    let root = TestRoot::new("localized-doctor-output");
+    let chinese = isolated_command(&root)
+        .args(["doctor", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese doctor starts");
+    let chinese = String::from_utf8(chinese.stdout).expect("Chinese doctor output is UTF-8");
+    assert!(chinese.contains("TabBeacon 诊断"));
+    assert!(!chinese.contains("CHECK="));
+}
+
+#[test]
 fn config_defaults_to_human_monochrome_output_and_plain_retains_receipts() {
     let root = TestRoot::new("human-config-output");
 
     let human = isolated_command(&root)
-        .args(["config", "show"])
+        .args(["config", "show", "--lang", "en-US"])
         .output()
         .expect("human config show starts");
     assert!(human.status.success());
@@ -275,6 +343,52 @@ fn config_defaults_to_human_monochrome_output_and_plain_retains_receipts() {
     assert!(plain.contains("TITLE_MODE="));
     assert!(plain.contains("TITLE_SPINNER_FEASIBILITY=PRODUCTION"));
     assert!(!plain.contains('\u{1b}'));
+}
+
+#[test]
+fn config_human_output_localizes_without_changing_plain_receipts() {
+    let root = TestRoot::new("localized-config-output");
+    let chinese = isolated_command(&root)
+        .args(["config", "show", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese config show starts");
+    assert!(chinese.status.success());
+    let chinese = String::from_utf8(chinese.stdout).expect("Chinese config output is UTF-8");
+    assert!(chinese.contains("外观呈现设置"));
+    assert!(chinese.contains("标签颜色"));
+    assert!(chinese.contains("低调深色"));
+    assert!(!chinese.contains("CONFIG_PATH="));
+}
+
+#[test]
+fn human_common_errors_keep_machine_receipts_out_and_localize_stable_wording() {
+    let root = TestRoot::new("localized-human-errors");
+
+    let config = isolated_command(&root)
+        .args(["config", "set", "theme", "unsupported", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese config validation starts");
+    assert_eq!(config.status.code(), Some(2));
+    let config_stderr = String::from_utf8(config.stderr).expect("config error is UTF-8");
+    assert!(config_stderr.contains("无法更新配置"));
+    assert!(config_stderr.contains("请运行 tabbeacon config show"));
+    assert!(!config_stderr.contains("CONFIG=FAIL"));
+
+    let interface = isolated_command(&root)
+        .args([
+            "interface",
+            "set",
+            "language",
+            "unsupported",
+            "--lang",
+            "zh-CN",
+        ])
+        .output()
+        .expect("Chinese Interface validation starts");
+    assert_eq!(interface.status.code(), Some(2));
+    let interface_stderr = String::from_utf8(interface.stderr).expect("Interface error is UTF-8");
+    assert!(interface_stderr.contains("不支持的界面偏好值"));
+    assert!(!interface_stderr.contains("INTERFACE=FAIL"));
 }
 
 #[test]
@@ -338,7 +452,7 @@ fn human_setup_and_config_failures_do_not_emit_machine_receipts() {
     let root = TestRoot::new("human-setup-failure-output");
 
     let setup = isolated_command(&root)
-        .arg("setup")
+        .args(["setup", "--lang", "en-US"])
         .output()
         .expect("human guided setup starts");
     assert!(!setup.status.success());
@@ -359,7 +473,7 @@ fn human_setup_and_config_failures_do_not_emit_machine_receipts() {
     assert!(setup_plain_error.contains("NEXT_ACTION="));
 
     let config = isolated_command(&root)
-        .args(["config", "wizard"])
+        .args(["config", "wizard", "--lang", "en-US"])
         .output()
         .expect("human config wizard starts");
     assert!(!config.status.success());
@@ -370,7 +484,7 @@ fn human_setup_and_config_failures_do_not_emit_machine_receipts() {
 
     let direct_setup = isolated_command(&root)
         .env_remove("LOCALAPPDATA")
-        .args(["setup", "codex"])
+        .args(["setup", "codex", "--lang", "en-US"])
         .output()
         .expect("human direct setup starts");
     assert!(!direct_setup.status.success());
@@ -393,7 +507,7 @@ fn human_setup_and_config_failures_do_not_emit_machine_receipts() {
 
     let config = isolated_command(&root)
         .env_remove("LOCALAPPDATA")
-        .args(["config", "show"])
+        .args(["config", "show", "--lang", "en-US"])
         .output()
         .expect("human config show starts");
     assert!(!config.status.success());
@@ -426,7 +540,7 @@ fn invalid_arguments_keep_usage_exit_code_and_interactive_commands_refuse_pipes(
     assert_eq!(invalid.status.code(), Some(2));
 
     let setup = isolated_command(&root)
-        .arg("setup")
+        .args(["setup", "--lang", "en-US"])
         .output()
         .expect("piped setup starts");
     assert_eq!(setup.status.code(), Some(2));
@@ -437,7 +551,7 @@ fn invalid_arguments_keep_usage_exit_code_and_interactive_commands_refuse_pipes(
     assert!(!root.child("local-appdata/TabBeacon/config.toml").exists());
 
     let wizard = isolated_command(&root)
-        .args(["config", "wizard"])
+        .args(["config", "wizard", "--lang", "en-US"])
         .output()
         .expect("piped config wizard starts");
     assert_eq!(wizard.status.code(), Some(2));

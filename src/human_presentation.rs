@@ -7,7 +7,8 @@
 
 use std::env;
 
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     human_output::HumanTone,
@@ -179,6 +180,7 @@ pub enum HumanMessageKey {
     Status,
     Doctor,
     Setup,
+    SetupOperation,
     Healthy,
     NeedsAttention,
     ActionNeeded,
@@ -194,6 +196,13 @@ pub enum HumanMessageKey {
     Activity,
     Spinner,
     Theme,
+    BrailleSpinner,
+    QuadrantSpinner,
+    LineSpinner,
+    PulseSpinner,
+    MutedDark,
+    ClassicTheme,
+    Profile,
     Workers,
     Active,
     Stale,
@@ -229,6 +238,95 @@ pub enum HumanMessageKey {
     Color,
     ReducedMotion,
     InterfacePreferencesUpdated,
+    Interface,
+    Auto,
+    English,
+    SimplifiedChinese,
+    Always,
+    Never,
+    Enabled,
+    Disabled,
+    DraftAppearance,
+    DraftInterface,
+    UseArrowsToChange,
+    PressEnterToSelect,
+    MinimumSize,
+    ResizeAndReopen,
+    Currentness,
+    Trust,
+    ManualOnly,
+    RecommendedActions,
+    NoAutomatedAction,
+    NoAutomatedActionAvailable,
+    ReadOnly,
+    ManualAction,
+    PreviewableRepair,
+    OwnerApplyRequired,
+    NotAutomated,
+    Failure,
+    NativeTitle,
+    Ready,
+    Working,
+    ResultReady,
+    Approval,
+    TabBeaconColors,
+    NativeColors,
+    TitleSpinner,
+    TitleIndicator,
+    TerminalRing,
+    TitleSpinnerAndRing,
+    Native,
+    PresentationSettings,
+    UserLocalState,
+    PresentationSettingsUpdated,
+    PresentationSettingsReset,
+    ConfigurationCouldNotBeUpdated,
+    UseConfigShow,
+    Configuration,
+    Uninstall,
+    OperationCouldNotComplete,
+    InteractiveTerminalRequired,
+    NextAction,
+    SavedPresentationSettingsUnreadable,
+    ConfigurationInputFailed,
+    PresentationWizard,
+    SupportedPresets,
+    TitleOwnershipReconciled,
+    Sessions,
+    InvalidLeases,
+    NoInspectableSessionLeases,
+    LeaseObservationOnly,
+    Environment,
+    WindowsTerminal,
+    WindowsTerminalCurrentSession,
+    WindowsTerminalNotCurrentSession,
+    Binary,
+    Unknown,
+    SetupCodexSummary,
+    PlannedChanges,
+    WindowsTerminalTitlePolicy,
+    SetupReady,
+    NoChangesNeeded,
+    WelcomeSetup,
+    QuickSetup,
+    FullSetup,
+    SetupCancelled,
+    SetupChangesApplied,
+    NoSetupChangesMade,
+    SetupInputFailed,
+    SetupPreviewBlocked,
+    PreviewCouldNotComplete,
+    SetupSettingsChanged,
+    ReviewSettingsAndRunSetupAgain,
+    SetupCouldNotApply,
+    PresentationSettingsRestored,
+    PresentationSettingsRestoreUnproven,
+    RunDoctorBeforeSetup,
+    SetupCouldNotReadState,
+    UnsupportedInterfacePreferenceValue,
+    PreviewResult,
+    UnchangedOwnedState,
+    PreservedExternalSettings,
     SetupInstalled,
     SetupUpgraded,
     SetupAlreadyInstalled,
@@ -769,9 +867,9 @@ impl HumanRenderer {
     #[must_use]
     pub fn render(self, document: &HumanDocument) -> Vec<HumanLine> {
         let mut lines = Vec::new();
-        let title = render_text(self.locale, document.title());
+        let title = render_human_text(self.locale, document.title());
         let title = document.status().map_or(title.clone(), |status| {
-            format!("{title} — {}", render_text(self.locale, status))
+            format!("{title} — {}", render_human_text(self.locale, status))
         });
         push_line(&mut lines, self.width, &title, HumanTone::Accent);
 
@@ -781,7 +879,7 @@ impl HumanRenderer {
                 tone: HumanTone::Plain,
             });
             if let Some(heading) = &section.heading {
-                let heading = render_text(self.locale, heading);
+                let heading = render_human_text(self.locale, heading);
                 push_line(&mut lines, self.width, &heading, HumanTone::Accent);
             }
             for field in &section.fields {
@@ -789,8 +887,8 @@ impl HumanRenderer {
                     .marker
                     .as_deref()
                     .map_or(String::new(), |value| format!("{value} "));
-                let label = render_text(self.locale, &field.label);
-                let value = render_text(self.locale, &field.value);
+                let label = render_human_text(self.locale, &field.label);
+                let value = render_human_text(self.locale, &field.value);
                 let field_text = format!("  {marker}{label}  {value}");
                 push_line(&mut lines, self.width, &field_text, field.tone);
             }
@@ -800,11 +898,11 @@ impl HumanRenderer {
                     .as_deref()
                     .map_or(String::new(), |value| format!("{value} "));
                 let prefix = message.prefix.as_ref().map_or(String::new(), |value| {
-                    format!("{}: ", render_text(self.locale, value))
+                    format!("{}: ", render_human_text(self.locale, value))
                 });
                 let message_text = format!(
                     "{marker}{prefix}{}",
-                    render_text(self.locale, &message.text)
+                    render_human_text(self.locale, &message.text)
                 );
                 push_line(&mut lines, self.width, &message_text, message.tone);
             }
@@ -812,7 +910,7 @@ impl HumanRenderer {
                 let action_text = format!(
                     "{}: {}",
                     catalog(self.locale, HumanMessageKey::Next),
-                    render_text(self.locale, &action.text)
+                    render_human_text(self.locale, &action.text)
                 );
                 push_line(&mut lines, self.width, &action_text, action.tone);
             }
@@ -836,7 +934,7 @@ pub fn display_width(value: &str) -> usize {
     UnicodeWidthStr::width(value)
 }
 
-/// Fits text into a display-cell width without splitting a Unicode scalar.
+/// Fits text into a display-cell width without splitting a grapheme cluster.
 #[must_use]
 pub fn fit_display_width(value: &str, width: usize) -> String {
     if display_width(value) <= width {
@@ -861,12 +959,12 @@ pub fn pad_display_width(value: &str, width: usize) -> String {
 fn take_display_width(value: &str, width: usize) -> String {
     let mut used = 0_usize;
     let mut result = String::new();
-    for character in value.chars() {
-        let character_width = UnicodeWidthChar::width(character).unwrap_or(0);
+    for grapheme in UnicodeSegmentation::graphemes(value, true) {
+        let character_width = display_width(grapheme);
         if used.saturating_add(character_width) > width {
             break;
         }
-        result.push(character);
+        result.push_str(grapheme);
         used += character_width;
     }
     result
@@ -893,7 +991,7 @@ pub const fn health_label(locale: ResolvedLocale, health: ManagementHealth) -> &
 #[must_use]
 // One exhaustive two-locale catalog is intentionally kept together so new
 // product code cannot add language branches outside this presentation boundary.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::match_same_arms, clippy::too_many_lines)]
 pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static str {
     match (locale, key) {
         (_, HumanMessageKey::TabBeacon | HumanMessageKey::TitleOwnedByTabBeacon) => "TabBeacon",
@@ -901,6 +999,7 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::EnUs, HumanMessageKey::Status) => "TabBeacon Status",
         (ResolvedLocale::EnUs, HumanMessageKey::Doctor) => "TabBeacon Doctor",
         (ResolvedLocale::EnUs, HumanMessageKey::Setup) => "TabBeacon Setup",
+        (ResolvedLocale::EnUs, HumanMessageKey::SetupOperation) => "Setup",
         (ResolvedLocale::EnUs, HumanMessageKey::Healthy) => "Healthy",
         (ResolvedLocale::EnUs, HumanMessageKey::NeedsAttention) => "Needs attention",
         (ResolvedLocale::EnUs, HumanMessageKey::ActionNeeded) => "Action needed",
@@ -916,6 +1015,13 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::EnUs, HumanMessageKey::Activity) => "Activity",
         (ResolvedLocale::EnUs, HumanMessageKey::Spinner) => "Spinner",
         (ResolvedLocale::EnUs, HumanMessageKey::Theme) => "Theme",
+        (ResolvedLocale::EnUs, HumanMessageKey::BrailleSpinner) => "Braille",
+        (ResolvedLocale::EnUs, HumanMessageKey::QuadrantSpinner) => "Quadrant",
+        (ResolvedLocale::EnUs, HumanMessageKey::LineSpinner) => "Line",
+        (ResolvedLocale::EnUs, HumanMessageKey::PulseSpinner) => "Pulse",
+        (ResolvedLocale::EnUs, HumanMessageKey::MutedDark) => "Muted Dark",
+        (ResolvedLocale::EnUs, HumanMessageKey::ClassicTheme) => "Classic",
+        (ResolvedLocale::EnUs, HumanMessageKey::Profile) => "profile",
         (ResolvedLocale::EnUs, HumanMessageKey::Workers) => "Workers",
         (ResolvedLocale::EnUs, HumanMessageKey::Active | HumanMessageKey::TrustActive) => "active",
         (ResolvedLocale::EnUs, HumanMessageKey::Stale) => "stale",
@@ -947,7 +1053,7 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::EnUs, HumanMessageKey::OverallHealth) => "Overall health",
         (ResolvedLocale::EnUs, HumanMessageKey::UnsavedChanges) => "unsaved changes",
         (ResolvedLocale::EnUs, HumanMessageKey::FooterNavigation) => {
-            "↑↓ navigate  Enter edit Appearance  a Apply  r Revert  q Quit"
+            "↑↓ navigate  Enter edit selected screen  a Apply  r Revert  q Quit"
         }
         (ResolvedLocale::EnUs, HumanMessageKey::FooterEditing) => {
             "↑↓ select setting  ←→ change draft  Enter done  a Apply  r Revert"
@@ -962,6 +1068,169 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::EnUs, HumanMessageKey::ReducedMotion) => "Reduced motion",
         (ResolvedLocale::EnUs, HumanMessageKey::InterfacePreferencesUpdated) => {
             "Interface preferences updated."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::Interface) => "Interface",
+        (ResolvedLocale::EnUs, HumanMessageKey::Auto) => "Auto",
+        (ResolvedLocale::EnUs, HumanMessageKey::English) => "English",
+        (ResolvedLocale::EnUs, HumanMessageKey::SimplifiedChinese) => "Simplified Chinese",
+        (ResolvedLocale::EnUs, HumanMessageKey::Always) => "Always",
+        (ResolvedLocale::EnUs, HumanMessageKey::Never) => "Never",
+        (ResolvedLocale::EnUs, HumanMessageKey::Enabled) => "Enabled",
+        (ResolvedLocale::EnUs, HumanMessageKey::Disabled) => "Disabled",
+        (ResolvedLocale::EnUs, HumanMessageKey::DraftAppearance) => {
+            "Draft appearance — staged only"
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::DraftInterface) => "Draft interface — staged only",
+        (ResolvedLocale::EnUs, HumanMessageKey::UseArrowsToChange) => {
+            "Use ← → to change this in-memory draft."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::PressEnterToSelect) => {
+            "Press Enter to select a setting; no enum typing is required."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::MinimumSize) => "Minimum size",
+        (ResolvedLocale::EnUs, HumanMessageKey::ResizeAndReopen) => {
+            "Resize, then reopen TabBeacon Control Center."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::Currentness) => "Currentness",
+        (ResolvedLocale::EnUs, HumanMessageKey::Trust) => "Trust",
+        (ResolvedLocale::EnUs, HumanMessageKey::ManualOnly) => "manual only",
+        (ResolvedLocale::EnUs, HumanMessageKey::RecommendedActions) => "Recommended actions",
+        (ResolvedLocale::EnUs, HumanMessageKey::NoAutomatedAction) => "No action required.",
+        (ResolvedLocale::EnUs, HumanMessageKey::NoAutomatedActionAvailable) => {
+            "No automated action is available."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::ReadOnly) => "Read only",
+        (ResolvedLocale::EnUs, HumanMessageKey::ManualAction) => "Manual action",
+        (ResolvedLocale::EnUs, HumanMessageKey::PreviewableRepair) => "Previewable repair",
+        (ResolvedLocale::EnUs, HumanMessageKey::OwnerApplyRequired) => "Owner apply required",
+        (ResolvedLocale::EnUs, HumanMessageKey::NotAutomated) => "Not automated",
+        (ResolvedLocale::EnUs, HumanMessageKey::Failure) => "Failure",
+        (ResolvedLocale::EnUs, HumanMessageKey::NativeTitle) => "Native title",
+        (ResolvedLocale::EnUs, HumanMessageKey::Ready) => "Ready",
+        (ResolvedLocale::EnUs, HumanMessageKey::Working) => "Working",
+        (ResolvedLocale::EnUs, HumanMessageKey::ResultReady) => "Result ready",
+        (ResolvedLocale::EnUs, HumanMessageKey::Approval) => "Approval",
+        (ResolvedLocale::EnUs, HumanMessageKey::TabBeaconColors) => "TabBeacon colors",
+        (ResolvedLocale::EnUs, HumanMessageKey::NativeColors) => "Native colors",
+        (ResolvedLocale::EnUs, HumanMessageKey::TitleSpinner) => "Title spinner",
+        (ResolvedLocale::EnUs, HumanMessageKey::TitleIndicator) => "Title indicator",
+        (ResolvedLocale::EnUs, HumanMessageKey::TerminalRing) => "Windows Terminal ring",
+        (ResolvedLocale::EnUs, HumanMessageKey::TitleSpinnerAndRing) => "Title spinner + ring",
+        (ResolvedLocale::EnUs, HumanMessageKey::Native) => "Native",
+        (ResolvedLocale::EnUs, HumanMessageKey::PresentationSettings) => "Presentation settings",
+        (ResolvedLocale::EnUs, HumanMessageKey::UserLocalState) => {
+            "Settings are stored only in your user-local TabBeacon state."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::PresentationSettingsUpdated) => {
+            "Presentation settings updated."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::PresentationSettingsReset) => {
+            "Presentation settings reset to defaults."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::ConfigurationCouldNotBeUpdated) => {
+            "Configuration could not be updated"
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::UseConfigShow) => {
+            "Use tabbeacon config show for the current settings and supported values."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::Configuration) => "Configuration",
+        (ResolvedLocale::EnUs, HumanMessageKey::Uninstall) => "Uninstall",
+        (ResolvedLocale::EnUs, HumanMessageKey::OperationCouldNotComplete) => {
+            "{0} could not be completed: {1}."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::InteractiveTerminalRequired) => {
+            "{0} needs an interactive terminal."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::NextAction) => "Next: {0}.",
+        (ResolvedLocale::EnUs, HumanMessageKey::SavedPresentationSettingsUnreadable) => {
+            "Saved presentation settings could not be read; showing defaults."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::ConfigurationInputFailed) => {
+            "Configuration input failed: {0}."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::PresentationWizard) => {
+            "TabBeacon presentation wizard (press Enter to keep each current value)."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::SupportedPresets) => {
+            "Supported presets: native, minimal, balanced, full."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::TitleOwnershipReconciled) => {
+            "Title ownership was reconciled safely."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::Sessions) => "Sessions",
+        (ResolvedLocale::EnUs, HumanMessageKey::InvalidLeases) => "Invalid leases",
+        (ResolvedLocale::EnUs, HumanMessageKey::NoInspectableSessionLeases) => {
+            "No inspectable session leases."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::LeaseObservationOnly) => {
+            "Lease-based observation only; no process or session control."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::Environment) => "Environment",
+        (ResolvedLocale::EnUs, HumanMessageKey::WindowsTerminal) => "Windows Terminal",
+        (ResolvedLocale::EnUs, HumanMessageKey::WindowsTerminalCurrentSession) => "Current session",
+        (ResolvedLocale::EnUs, HumanMessageKey::WindowsTerminalNotCurrentSession) => {
+            "Not current session"
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::Binary) => "Binary",
+        (ResolvedLocale::EnUs, HumanMessageKey::Unknown) => "Unknown",
+        (ResolvedLocale::EnUs, HumanMessageKey::SetupCodexSummary) => "{0} — {1} ({2})",
+        (ResolvedLocale::EnUs, HumanMessageKey::PlannedChanges) => "Planned changes",
+        (ResolvedLocale::EnUs, HumanMessageKey::WindowsTerminalTitlePolicy) => {
+            "Windows Terminal title policy"
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::SetupReady) => "Setup is ready.",
+        (ResolvedLocale::EnUs, HumanMessageKey::NoChangesNeeded) => "No changes are needed.",
+        (ResolvedLocale::EnUs, HumanMessageKey::WelcomeSetup) => {
+            "Setup keeps prompts, assistant output, and provider session data out of configuration."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::QuickSetup) => {
+            "Quick setup — action-required sections only."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::FullSetup) => {
+            "Full setup — review the complete presentation flow."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::SetupCancelled) => "Setup cancelled.",
+        (ResolvedLocale::EnUs, HumanMessageKey::SetupChangesApplied) => "Setup changes applied.",
+        (ResolvedLocale::EnUs, HumanMessageKey::NoSetupChangesMade) => {
+            "No settings, Codex configuration, or hooks were changed."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::SetupInputFailed) => "Setup input failed: {0}.",
+        (ResolvedLocale::EnUs, HumanMessageKey::SetupPreviewBlocked) => {
+            "Setup was not applied because the preview did not complete."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::PreviewCouldNotComplete) => {
+            "Preview could not complete: {0}."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::SetupSettingsChanged) => {
+            "Setup was not applied because your settings changed while it was open."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::ReviewSettingsAndRunSetupAgain) => {
+            "Review the current settings and run setup again."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::SetupCouldNotApply) => {
+            "Setup could not be applied: {0}."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::PresentationSettingsRestored) => {
+            "Your presentation settings were restored."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::PresentationSettingsRestoreUnproven) => {
+            "TabBeacon could not verify that presentation settings were restored."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::RunDoctorBeforeSetup) => {
+            "Run tabbeacon doctor before making another setup attempt."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::SetupCouldNotReadState) => {
+            "Setup could not read the current state: {0}."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::UnsupportedInterfacePreferenceValue) => {
+            "Unsupported Interface preference value: {0}."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::PreviewResult) => "Preview",
+        (ResolvedLocale::EnUs, HumanMessageKey::UnchangedOwnedState) => {
+            "Unchanged owned state: existing ownership checks remain in effect."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::PreservedExternalSettings) => {
+            "TabBeacon will not touch unrelated Codex, Windows Terminal, or PowerShell settings."
         }
         (ResolvedLocale::EnUs, HumanMessageKey::SetupInstalled) => "Codex integration installed.",
         (ResolvedLocale::EnUs, HumanMessageKey::SetupUpgraded) => "Codex integration upgraded.",
@@ -1150,6 +1419,7 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::ZhCn, HumanMessageKey::Status) => "TabBeacon 状态",
         (ResolvedLocale::ZhCn, HumanMessageKey::Doctor) => "TabBeacon 诊断",
         (ResolvedLocale::ZhCn, HumanMessageKey::Setup) => "TabBeacon 设置",
+        (ResolvedLocale::ZhCn, HumanMessageKey::SetupOperation) => "设置",
         (ResolvedLocale::ZhCn, HumanMessageKey::Healthy) => "正常",
         (ResolvedLocale::ZhCn, HumanMessageKey::NeedsAttention) => "需要关注",
         (ResolvedLocale::ZhCn, HumanMessageKey::ActionNeeded) => "需要处理",
@@ -1165,6 +1435,13 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::ZhCn, HumanMessageKey::Activity | HumanMessageKey::Active) => "活动",
         (ResolvedLocale::ZhCn, HumanMessageKey::Spinner) => "旋转指示器",
         (ResolvedLocale::ZhCn, HumanMessageKey::Theme) => "主题",
+        (ResolvedLocale::ZhCn, HumanMessageKey::BrailleSpinner) => "盲文",
+        (ResolvedLocale::ZhCn, HumanMessageKey::QuadrantSpinner) => "象限",
+        (ResolvedLocale::ZhCn, HumanMessageKey::LineSpinner) => "线条",
+        (ResolvedLocale::ZhCn, HumanMessageKey::PulseSpinner) => "脉冲",
+        (ResolvedLocale::ZhCn, HumanMessageKey::MutedDark) => "低调深色",
+        (ResolvedLocale::ZhCn, HumanMessageKey::ClassicTheme) => "经典",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Profile) => "配置档",
         (ResolvedLocale::ZhCn, HumanMessageKey::Workers) => "工作器",
         (ResolvedLocale::ZhCn, HumanMessageKey::Stale) => "过期",
         (ResolvedLocale::ZhCn, HumanMessageKey::ActiveAndStale) => "活动 {0} · 过期 {1}",
@@ -1193,7 +1470,7 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::ZhCn, HumanMessageKey::OverallHealth) => "总体状态",
         (ResolvedLocale::ZhCn, HumanMessageKey::UnsavedChanges) => "有未保存的更改",
         (ResolvedLocale::ZhCn, HumanMessageKey::FooterNavigation) => {
-            "↑↓ 导航  Enter 编辑外观  a 应用  r 还原  q 退出"
+            "↑↓ 导航  Enter 编辑当前分区  a 应用  r 还原  q 退出"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::FooterEditing) => {
             "↑↓ 选择设置  ←→ 调整草稿  Enter 完成  a 应用  r 还原"
@@ -1207,6 +1484,151 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::ZhCn, HumanMessageKey::Color) => "颜色",
         (ResolvedLocale::ZhCn, HumanMessageKey::ReducedMotion) => "减少动画",
         (ResolvedLocale::ZhCn, HumanMessageKey::InterfacePreferencesUpdated) => "界面偏好已更新。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Interface) => "界面",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Auto) => "自动",
+        (ResolvedLocale::ZhCn, HumanMessageKey::English) => "English",
+        (ResolvedLocale::ZhCn, HumanMessageKey::SimplifiedChinese) => "简体中文",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Always) => "始终",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Never) => "从不",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Enabled) => "启用",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Disabled) => "停用",
+        (ResolvedLocale::ZhCn, HumanMessageKey::DraftAppearance) => "外观草稿 — 仅暂存",
+        (ResolvedLocale::ZhCn, HumanMessageKey::DraftInterface) => "界面草稿 — 仅暂存",
+        (ResolvedLocale::ZhCn, HumanMessageKey::UseArrowsToChange) => {
+            "使用 ← → 调整此内存中的草稿。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::PressEnterToSelect) => {
+            "按 Enter 选择设置；无需手动输入枚举值。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::MinimumSize) => "最小尺寸",
+        (ResolvedLocale::ZhCn, HumanMessageKey::ResizeAndReopen) => {
+            "请调整窗口大小后重新打开 TabBeacon 控制中心。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::Currentness) => "当前状态",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Trust) => "信任",
+        (ResolvedLocale::ZhCn, HumanMessageKey::ManualOnly) => "仅手动",
+        (ResolvedLocale::ZhCn, HumanMessageKey::RecommendedActions) => "建议操作",
+        (ResolvedLocale::ZhCn, HumanMessageKey::NoAutomatedAction) => "无需操作。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::NoAutomatedActionAvailable) => {
+            "没有可用的自动操作。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::ReadOnly) => "只读",
+        (ResolvedLocale::ZhCn, HumanMessageKey::ManualAction) => "手动操作",
+        (ResolvedLocale::ZhCn, HumanMessageKey::PreviewableRepair) => "可预览修复",
+        (ResolvedLocale::ZhCn, HumanMessageKey::OwnerApplyRequired) => "需要所有者应用",
+        (ResolvedLocale::ZhCn, HumanMessageKey::NotAutomated) => "不自动化",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Failure) => "失败",
+        (ResolvedLocale::ZhCn, HumanMessageKey::NativeTitle) => "原生标题",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Ready) => "就绪",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Working) => "工作中",
+        (ResolvedLocale::ZhCn, HumanMessageKey::ResultReady) => "结果就绪",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Approval) => "批准",
+        (ResolvedLocale::ZhCn, HumanMessageKey::TabBeaconColors) => "TabBeacon 颜色",
+        (ResolvedLocale::ZhCn, HumanMessageKey::NativeColors) => "原生颜色",
+        (ResolvedLocale::ZhCn, HumanMessageKey::TitleSpinner) => "标题旋转指示器",
+        (ResolvedLocale::ZhCn, HumanMessageKey::TitleIndicator) => "标题指示器",
+        (ResolvedLocale::ZhCn, HumanMessageKey::TerminalRing) => "Windows Terminal 圆环",
+        (ResolvedLocale::ZhCn, HumanMessageKey::TitleSpinnerAndRing) => "标题旋转指示器 + 圆环",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Native) => "原生",
+        (ResolvedLocale::ZhCn, HumanMessageKey::PresentationSettings) => "外观呈现设置",
+        (ResolvedLocale::ZhCn, HumanMessageKey::UserLocalState) => {
+            "设置仅保存在你的用户本地 TabBeacon 状态中。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::PresentationSettingsUpdated) => {
+            "外观呈现设置已更新。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::PresentationSettingsReset) => {
+            "外观呈现设置已恢复默认值。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::ConfigurationCouldNotBeUpdated) => "无法更新配置",
+        (ResolvedLocale::ZhCn, HumanMessageKey::UseConfigShow) => {
+            "请运行 tabbeacon config show 查看当前设置和支持的值。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::Configuration) => "配置",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Uninstall) => "卸载",
+        (ResolvedLocale::ZhCn, HumanMessageKey::OperationCouldNotComplete) => "无法完成{0}：{1}。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::InteractiveTerminalRequired) => {
+            "{0}需要交互式终端。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::NextAction) => "下一步：{0}。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::SavedPresentationSettingsUnreadable) => {
+            "无法读取已保存的外观呈现设置；将显示默认值。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::ConfigurationInputFailed) => "配置输入失败：{0}。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::PresentationWizard) => {
+            "TabBeacon 外观呈现向导（按 Enter 保留每个当前值）。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::SupportedPresets) => {
+            "支持的预设：native、minimal、balanced、full。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::TitleOwnershipReconciled) => {
+            "已安全协调标题所有权。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::Sessions) => "会话",
+        (ResolvedLocale::ZhCn, HumanMessageKey::InvalidLeases) => "无效租约",
+        (ResolvedLocale::ZhCn, HumanMessageKey::NoInspectableSessionLeases) => {
+            "没有可检查的会话租约。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::LeaseObservationOnly) => {
+            "仅基于租约进行观察；不控制进程或会话。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::Environment) => "环境",
+        (ResolvedLocale::ZhCn, HumanMessageKey::WindowsTerminal) => "Windows Terminal",
+        (ResolvedLocale::ZhCn, HumanMessageKey::WindowsTerminalCurrentSession) => "当前会话",
+        (ResolvedLocale::ZhCn, HumanMessageKey::WindowsTerminalNotCurrentSession) => "不是当前会话",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Binary) => "二进制程序",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Unknown) => "未知",
+        (ResolvedLocale::ZhCn, HumanMessageKey::SetupCodexSummary) => "{0} — {1}（{2}）",
+        (ResolvedLocale::ZhCn, HumanMessageKey::PlannedChanges) => "计划变更",
+        (ResolvedLocale::ZhCn, HumanMessageKey::WindowsTerminalTitlePolicy) => {
+            "Windows Terminal 标题策略"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::SetupReady) => "设置已就绪。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::NoChangesNeeded) => "无需更改。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::WelcomeSetup) => {
+            "设置不会将提示词、助手输出或提供方会话数据写入配置。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::QuickSetup) => "快速设置 — 仅显示需要操作的分区。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::FullSetup) => "完整设置 — 检查完整的外观呈现流程。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::SetupCancelled) => "设置已取消。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::SetupChangesApplied) => "设置变更已应用。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::NoSetupChangesMade) => {
+            "未更改设置、Codex 配置或钩子。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::SetupInputFailed) => "设置输入失败：{0}。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::SetupPreviewBlocked) => {
+            "预览未完成，因此未应用设置。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::PreviewCouldNotComplete) => "预览无法完成：{0}。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::SetupSettingsChanged) => {
+            "设置打开期间配置已更改，因此未应用设置。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::ReviewSettingsAndRunSetupAgain) => {
+            "请检查当前设置后重新运行 setup。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::SetupCouldNotApply) => "无法应用设置：{0}。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::PresentationSettingsRestored) => {
+            "已恢复外观呈现设置。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::PresentationSettingsRestoreUnproven) => {
+            "TabBeacon 无法确认外观呈现设置已恢复。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::RunDoctorBeforeSetup) => {
+            "再次设置前请运行 tabbeacon doctor。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::SetupCouldNotReadState) => {
+            "设置无法读取当前状态：{0}。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::UnsupportedInterfacePreferenceValue) => {
+            "不支持的界面偏好值：{0}。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::PreviewResult) => "预览",
+        (ResolvedLocale::ZhCn, HumanMessageKey::UnchangedOwnedState) => {
+            "未更改的受管状态：现有所有权检查继续生效。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::PreservedExternalSettings) => {
+            "TabBeacon 不会触碰无关的 Codex、Windows Terminal 或 PowerShell 设置。"
+        }
         (
             ResolvedLocale::ZhCn,
             HumanMessageKey::SetupInstalled | HumanMessageKey::SetupAlreadyInstalled,
@@ -1381,7 +1803,10 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
     }
 }
 
-fn render_text(locale: ResolvedLocale, value: &HumanText) -> String {
+/// Renders one semantic Human fragment for non-line-oriented surfaces such as
+/// the Control Center while preserving the same shared catalog boundary.
+#[must_use]
+pub fn render_human_text(locale: ResolvedLocale, value: &HumanText) -> String {
     match value {
         HumanText::Message(key) => catalog(locale, *key).to_owned(),
         HumanText::Template { key, values } => {
@@ -1527,5 +1952,16 @@ mod tests {
         let fitted = fit_display_width("中文abcdef", 7);
         assert!(display_width(&fitted) <= 7);
         assert_eq!(display_width(&pad_display_width("中", 4)), 4);
+    }
+
+    #[test]
+    fn display_width_truncation_never_splits_combining_or_zwj_graphemes() {
+        let combining = "e\u{301}x";
+        assert_eq!(fit_display_width(combining, 1), "e\u{301}");
+
+        let family = "👨‍👩‍👧‍👦x";
+        let fitted = fit_display_width(family, display_width("👨‍👩‍👧‍👦"));
+        assert_eq!(fitted, "👨‍👩‍👧‍👦");
+        assert!(display_width(&fitted) <= display_width("👨‍👩‍👧‍👦"));
     }
 }

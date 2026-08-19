@@ -1057,6 +1057,7 @@ dependencies = [
  "sha2",
  "toml_edit",
  "uiautomation",
+ "unicode-segmentation",
  "unicode-width 0.2.0",
  "win-screenshot",
  "windows",
