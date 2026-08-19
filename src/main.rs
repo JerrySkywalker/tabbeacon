@@ -220,11 +220,11 @@ fn setup_codex(output_mode: OutputMode) -> ExitCode {
     );
     let integration = match CodexIntegration::from_environment() {
         Ok(integration) => integration,
-        Err(error) => return management_error("SETUP", &error),
+        Err(error) => return setup_management_error(&error, output_mode),
     };
     match integration.setup_with_title_ownership(settings.title().owns_tabbeacon_title()) {
         Ok(outcome) => print_setup_outcome(outcome, output_mode),
-        Err(error) => management_error("SETUP", &error),
+        Err(error) => setup_management_error(&error, output_mode),
     }
 }
 
@@ -234,9 +234,10 @@ fn guided_setup(quick: bool, full: bool, output_mode: OutputMode) -> ExitCode {
             "SETUP",
             "guided setup requires an interactive terminal",
             "run tabbeacon setup from an interactive terminal, or use tabbeacon config and tabbeacon setup codex",
+            output_mode,
         );
     }
-    let (store, snapshot, integration, discovery) = match guided_setup_context() {
+    let (store, snapshot, integration, discovery) = match guided_setup_context(output_mode) {
         Ok(context) => context,
         Err(exit_code) => return exit_code,
     };
@@ -254,23 +255,19 @@ fn guided_setup(quick: bool, full: bool, output_mode: OutputMode) -> ExitCode {
             print_setup_cancelled(output_mode);
             return ExitCode::SUCCESS;
         }
-        Err(error) => return setup_input_error(&error),
+        Err(error) => return setup_input_error(&error, output_mode),
     };
     let plan = SetupPlan::new(before, discovery).with_draft(draft);
     print_setup_change_plan(&plan);
     println!("Preview");
-    let preview_exit = print_preview_result(plan.preview_settings());
+    let preview_exit = print_preview_result(plan.preview_settings(), output_mode);
     if preview_exit != ExitCode::SUCCESS {
-        eprintln!("SETUP=BLOCKED");
-        eprintln!("REASON=preview must succeed before setup can apply changes");
-        eprintln!("SETTINGS_UNCHANGED=true");
-        eprintln!("CODEX_CONFIG_UNCHANGED=true");
-        eprintln!("HOOKS_UNCHANGED=true");
+        print_setup_preview_blocked(output_mode);
         return preview_exit;
     }
     let decision = match prompt_setup_decision_v3() {
         Ok(decision) => decision,
-        Err(error) => return setup_input_error(&error),
+        Err(error) => return setup_input_error(&error, output_mode),
     };
     match decision {
         SetupDecision::Cancel => {
@@ -287,27 +284,13 @@ fn guided_setup(quick: bool, full: bool, output_mode: OutputMode) -> ExitCode {
                 print_setup_applied(&store, plan.draft(), output_mode);
                 print_setup_outcome(outcome, output_mode)
             }
-            Ok(SetupApplyResult::SettingsConflict) => {
-                eprintln!("SETUP=BLOCKED");
-                eprintln!("REASON=settings changed while guided setup was open");
-                eprintln!("SETTINGS_UNCHANGED=true");
-                eprintln!("CODEX_CONFIG_UNCHANGED=true");
-                eprintln!("HOOKS_UNCHANGED=true");
-                ExitCode::from(75)
-            }
+            Ok(SetupApplyResult::SettingsConflict) => print_setup_settings_conflict(output_mode),
             Ok(SetupApplyResult::SetupFailed {
                 reason,
                 settings_restored,
-            }) => {
-                eprintln!("SETUP=FAIL");
-                eprintln!("REASON={reason}");
-                eprintln!("SETTINGS_RESTORED={settings_restored}");
-                eprintln!("CODEX_CONFIG_UNCHANGED=UNPROVEN");
-                eprintln!("HOOKS_UNCHANGED=UNPROVEN");
-                ExitCode::FAILURE
-            }
+            }) => print_setup_apply_failure(&reason, settings_restored, output_mode),
             Ok(SetupApplyResult::Cancelled) => unreachable!("apply path cannot cancel"),
-            Err(error) => management_error("SETUP", &error),
+            Err(error) => setup_management_error(&error, output_mode),
         },
     }
 }
@@ -343,7 +326,9 @@ fn print_guided_setup_intro(
     false
 }
 
-fn guided_setup_context() -> Result<
+fn guided_setup_context(
+    output_mode: OutputMode,
+) -> Result<
     (
         PresentationSettingsStore,
         PresentationSettingsSnapshot,
@@ -352,21 +337,22 @@ fn guided_setup_context() -> Result<
     ),
     ExitCode,
 > {
-    let store = settings_store().map_err(|error| management_error("SETUP", &error))?;
-    let snapshot = store.snapshot_read_only().map_err(|error| {
-        eprintln!("SETUP=FAIL");
-        eprintln!("REASON={error}");
-        eprintln!("SETTINGS_UNCHANGED=true");
-        ExitCode::FAILURE
-    })?;
-    let integration =
-        CodexIntegration::from_environment().map_err(|error| management_error("SETUP", &error))?;
-    let discovery = guided_setup_discovery(&integration)?;
+    let store = settings_store().map_err(|error| setup_management_error(&error, output_mode))?;
+    let snapshot = store
+        .snapshot_read_only()
+        .map_err(|error| print_setup_snapshot_failure(&error, output_mode))?;
+    let integration = CodexIntegration::from_environment()
+        .map_err(|error| setup_management_error(&error, output_mode))?;
+    let discovery = guided_setup_discovery(&integration, output_mode)?;
     Ok((store, snapshot, integration, discovery))
 }
 
-fn guided_setup_discovery(integration: &CodexIntegration) -> Result<SetupDiscovery, ExitCode> {
-    let binary_path = std::env::current_exe().map_err(|error| management_error("SETUP", &error))?;
+fn guided_setup_discovery(
+    integration: &CodexIntegration,
+    output_mode: OutputMode,
+) -> Result<SetupDiscovery, ExitCode> {
+    let binary_path =
+        std::env::current_exe().map_err(|error| setup_management_error(&error, output_mode))?;
     Ok(SetupDiscovery::from_doctor(
         env!("CARGO_PKG_VERSION"),
         binary_path,
@@ -673,7 +659,7 @@ fn print_setup_title_policy(policy: &tabbeacon::windows_terminal_policy::TitlePo
 fn uninstall_codex(output_mode: OutputMode) -> ExitCode {
     let integration = match CodexIntegration::from_environment() {
         Ok(integration) => integration,
-        Err(error) => return management_error("UNINSTALL", &error),
+        Err(error) => return management_error_for_output("UNINSTALL", &error, output_mode),
     };
     match integration.uninstall() {
         Ok(UninstallOutcome::Removed) => {
@@ -702,7 +688,7 @@ fn uninstall_codex(output_mode: OutputMode) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Err(error) => management_error("UNINSTALL", &error),
+        Err(error) => management_error_for_output("UNINSTALL", &error, output_mode),
     }
 }
 
@@ -720,13 +706,20 @@ fn run_codex_hook() -> ExitCode {
 fn config_show(output_mode: OutputMode) -> ExitCode {
     let store = match settings_store() {
         Ok(store) => store,
-        Err(error) => return management_error("CONFIG", &error),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
     };
     let settings = match store.load() {
         Ok(settings) => settings,
         Err(error) => {
-            eprintln!("CONFIG=WARNING");
-            eprintln!("REASON={error}");
+            if output_mode == OutputMode::Plain {
+                eprintln!("CONFIG=WARNING");
+                eprintln!("REASON={error}");
+            } else {
+                eprint_human_tone(
+                    HumanTone::Attention,
+                    "Saved presentation settings could not be read; showing defaults.",
+                );
+            }
             PresentationSettings::default()
         }
     };
@@ -737,11 +730,11 @@ fn config_show(output_mode: OutputMode) -> ExitCode {
 fn config_set(key: &str, value: &str, output_mode: OutputMode) -> ExitCode {
     let store = match settings_store() {
         Ok(store) => store,
-        Err(error) => return management_error("CONFIG", &error),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
     };
     let current = match store.load() {
         Ok(settings) => settings,
-        Err(error) => return management_error("CONFIG", &error),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
     };
     let updated = match key {
         "title" => TitleMode::parse(value).map(|mode| current.with_title(mode)),
@@ -762,12 +755,12 @@ fn config_set(key: &str, value: &str, output_mode: OutputMode) -> ExitCode {
 fn config_reset(output_mode: OutputMode) -> ExitCode {
     let store = match settings_store() {
         Ok(store) => store,
-        Err(error) => return management_error("CONFIG", &error),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
     };
     let current = store.load_or_default();
     let defaults = match store.reset() {
         Ok(settings) => settings,
-        Err(error) => return management_error("CONFIG", &error),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
     };
     if current.title() != defaults.title() {
         match CodexIntegration::from_environment()
@@ -777,7 +770,7 @@ fn config_reset(output_mode: OutputMode) -> ExitCode {
                 println!("CODEX_TITLE_OWNERSHIP={}", title_ownership_label(outcome));
             }
             Ok(_) => print_human_tone(HumanTone::Dim, "Title ownership was reconciled."),
-            Err(error) => return management_error("CONFIG", &error),
+            Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
         }
     }
     if output_mode == OutputMode::Plain {
@@ -795,11 +788,11 @@ fn config_reset(output_mode: OutputMode) -> ExitCode {
 fn config_preset(name: &str, output_mode: OutputMode) -> ExitCode {
     let store = match settings_store() {
         Ok(store) => store,
-        Err(error) => return management_error("CONFIG", &error),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
     };
     let current = match store.load() {
         Ok(settings) => settings,
-        Err(error) => return management_error("CONFIG", &error),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
     };
     let Some(preset) = PresentationSettings::preset(name) else {
         print_config_failure(output_mode, "unsupported preset");
@@ -819,17 +812,18 @@ fn config_wizard(output_mode: OutputMode) -> ExitCode {
             "CONFIG",
             "config wizard requires an interactive terminal",
             "run tabbeacon config wizard from an interactive terminal, or use tabbeacon config set",
+            output_mode,
         );
     }
     let store = match settings_store() {
         Ok(store) => store,
-        Err(error) => return management_error("CONFIG", &error),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
     };
     let current = store.load_or_default();
     println!("TabBeacon presentation wizard (press Enter to keep each current value).");
     let title = match prompt_choice("title", current.title().as_str(), TitleMode::parse) {
         Ok(value) => value,
-        Err(error) => return wizard_error(&error),
+        Err(error) => return wizard_error(&error, output_mode),
     };
     let tab_color = match prompt_choice(
         "tab-color",
@@ -837,20 +831,20 @@ fn config_wizard(output_mode: OutputMode) -> ExitCode {
         TabColorMode::parse,
     ) {
         Ok(value) => value,
-        Err(error) => return wizard_error(&error),
+        Err(error) => return wizard_error(&error, output_mode),
     };
     let activity = match prompt_choice("activity", current.activity().as_str(), ActivityMode::parse)
     {
         Ok(value) => value,
-        Err(error) => return wizard_error(&error),
+        Err(error) => return wizard_error(&error, output_mode),
     };
     let spinner = match prompt_choice("spinner", current.spinner().as_str(), SpinnerPreset::parse) {
         Ok(value) => value,
-        Err(error) => return wizard_error(&error),
+        Err(error) => return wizard_error(&error, output_mode),
     };
     let theme = match prompt_choice("theme", current.theme().as_str(), PresentationTheme::parse) {
         Ok(value) => value,
-        Err(error) => return wizard_error(&error),
+        Err(error) => return wizard_error(&error, output_mode),
     };
     persist_settings_change(
         &store,
@@ -959,12 +953,17 @@ fn prompt_setup_decision_v3() -> Result<SetupDecision, String> {
     }
 }
 
-fn setup_input_error(error: &str) -> ExitCode {
-    eprintln!("SETUP=FAIL");
-    eprintln!("REASON={error}");
-    eprintln!("SETTINGS_UNCHANGED=true");
-    eprintln!("CODEX_CONFIG_UNCHANGED=true");
-    eprintln!("HOOKS_UNCHANGED=true");
+fn setup_input_error(error: &str, output_mode: OutputMode) -> ExitCode {
+    if output_mode == OutputMode::Plain {
+        eprintln!("SETUP=FAIL");
+        eprintln!("REASON={error}");
+        eprintln!("SETTINGS_UNCHANGED=true");
+        eprintln!("CODEX_CONFIG_UNCHANGED=true");
+        eprintln!("HOOKS_UNCHANGED=true");
+    } else {
+        eprint_human_tone(HumanTone::Failure, format!("Setup input failed: {error}."));
+        eprintln!("No settings, Codex configuration, or hooks were changed.");
+    }
     ExitCode::from(2)
 }
 
@@ -1076,7 +1075,7 @@ fn persist_settings_change(
 ) -> ExitCode {
     let title_outcome = match apply_settings_change(store, before, after) {
         Ok(outcome) => outcome,
-        Err(error) => return management_error("CONFIG", &error),
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode),
     };
     if output_mode == OutputMode::Plain {
         println!("CONFIG=PASS");
@@ -1181,12 +1180,104 @@ fn print_setup_applied(
     print_settings(store, settings, output_mode);
 }
 
+fn print_setup_preview_blocked(output_mode: OutputMode) {
+    if output_mode == OutputMode::Plain {
+        eprintln!("SETUP=BLOCKED");
+        eprintln!("REASON=preview must succeed before setup can apply changes");
+        eprintln!("SETTINGS_UNCHANGED=true");
+        eprintln!("CODEX_CONFIG_UNCHANGED=true");
+        eprintln!("HOOKS_UNCHANGED=true");
+    } else {
+        eprint_human_tone(
+            HumanTone::Failure,
+            "Setup was not applied because the preview did not complete.",
+        );
+        eprintln!("No settings, Codex configuration, or hooks were changed.");
+    }
+}
+
+fn print_setup_settings_conflict(output_mode: OutputMode) -> ExitCode {
+    if output_mode == OutputMode::Plain {
+        eprintln!("SETUP=BLOCKED");
+        eprintln!("REASON=settings changed while guided setup was open");
+        eprintln!("SETTINGS_UNCHANGED=true");
+        eprintln!("CODEX_CONFIG_UNCHANGED=true");
+        eprintln!("HOOKS_UNCHANGED=true");
+    } else {
+        eprint_human_tone(
+            HumanTone::Attention,
+            "Setup was not applied because your settings changed while it was open.",
+        );
+        eprintln!("Review the current settings and run setup again.");
+    }
+    ExitCode::from(75)
+}
+
+fn print_setup_apply_failure(
+    reason: &str,
+    settings_restored: bool,
+    output_mode: OutputMode,
+) -> ExitCode {
+    if output_mode == OutputMode::Plain {
+        eprintln!("SETUP=FAIL");
+        eprintln!("REASON={reason}");
+        eprintln!("SETTINGS_RESTORED={settings_restored}");
+        eprintln!("CODEX_CONFIG_UNCHANGED=UNPROVEN");
+        eprintln!("HOOKS_UNCHANGED=UNPROVEN");
+    } else {
+        eprint_human_tone(
+            HumanTone::Failure,
+            format!("Setup could not be applied: {reason}."),
+        );
+        if settings_restored {
+            eprintln!("Your presentation settings were restored.");
+        } else {
+            eprintln!("TabBeacon could not verify that presentation settings were restored.");
+        }
+        eprint_human_tone(
+            HumanTone::Dim,
+            "Run tabbeacon doctor before making another setup attempt.",
+        );
+    }
+    ExitCode::FAILURE
+}
+
+fn print_setup_snapshot_failure(
+    error: &dyn std::error::Error,
+    output_mode: OutputMode,
+) -> ExitCode {
+    if output_mode == OutputMode::Plain {
+        eprintln!("SETUP=FAIL");
+        eprintln!("REASON={error}");
+        eprintln!("SETTINGS_UNCHANGED=true");
+    } else {
+        eprint_human_tone(
+            HumanTone::Failure,
+            format!("Setup could not read the current presentation settings: {error}."),
+        );
+        eprintln!("No settings were changed.");
+    }
+    ExitCode::FAILURE
+}
+
+fn setup_management_error(error: &dyn std::error::Error, output_mode: OutputMode) -> ExitCode {
+    management_error_for_output("SETUP", error, output_mode)
+}
+
 fn print_human_tone(tone: HumanTone, line: impl AsRef<str>) {
     let color_enabled = auto_color_enabled(
         io::stdout().is_terminal(),
         std::env::var_os("NO_COLOR").is_some(),
     );
     println!("{}", style(tone, line.as_ref(), color_enabled));
+}
+
+fn eprint_human_tone(tone: HumanTone, line: impl AsRef<str>) {
+    let color_enabled = auto_color_enabled(
+        io::stderr().is_terminal(),
+        std::env::var_os("NO_COLOR").is_some(),
+    );
+    eprintln!("{}", style(tone, line.as_ref(), color_enabled));
 }
 
 fn print_human_lines(lines: impl IntoIterator<Item = String>) {
@@ -1230,9 +1321,16 @@ fn prompt_choice<T: Copy>(
         .ok_or_else(|| format!("unsupported {name} choice"))
 }
 
-fn wizard_error(error: &str) -> ExitCode {
-    eprintln!("CONFIG=FAIL");
-    eprintln!("REASON={error}");
+fn wizard_error(error: &str, output_mode: OutputMode) -> ExitCode {
+    if output_mode == OutputMode::Plain {
+        eprintln!("CONFIG=FAIL");
+        eprintln!("REASON={error}");
+    } else {
+        eprint_human_tone(
+            HumanTone::Failure,
+            format!("Configuration input failed: {error}."),
+        );
+    }
     ExitCode::from(2)
 }
 
@@ -1254,19 +1352,34 @@ fn preview(arguments: PreviewArgs) -> ExitCode {
             None => return preview_choice_error("spinner"),
         };
     }
-    print_preview_result(settings)
+    print_preview_result(settings, OutputMode::Plain)
 }
 
-fn print_preview_result(settings: PresentationSettings) -> ExitCode {
+fn print_preview_result(settings: PresentationSettings, output_mode: OutputMode) -> ExitCode {
     match render_preview(settings) {
         Ok(()) => {
-            println!("PREVIEW=PASS");
-            println!("TITLE_SPINNER_FEASIBILITY=PRODUCTION");
+            if output_mode == OutputMode::Plain {
+                println!("PREVIEW=PASS");
+                println!("TITLE_SPINNER_FEASIBILITY=PRODUCTION");
+            } else {
+                print_human_tone(HumanTone::Success, "Preview completed.");
+                print_human_tone(
+                    HumanTone::Dim,
+                    "The staged presentation was rendered without saving changes.",
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(reason) => {
-            eprintln!("PREVIEW=BLOCKED");
-            eprintln!("REASON={reason}");
+            if output_mode == OutputMode::Plain {
+                eprintln!("PREVIEW=BLOCKED");
+                eprintln!("REASON={reason}");
+            } else {
+                eprint_human_tone(
+                    HumanTone::Failure,
+                    format!("Preview could not complete: {reason}."),
+                );
+            }
             ExitCode::from(78)
         }
     }
@@ -1325,6 +1438,27 @@ fn management_error(operation: &str, error: &dyn std::error::Error) -> ExitCode 
     ExitCode::FAILURE
 }
 
+fn management_error_for_output(
+    operation: &str,
+    error: &dyn std::error::Error,
+    output_mode: OutputMode,
+) -> ExitCode {
+    if output_mode == OutputMode::Plain {
+        return management_error(operation, error);
+    }
+    let label = match operation {
+        "SETUP" => "Setup",
+        "CONFIG" => "Configuration",
+        "UNINSTALL" => "Uninstall",
+        _ => operation,
+    };
+    eprint_human_tone(
+        HumanTone::Failure,
+        format!("{label} could not be completed: {error}."),
+    );
+    ExitCode::FAILURE
+}
+
 /// Returns whether this process can safely offer an inline interactive flow.
 ///
 /// G40 intentionally does not enter raw or alternate-screen terminal modes;
@@ -1333,13 +1467,31 @@ fn is_interactive_terminal() -> bool {
     io::stdin().is_terminal() && io::stdout().is_terminal()
 }
 
-fn interactive_terminal_required(operation: &str, reason: &str, next_action: &str) -> ExitCode {
-    eprintln!("{operation}=BLOCKED");
-    eprintln!("REASON={reason}");
-    eprintln!("SETTINGS_UNCHANGED=true");
-    eprintln!("CODEX_CONFIG_UNCHANGED=true");
-    eprintln!("HOOKS_UNCHANGED=true");
-    eprintln!("NEXT_ACTION={next_action}");
+fn interactive_terminal_required(
+    operation: &str,
+    reason: &str,
+    next_action: &str,
+    output_mode: OutputMode,
+) -> ExitCode {
+    if output_mode == OutputMode::Plain {
+        eprintln!("{operation}=BLOCKED");
+        eprintln!("REASON={reason}");
+        eprintln!("SETTINGS_UNCHANGED=true");
+        eprintln!("CODEX_CONFIG_UNCHANGED=true");
+        eprintln!("HOOKS_UNCHANGED=true");
+        eprintln!("NEXT_ACTION={next_action}");
+    } else {
+        let label = match operation {
+            "SETUP" => "Setup",
+            "CONFIG" => "Configuration",
+            _ => operation,
+        };
+        eprint_human_tone(
+            HumanTone::Attention,
+            format!("{label} needs an interactive terminal."),
+        );
+        eprint_human_tone(HumanTone::Dim, format!("Next: {next_action}."));
+    }
     ExitCode::from(2)
 }
 
