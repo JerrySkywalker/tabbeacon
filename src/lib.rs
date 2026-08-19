@@ -13,6 +13,8 @@ pub mod diagnostics;
 pub mod guided_setup;
 pub mod human_diagnostics;
 pub mod human_output;
+pub mod human_presentation;
+pub mod interface_preferences;
 pub mod management;
 pub mod presentation;
 pub mod providers;

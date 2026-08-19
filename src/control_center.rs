@@ -19,6 +19,9 @@ use ratatui::{
 
 use crate::{
     core::{Attention, Health, Phase},
+    human_presentation::{
+        HumanMessageKey, ResolvedLocale, catalog, health_label as shared_health_label,
+    },
     management::{ActionSafety, ManagementHealth, ManagementOverview, ManagementSnapshot},
     presentation::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput,
@@ -46,6 +49,7 @@ impl Screen {
         Self::Preview,
     ];
 
+    #[cfg(test)]
     const fn title(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
@@ -54,6 +58,20 @@ impl Screen {
             Self::Diagnostics => "Diagnostics",
             Self::Preview => "Preview",
         }
+    }
+
+    const fn message_key(self) -> HumanMessageKey {
+        match self {
+            Self::Overview => HumanMessageKey::Overview,
+            Self::Appearance => HumanMessageKey::Appearance,
+            Self::Integration => HumanMessageKey::CodexIntegration,
+            Self::Diagnostics => HumanMessageKey::Diagnostics,
+            Self::Preview => HumanMessageKey::Preview,
+        }
+    }
+
+    fn localized_title(self, locale: ResolvedLocale) -> &'static str {
+        catalog(locale, self.message_key())
     }
 }
 
@@ -106,6 +124,7 @@ pub enum ControlCenterCommand {
 /// In-memory frontend state. No mutation authority is stored here.
 #[derive(Clone, Debug)]
 pub struct ControlCenterApp {
+    locale: ResolvedLocale,
     screen: Screen,
     snapshot: ManagementSnapshot,
     overview: ManagementOverview,
@@ -125,6 +144,7 @@ impl ControlCenterApp {
         overview: ManagementOverview,
     ) -> Self {
         Self {
+            locale: ResolvedLocale::EnUs,
             screen: Screen::Overview,
             snapshot,
             overview,
@@ -134,6 +154,19 @@ impl ControlCenterApp {
             confirm_discard: false,
             appearance_field: None,
         }
+    }
+
+    /// Selects one resolved Human locale for the bounded Control Center surface.
+    #[must_use]
+    pub fn with_locale(mut self, locale: ResolvedLocale) -> Self {
+        self.locale = locale;
+        self
+    }
+
+    /// The selected Human locale for the bounded Control Center surface.
+    #[must_use]
+    pub const fn locale(&self) -> ResolvedLocale {
+        self.locale
     }
 
     /// Current active screen.
@@ -624,7 +657,8 @@ pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
     if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
         frame.render_widget(
             Paragraph::new(format!(
-                "Terminal too small\nMinimum size: {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}\nResize, then reopen TabBeacon Control Center."
+                "{}\nMinimum size: {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}\nResize, then reopen TabBeacon Control Center.",
+                catalog(app.locale(), HumanMessageKey::TerminalTooSmall),
             ))
             .block(Block::default().borders(Borders::ALL).title("TabBeacon")),
             area,
@@ -642,10 +676,13 @@ pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
-                "TabBeacon Control Center",
+                catalog(app.locale(), HumanMessageKey::ControlCenter),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!(" — {}", health_label(app.snapshot.health))),
+            Span::raw(format!(
+                " — {}",
+                shared_health_label(app.locale(), app.snapshot.health)
+            )),
         ])),
         areas[0],
     );
@@ -657,35 +694,43 @@ pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
         .iter()
         .map(|screen| {
             ListItem::new(if *screen == app.screen {
-                format!("> {}", screen.title())
+                format!("> {}", screen.localized_title(app.locale()))
             } else {
-                format!("  {}", screen.title())
+                format!("  {}", screen.localized_title(app.locale()))
             })
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        List::new(nav).block(Block::default().borders(Borders::ALL).title("Sections")),
+        List::new(nav).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(catalog(app.locale(), HumanMessageKey::Sections)),
+        ),
         body[0],
     );
     frame.render_widget(
         content(app).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(app.screen.title()),
+                .title(app.screen.localized_title(app.locale())),
         ),
         body[1],
     );
     let footer = if app.confirm_discard {
-        "Unsaved changes — [k] Keep editing  [d] Discard changes".to_owned()
+        catalog(app.locale(), HumanMessageKey::FooterDiscard).to_owned()
     } else if app.appearance_field.is_some() {
-        "↑↓ select setting  ←→ change draft  Enter done  a Apply  r Revert".to_owned()
+        catalog(app.locale(), HumanMessageKey::FooterEditing).to_owned()
     } else {
+        let footer = catalog(app.locale(), HumanMessageKey::FooterNavigation);
         format!(
-            "↑↓ navigate  Enter edit Appearance  a Apply  r Revert  q Quit{}",
+            "{footer}{}",
             if app.dirty {
-                "  • unsaved changes"
+                format!(
+                    "  • {}",
+                    catalog(app.locale(), HumanMessageKey::UnsavedChanges)
+                )
             } else {
-                ""
+                String::new()
             }
         )
     };
@@ -704,21 +749,35 @@ fn content(app: &ControlCenterApp) -> Paragraph<'static> {
 
 fn overview_lines(app: &ControlCenterApp) -> String {
     format!(
-        "Overall health: {}\n\nTabBeacon  {}\nCodex      {} · {}\nHooks      {} · trust {}\nTitle      {}\n\nPresentation\n  Title      {}\n  Tab color  {}\n  Activity   {}\n  Spinner    {}\n  Theme      {}\n\nWorkers    {} · active {} · stale {}",
-        health_label(app.snapshot.health),
+        "{}: {}\n\n{}  {}\n{}      {} · {}\n{}      {} · trust {}\n{}      {}\n\n{}\n  {}      {}\n  {}  {}\n  {}   {}\n  {}    {}\n  {}      {}\n\n{}    {} · {} {} · {} {}",
+        catalog(app.locale(), HumanMessageKey::OverallHealth),
+        shared_health_label(app.locale(), app.snapshot.health),
+        catalog(app.locale(), HumanMessageKey::TabBeacon),
         app.overview.tabbeacon_version,
+        catalog(app.locale(), HumanMessageKey::Codex),
         app.overview.codex_version,
         app.overview.codex_profile,
+        catalog(app.locale(), HumanMessageKey::Hooks),
         app.overview.hooks,
         app.overview.hook_trust,
+        catalog(app.locale(), HumanMessageKey::Title),
         app.overview.title_ownership,
+        catalog(app.locale(), HumanMessageKey::Presentation),
+        catalog(app.locale(), HumanMessageKey::Title),
         human_title(app.current.title()),
+        catalog(app.locale(), HumanMessageKey::TabColor),
         human_tab_color(app.current.tab_color()),
+        catalog(app.locale(), HumanMessageKey::Activity),
         human_activity(app.current.activity()),
+        catalog(app.locale(), HumanMessageKey::Spinner),
         human_spinner(app.current.spinner()),
+        catalog(app.locale(), HumanMessageKey::Theme),
         human_theme(app.current.theme()),
+        catalog(app.locale(), HumanMessageKey::Workers),
         app.overview.worker_health,
+        catalog(app.locale(), HumanMessageKey::Active),
         app.overview.active_workers,
+        catalog(app.locale(), HumanMessageKey::Stale),
         app.overview.stale_workers,
     )
 }
@@ -1005,6 +1064,19 @@ mod tests {
             }
             app.handle_key(KeyCode::Down);
         }
+    }
+
+    #[test]
+    fn control_center_localizes_the_header_overview_and_footer_path() {
+        let app = app().with_locale(ResolvedLocale::ZhCn);
+        let mut terminal = Terminal::new(TestBackend::new(100, 18)).expect("test terminal starts");
+        terminal.draw(|frame| render(frame, &app)).expect("renders");
+        let rendered = format!("{:?}", terminal.backend().buffer());
+
+        assert!(rendered.contains("TabBeacon 控制中心"));
+        assert!(rendered.contains("概览"));
+        assert!(rendered.contains("总体状态"));
+        assert!(rendered.contains("↑↓ 导航"));
     }
 
     #[test]

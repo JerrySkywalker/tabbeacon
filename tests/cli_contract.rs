@@ -124,6 +124,129 @@ fn output_modes_preserve_machine_json_and_admit_legacy_plain_output() {
 }
 
 #[test]
+fn machine_transports_are_locale_independent() {
+    let root = TestRoot::new("localized-human-output");
+
+    let status_json_en = isolated_command(&root)
+        .args(["status", "--json", "--lang", "en-US"])
+        .output()
+        .expect("English JSON status starts");
+    let status_json_zh = isolated_command(&root)
+        .args(["status", "--json", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese JSON status starts");
+    assert!(status_json_en.status.success());
+    assert!(status_json_zh.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&status_json_en.stdout)
+            .expect("English JSON parses"),
+        serde_json::from_slice::<serde_json::Value>(&status_json_zh.stdout)
+            .expect("Chinese JSON parses"),
+        "machine JSON must not depend on Human locale"
+    );
+
+    let status_plain_en = isolated_command(&root)
+        .args(["status", "--plain", "--lang", "en-US"])
+        .output()
+        .expect("English plain status starts");
+    let status_plain_zh = isolated_command(&root)
+        .args(["status", "--plain", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese plain status starts");
+    assert_eq!(
+        status_plain_en.stdout, status_plain_zh.stdout,
+        "legacy key/value output must not depend on Human locale"
+    );
+
+    let doctor_plain_en = isolated_command(&root)
+        .args(["doctor", "--plain", "--lang", "en-US"])
+        .output()
+        .expect("English plain doctor starts");
+    let doctor_plain_zh = isolated_command(&root)
+        .args(["doctor", "--plain", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese plain doctor starts");
+    assert_eq!(
+        doctor_plain_en.stdout, doctor_plain_zh.stdout,
+        "plain doctor receipts must not depend on Human locale"
+    );
+
+    let doctor_json_en = isolated_command(&root)
+        .args(["doctor", "--json", "--lang", "en-US"])
+        .output()
+        .expect("English JSON doctor starts");
+    let doctor_json_zh = isolated_command(&root)
+        .args(["doctor", "--json", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese JSON doctor starts");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&doctor_json_en.stdout)
+            .expect("English doctor JSON parses"),
+        serde_json::from_slice::<serde_json::Value>(&doctor_json_zh.stdout)
+            .expect("Chinese doctor JSON parses"),
+        "doctor JSON must not depend on Human locale"
+    );
+}
+
+#[test]
+fn human_locale_and_interface_state_stay_user_local() {
+    let root = TestRoot::new("localized-human-interface");
+
+    let interface_path = root
+        .child("local-appdata")
+        .join("TabBeacon")
+        .join("interface.toml");
+    assert!(
+        !interface_path.exists(),
+        "read-only Human locale resolution must not create Interface state"
+    );
+
+    let auto_human = isolated_command(&root)
+        .args(["status", "--lang", "zh-CN"])
+        .output()
+        .expect("redirected automatic-color Human status starts");
+    assert!(auto_human.status.success());
+    let auto_human = String::from_utf8(auto_human.stdout).expect("automatic Human output is UTF-8");
+    assert!(auto_human.contains("TabBeacon 状态"));
+    assert!(
+        !auto_human.contains('\u{1b}'),
+        "redirected color=auto must not emit ANSI"
+    );
+    assert!(
+        !interface_path.exists(),
+        "passive Human rendering must still leave Interface state absent"
+    );
+
+    let stored_language = isolated_command(&root)
+        .args(["interface", "set", "language", "zh-CN", "--plain"])
+        .output()
+        .expect("Interface language set starts");
+    assert!(stored_language.status.success());
+    assert!(
+        interface_path.exists(),
+        "explicit preference write creates state"
+    );
+
+    let stored_color = isolated_command(&root)
+        .args(["interface", "set", "color", "never", "--plain"])
+        .output()
+        .expect("Interface color set starts");
+    assert!(stored_color.status.success());
+
+    let human = isolated_command(&root)
+        .arg("status")
+        .output()
+        .expect("stored Chinese Human status starts");
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).expect("Human output is UTF-8");
+    assert!(human.contains("TabBeacon 状态"));
+    assert!(
+        !human.contains('\u{1b}'),
+        "color=never must keep redirected Human output monochrome"
+    );
+}
+
+#[test]
 fn config_defaults_to_human_monochrome_output_and_plain_retains_receipts() {
     let root = TestRoot::new("human-config-output");
 
@@ -184,7 +307,7 @@ fn setup_codex_defaults_to_human_output_and_plain_retains_receipts() {
     let root = TestRoot::new("human-setup-output");
 
     let human = isolated_command(&root)
-        .args(["setup", "codex"])
+        .args(["setup", "codex", "--lang", "en-US"])
         .output()
         .expect("human setup codex starts");
     assert!(human.status.success());

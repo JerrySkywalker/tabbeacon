@@ -9,19 +9,20 @@ use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use dialoguer::Select;
 use tabbeacon::cli::{
-    Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, OutputMode, PreviewArgs, Provider,
-    SetupCommand, TitlePolicyCommand,
+    Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, InterfaceCommand,
+    InterfacePreferenceKey, OutputMode, PreviewArgs, Provider, SetupCommand, TitlePolicyCommand,
 };
 use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_title_probe,
     human_doctor_lines, human_status_lines,
 };
 use tabbeacon::guided_setup::{GuidedInput, choose_presentation};
-use tabbeacon::human_diagnostics::{
-    human_doctor_lines as human_doctor_v2_lines, human_status_lines as human_status_v2_lines,
-    terminal_width,
+use tabbeacon::human_diagnostics::{render_human_doctor, render_human_status, terminal_width};
+use tabbeacon::human_output::{HumanTone, style};
+use tabbeacon::human_presentation::{
+    HumanAction, HumanDocument, HumanField, HumanLine, HumanMessage, HumanMessageKey,
+    HumanRenderer, HumanSection, HumanText, ResolvedLocale, color_enabled, resolve_runtime_locale,
 };
-use tabbeacon::human_output::{HumanTone, auto_color_enabled, style};
 use tabbeacon::management::ManagementSnapshot;
 use tabbeacon::providers::codex::{
     CodexHookRuntime, CodexIntegration, SetupOutcome, TitleOwnershipOutcome, UninstallOutcome,
@@ -32,6 +33,10 @@ use tabbeacon::setup::{
 use tabbeacon::{
     activity::{run_activity_cleanup_observer_system, run_activity_worker_system},
     core::{Attention, Health, Phase},
+    interface_preferences::{
+        HumanColor, InterfaceLanguage, InterfacePreferences,
+        InterfacePreferencesSnapshotSaveOutcome, InterfacePreferencesStore,
+    },
     presentation::{
         PresentationPolicy, SemanticPresentationInput, WindowsTerminalCapabilities,
         WindowsTerminalRenderer,
@@ -119,12 +124,12 @@ fn dispatch(cli: Cli) -> ExitCode {
             command: Some(SetupCommand::Codex),
             output,
             ..
-        }) => setup_codex(output.mode()),
+        }) => setup_codex(output.mode(), output.language.preference()),
         Some(Command::Doctor(DoctorArgs {
             output,
             probe_title,
-        })) => doctor(output.mode(), probe_title),
-        Some(Command::Status(output)) => status(output.mode()),
+        })) => doctor(output.mode(), probe_title, output.language.preference()),
+        Some(Command::Status(output)) => status(output.mode(), output.language.preference()),
         Some(Command::Sessions(output)) => sessions(output.mode()),
         Some(Command::TitlePolicy { command }) => match command {
             TitlePolicyCommand::Inspect(output) => title_policy_inspect(output.json),
@@ -145,15 +150,33 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Hook {
             provider: Provider::Codex,
         }) => run_codex_hook(),
-        Some(Command::Config { command, output }) => match command {
-            ConfigCommand::Show => config_show(output.mode()),
-            ConfigCommand::Set { key, value } => config_set(&key, &value, output.mode()),
-            ConfigCommand::Preset { name } => config_preset(&name, output.mode()),
-            ConfigCommand::Reset => config_reset(output.mode()),
-            ConfigCommand::Wizard => config_wizard(output.mode()),
-        },
+        Some(Command::Config { command, output }) => config_command(command, output.mode()),
+        Some(Command::Interface { command, output }) => {
+            interface_command(command, output.mode(), output.language.preference())
+        }
         Some(Command::Preview(arguments)) => preview(arguments),
         Some(Command::Completions { shell }) => completions(shell),
+    }
+}
+
+fn config_command(command: ConfigCommand, output_mode: OutputMode) -> ExitCode {
+    match command {
+        ConfigCommand::Show => config_show(output_mode),
+        ConfigCommand::Set { key, value } => config_set(&key, &value, output_mode),
+        ConfigCommand::Preset { name } => config_preset(&name, output_mode),
+        ConfigCommand::Reset => config_reset(output_mode),
+        ConfigCommand::Wizard => config_wizard(output_mode),
+    }
+}
+
+fn interface_command(
+    command: InterfaceCommand,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
+    match command {
+        InterfaceCommand::Show => interface_show(output_mode, language),
+        InterfaceCommand::Set { key, value } => interface_set(key, &value, output_mode, language),
     }
 }
 
@@ -213,7 +236,7 @@ fn convergence_verify(path: &std::path::Path, expected_head: &str) -> ExitCode {
     }
 }
 
-fn setup_codex(output_mode: OutputMode) -> ExitCode {
+fn setup_codex(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
     let settings = settings_store().map_or_else(
         |_| PresentationSettings::default(),
         |store| store.load_or_default(),
@@ -223,7 +246,7 @@ fn setup_codex(output_mode: OutputMode) -> ExitCode {
         Err(error) => return setup_management_error(&error, output_mode),
     };
     match integration.setup_with_title_ownership(settings.title().owns_tabbeacon_title()) {
-        Ok(outcome) => print_setup_outcome(outcome, output_mode),
+        Ok(outcome) => print_setup_outcome(outcome, output_mode, language),
         Err(error) => setup_management_error(&error, output_mode),
     }
 }
@@ -282,7 +305,7 @@ fn guided_setup(quick: bool, full: bool, output_mode: OutputMode) -> ExitCode {
         }) {
             Ok(SetupApplyResult::Applied(outcome)) => {
                 print_setup_applied(&store, plan.draft(), output_mode);
-                print_setup_outcome(outcome, output_mode)
+                print_setup_outcome(outcome, output_mode, None)
             }
             Ok(SetupApplyResult::SettingsConflict) => print_setup_settings_conflict(output_mode),
             Ok(SetupApplyResult::SetupFailed {
@@ -361,34 +384,13 @@ fn guided_setup_discovery(
     ))
 }
 
-fn print_setup_outcome(outcome: SetupOutcome, output_mode: OutputMode) -> ExitCode {
+fn print_setup_outcome(
+    outcome: SetupOutcome,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
     if output_mode != OutputMode::Plain {
-        match outcome {
-            SetupOutcome::InstalledTrustReviewRequired => {
-                print_human_tone(HumanTone::Success, "Codex integration installed.");
-                print_human_tone(
-                    HumanTone::Dim,
-                    "Next: launch codex, review TabBeacon hooks in /hooks, then run tabbeacon doctor.",
-                );
-            }
-            SetupOutcome::Upgraded => {
-                print_human_tone(HumanTone::Success, "Codex integration upgraded.");
-                print_human_tone(
-                    HumanTone::Dim,
-                    "Next: launch codex, review the updated TabBeacon hooks in /hooks, then run tabbeacon doctor.",
-                );
-            }
-            SetupOutcome::AlreadyInstalled => {
-                print_human_tone(
-                    HumanTone::Success,
-                    "Codex integration is already installed.",
-                );
-                print_human_tone(
-                    HumanTone::Dim,
-                    "Next: run tabbeacon doctor to verify hook trust and configuration.",
-                );
-            }
-        }
+        print_human_document(&setup_outcome_document(outcome), language);
         return ExitCode::SUCCESS;
     }
 
@@ -416,7 +418,36 @@ fn print_setup_outcome(outcome: SetupOutcome, output_mode: OutputMode) -> ExitCo
     ExitCode::SUCCESS
 }
 
-fn doctor(output_mode: OutputMode, probe_title: bool) -> ExitCode {
+fn setup_outcome_document(outcome: SetupOutcome) -> HumanDocument {
+    let (summary, next) = match outcome {
+        SetupOutcome::InstalledTrustReviewRequired => (
+            HumanMessageKey::SetupInstalled,
+            HumanMessageKey::SetupInstalledNext,
+        ),
+        SetupOutcome::Upgraded => (
+            HumanMessageKey::SetupUpgraded,
+            HumanMessageKey::SetupUpgradedNext,
+        ),
+        SetupOutcome::AlreadyInstalled => (
+            HumanMessageKey::SetupAlreadyInstalled,
+            HumanMessageKey::SetupAlreadyInstalledNext,
+        ),
+    };
+    HumanDocument::new(HumanText::message(HumanMessageKey::Setup), None).with_section(
+        HumanSection::new(None)
+            .with_message(HumanMessage::plain(
+                HumanText::message(summary),
+                HumanTone::Success,
+            ))
+            .with_action(HumanAction::new(HumanText::message(next), HumanTone::Dim)),
+    )
+}
+
+fn doctor(
+    output_mode: OutputMode,
+    probe_title: bool,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
     let report = if probe_title {
         collect_operational_diagnostics_with_title_probe()
     } else {
@@ -435,18 +466,22 @@ fn doctor(output_mode: OutputMode, probe_title: bool) -> ExitCode {
             Err(error) => management_error("DOCTOR", &error),
         };
     }
-    let lines = if output_mode == OutputMode::Plain {
-        human_doctor_lines(&report.doctor)
-    } else {
-        let snapshot = ManagementSnapshot::from_diagnostics(&report);
-        human_doctor_v2_lines(&report.doctor, &snapshot, terminal_width())
-    };
     if output_mode == OutputMode::Plain {
-        for line in lines {
+        for line in human_doctor_lines(&report.doctor) {
             println!("{line}");
         }
     } else {
-        print_human_lines(lines);
+        let snapshot = ManagementSnapshot::from_diagnostics(&report);
+        let presentation = human_runtime_presentation(language);
+        print_human_lines(
+            render_human_doctor(
+                &report.doctor,
+                &snapshot,
+                presentation.locale,
+                terminal_width(),
+            ),
+            presentation.color,
+        );
     }
     if report.doctor.is_failure() {
         ExitCode::FAILURE
@@ -455,7 +490,7 @@ fn doctor(output_mode: OutputMode, probe_title: bool) -> ExitCode {
     }
 }
 
-fn status(output_mode: OutputMode) -> ExitCode {
+fn status(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
     let report = collect_operational_diagnostics();
     if output_mode == OutputMode::Json {
         return match serde_json::to_string(&report) {
@@ -466,18 +501,17 @@ fn status(output_mode: OutputMode) -> ExitCode {
             Err(error) => management_error("STATUS", &error),
         };
     }
-    let lines = if output_mode == OutputMode::Plain {
-        human_status_lines(&report)
-    } else {
-        let snapshot = ManagementSnapshot::from_diagnostics(&report);
-        human_status_v2_lines(&report, &snapshot, terminal_width())
-    };
     if output_mode == OutputMode::Plain {
-        for line in lines {
+        for line in human_status_lines(&report) {
             println!("{line}");
         }
     } else {
-        print_human_lines(lines);
+        let snapshot = ManagementSnapshot::from_diagnostics(&report);
+        let presentation = human_runtime_presentation(language);
+        print_human_lines(
+            render_human_status(&report, &snapshot, presentation.locale, terminal_width()),
+            presentation.color,
+        );
     }
     ExitCode::SUCCESS
 }
@@ -1264,42 +1298,82 @@ fn setup_management_error(error: &dyn std::error::Error, output_mode: OutputMode
     management_error_for_output("SETUP", error, output_mode)
 }
 
-fn print_human_tone(tone: HumanTone, line: impl AsRef<str>) {
-    let color_enabled = auto_color_enabled(
-        io::stdout().is_terminal(),
-        std::env::var_os("NO_COLOR").is_some(),
+#[derive(Clone, Copy)]
+struct HumanRuntimePresentation {
+    locale: ResolvedLocale,
+    color: HumanColor,
+}
+
+fn human_runtime_presentation(language: Option<InterfaceLanguage>) -> HumanRuntimePresentation {
+    let preferences = active_interface_preferences();
+    HumanRuntimePresentation {
+        locale: resolve_runtime_locale(language, preferences.language()).locale(),
+        color: preferences.color(),
+    }
+}
+
+fn active_interface_preferences() -> InterfacePreferences {
+    InterfacePreferencesStore::from_environment()
+        .map(|store| store.load_or_default())
+        .unwrap_or_default()
+}
+
+fn print_human_document(document: &HumanDocument, language: Option<InterfaceLanguage>) {
+    let presentation = human_runtime_presentation(language);
+    print_human_lines(
+        HumanRenderer::new(presentation.locale, terminal_width()).render(document),
+        presentation.color,
     );
-    println!("{}", style(tone, line.as_ref(), color_enabled));
+}
+
+fn print_human_tone(tone: HumanTone, line: impl AsRef<str>) {
+    print_human_tone_with_color(
+        tone,
+        line,
+        active_interface_preferences().color(),
+        io::stdout().is_terminal(),
+        false,
+    );
 }
 
 fn eprint_human_tone(tone: HumanTone, line: impl AsRef<str>) {
-    let color_enabled = auto_color_enabled(
+    print_human_tone_with_color(
+        tone,
+        line,
+        active_interface_preferences().color(),
         io::stderr().is_terminal(),
-        std::env::var_os("NO_COLOR").is_some(),
+        true,
     );
-    eprintln!("{}", style(tone, line.as_ref(), color_enabled));
 }
 
-fn print_human_lines(lines: impl IntoIterator<Item = String>) {
+fn print_human_tone_with_color(
+    tone: HumanTone,
+    line: impl AsRef<str>,
+    color: HumanColor,
+    is_terminal: bool,
+    stderr: bool,
+) {
+    let styled = style(
+        tone,
+        line.as_ref(),
+        color_enabled(color, is_terminal, std::env::var_os("NO_COLOR").is_some()),
+    );
+    if stderr {
+        eprintln!("{styled}");
+    } else {
+        println!("{styled}");
+    }
+}
+
+fn print_human_lines(lines: impl IntoIterator<Item = HumanLine>, color: HumanColor) {
     for line in lines {
-        let trimmed = line.trim_start();
-        let tone = if trimmed.starts_with("TabBeacon ") || trimmed == "Sessions" {
-            HumanTone::Accent
-        } else if trimmed.starts_with("OK ") || trimmed.starts_with("No action required") {
-            HumanTone::Success
-        } else if trimmed.starts_with("X ") {
-            HumanTone::Failure
-        } else if trimmed.starts_with('!') || trimmed == "Attention" {
-            HumanTone::Attention
-        } else if trimmed.starts_with("Why:")
-            || trimmed.starts_with("Next:")
-            || trimmed.starts_with("Lease-based observation")
-        {
-            HumanTone::Dim
-        } else {
-            HumanTone::Plain
-        };
-        print_human_tone(tone, line);
+        print_human_tone_with_color(
+            line.tone(),
+            line.text(),
+            color,
+            io::stdout().is_terminal(),
+            false,
+        );
     }
 }
 
@@ -1428,8 +1502,158 @@ fn preview_choice_error(key: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
+fn interface_show(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
+    let store = match interface_store() {
+        Ok(store) => store,
+        Err(error) => return management_error_for_output("INTERFACE", &error, output_mode),
+    };
+    let preferences = match store.load_read_only() {
+        Ok(preferences) => preferences,
+        Err(error) => return management_error_for_output("INTERFACE", &error, output_mode),
+    };
+    if output_mode == OutputMode::Plain {
+        print_interface_plain(store.path(), preferences, None);
+    } else {
+        print_human_document(&interface_preferences_document(preferences, None), language);
+    }
+    ExitCode::SUCCESS
+}
+
+fn interface_set(
+    key: InterfacePreferenceKey,
+    value: &str,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
+    let store = match interface_store() {
+        Ok(store) => store,
+        Err(error) => return management_error_for_output("INTERFACE", &error, output_mode),
+    };
+    let snapshot = match store.snapshot_read_only() {
+        Ok(snapshot) => snapshot,
+        Err(error) => return management_error_for_output("INTERFACE", &error, output_mode),
+    };
+    let preferences = snapshot.preferences();
+    let replacement = match key {
+        InterfacePreferenceKey::Language => {
+            InterfaceLanguage::parse(value).map(|language| preferences.with_language(language))
+        }
+        InterfacePreferenceKey::Color => {
+            HumanColor::parse(value).map(|color| preferences.with_color(color))
+        }
+        InterfacePreferenceKey::ReducedMotion => value
+            .parse::<bool>()
+            .ok()
+            .map(|reduced_motion| preferences.with_reduced_motion(reduced_motion)),
+    };
+    let Some(replacement) = replacement else {
+        return interface_value_error(key, value, output_mode);
+    };
+    match store.save_snapshot_if_unchanged(&snapshot, replacement) {
+        Ok(InterfacePreferencesSnapshotSaveOutcome::Saved(_)) => {
+            if output_mode == OutputMode::Plain {
+                print_interface_plain(store.path(), replacement, Some("PASS"));
+            } else {
+                print_human_document(
+                    &interface_preferences_document(
+                        replacement,
+                        Some(HumanMessageKey::InterfacePreferencesUpdated),
+                    ),
+                    language,
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Ok(InterfacePreferencesSnapshotSaveOutcome::Conflict) => {
+            if output_mode == OutputMode::Plain {
+                eprintln!("INTERFACE=CONFLICT");
+                eprintln!("INTERFACE_UNCHANGED=true");
+            } else {
+                eprint_human_tone(
+                    HumanTone::Attention,
+                    "Interface preferences changed while this request was open.",
+                );
+            }
+            ExitCode::from(2)
+        }
+        Err(error) => management_error_for_output("INTERFACE", &error, output_mode),
+    }
+}
+
+fn interface_preferences_document(
+    preferences: InterfacePreferences,
+    result: Option<HumanMessageKey>,
+) -> HumanDocument {
+    let section = HumanSection::new(None)
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Language),
+            HumanText::literal(preferences.language().as_str()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Color),
+            HumanText::literal(preferences.color().as_str()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::ReducedMotion),
+            HumanText::literal(preferences.reduced_motion().to_string()),
+            HumanTone::Plain,
+        ));
+    let document = HumanDocument::new(
+        HumanText::message(HumanMessageKey::InterfacePreferences),
+        None,
+    )
+    .with_section(section);
+    result.map_or(document.clone(), |message| {
+        document.with_section(HumanSection::new(None).with_message(HumanMessage::plain(
+            HumanText::message(message),
+            HumanTone::Success,
+        )))
+    })
+}
+
+fn print_interface_plain(
+    path: &std::path::Path,
+    preferences: InterfacePreferences,
+    result: Option<&str>,
+) {
+    if let Some(result) = result {
+        println!("INTERFACE={result}");
+    }
+    println!("INTERFACE_PATH={}", path.display());
+    println!("INTERFACE_LANGUAGE={}", preferences.language());
+    println!("INTERFACE_COLOR={}", preferences.color());
+    println!("INTERFACE_REDUCED_MOTION={}", preferences.reduced_motion());
+}
+
+fn interface_value_error(
+    key: InterfacePreferenceKey,
+    value: &str,
+    output_mode: OutputMode,
+) -> ExitCode {
+    if output_mode == OutputMode::Plain {
+        eprintln!("INTERFACE=FAIL");
+        eprintln!("REASON=unsupported {key:?} value: {value}");
+    } else {
+        eprint_human_tone(
+            HumanTone::Attention,
+            format!("Unsupported Interface preference value: {value}."),
+        );
+    }
+    ExitCode::from(2)
+}
+
 fn settings_store() -> Result<PresentationSettingsStore, tabbeacon::settings::SettingsError> {
     PresentationSettingsStore::from_environment()
+}
+
+fn interface_store()
+-> Result<InterfacePreferencesStore, tabbeacon::interface_preferences::InterfacePreferencesError> {
+    InterfacePreferencesStore::from_environment()
 }
 
 fn management_error(operation: &str, error: &dyn std::error::Error) -> ExitCode {
@@ -1449,6 +1673,7 @@ fn management_error_for_output(
     let label = match operation {
         "SETUP" => "Setup",
         "CONFIG" => "Configuration",
+        "INTERFACE" => "Interface preferences",
         "UNINSTALL" => "Uninstall",
         _ => operation,
     };
@@ -1520,7 +1745,8 @@ fn ui() -> ExitCode {
     let snapshot = ManagementSnapshot::from_diagnostics(&report);
     let overview = tabbeacon::management::ManagementOverview::from_diagnostics(&report);
     match tabbeacon::control_center::run(
-        tabbeacon::control_center::ControlCenterApp::new(settings, snapshot, overview),
+        tabbeacon::control_center::ControlCenterApp::new(settings, snapshot, overview)
+            .with_locale(human_runtime_presentation(None).locale),
         |before, after| {
             let (_, next_snapshot) =
                 apply_control_center_settings_change(&store, &settings_snapshot, before, after)?;

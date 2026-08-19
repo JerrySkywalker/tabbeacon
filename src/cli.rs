@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
+use crate::interface_preferences::InterfaceLanguage;
+
 /// Top-level `TabBeacon` command-line interface.
 #[derive(Debug, Parser)]
 #[command(
@@ -70,6 +72,13 @@ pub enum Command {
         #[command(flatten)]
         output: HumanOutputArgs,
     },
+    /// Manage user-local Human language, color, and reduced-motion preferences.
+    Interface {
+        #[command(subcommand)]
+        command: InterfaceCommand,
+        #[command(flatten)]
+        output: HumanOutputArgs,
+    },
     /// Render a temporary presentation preview without persisting a change.
     Preview(PreviewArgs),
     /// Emit a shell-completion script to stdout.
@@ -114,6 +123,8 @@ pub struct OutputArgs {
     /// Emit the legacy key-value/check representation.
     #[arg(long, conflicts_with = "json")]
     pub plain: bool,
+    #[command(flatten)]
+    pub language: LanguageArgs,
 }
 
 impl OutputArgs {
@@ -147,6 +158,8 @@ pub struct HumanOutputArgs {
     /// Emit legacy key-value receipts for scripts that explicitly request them.
     #[arg(long, global = true)]
     pub plain: bool,
+    #[command(flatten)]
+    pub language: LanguageArgs,
 }
 
 impl HumanOutputArgs {
@@ -157,6 +170,50 @@ impl HumanOutputArgs {
             OutputMode::Plain
         } else {
             OutputMode::Human
+        }
+    }
+}
+
+/// Explicit Human locale selection shared by Human-capable commands.
+#[derive(Clone, Copy, Debug, Args)]
+pub struct LanguageArgs {
+    /// Select Human language (`auto`, `en-US`, or `zh-CN`).
+    #[arg(long, global = true, value_enum, value_name = "LOCALE")]
+    pub lang: Option<LanguageArgument>,
+}
+
+impl LanguageArgs {
+    /// Returns the typed override; `auto` intentionally continues precedence.
+    #[must_use]
+    pub const fn preference(self) -> Option<InterfaceLanguage> {
+        match self.lang {
+            Some(language) => Some(language.preference()),
+            None => None,
+        }
+    }
+}
+
+/// One explicit CLI language selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum LanguageArgument {
+    /// Continue through environment, user preference, and OS sources.
+    Auto,
+    /// Use English Human text.
+    #[value(name = "en-US")]
+    EnUs,
+    /// Use Simplified Chinese Human text.
+    #[value(name = "zh-CN")]
+    ZhCn,
+}
+
+impl LanguageArgument {
+    /// Converts the command-line spelling into the shared typed preference.
+    #[must_use]
+    pub const fn preference(self) -> InterfaceLanguage {
+        match self {
+            Self::Auto => InterfaceLanguage::Auto,
+            Self::EnUs => InterfaceLanguage::EnUs,
+            Self::ZhCn => InterfaceLanguage::ZhCn,
         }
     }
 }
@@ -227,6 +284,32 @@ pub enum ConfigCommand {
     Wizard,
 }
 
+/// User-local Interface preference operations.
+#[derive(Debug, Subcommand)]
+pub enum InterfaceCommand {
+    /// Show effective user-local Interface preferences.
+    Show,
+    /// Set one Interface preference atomically.
+    Set {
+        /// Preference to update.
+        key: InterfacePreferenceKey,
+        /// Supported value for that preference.
+        value: String,
+    },
+}
+
+/// One typed Interface preference key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum InterfacePreferenceKey {
+    /// Human language policy.
+    Language,
+    /// Human terminal color policy.
+    Color,
+    /// Future Human animation reduction policy.
+    #[value(name = "reduced-motion")]
+    ReducedMotion,
+}
+
 /// Non-persistent preview overrides.
 #[derive(Debug, Args)]
 pub struct PreviewArgs {
@@ -242,7 +325,10 @@ pub struct PreviewArgs {
 mod tests {
     use clap::{CommandFactory, Parser};
 
-    use super::{Cli, Command, ConvergenceCommand, OutputMode, SetupCommand};
+    use super::{
+        Cli, Command, ConvergenceCommand, InterfaceCommand, InterfacePreferenceKey, OutputMode,
+        SetupCommand,
+    };
 
     #[test]
     fn parses_supported_production_commands_with_typed_output_modes() {
@@ -252,6 +338,13 @@ mod tests {
             panic!("status command is typed");
         };
         assert_eq!(output.mode(), OutputMode::Plain);
+
+        let localized = Cli::try_parse_from(["tabbeacon", "status", "--lang", "zh-CN"])
+            .expect("exact BCP-47 status locale parses");
+        let Command::Status(output) = localized.command.expect("localized status command") else {
+            panic!("localized status command is typed");
+        };
+        assert!(output.language.preference().is_some());
 
         let sessions =
             Cli::try_parse_from(["tabbeacon", "sessions", "--json"]).expect("JSON sessions parses");
@@ -297,6 +390,20 @@ mod tests {
         };
         assert_eq!(output.mode(), OutputMode::Plain);
 
+        let interface = Cli::try_parse_from(["tabbeacon", "interface", "set", "language", "zh-CN"])
+            .expect("Interface set parses");
+        let Command::Interface { command, .. } = interface.command.expect("Interface command")
+        else {
+            panic!("Interface command is typed");
+        };
+        assert!(matches!(
+            command,
+            InterfaceCommand::Set {
+                key: InterfacePreferenceKey::Language,
+                ..
+            }
+        ));
+
         let uninstall = Cli::try_parse_from(["tabbeacon", "uninstall", "codex", "--plain"])
             .expect("legacy uninstall output parses after the provider");
         let Command::Uninstall { output, .. } = uninstall.command.expect("uninstall command")
@@ -309,6 +416,7 @@ mod tests {
     #[test]
     fn rejects_ambiguous_output_and_requires_convergence_flags() {
         assert!(Cli::try_parse_from(["tabbeacon", "status", "--json", "--plain"]).is_err());
+        assert!(Cli::try_parse_from(["tabbeacon", "status", "--lang", "fr-FR"]).is_err());
         assert!(Cli::try_parse_from(["tabbeacon", "sessions", "--json", "--plain"]).is_err());
         assert!(Cli::try_parse_from(["tabbeacon", "convergence", "verify"]).is_err());
 
