@@ -1,8 +1,9 @@
-//! Small, auto-only terminal styling helpers for human-facing CLI output.
+//! Small terminal styling helpers for human-facing CLI output.
 //!
 //! This is deliberately presentation-only: JSON and `--plain` machine
-//! transports never receive ANSI sequences, and output redirected away from a
-//! terminal remains monochrome. Persistent color preferences belong to v0.5.
+//! transports never receive ANSI sequences. The v0.5 typed Human renderer owns
+//! persisted `auto|always|never` policy; these helpers remain compatible with
+//! the unmigrated Human paths.
 
 /// A restrained semantic treatment for a human-facing line.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,11 +1,20 @@
-//! Compact, monochrome-safe human renderers for management diagnostics.
+//! Typed Human documents for the shared management diagnostics projection.
 //!
-//! JSON and the legacy key/value views remain in `diagnostics`. This module
-//! consumes the shared `ManagementSnapshot`, so human frontends render the
-//! same issue and action semantics without interpreting raw diagnostics.
+//! JSON and legacy key/value output remain in `diagnostics`. This module
+//! converts the same normalized management state into locale-neutral
+//! [`HumanDocument`] values for Human CLI and TUI renderers.
 
 use crate::{
-    diagnostics::{DiagnosticStatus, DoctorDiagnostics, OperationalDiagnostics},
+    diagnostics::{
+        DiagnosticStatus, DoctorDiagnostics, HookTrustState, OperationalDiagnostics,
+        TitleOwnershipState,
+    },
+    human_output::HumanTone,
+    human_presentation::{
+        HumanAction, HumanDocument, HumanField, HumanLine, HumanMessage, HumanMessageKey,
+        HumanRenderer, HumanSection, HumanText, ManagementTextKind, ResolvedLocale,
+        management_action_text, management_text, protected_state_text,
+    },
     management::{ChangePlan, HealthIssue, ManagementHealth, ManagementSnapshot},
 };
 
@@ -16,6 +25,9 @@ const MAX_STATUS_ISSUES: usize = 3;
 /// Returns the current text width without entering a terminal UI mode.
 #[must_use]
 pub fn terminal_width() -> usize {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdout()) {
+        return DEFAULT_WIDTH;
+    }
     std::env::var("COLUMNS")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
@@ -23,277 +35,330 @@ pub fn terminal_width() -> usize {
         .unwrap_or(DEFAULT_WIDTH)
 }
 
-/// Renders the default concise human status view for one diagnostic collection.
+/// Produces the shared semantic Human status document.
 #[must_use]
-pub fn human_status_lines(
+pub fn human_status_document(
     report: &OperationalDiagnostics,
     snapshot: &ManagementSnapshot,
-    width: usize,
-) -> Vec<String> {
-    let width = normalize_width(width);
-    let mut lines = Vec::new();
-    push(
-        &mut lines,
-        width,
-        format!("TabBeacon Status — {}", health_label(snapshot.health)),
-    );
-    lines.push(String::new());
-
-    append_integration(&mut lines, report, snapshot, width);
-    append_presentation(&mut lines, report, snapshot, width);
-    append_runtime(&mut lines, report, snapshot, width);
-
-    append_status_action_summary(&mut lines, snapshot, width);
-    lines
+) -> HumanDocument {
+    HumanDocument::new(
+        HumanText::message(HumanMessageKey::Status),
+        Some(health_text(snapshot.health)),
+    )
+    .with_section(integration_section(report, snapshot))
+    .with_section(presentation_section(report, snapshot))
+    .with_section(runtime_section(report, snapshot))
+    .with_section(status_action_section(snapshot))
 }
 
-fn append_integration(
-    lines: &mut Vec<String>,
-    report: &OperationalDiagnostics,
-    snapshot: &ManagementSnapshot,
-    width: usize,
-) {
-    push(lines, width, "Integration");
-    push(
-        lines,
-        width,
-        format!(
-            "  {} TabBeacon  {}",
-            state_marker(snapshot.health),
-            report.tabbeacon.version
-        ),
-    );
-    push(
-        lines,
-        width,
-        format!(
-            "  {} Codex      {} — {}",
-            state_marker(if report.codex.profile_supported {
-                ManagementHealth::Healthy
-            } else {
-                ManagementHealth::Error
-            }),
-            option_label(report.codex.version.as_deref()),
-            if report.codex.profile_supported {
-                "Supported"
-            } else {
-                "Not admitted"
-            }
-        ),
-    );
-    push(
-        lines,
-        width,
-        format!(
-            "  {} Hooks      {}",
-            marker_for_status(report.integration.declaration_status),
-            hook_summary(report)
-        ),
-    );
-    push(
-        lines,
-        width,
-        format!(
-            "  {} Hook trust {}",
-            state_marker_for_issue(snapshot, "hooks."),
-            hook_trust_label(report)
-        ),
-    );
-}
-
-fn append_presentation(
-    lines: &mut Vec<String>,
-    report: &OperationalDiagnostics,
-    snapshot: &ManagementSnapshot,
-    width: usize,
-) {
-    lines.push(String::new());
-    push(lines, width, "Presentation");
-    push(
-        lines,
-        width,
-        format!(
-            "  {} Title      {}",
-            state_marker_for_issue(snapshot, "terminal.title"),
-            title_label(report)
-        ),
-    );
-    push(
-        lines,
-        width,
-        format!(
-            "  {} Activity   {}",
-            state_marker_for_issue(snapshot, "workers."),
-            option_label(report.presentation.spinner_preset.as_deref())
-        ),
-    );
-    push(
-        lines,
-        width,
-        format!(
-            "  {} Theme      {}",
-            state_marker_for_issue(snapshot, "settings."),
-            option_label(report.presentation.theme.as_deref())
-        ),
-    );
-}
-
-fn append_runtime(
-    lines: &mut Vec<String>,
-    report: &OperationalDiagnostics,
-    snapshot: &ManagementSnapshot,
-    width: usize,
-) {
-    lines.push(String::new());
-    push(lines, width, "Runtime");
-    push(
-        lines,
-        width,
-        format!(
-            "  {} Workers    {}",
-            state_marker_for_issue(snapshot, "workers."),
-            bounded_label(&report.activity.worker_state_health)
-        ),
-    );
-    push(
-        lines,
-        width,
-        format!(
-            "    Active {} · Stale {}",
-            report.activity.active_leases, report.activity.stale_leases
-        ),
-    );
-}
-
-/// Renders the default human doctor view from the shared management projection.
+/// Produces the shared semantic Human doctor document.
 #[must_use]
-pub fn human_doctor_lines(
+pub fn human_doctor_document(
     report: &DoctorDiagnostics,
     snapshot: &ManagementSnapshot,
-    width: usize,
-) -> Vec<String> {
-    let width = normalize_width(width);
-    let mut lines = Vec::new();
-    push(
-        &mut lines,
-        width,
-        format!("TabBeacon Doctor — {}", health_label(snapshot.health)),
+) -> HumanDocument {
+    let document = HumanDocument::new(
+        HumanText::message(HumanMessageKey::Doctor),
+        Some(health_text(snapshot.health)),
     );
-    lines.push(String::new());
-
     if snapshot.is_healthy() {
         let passed = report
             .checks
             .iter()
             .filter(|check| check.status == DiagnosticStatus::Pass)
             .count();
-        push(&mut lines, width, format!("{passed} checks passed."));
-        lines.push(String::new());
-        for check in &report.checks {
-            push(&mut lines, width, format!("OK {}", check.summary));
-        }
-        lines.push(String::new());
-        push(&mut lines, width, "No action required.");
-        return lines;
+        let section = report.checks.iter().fold(
+            HumanSection::new(None)
+                .with_message(HumanMessage::plain(
+                    HumanText::template(HumanMessageKey::ChecksPassed, [passed.to_string()]),
+                    HumanTone::Success,
+                ))
+                .with_message(HumanMessage::plain(
+                    HumanText::message(HumanMessageKey::NoActionRequired),
+                    HumanTone::Success,
+                )),
+            |section, check| {
+                section.with_message(HumanMessage::marked(
+                    "OK",
+                    management_text(
+                        ManagementTextKind::CheckSummary,
+                        &check.id,
+                        check.summary.clone(),
+                    ),
+                    HumanTone::Success,
+                ))
+            },
+        );
+        return document.with_section(section);
     }
 
-    push(
-        &mut lines,
-        width,
-        format!(
-            "{} warning(s), {} failure(s).",
-            report.warnings.len(),
-            report.failures.len()
-        ),
-    );
-    lines.push(String::new());
-    for issue in &snapshot.issues {
-        append_doctor_issue(&mut lines, issue, &snapshot.change_plans, width);
-    }
-    lines
+    let document =
+        document.with_section(HumanSection::new(None).with_message(HumanMessage::plain(
+            HumanText::template(
+                HumanMessageKey::WarningsAndFailures,
+                [
+                    report.warnings.len().to_string(),
+                    report.failures.len().to_string(),
+                ],
+            ),
+            HumanTone::Attention,
+        )));
+    snapshot.issues.iter().fold(document, |document, issue| {
+        document.with_section(doctor_issue_section(issue, &snapshot.change_plans))
+    })
 }
 
-fn append_status_action_summary(
-    lines: &mut Vec<String>,
+/// Renders a status document with explicit per-line semantic tones.
+#[must_use]
+pub fn render_human_status(
+    report: &OperationalDiagnostics,
+    snapshot: &ManagementSnapshot,
+    locale: ResolvedLocale,
+    width: usize,
+) -> Vec<HumanLine> {
+    HumanRenderer::new(locale, normalize_width(width))
+        .render(&human_status_document(report, snapshot))
+}
+
+/// Renders a doctor document with explicit per-line semantic tones.
+#[must_use]
+pub fn render_human_doctor(
+    report: &DoctorDiagnostics,
+    snapshot: &ManagementSnapshot,
+    locale: ResolvedLocale,
+    width: usize,
+) -> Vec<HumanLine> {
+    HumanRenderer::new(locale, normalize_width(width))
+        .render(&human_doctor_document(report, snapshot))
+}
+
+/// Compatibility English text view for existing Human callers and tests.
+#[must_use]
+pub fn human_status_lines(
+    report: &OperationalDiagnostics,
     snapshot: &ManagementSnapshot,
     width: usize,
-) {
-    lines.push(String::new());
+) -> Vec<String> {
+    render_human_status(report, snapshot, ResolvedLocale::EnUs, width)
+        .into_iter()
+        .map(|line| line.text().to_owned())
+        .collect()
+}
+
+/// Compatibility English text view for existing Human callers and tests.
+#[must_use]
+pub fn human_doctor_lines(
+    report: &DoctorDiagnostics,
+    snapshot: &ManagementSnapshot,
+    width: usize,
+) -> Vec<String> {
+    render_human_doctor(report, snapshot, ResolvedLocale::EnUs, width)
+        .into_iter()
+        .map(|line| line.text().to_owned())
+        .collect()
+}
+
+fn integration_section(
+    report: &OperationalDiagnostics,
+    snapshot: &ManagementSnapshot,
+) -> HumanSection {
+    HumanSection::new(Some(HumanText::message(HumanMessageKey::Integration)))
+        .with_field(HumanField::new(
+            Some(state_marker(snapshot.health)),
+            HumanText::message(HumanMessageKey::TabBeacon),
+            HumanText::literal(report.tabbeacon.version.clone()),
+            health_tone(snapshot.health),
+        ))
+        .with_field(HumanField::new(
+            Some(state_marker(if report.codex.profile_supported {
+                ManagementHealth::Healthy
+            } else {
+                ManagementHealth::Error
+            })),
+            HumanText::message(HumanMessageKey::Codex),
+            codex_version_text(report),
+            if report.codex.profile_supported {
+                HumanTone::Success
+            } else {
+                HumanTone::Failure
+            },
+        ))
+        .with_field(HumanField::new(
+            Some(marker_for_status(report.integration.declaration_status)),
+            HumanText::message(HumanMessageKey::Hooks),
+            hook_summary_text(report),
+            diagnostic_tone(report.integration.declaration_status),
+        ))
+        .with_field(HumanField::new(
+            Some(state_marker_for_issue(snapshot, "hooks.")),
+            HumanText::message(HumanMessageKey::HookTrust),
+            hook_trust_text(report),
+            issue_tone(snapshot, "hooks."),
+        ))
+}
+
+fn presentation_section(
+    report: &OperationalDiagnostics,
+    snapshot: &ManagementSnapshot,
+) -> HumanSection {
+    HumanSection::new(Some(HumanText::message(HumanMessageKey::Presentation)))
+        .with_field(HumanField::new(
+            Some(state_marker_for_issue(snapshot, "terminal.title")),
+            HumanText::message(HumanMessageKey::Title),
+            title_text(report),
+            issue_tone(snapshot, "terminal.title"),
+        ))
+        .with_field(HumanField::new(
+            Some(state_marker_for_issue(snapshot, "workers.")),
+            HumanText::message(HumanMessageKey::Activity),
+            option_text(report.presentation.spinner_preset.as_deref()),
+            issue_tone(snapshot, "workers."),
+        ))
+        .with_field(HumanField::new(
+            Some(state_marker_for_issue(snapshot, "settings.")),
+            HumanText::message(HumanMessageKey::Theme),
+            option_text(report.presentation.theme.as_deref()),
+            issue_tone(snapshot, "settings."),
+        ))
+}
+
+fn runtime_section(report: &OperationalDiagnostics, snapshot: &ManagementSnapshot) -> HumanSection {
+    HumanSection::new(Some(HumanText::message(HumanMessageKey::Runtime)))
+        .with_field(HumanField::new(
+            Some(state_marker_for_issue(snapshot, "workers.")),
+            HumanText::message(HumanMessageKey::Workers),
+            worker_health_text(&report.activity.worker_state_health),
+            issue_tone(snapshot, "workers."),
+        ))
+        .with_message(HumanMessage::plain(
+            HumanText::template(
+                HumanMessageKey::ActiveAndStale,
+                [
+                    report.activity.active_leases.to_string(),
+                    report.activity.stale_leases.to_string(),
+                ],
+            ),
+            HumanTone::Dim,
+        ))
+}
+
+fn status_action_section(snapshot: &ManagementSnapshot) -> HumanSection {
     if snapshot.is_healthy() {
-        push(lines, width, "No action required.");
-        return;
+        return HumanSection::new(None).with_message(HumanMessage::plain(
+            HumanText::message(HumanMessageKey::NoActionRequired),
+            HumanTone::Success,
+        ));
     }
 
-    push(lines, width, "Attention");
+    let mut section = HumanSection::new(Some(HumanText::message(HumanMessageKey::Attention)));
     for issue in snapshot.issues.iter().take(MAX_STATUS_ISSUES) {
-        push(lines, width, format!("! {}", issue.title));
+        section = section.with_message(HumanMessage::marked(
+            "!",
+            management_text(
+                ManagementTextKind::IssueTitle,
+                &issue.id,
+                issue.title.clone(),
+            ),
+            severity_tone(issue),
+        ));
         if let Some(action) = &issue.remediation {
-            push(lines, width, format!("  Next: {}", action.instruction));
+            section = section.with_action(HumanAction::new(
+                management_action_text(&issue.id, &action.id, action.instruction.clone()),
+                HumanTone::Dim,
+            ));
         }
     }
     let remaining = snapshot.issues.len().saturating_sub(MAX_STATUS_ISSUES);
     if remaining > 0 {
-        push(
-            lines,
-            width,
-            format!("  {remaining} additional condition(s): run tabbeacon doctor."),
-        );
+        section = section.with_message(HumanMessage::plain(
+            HumanText::template(
+                HumanMessageKey::AdditionalConditions,
+                [remaining.to_string()],
+            ),
+            HumanTone::Dim,
+        ));
     }
+    section
 }
 
-fn append_doctor_issue(
-    lines: &mut Vec<String>,
-    issue: &HealthIssue,
-    plans: &[ChangePlan],
-    width: usize,
-) {
-    push(
-        lines,
-        width,
-        format!("{} {}", severity_marker(issue), issue.title),
-    );
-    push(lines, width, format!("  Why: {}", issue.explanation));
+fn doctor_issue_section(issue: &HealthIssue, plans: &[ChangePlan]) -> HumanSection {
+    let mut section = HumanSection::new(None)
+        .with_message(HumanMessage::marked(
+            severity_marker(issue),
+            management_text(
+                ManagementTextKind::IssueTitle,
+                &issue.id,
+                issue.title.clone(),
+            ),
+            severity_tone(issue),
+        ))
+        .with_message(HumanMessage::prefixed(
+            HumanText::message(HumanMessageKey::Why),
+            management_text(
+                ManagementTextKind::IssueExplanation,
+                &issue.id,
+                issue.explanation.clone(),
+            ),
+            HumanTone::Dim,
+        ));
     if let Some(action) = &issue.remediation {
-        push(lines, width, format!("  Next: {}", action.instruction));
+        section = section.with_action(HumanAction::new(
+            management_action_text(&issue.id, &action.id, action.instruction.clone()),
+            HumanTone::Dim,
+        ));
         if let Some(plan) = plans.iter().find(|plan| plan.action_id == action.id) {
-            for protected in &plan.protected_state {
-                push(
-                    lines,
-                    width,
-                    format!("  TabBeacon did not change: {protected}"),
-                );
+            for _protected in &plan.protected_state {
+                section = section.with_message(HumanMessage::prefixed(
+                    HumanText::message(HumanMessageKey::ProtectedState),
+                    protected_state_text(plan.safety),
+                    HumanTone::Dim,
+                ));
             }
         }
     }
-    lines.push(String::new());
+    section
 }
 
 fn normalize_width(width: usize) -> usize {
     width.max(MIN_WIDTH)
 }
 
-fn push(lines: &mut Vec<String>, width: usize, line: impl AsRef<str>) {
-    lines.push(fit(line.as_ref(), width));
+fn health_text(health: ManagementHealth) -> HumanText {
+    HumanText::message(match health {
+        ManagementHealth::Healthy => HumanMessageKey::Healthy,
+        ManagementHealth::Warning => HumanMessageKey::NeedsAttention,
+        ManagementHealth::Error => HumanMessageKey::ActionNeeded,
+    })
 }
 
-fn fit(value: &str, width: usize) -> String {
-    let count = value.chars().count();
-    if count <= width {
-        return value.to_owned();
-    }
-    if width <= 3 {
-        return value.chars().take(width).collect();
-    }
-    let mut shortened = value.chars().take(width - 3).collect::<String>();
-    shortened.push_str("...");
-    shortened
-}
-
-fn health_label(health: ManagementHealth) -> &'static str {
+fn health_tone(health: ManagementHealth) -> HumanTone {
     match health {
-        ManagementHealth::Healthy => "Healthy",
-        ManagementHealth::Warning => "Needs attention",
-        ManagementHealth::Error => "Action needed",
+        ManagementHealth::Healthy => HumanTone::Success,
+        ManagementHealth::Warning => HumanTone::Attention,
+        ManagementHealth::Error => HumanTone::Failure,
+    }
+}
+
+fn diagnostic_tone(status: DiagnosticStatus) -> HumanTone {
+    match status {
+        DiagnosticStatus::Pass => HumanTone::Success,
+        DiagnosticStatus::Warning => HumanTone::Attention,
+        DiagnosticStatus::Fail => HumanTone::Failure,
+    }
+}
+
+fn issue_tone(snapshot: &ManagementSnapshot, prefix: &str) -> HumanTone {
+    snapshot
+        .issues
+        .iter()
+        .find(|issue| issue.id.starts_with(prefix))
+        .map_or(HumanTone::Success, severity_tone)
+}
+
+fn severity_tone(issue: &HealthIssue) -> HumanTone {
+    match issue.severity {
+        crate::management::HealthSeverity::Warning => HumanTone::Attention,
+        crate::management::HealthSeverity::Error => HumanTone::Failure,
     }
 }
 
@@ -328,35 +393,76 @@ fn state_marker_for_issue(snapshot: &ManagementSnapshot, prefix: &str) -> &'stat
         .map_or("OK", severity_marker)
 }
 
-fn option_label(value: Option<&str>) -> String {
-    value.map_or_else(|| "Unavailable".to_owned(), bounded_label)
+fn option_text(value: Option<&str>) -> HumanText {
+    value.map_or_else(
+        || HumanText::message(HumanMessageKey::Unavailable),
+        |value| HumanText::literal(bounded_label(value)),
+    )
+}
+
+fn codex_version_text(report: &OperationalDiagnostics) -> HumanText {
+    let Some(version) = report.codex.version.as_deref() else {
+        return HumanText::message(HumanMessageKey::CodexVersionUnavailable);
+    };
+    HumanText::template(
+        if report.codex.profile_supported {
+            HumanMessageKey::CodexVersionSupported
+        } else {
+            HumanMessageKey::CodexVersionNotAdmitted
+        },
+        [version.to_owned()],
+    )
+}
+
+fn hook_trust_text(report: &OperationalDiagnostics) -> HumanText {
+    HumanText::message(match report.integration.hook_trust {
+        HookTrustState::Active => HumanMessageKey::TrustActive,
+        HookTrustState::ReviewRequired => HumanMessageKey::TrustReviewRequired,
+        HookTrustState::Failed => HumanMessageKey::TrustNotProven,
+        HookTrustState::Unavailable => HumanMessageKey::Unavailable,
+    })
+}
+
+fn title_text(report: &OperationalDiagnostics) -> HumanText {
+    HumanText::message(match report.integration.title_ownership {
+        TitleOwnershipState::Tabbeacon => HumanMessageKey::TitleOwnedByTabBeacon,
+        TitleOwnershipState::NativeOrOff => HumanMessageKey::TitleNativeOrOff,
+        TitleOwnershipState::Conflict => HumanMessageKey::TitleOwnershipConflict,
+        TitleOwnershipState::Unavailable => HumanMessageKey::Unavailable,
+    })
+}
+
+fn worker_health_text(value: &str) -> HumanText {
+    HumanText::message(match value {
+        "healthy" => HumanMessageKey::Healthy,
+        "warning" => HumanMessageKey::NeedsAttention,
+        "unavailable" => HumanMessageKey::Unavailable,
+        _ => return HumanText::literal(bounded_label(value)),
+    })
 }
 
 fn bounded_label(value: &str) -> String {
     value.replace(['_', '-'], " ")
 }
 
-fn hook_summary(report: &OperationalDiagnostics) -> String {
+fn hook_summary_text(report: &OperationalDiagnostics) -> HumanText {
     match report.integration.owned_hook_count {
         Some(count) if report.integration.declaration_status == DiagnosticStatus::Pass => {
-            format!("{count} active")
+            HumanText::template(HumanMessageKey::ActiveCount, [count.to_string()])
         }
-        Some(count) => format!("{count} need attention"),
-        None => "Unavailable".to_owned(),
+        Some(count) => {
+            HumanText::template(HumanMessageKey::NeedsAttentionCount, [count.to_string()])
+        }
+        None => HumanText::message(HumanMessageKey::Unavailable),
     }
-}
-
-fn hook_trust_label(report: &OperationalDiagnostics) -> String {
-    bounded_label(report.integration.hook_trust.as_str())
-}
-
-fn title_label(report: &OperationalDiagnostics) -> String {
-    bounded_label(report.integration.title_ownership.as_str())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{human_doctor_lines, human_status_lines};
+    use super::{
+        human_doctor_document, human_doctor_lines, human_status_document, human_status_lines,
+        render_human_doctor, render_human_status,
+    };
     use crate::{
         diagnostics::{
             ActivityDiagnostics, CodexDiagnostics, DiagnosticCheck, DiagnosticStatus,
@@ -364,6 +470,7 @@ mod tests {
             PresentationDiagnostics, PresentationSettingsSource, TabBeaconDiagnostics,
             TitleOwnershipState, WorkspaceDiagnostics,
         },
+        human_presentation::{ResolvedLocale, display_width},
         management::ManagementSnapshot,
         title_authority::{
             TitleAuthority, TitleAuthorityDiagnostics, TitleConflictClass, VisibleTitleProbe,
@@ -475,34 +582,36 @@ mod tests {
     }
 
     #[test]
-    fn healthy_status_and_doctor_are_compact_and_monochrome_safe() {
+    fn status_and_doctor_build_typed_documents_then_render_english() {
         let report = report();
         let snapshot = ManagementSnapshot::from_diagnostics(&report);
-        let status = human_status_lines(&report, &snapshot, 80);
-        let doctor = human_doctor_lines(&report.doctor, &snapshot, 80);
-
-        assert!(status.join("\n").contains("TabBeacon Status — Healthy"));
-        assert!(status.join("\n").contains("No action required."));
-        assert!(status.len() < 24, "healthy status fits one ordinary screen");
-        assert!(doctor.join("\n").contains("7 checks passed."));
-        assert!(doctor.join("\n").contains("No action required."));
+        assert!(human_status_document(&report, &snapshot).status().is_some());
         assert!(
-            status
-                .iter()
-                .chain(&doctor)
-                .all(|line| !line.contains('\u{1b}'))
+            !human_status_document(&report, &snapshot)
+                .sections()
+                .is_empty()
         );
+        assert!(
+            human_doctor_document(&report.doctor, &snapshot)
+                .status()
+                .is_some()
+        );
+        let status = human_status_lines(&report, &snapshot, 80).join("\n");
+        let doctor = human_doctor_lines(&report.doctor, &snapshot, 80).join("\n");
+        assert!(status.contains("TabBeacon Status — Healthy"));
+        assert!(status.contains("No action required."));
+        assert!(doctor.contains("7 checks passed."));
     }
 
     #[test]
-    fn hook_review_required_has_manual_next_action_and_trust_boundary() {
+    fn doctor_keeps_manual_next_action_and_trust_boundary() {
         let mut report = report();
         report.integration.hook_trust = HookTrustState::ReviewRequired;
         add_warning(&mut report, "hooks.trust", "Hook trust review is required");
         let snapshot = ManagementSnapshot::from_diagnostics(&report);
         let output = human_doctor_lines(&report.doctor, &snapshot, 120).join("\n");
 
-        assert!(output.contains("Codex hook review is required"));
+        assert!(output.contains("Codex Hook review is required"));
         assert!(output.contains("Why:"));
         assert!(output.contains("Next: Launch codex, open /hooks"));
         assert!(output.contains(
@@ -511,7 +620,37 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_profile_title_repair_and_worker_warning_use_shared_actions() {
+    fn cjk_rendering_obeys_display_cell_width_without_escape_sequences() {
+        let report = report();
+        let snapshot = ManagementSnapshot::from_diagnostics(&report);
+        let lines = render_human_status(&report, &snapshot, ResolvedLocale::ZhCn, 24);
+        assert!(lines.iter().all(|line| display_width(line.text()) <= 24));
+        assert!(lines.iter().all(|line| !line.text().contains('\u{1b}')));
+        assert!(lines.iter().any(|line| line.text().contains("状态")));
+    }
+
+    #[test]
+    fn known_management_diagnostic_ids_render_from_the_chinese_catalog() {
+        let mut report = report();
+        report.integration.hook_trust = HookTrustState::ReviewRequired;
+        add_warning(&mut report, "hooks.trust", "Hook trust review is required");
+        let snapshot = ManagementSnapshot::from_diagnostics(&report);
+        let output = render_human_doctor(&report.doctor, &snapshot, ResolvedLocale::ZhCn, 500)
+            .into_iter()
+            .map(|line| line.text().to_owned())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(output.contains("需要审查 Codex 钩子"));
+        assert!(output.contains("原因: 受管定义已存在，但 Codex 信任仍是人工审查边界。"));
+        assert!(output.contains("下一步: 启动 codex，打开 /hooks，并审查 TabBeacon 定义。"));
+        assert!(output.contains("TabBeacon 未更改: TabBeacon 不会更改应用信任状态。"));
+        assert!(!output.contains("Codex Hook review is required"));
+        assert!(!output.contains("Hook trust review is required"));
+    }
+
+    #[test]
+    fn shared_status_actions_remain_present_for_existing_issue_families() {
         let mut report = report();
         report.codex.profile_supported = false;
         report.codex.profile_state = "known_unadmitted".to_owned();
@@ -523,17 +662,5 @@ mod tests {
         assert!(output.contains("Codex profile is not admitted"));
         assert!(output.contains("Windows Terminal title repair is available"));
         assert!(output.contains("Activity worker state needs attention"));
-    }
-
-    #[test]
-    fn narrow_rendering_keeps_textual_state_without_control_sequences() {
-        let mut report = report();
-        report.activity.worker_state_health = "warning".to_owned();
-        let snapshot = ManagementSnapshot::from_diagnostics(&report);
-        let lines = human_status_lines(&report, &snapshot, 24);
-
-        assert!(lines.iter().all(|line| line.chars().count() <= 24));
-        assert!(lines.join("\n").contains("TabBeacon Status"));
-        assert!(lines.iter().all(|line| !line.contains('\u{1b}')));
     }
 }
