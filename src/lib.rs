@@ -12,6 +12,7 @@ pub mod core;
 pub mod diagnostics;
 pub mod guided_setup;
 pub mod human_diagnostics;
+pub mod human_output;
 pub mod management;
 pub mod presentation;
 pub mod providers;

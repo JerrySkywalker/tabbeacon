@@ -124,6 +124,175 @@ fn output_modes_preserve_machine_json_and_admit_legacy_plain_output() {
 }
 
 #[test]
+fn config_defaults_to_human_monochrome_output_and_plain_retains_receipts() {
+    let root = TestRoot::new("human-config-output");
+
+    let human = isolated_command(&root)
+        .args(["config", "show"])
+        .output()
+        .expect("human config show starts");
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).expect("human config output is UTF-8");
+    assert!(human.contains("Presentation settings"));
+    assert!(!human.contains("CONFIG_PATH="));
+    assert!(!human.contains("TITLE_MODE="));
+    assert!(!human.contains("TITLE_SPINNER_FEASIBILITY="));
+    assert!(
+        !human.contains('\u{1b}'),
+        "redirected human output must not contain ANSI color"
+    );
+
+    let plain = isolated_command(&root)
+        .args(["config", "show", "--plain"])
+        .output()
+        .expect("plain config show starts");
+    assert!(plain.status.success());
+    let plain = String::from_utf8(plain.stdout).expect("plain config output is UTF-8");
+    assert!(plain.contains("CONFIG_PATH="));
+    assert!(plain.contains("TITLE_MODE="));
+    assert!(plain.contains("TITLE_SPINNER_FEASIBILITY=PRODUCTION"));
+    assert!(!plain.contains('\u{1b}'));
+}
+
+#[test]
+fn uninstall_defaults_to_human_output_and_preserves_plain_receipts() {
+    let root = TestRoot::new("human-uninstall-output");
+
+    let human = isolated_command(&root)
+        .args(["uninstall", "codex"])
+        .output()
+        .expect("human uninstall starts");
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).expect("human uninstall output is UTF-8");
+    assert!(human.contains("No owned Codex integration is installed."));
+    assert!(!human.contains("UNINSTALL_SAFETY="));
+    assert!(!human.contains("OWNER_ACTION="));
+
+    let plain = isolated_command(&root)
+        .args(["uninstall", "codex", "--plain"])
+        .output()
+        .expect("plain uninstall starts");
+    assert!(plain.status.success());
+    let plain = String::from_utf8(plain.stdout).expect("plain uninstall output is UTF-8");
+    assert!(plain.contains("UNINSTALL_SAFETY=PASS"));
+    assert!(plain.contains("CODEX_INTEGRATION=NOT_INSTALLED"));
+    assert!(plain.contains("OWNER_ACTION=none"));
+}
+
+#[test]
+fn setup_codex_defaults_to_human_output_and_plain_retains_receipts() {
+    let root = TestRoot::new("human-setup-output");
+
+    let human = isolated_command(&root)
+        .args(["setup", "codex"])
+        .output()
+        .expect("human setup codex starts");
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).expect("human setup output is UTF-8");
+    assert!(human.contains("Codex integration installed."));
+    assert!(!human.contains("SETUP_IDEMPOTENCE="));
+    assert!(!human.contains("CODEX_INTEGRATION="));
+    assert!(!human.contains("OWNER_ACTION="));
+    assert!(
+        !human.contains('\u{1b}'),
+        "redirected human output must not contain ANSI color"
+    );
+
+    let plain = isolated_command(&root)
+        .args(["setup", "codex", "--plain"])
+        .output()
+        .expect("plain setup codex starts");
+    assert!(plain.status.success());
+    let plain = String::from_utf8(plain.stdout).expect("plain setup output is UTF-8");
+    assert!(plain.contains("SETUP_IDEMPOTENCE=PASS"));
+    assert!(plain.contains("CODEX_INTEGRATION=ALREADY_INSTALLED"));
+    assert!(plain.contains("OWNER_ACTION=run tabbeacon doctor"));
+    assert!(!plain.contains('\u{1b}'));
+}
+
+#[test]
+fn human_setup_and_config_failures_do_not_emit_machine_receipts() {
+    let root = TestRoot::new("human-setup-failure-output");
+
+    let setup = isolated_command(&root)
+        .arg("setup")
+        .output()
+        .expect("human guided setup starts");
+    assert!(!setup.status.success());
+    let setup_error = String::from_utf8(setup.stderr).expect("human setup error is UTF-8");
+    assert!(setup_error.contains("Setup needs an interactive terminal."));
+    assert!(!setup_error.contains("SETUP="));
+    assert!(!setup_error.contains("NEXT_ACTION="));
+    assert!(!setup_error.contains('\u{1b}'));
+
+    let setup_plain = isolated_command(&root)
+        .args(["setup", "--plain"])
+        .output()
+        .expect("plain guided setup starts");
+    assert!(!setup_plain.status.success());
+    let setup_plain_error =
+        String::from_utf8(setup_plain.stderr).expect("plain setup error is UTF-8");
+    assert!(setup_plain_error.contains("SETUP=BLOCKED"));
+    assert!(setup_plain_error.contains("NEXT_ACTION="));
+
+    let config = isolated_command(&root)
+        .args(["config", "wizard"])
+        .output()
+        .expect("human config wizard starts");
+    assert!(!config.status.success());
+    let config_error = String::from_utf8(config.stderr).expect("human config error is UTF-8");
+    assert!(config_error.contains("Configuration needs an interactive terminal."));
+    assert!(!config_error.contains("CONFIG="));
+    assert!(!config_error.contains("NEXT_ACTION="));
+
+    let direct_setup = isolated_command(&root)
+        .env_remove("LOCALAPPDATA")
+        .args(["setup", "codex"])
+        .output()
+        .expect("human direct setup starts");
+    assert!(!direct_setup.status.success());
+    let direct_setup_error =
+        String::from_utf8(direct_setup.stderr).expect("human direct setup error is UTF-8");
+    assert!(direct_setup_error.contains("Setup could not be completed:"));
+    assert!(!direct_setup_error.contains("SETUP="));
+    assert!(!direct_setup_error.contains("REASON="));
+
+    let direct_setup_plain = isolated_command(&root)
+        .env_remove("LOCALAPPDATA")
+        .args(["setup", "codex", "--plain"])
+        .output()
+        .expect("plain direct setup starts");
+    assert!(!direct_setup_plain.status.success());
+    let direct_setup_plain_error =
+        String::from_utf8(direct_setup_plain.stderr).expect("plain direct setup error is UTF-8");
+    assert!(direct_setup_plain_error.contains("SETUP=FAIL"));
+    assert!(direct_setup_plain_error.contains("REASON="));
+
+    let config = isolated_command(&root)
+        .env_remove("LOCALAPPDATA")
+        .args(["config", "show"])
+        .output()
+        .expect("human config show starts");
+    assert!(!config.status.success());
+    let config_error = String::from_utf8(config.stderr).expect("human config failure is UTF-8");
+    assert!(config_error.contains("Configuration could not be completed:"));
+    assert!(!config_error.contains("CONFIG="));
+    assert!(!config_error.contains("REASON="));
+
+    let uninstall = isolated_command(&root)
+        .env_remove("LOCALAPPDATA")
+        .args(["uninstall", "codex"])
+        .output()
+        .expect("human uninstall starts");
+    assert!(!uninstall.status.success());
+    let uninstall_error =
+        String::from_utf8(uninstall.stderr).expect("human uninstall failure is UTF-8");
+    assert!(uninstall_error.contains("Uninstall could not be completed:"));
+    assert!(!uninstall_error.contains("UNINSTALL="));
+    assert!(!uninstall_error.contains("REASON="));
+}
+
+#[test]
 fn invalid_arguments_keep_usage_exit_code_and_interactive_commands_refuse_pipes() {
     let root = TestRoot::new("non-tty");
 
@@ -139,8 +308,9 @@ fn invalid_arguments_keep_usage_exit_code_and_interactive_commands_refuse_pipes(
         .expect("piped setup starts");
     assert_eq!(setup.status.code(), Some(2));
     let setup_stderr = String::from_utf8(setup.stderr).expect("setup error is UTF-8");
-    assert!(setup_stderr.contains("guided setup requires an interactive terminal"));
-    assert!(setup_stderr.contains("SETTINGS_UNCHANGED=true"));
+    assert!(setup_stderr.contains("Setup needs an interactive terminal."));
+    assert!(!setup_stderr.contains("SETUP="));
+    assert!(!setup_stderr.contains("SETTINGS_UNCHANGED="));
     assert!(!root.child("local-appdata/TabBeacon/config.toml").exists());
 
     let wizard = isolated_command(&root)
@@ -149,7 +319,8 @@ fn invalid_arguments_keep_usage_exit_code_and_interactive_commands_refuse_pipes(
         .expect("piped config wizard starts");
     assert_eq!(wizard.status.code(), Some(2));
     let wizard_stderr = String::from_utf8(wizard.stderr).expect("wizard error is UTF-8");
-    assert!(wizard_stderr.contains("config wizard requires an interactive terminal"));
+    assert!(wizard_stderr.contains("Configuration needs an interactive terminal."));
+    assert!(!wizard_stderr.contains("CONFIG="));
     assert!(!root.child("local-appdata/TabBeacon/config.toml").exists());
 
     let ui = isolated_command(&root)

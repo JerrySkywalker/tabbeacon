@@ -35,6 +35,8 @@ pub enum Command {
         /// Revisit the complete guided setup flow.
         #[arg(long, conflicts_with = "quick")]
         full: bool,
+        #[command(flatten)]
+        output: HumanOutputArgs,
     },
     /// Diagnose the current installation.
     Doctor(DoctorArgs),
@@ -54,13 +56,19 @@ pub enum Command {
         command: ConvergenceCommand,
     },
     /// Remove only the owned Codex integration declarations.
-    Uninstall { provider: Provider },
+    Uninstall {
+        provider: Provider,
+        #[command(flatten)]
+        output: HumanOutputArgs,
+    },
     /// Receive a fail-open Codex hook payload from stdin.
     Hook { provider: Provider },
     /// Manage persisted presentation settings through the existing owner-aware store.
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
+        #[command(flatten)]
+        output: HumanOutputArgs,
     },
     /// Render a temporary presentation preview without persisting a change.
     Preview(PreviewArgs),
@@ -131,6 +139,26 @@ pub enum OutputMode {
     Json,
     /// Legacy key-value/check output for compatibility.
     Plain,
+}
+
+/// An explicit legacy machine-output escape hatch for human-first commands.
+#[derive(Clone, Copy, Debug, Args)]
+pub struct HumanOutputArgs {
+    /// Emit legacy key-value receipts for scripts that explicitly request them.
+    #[arg(long, global = true)]
+    pub plain: bool,
+}
+
+impl HumanOutputArgs {
+    /// Resolves the default Human transport or the explicit legacy transport.
+    #[must_use]
+    pub const fn mode(self) -> OutputMode {
+        if self.plain {
+            OutputMode::Plain
+        } else {
+            OutputMode::Human
+        }
+    }
 }
 
 /// Doctor-specific observational flags.
@@ -253,6 +281,7 @@ mod tests {
             command,
             quick,
             full,
+            ..
         } = quick.command.expect("quick setup command")
         else {
             panic!("quick setup is typed");
@@ -260,6 +289,21 @@ mod tests {
         assert!(command.is_none());
         assert!(quick);
         assert!(!full);
+
+        let config = Cli::try_parse_from(["tabbeacon", "config", "show", "--plain"])
+            .expect("legacy config output parses after the subcommand");
+        let Command::Config { output, .. } = config.command.expect("config command") else {
+            panic!("config output is typed");
+        };
+        assert_eq!(output.mode(), OutputMode::Plain);
+
+        let uninstall = Cli::try_parse_from(["tabbeacon", "uninstall", "codex", "--plain"])
+            .expect("legacy uninstall output parses after the provider");
+        let Command::Uninstall { output, .. } = uninstall.command.expect("uninstall command")
+        else {
+            panic!("uninstall output is typed");
+        };
+        assert_eq!(output.mode(), OutputMode::Plain);
     }
 
     #[test]

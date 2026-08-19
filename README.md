@@ -67,8 +67,15 @@ TabBeacon has two first-class installation channels:
   To install this release exactly:
 
   ```powershell
-  cargo install tabbeacon --version 0.4.0 --locked
+  cargo install tabbeacon --version 0.4.1 --locked
   ```
+
+TabBeacon requires Rust 1.97.1. If your default Rust toolchain is older, use a
+process-scoped recovery without changing your user or machine default:
+
+```powershell
+rustup run 1.97.1 cargo install tabbeacon --locked
+```
 
 The default Cargo install surface is the public `tabbeacon` command only.
 After installing, start the guided first-run or reconfiguration flow with:
@@ -109,7 +116,7 @@ to stdout and keeps the normal doctor exit contract: a failure is nonzero while
 warning and pass are successful. `status --json` remains observational and
 successful even when its nested doctor verdict is a failure.
 
-Development builds after v0.4.0 add `sessions`, a read-only projection of
+TabBeacon 0.4.1 publishes `sessions`, a read-only projection of
 ephemeral activity leases. Each row contains only a safe workspace alias,
 semantic state, age/recency, and lease-backed worker health. A current lease is
 reported as `recently_authorized`, not as proof that an operating-system process

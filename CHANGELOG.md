@@ -4,6 +4,26 @@ All notable changes to TabBeacon will be documented here.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-20
+
+### Added
+
+- Published the privacy-preserving read-only `tabbeacon sessions` command that
+  was accepted after the immutable v0.4.0 release.
+
+### Changed
+
+- Made Control Center page, field, and value navigation edge-triggered: Press
+  advances once while Repeat and Release events are ignored.
+- Removed Setup's `wt.exe --version` launcher probe. `WT_SESSION` proves the
+  current session; other contexts are reported truthfully as not current.
+- Made default Setup, Config, and Uninstall results concise Human summaries.
+  Legacy machine receipts remain available only through explicit `--plain`.
+- Added restrained automatic Human CLI color that is disabled for redirected
+  output or `NO_COLOR`.
+- Documented Rust 1.97.1 and the process-scoped `rustup run 1.97.1` install
+  recovery path.
+
 ## [0.4.0] - 2026-08-19
 
 ### Added
