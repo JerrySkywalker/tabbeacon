@@ -234,6 +234,27 @@ pub enum HumanMessageKey {
     FooterDiscard,
     TerminalTooSmall,
     InterfacePreferences,
+    WorkspaceAlias,
+    Workspace,
+    AutomaticAlias,
+    CustomAlias,
+    EffectiveAlias,
+    NamingPolicy,
+    AliasPreview,
+    AliasExplanation,
+    ProjectDisplayHint,
+    Candidates,
+    Tokens,
+    CandidateStrategy,
+    CandidateScore,
+    CandidateComponents,
+    AliasProspective,
+    AliasOverrideSaved,
+    AliasOverrideReset,
+    AliasInvalid,
+    AliasCollision,
+    AliasConflict,
+    AliasUnavailable,
     Language,
     Color,
     ReducedMotion,
@@ -1063,6 +1084,39 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         }
         (ResolvedLocale::EnUs, HumanMessageKey::TerminalTooSmall) => "Terminal too small",
         (ResolvedLocale::EnUs, HumanMessageKey::InterfacePreferences) => "Interface preferences",
+        (ResolvedLocale::EnUs, HumanMessageKey::WorkspaceAlias) => "Workspace alias",
+        (ResolvedLocale::EnUs, HumanMessageKey::Workspace) => "Workspace",
+        (ResolvedLocale::EnUs, HumanMessageKey::AutomaticAlias) => "Automatic alias",
+        (ResolvedLocale::EnUs, HumanMessageKey::CustomAlias) => "Custom alias",
+        (ResolvedLocale::EnUs, HumanMessageKey::EffectiveAlias) => "Effective alias",
+        (ResolvedLocale::EnUs, HumanMessageKey::NamingPolicy) => "Naming policy",
+        (ResolvedLocale::EnUs, HumanMessageKey::AliasPreview) => "Adaptive alias preview",
+        (ResolvedLocale::EnUs, HumanMessageKey::AliasExplanation) => "Adaptive alias explanation",
+        (ResolvedLocale::EnUs, HumanMessageKey::ProjectDisplayHint) => "Project/display hint",
+        (ResolvedLocale::EnUs, HumanMessageKey::Candidates) => "Candidates",
+        (ResolvedLocale::EnUs, HumanMessageKey::Tokens) => "Tokens",
+        (ResolvedLocale::EnUs, HumanMessageKey::CandidateStrategy) => "Candidate strategy",
+        (ResolvedLocale::EnUs, HumanMessageKey::CandidateScore) => "Candidate score",
+        (ResolvedLocale::EnUs, HumanMessageKey::CandidateComponents) => "Score components",
+        (ResolvedLocale::EnUs, HumanMessageKey::AliasProspective) => "prospective (not saved)",
+        (ResolvedLocale::EnUs, HumanMessageKey::AliasOverrideSaved) => {
+            "Workspace alias override saved."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::AliasOverrideReset) => {
+            "Workspace alias override removed."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::AliasInvalid) => {
+            "The requested alias is not safe or bounded."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::AliasCollision) => {
+            "The requested alias is already used by another local workspace."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::AliasConflict) => {
+            "Workspace preferences changed before the requested update."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::AliasUnavailable) => {
+            "The workspace alias operation could not be completed safely."
+        }
         (ResolvedLocale::EnUs, HumanMessageKey::Language) => "Language",
         (ResolvedLocale::EnUs, HumanMessageKey::Color) => "Color",
         (ResolvedLocale::EnUs, HumanMessageKey::ReducedMotion) => "Reduced motion",
@@ -1480,6 +1534,29 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::TerminalTooSmall) => "终端窗口过小",
         (ResolvedLocale::ZhCn, HumanMessageKey::InterfacePreferences) => "界面偏好",
+        (ResolvedLocale::ZhCn, HumanMessageKey::WorkspaceAlias) => "工作区别名",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Workspace) => "工作区",
+        (ResolvedLocale::ZhCn, HumanMessageKey::AutomaticAlias) => "自动别名",
+        (ResolvedLocale::ZhCn, HumanMessageKey::CustomAlias) => "自定义别名",
+        (ResolvedLocale::ZhCn, HumanMessageKey::EffectiveAlias) => "生效别名",
+        (ResolvedLocale::ZhCn, HumanMessageKey::NamingPolicy) => "命名策略",
+        (ResolvedLocale::ZhCn, HumanMessageKey::AliasPreview) => "自适应别名预览",
+        (ResolvedLocale::ZhCn, HumanMessageKey::AliasExplanation) => "自适应别名说明",
+        (ResolvedLocale::ZhCn, HumanMessageKey::ProjectDisplayHint) => "项目/显示提示",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Candidates) => "候选别名",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Tokens) => "分词",
+        (ResolvedLocale::ZhCn, HumanMessageKey::CandidateStrategy) => "候选策略",
+        (ResolvedLocale::ZhCn, HumanMessageKey::CandidateScore) => "候选评分",
+        (ResolvedLocale::ZhCn, HumanMessageKey::CandidateComponents) => "评分组成",
+        (ResolvedLocale::ZhCn, HumanMessageKey::AliasProspective) => "候选（尚未保存）",
+        (ResolvedLocale::ZhCn, HumanMessageKey::AliasOverrideSaved) => "工作区别名覆盖已保存。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::AliasOverrideReset) => "工作区别名覆盖已移除。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::AliasInvalid) => "请求的别名不安全或超出边界。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::AliasCollision) => {
+            "请求的别名已被另一处本地工作区使用。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::AliasConflict) => "工作区偏好在更新前已发生变化。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::AliasUnavailable) => "无法安全完成工作区别名操作。",
         (ResolvedLocale::ZhCn, HumanMessageKey::Language) => "语言",
         (ResolvedLocale::ZhCn, HumanMessageKey::Color) => "颜色",
         (ResolvedLocale::ZhCn, HumanMessageKey::ReducedMotion) => "减少动画",

@@ -28,6 +28,10 @@ pub enum RepositoryIdentityError {
     CorruptRegistry(String),
     /// Deterministic alias candidates were exhausted.
     AliasExhausted,
+    /// An explicit alias is already reserved by another local workspace.
+    AliasConflict,
+    /// A device-local preference document changed after its snapshot.
+    PreferenceConflict,
     /// A filesystem operation failed.
     Io(io::Error),
     /// Registry serialization or parsing failed.
@@ -57,6 +61,12 @@ impl fmt::Display for RepositoryIdentityError {
             }
             Self::CorruptRegistry(detail) => write!(formatter, "corrupt alias registry: {detail}"),
             Self::AliasExhausted => formatter.write_str("stable alias candidates were exhausted"),
+            Self::AliasConflict => {
+                formatter.write_str("the requested workspace alias is already in use")
+            }
+            Self::PreferenceConflict => {
+                formatter.write_str("workspace preferences changed before the requested update")
+            }
             Self::Io(error) => write!(formatter, "repository identity I/O failed: {error}"),
             Self::Json(error) => write!(formatter, "repository identity JSON failed: {error}"),
         }

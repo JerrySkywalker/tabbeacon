@@ -179,14 +179,14 @@ impl CodexHookRuntime {
         let snapshot = reconciler.apply(normalized.evidence());
         let action = PresentationPolicy::resolve(SemanticPresentationInput::from_snapshot(
             &snapshot,
-            resolved.alias.as_str(),
+            resolved.effective_alias.as_str(),
         ));
         let render = self.activity.reconcile(
             admitted.session_sha256(),
             admitted.turn_sha256(),
             admitted.generation(),
             admitted.event_sequence(),
-            resolved.alias.as_str(),
+            resolved.effective_alias.as_str(),
             &action,
             self.renderer.settings(),
         );

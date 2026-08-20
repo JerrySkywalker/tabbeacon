@@ -9,8 +9,9 @@ use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use dialoguer::Select;
 use tabbeacon::cli::{
-    Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, HumanOutputArgs, InterfaceCommand,
-    InterfacePreferenceKey, OutputMode, PreviewArgs, Provider, SetupCommand, TitlePolicyCommand,
+    AliasCommand, Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, HumanOutputArgs,
+    InterfaceCommand, InterfacePreferenceKey, OutputMode, PreviewArgs, Provider, SetupCommand,
+    TitlePolicyCommand,
 };
 use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_title_probe,
@@ -43,6 +44,10 @@ use tabbeacon::{
     presentation::{
         PresentationPolicy, SemanticPresentationInput, WindowsTerminalCapabilities,
         WindowsTerminalRenderer,
+    },
+    repo::{
+        AliasCandidate, RepositoryAlias, WorkspaceAliasError, WorkspaceAliasInspection,
+        WorkspaceIdentityResolver,
     },
     settings::{
         ActivityMode, ConditionalSaveOutcome, PresentationSettings, PresentationSettingsSnapshot,
@@ -159,6 +164,9 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Interface { command, output }) => {
             interface_command(command, output.mode(), output.language.preference())
         }
+        Some(Command::Alias { command, output }) => {
+            alias_command(command, output.mode(), output.language.preference())
+        }
         Some(Command::Preview(arguments)) => preview(arguments),
         Some(Command::Completions { shell }) => completions(shell),
     }
@@ -186,6 +194,326 @@ fn interface_command(
     match command {
         InterfaceCommand::Show => interface_show(output_mode, language),
         InterfaceCommand::Set { key, value } => interface_set(key, &value, output_mode, language),
+    }
+}
+
+fn alias_command(
+    command: Option<AliasCommand>,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
+    let operation = match command.as_ref() {
+        None | Some(AliasCommand::Show) => "show",
+        Some(AliasCommand::Preview) => "preview",
+        Some(AliasCommand::Explain) => "explain",
+        Some(AliasCommand::Set { .. }) => "set",
+        Some(AliasCommand::Reset) => "reset",
+    };
+    let Ok(resolver) = WorkspaceIdentityResolver::with_default_state_root() else {
+        return alias_failure(
+            operation,
+            WorkspaceAliasError::Unavailable,
+            output_mode,
+            language,
+        );
+    };
+    let Ok(cwd) = std::env::current_dir() else {
+        return alias_failure(
+            operation,
+            WorkspaceAliasError::Unavailable,
+            output_mode,
+            language,
+        );
+    };
+    let result = match command.unwrap_or(AliasCommand::Show) {
+        AliasCommand::Show | AliasCommand::Preview | AliasCommand::Explain => {
+            resolver.inspect_alias(&cwd)
+        }
+        AliasCommand::Set { alias } => resolver.set_alias_override(&cwd, alias),
+        AliasCommand::Reset => resolver.reset_alias_override(&cwd),
+    };
+    match result {
+        Ok(inspection) => {
+            print_alias_output(operation, &inspection, output_mode, language);
+            ExitCode::SUCCESS
+        }
+        Err(error) => alias_failure(operation, error, output_mode, language),
+    }
+}
+
+fn print_alias_output(
+    operation: &str,
+    inspection: &WorkspaceAliasInspection,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) {
+    match output_mode {
+        OutputMode::Human => print_human_document(&alias_document(operation, inspection), language),
+        OutputMode::Plain => print_alias_plain(operation, inspection),
+        OutputMode::Json => match serde_json::to_string(&alias_json(operation, inspection)) {
+            Ok(value) => println!("{value}"),
+            Err(_) => {
+                // The DTO has only strings, booleans, and integers. This is a
+                // defensive safe fallback rather than a raw serialization error.
+                println!(
+                    "{{\"schema\":\"tabbeacon-alias-v1\",\"operation\":\"{operation}\",\"result\":\"failure\",\"reason\":\"unavailable\"}}"
+                );
+            }
+        },
+    }
+}
+
+fn alias_failure(
+    operation: &str,
+    error: WorkspaceAliasError,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
+    let reason = match error {
+        WorkspaceAliasError::InvalidAlias => "invalid_alias",
+        WorkspaceAliasError::Collision => "alias_conflict",
+        WorkspaceAliasError::Conflict => "preference_conflict",
+        WorkspaceAliasError::Unavailable => "unavailable",
+    };
+    match output_mode {
+        OutputMode::Json => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "schema": "tabbeacon-alias-v1",
+                    "operation": operation,
+                    "result": "failure",
+                    "reason": reason,
+                    "unchanged": true,
+                })
+            );
+        }
+        OutputMode::Plain => {
+            eprintln!("ALIAS_SCHEMA_VERSION=1");
+            eprintln!("ALIAS_OPERATION={operation}");
+            eprintln!("ALIAS=FAIL");
+            eprintln!("REASON={reason}");
+            eprintln!("ALIAS_UNCHANGED=true");
+        }
+        OutputMode::Human => {
+            eprint_human_text(
+                HumanTone::Attention,
+                &HumanText::message(alias_error_message_key(error)),
+                language,
+            );
+        }
+    }
+    ExitCode::from(2)
+}
+
+fn alias_document(operation: &str, inspection: &WorkspaceAliasInspection) -> HumanDocument {
+    let title = match operation {
+        "preview" => HumanMessageKey::AliasPreview,
+        "explain" => HumanMessageKey::AliasExplanation,
+        _ => HumanMessageKey::WorkspaceAlias,
+    };
+    let status = match operation {
+        "set" => Some(HumanText::message(HumanMessageKey::AliasOverrideSaved)),
+        "reset" => Some(HumanText::message(HumanMessageKey::AliasOverrideReset)),
+        _ if !inspection.is_assigned() => {
+            Some(HumanText::message(HumanMessageKey::AliasProspective))
+        }
+        _ => None,
+    };
+    let document = HumanDocument::new(HumanText::message(title), status)
+        .with_section(alias_summary_section(inspection));
+    match operation {
+        "preview" => alias_preview_document(document, inspection),
+        "explain" => alias_explain_document(document, inspection),
+        _ => document,
+    }
+}
+
+fn alias_summary_section(inspection: &WorkspaceAliasInspection) -> HumanSection {
+    HumanSection::new(None)
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Workspace),
+            HumanText::literal(inspection.workspace().as_str()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::AutomaticAlias),
+            HumanText::literal(inspection.automatic_alias().as_str()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::CustomAlias),
+            HumanText::literal(
+                inspection
+                    .custom_alias()
+                    .map_or("—", RepositoryAlias::as_str),
+            ),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::EffectiveAlias),
+            HumanText::literal(inspection.effective_alias().as_str()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::NamingPolicy),
+            HumanText::literal(inspection.policy_version()),
+            HumanTone::Dim,
+        ))
+}
+
+fn alias_preview_document(
+    document: HumanDocument,
+    inspection: &WorkspaceAliasInspection,
+) -> HumanDocument {
+    inspection.candidates().iter().take(5).enumerate().fold(
+        document.with_section(HumanSection::new(Some(HumanText::message(
+            HumanMessageKey::Candidates,
+        )))),
+        |document, (index, candidate)| {
+            document.with_section(HumanSection::new(None).with_message(HumanMessage::marked(
+                format!("{}", index + 1),
+                HumanText::literal(format!(
+                    "{} · {:?} · {}",
+                    candidate.alias(),
+                    candidate.strategy(),
+                    candidate.score()
+                )),
+                HumanTone::Plain,
+            )))
+        },
+    )
+}
+
+fn alias_explain_document(
+    document: HumanDocument,
+    inspection: &WorkspaceAliasInspection,
+) -> HumanDocument {
+    let top = inspection.candidates().first();
+    document.with_section(
+        HumanSection::new(Some(HumanText::message(HumanMessageKey::AliasExplanation)))
+            .with_field(HumanField::new(
+                None::<String>,
+                HumanText::message(HumanMessageKey::ProjectDisplayHint),
+                HumanText::literal(inspection.analysis().normalized_name()),
+                HumanTone::Plain,
+            ))
+            .with_field(HumanField::new(
+                None::<String>,
+                HumanText::message(HumanMessageKey::Tokens),
+                HumanText::literal(inspection.analysis().tokens().join(" · ")),
+                HumanTone::Plain,
+            ))
+            .with_field(HumanField::new(
+                None::<String>,
+                HumanText::message(HumanMessageKey::CandidateStrategy),
+                HumanText::literal(top.map_or_else(
+                    || "none".to_owned(),
+                    |candidate| format!("{:?}", candidate.strategy()),
+                )),
+                HumanTone::Plain,
+            ))
+            .with_field(HumanField::new(
+                None::<String>,
+                HumanText::message(HumanMessageKey::CandidateScore),
+                HumanText::literal(
+                    top.map_or_else(|| "0".to_owned(), |candidate| candidate.score().to_string()),
+                ),
+                HumanTone::Plain,
+            ))
+            .with_field(HumanField::new(
+                None::<String>,
+                HumanText::message(HumanMessageKey::CandidateComponents),
+                HumanText::literal(top.map_or_else(String::new, AliasCandidate::rationale)),
+                HumanTone::Dim,
+            )),
+    )
+}
+
+fn print_alias_plain(operation: &str, inspection: &WorkspaceAliasInspection) {
+    println!("ALIAS_SCHEMA_VERSION=1");
+    println!("ALIAS_OPERATION={}", operation.to_ascii_uppercase());
+    println!("WORKSPACE={}", inspection.workspace().as_str());
+    println!("AUTOMATIC_ALIAS={}", inspection.automatic_alias());
+    println!(
+        "CUSTOM_ALIAS={}",
+        inspection
+            .custom_alias()
+            .map_or("NONE", RepositoryAlias::as_str)
+    );
+    println!("EFFECTIVE_ALIAS={}", inspection.effective_alias());
+    println!("NAMING_POLICY={}", inspection.policy_version());
+    println!(
+        "ASSIGNMENT_STATE={}",
+        if inspection.is_assigned() {
+            "ASSIGNED"
+        } else {
+            "PROSPECTIVE"
+        }
+    );
+    if operation == "preview" {
+        for (index, candidate) in inspection.candidates().iter().take(5).enumerate() {
+            let ordinal = index + 1;
+            println!("CANDIDATE_{ordinal}_ALIAS={}", candidate.alias());
+            println!("CANDIDATE_{ordinal}_STRATEGY={:?}", candidate.strategy());
+            println!("CANDIDATE_{ordinal}_SCORE={}", candidate.score());
+        }
+    }
+    if operation == "explain" {
+        println!("TOKENS={}", inspection.analysis().tokens().join(","));
+        if let Some(candidate) = inspection.candidates().first() {
+            println!("CANDIDATE_STRATEGY={:?}", candidate.strategy());
+            println!("CANDIDATE_SCORE={}", candidate.score());
+            println!("CANDIDATE_COMPONENTS={}", candidate.rationale());
+        }
+    }
+}
+
+fn alias_json(operation: &str, inspection: &WorkspaceAliasInspection) -> serde_json::Value {
+    let candidates = inspection
+        .candidates()
+        .iter()
+        .take(5)
+        .map(|candidate| {
+            serde_json::json!({
+                "alias": candidate.alias().as_str(),
+                "strategy": format!("{:?}", candidate.strategy()),
+                "score": candidate.score(),
+                "display_width": candidate.display_width(),
+                "rationale": candidate.rationale(),
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "schema": "tabbeacon-alias-v1",
+        "operation": operation,
+        "result": "success",
+        "workspace": inspection.workspace().as_str(),
+        "automatic_alias": inspection.automatic_alias().as_str(),
+        "custom_alias": inspection.custom_alias().map(RepositoryAlias::as_str),
+        "effective_alias": inspection.effective_alias().as_str(),
+        "naming_policy": inspection.policy_version(),
+        "assignment_state": if inspection.is_assigned() { "assigned" } else { "prospective" },
+        "analysis": {
+            "normalized_name": inspection.analysis().normalized_name(),
+            "tokens": inspection.analysis().tokens(),
+            "style_hints": inspection.analysis().style_hints().iter().map(|hint| format!("{hint:?}")).collect::<Vec<_>>(),
+        },
+        "candidates": candidates,
+    })
+}
+
+const fn alias_error_message_key(error: WorkspaceAliasError) -> HumanMessageKey {
+    match error {
+        WorkspaceAliasError::InvalidAlias => HumanMessageKey::AliasInvalid,
+        WorkspaceAliasError::Collision => HumanMessageKey::AliasCollision,
+        WorkspaceAliasError::Conflict => HumanMessageKey::AliasConflict,
+        WorkspaceAliasError::Unavailable => HumanMessageKey::AliasUnavailable,
     }
 }
 

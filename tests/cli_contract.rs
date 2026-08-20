@@ -231,6 +231,104 @@ fn machine_transports_are_locale_independent() {
 }
 
 #[test]
+fn alias_read_only_surfaces_are_locale_safe_private_and_non_mutating() {
+    let root = TestRoot::new("alias-read-only");
+    let registry_root = root.child("local-appdata/TabBeacon/repository-identity");
+    let preference_root = root.child("local-appdata/TabBeacon/workspace-preferences");
+
+    let json_en = isolated_command(&root)
+        .args(["alias", "show", "--json", "--lang", "en-US"])
+        .output()
+        .expect("English alias JSON starts");
+    let json_zh = isolated_command(&root)
+        .args(["alias", "show", "--json", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese alias JSON starts");
+    assert!(json_en.status.success());
+    assert!(json_zh.status.success());
+    assert!(json_en.stderr.is_empty());
+    assert!(json_zh.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&json_en.stdout)
+            .expect("English alias JSON parses"),
+        serde_json::from_slice::<serde_json::Value>(&json_zh.stdout)
+            .expect("Chinese alias JSON parses"),
+        "machine alias JSON must not depend on Human locale"
+    );
+    let json_text = String::from_utf8(json_en.stdout).expect("alias JSON is UTF-8");
+    assert!(!json_text.contains("remote:"));
+    assert!(!json_text.contains("dir-v1:"));
+    assert!(!json_text.contains("repository-identity"));
+    assert!(
+        !registry_root.exists(),
+        "show must not create a registry root or lock"
+    );
+    assert!(
+        !preference_root.exists(),
+        "show must not create a preference root or lock"
+    );
+
+    let chinese = isolated_command(&root)
+        .args(["alias", "explain", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese alias explain starts");
+    assert!(chinese.status.success());
+    let chinese = String::from_utf8(chinese.stdout).expect("Chinese alias Human output is UTF-8");
+    assert!(chinese.contains("自适应别名说明"));
+    assert!(!chinese.contains("ALIAS_SCHEMA_VERSION="));
+    assert!(!chinese.contains("remote:"));
+    assert!(!chinese.contains("repository-identity"));
+    assert!(!registry_root.exists(), "explain remains read only");
+    assert!(!preference_root.exists(), "explain remains read only");
+}
+
+#[test]
+fn alias_set_reset_and_collision_remain_device_local_and_generic() {
+    let root = TestRoot::new("alias-mutation");
+    let first = root.child("first-workspace");
+    let second = root.child("second-workspace");
+    fs::create_dir_all(&first).expect("first workspace creates");
+    fs::create_dir_all(&second).expect("second workspace creates");
+
+    let first_set = isolated_command(&root)
+        .current_dir(&first)
+        .args(["alias", "set", "CUSTOM", "--plain"])
+        .output()
+        .expect("first custom alias starts");
+    assert!(first_set.status.success());
+    let first_set = String::from_utf8(first_set.stdout).expect("first receipt is UTF-8");
+    assert!(first_set.contains("ALIAS_OPERATION=SET"));
+    assert!(first_set.contains("CUSTOM_ALIAS=CUSTOM"));
+
+    let collision = isolated_command(&root)
+        .current_dir(&second)
+        .args(["alias", "set", "CUSTOM", "--plain"])
+        .output()
+        .expect("colliding custom alias starts");
+    assert_eq!(collision.status.code(), Some(2));
+    let collision = String::from_utf8(collision.stderr).expect("collision is UTF-8");
+    assert!(collision.contains("ALIAS=FAIL"));
+    assert!(collision.contains("REASON=alias_conflict"));
+    assert!(!collision.contains(first.to_string_lossy().as_ref()));
+    assert!(!collision.contains(second.to_string_lossy().as_ref()));
+
+    let reset = isolated_command(&root)
+        .current_dir(&first)
+        .args(["alias", "reset", "--plain"])
+        .output()
+        .expect("alias reset starts");
+    assert!(reset.status.success());
+    let reset = String::from_utf8(reset.stdout).expect("reset receipt is UTF-8");
+    assert!(reset.contains("ALIAS_OPERATION=RESET"));
+    assert!(reset.contains("CUSTOM_ALIAS=NONE"));
+    for workspace in [&first, &second] {
+        assert!(!workspace.join(".tabbeacon").exists());
+        assert!(!workspace.join(".tabbeacon.toml").exists());
+        assert!(!workspace.join("tabbeacon.toml").exists());
+    }
+}
+
+#[test]
 fn human_locale_and_interface_state_stay_user_local() {
     let root = TestRoot::new("localized-human-interface");
 

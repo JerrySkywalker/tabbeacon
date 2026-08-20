@@ -17,7 +17,7 @@ use crate::interface_preferences::InterfaceLanguage;
     name = "tabbeacon",
     version,
     about = "Live identity and status beacons for Codex CLI tabs in Windows Terminal.",
-    after_help = "Common commands:\n  tabbeacon setup codex\n  tabbeacon status --json\n  tabbeacon sessions --json\n  tabbeacon doctor --json\n  tabbeacon config show\n  tabbeacon completions powershell"
+    after_help = "Common commands:\n  tabbeacon setup codex\n  tabbeacon status --json\n  tabbeacon sessions --json\n  tabbeacon doctor --json\n  tabbeacon config show\n  tabbeacon alias show\n  tabbeacon completions powershell"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -79,6 +79,13 @@ pub enum Command {
         #[command(flatten)]
         output: HumanOutputArgs,
     },
+    /// Inspect or explicitly override the local workspace alias.
+    Alias {
+        #[command(subcommand)]
+        command: Option<AliasCommand>,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
     /// Render a temporary presentation preview without persisting a change.
     Preview(PreviewArgs),
     /// Emit a shell-completion script to stdout.
@@ -118,10 +125,10 @@ pub enum SetupCommand {
 #[derive(Clone, Copy, Debug, Args)]
 pub struct OutputArgs {
     /// Emit the stable machine-readable JSON document.
-    #[arg(long, conflicts_with = "plain")]
+    #[arg(long, global = true, conflicts_with = "plain")]
     pub json: bool,
     /// Emit the legacy key-value/check representation.
-    #[arg(long, conflicts_with = "json")]
+    #[arg(long, global = true, conflicts_with = "json")]
     pub plain: bool,
     #[command(flatten)]
     pub language: LanguageArgs,
@@ -298,6 +305,21 @@ pub enum InterfaceCommand {
     },
 }
 
+/// Device-local workspace alias operations.
+#[derive(Debug, Subcommand)]
+pub enum AliasCommand {
+    /// Show the safe effective alias summary without creating local state.
+    Show,
+    /// Show bounded Adaptive Naming v2 suggestions without creating local state.
+    Preview,
+    /// Explain safe Adaptive Naming v2 inputs and scoring without creating state.
+    Explain,
+    /// Persist one explicit device-local workspace alias.
+    Set { alias: String },
+    /// Remove only this workspace's explicit device-local alias override.
+    Reset,
+}
+
 /// One typed Interface preference key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum InterfacePreferenceKey {
@@ -326,8 +348,8 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::{
-        Cli, Command, ConvergenceCommand, InterfaceCommand, InterfacePreferenceKey, OutputMode,
-        SetupCommand,
+        AliasCommand, Cli, Command, ConvergenceCommand, InterfaceCommand, InterfacePreferenceKey,
+        OutputMode, SetupCommand,
     };
 
     #[test]
@@ -337,6 +359,30 @@ mod tests {
         let Command::Status(output) = status.command.expect("status command") else {
             panic!("status command is typed");
         };
+        assert_eq!(output.mode(), OutputMode::Plain);
+
+        let alias = Cli::try_parse_from(["tabbeacon", "alias", "show", "--json"])
+            .expect("alias JSON output parses after subcommand");
+        let Command::Alias { command, output } = alias.command.expect("alias command") else {
+            panic!("alias command is typed");
+        };
+        assert!(matches!(command, Some(AliasCommand::Show)));
+        assert_eq!(output.mode(), OutputMode::Json);
+
+        let bare_alias =
+            Cli::try_parse_from(["tabbeacon", "alias"]).expect("bare alias command parses");
+        let Command::Alias { command, output } = bare_alias.command.expect("alias command") else {
+            panic!("alias command is typed");
+        };
+        assert!(command.is_none());
+        assert_eq!(output.mode(), OutputMode::Human);
+
+        let set_alias = Cli::try_parse_from(["tabbeacon", "alias", "set", "BEACON", "--plain"])
+            .expect("alias set plain output parses after subcommand");
+        let Command::Alias { command, output } = set_alias.command.expect("alias command") else {
+            panic!("alias command is typed");
+        };
+        assert!(matches!(command, Some(AliasCommand::Set { .. })));
         assert_eq!(output.mode(), OutputMode::Plain);
 
         let localized = Cli::try_parse_from(["tabbeacon", "status", "--lang", "zh-CN"])
@@ -418,6 +464,7 @@ mod tests {
         assert!(Cli::try_parse_from(["tabbeacon", "status", "--json", "--plain"]).is_err());
         assert!(Cli::try_parse_from(["tabbeacon", "status", "--lang", "fr-FR"]).is_err());
         assert!(Cli::try_parse_from(["tabbeacon", "sessions", "--json", "--plain"]).is_err());
+        assert!(Cli::try_parse_from(["tabbeacon", "alias", "show", "--json", "--plain"]).is_err());
         assert!(Cli::try_parse_from(["tabbeacon", "convergence", "verify"]).is_err());
 
         let parsed = Cli::try_parse_from([

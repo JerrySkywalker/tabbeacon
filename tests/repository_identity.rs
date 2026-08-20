@@ -9,8 +9,9 @@ use std::{
 };
 
 use tabbeacon::repo::{
-    AbbreviationPolicy, CanonicalRepositoryIdentity, RepositoryDiscovery, RepositoryDisplayName,
-    RepositoryIdentityResolver, StableAliasRegistry, canonicalize_repository, normalize_remote_url,
+    AbbreviationPolicy, AdaptiveNamingPolicy, CanonicalRepositoryIdentity, RepositoryDiscovery,
+    RepositoryDisplayName, RepositoryIdentityResolver, StableAliasRegistry,
+    canonicalize_repository, normalize_remote_url,
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -164,7 +165,10 @@ fn ordinary_repository_resolves_from_nested_cwd_without_project_writes() {
         "remote:github.com/JerrySkywalker/tabbeacon"
     );
     assert_eq!(resolved.display_name.as_str(), "tabbeacon");
-    assert_eq!(resolved.alias.as_str(), "T");
+    let expected =
+        AdaptiveNamingPolicy::select(&resolved.display_name, &resolved.identity, &BTreeSet::new())
+            .expect("adaptive policy produces a candidate");
+    assert_eq!(&resolved.alias, expected.alias());
     assert_eq!(
         fs::canonicalize(&resolved.worktree_root).expect("discovered root canonicalizes"),
         fs::canonicalize(&repo).expect("expected root canonicalizes")
