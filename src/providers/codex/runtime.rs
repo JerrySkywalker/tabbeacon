@@ -132,12 +132,16 @@ impl CodexHookRuntime {
     /// returns a degraded disposition instead of propagating provider,
     /// repository, or output failures into Codex.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn dispatch_to(
         &self,
         raw: &[u8],
         observed_at: SystemTime,
         sink: &mut impl Write,
     ) -> HookDispatchOutcome {
+        let observed_at_unix_seconds = observed_at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
         let Ok(normalized) = CodexHookNormalizer.normalize(raw, observed_at) else {
             return HookDispatchOutcome::DegradedInput;
         };
@@ -177,7 +181,9 @@ impl CodexHookRuntime {
                 // subagent-attributed ordinary events deliberately retain no
                 // extra data and cannot affect root anchoring.
                 if context.event().is_subagent_lifecycle() {
-                    let _ = self.root_workspace_anchors.observe_subagent(&context);
+                    let _ = self
+                        .root_workspace_anchors
+                        .observe_subagent(&context, observed_at_unix_seconds);
                 }
                 return HookDispatchOutcome::IgnoredSubagent;
             }
@@ -185,7 +191,11 @@ impl CodexHookRuntime {
                 return HookDispatchOutcome::IgnoredUnsupported;
             }
         };
-        let selection = match self.root_workspace_selection(normalized.context(), &admitted) {
+        let selection = match self.root_workspace_selection(
+            normalized.context(),
+            &admitted,
+            observed_at_unix_seconds,
+        ) {
             Ok(selection) => selection,
             Err(AnchorSelectionError::Workspace) => {
                 return HookDispatchOutcome::DegradedWorkspaceIdentity;
@@ -239,6 +249,7 @@ impl CodexHookRuntime {
         &self,
         context: &super::CodexHookContext,
         admitted: &super::generation::AdmittedGeneration,
+        observed_at_unix_seconds: u64,
     ) -> Result<RootWorkspaceSelection, AnchorSelectionError> {
         let session_sha256 = admitted.session_sha256();
         match context.event() {
@@ -247,12 +258,16 @@ impl CodexHookRuntime {
                     .session_start_source()
                     .map(RootWorkspaceBindingSource::from_session_start)
                     .ok_or(AnchorSelectionError::Anchor)?;
-                self.bind_root_workspace(context, admitted, source)
+                self.bind_root_workspace(context, admitted, observed_at_unix_seconds, source)
             }
             super::CodexHookEvent::UserPromptSubmit => {
                 let has_anchor = self
                     .root_workspace_anchors
-                    .has_anchor(session_sha256)
+                    .has_anchor(
+                        session_sha256,
+                        admitted.generation(),
+                        observed_at_unix_seconds,
+                    )
                     .map_err(|_| AnchorSelectionError::Anchor)?;
                 if !has_anchor {
                     let resolved = self
@@ -262,6 +277,7 @@ impl CodexHookRuntime {
                     return self.bind_resolved_root_workspace(
                         &resolved,
                         admitted,
+                        observed_at_unix_seconds,
                         RootWorkspaceBindingSource::UserPromptFallback,
                     );
                 }
@@ -270,13 +286,22 @@ impl CodexHookRuntime {
                     .workspace_identity_sha256(context.cwd())
                     .map_err(|_| AnchorSelectionError::Workspace)?;
                 self.root_workspace_anchors
-                    .select_existing_or_observe_mismatch(session_sha256, &observed_identity)
+                    .select_existing_or_observe_mismatch(
+                        session_sha256,
+                        admitted.generation(),
+                        observed_at_unix_seconds,
+                        &observed_identity,
+                    )
                     .map_err(|_| AnchorSelectionError::Anchor)?
                     .ok_or(AnchorSelectionError::Anchor)
             }
             super::CodexHookEvent::SessionEnd => self
                 .root_workspace_anchors
-                .take_for_session_end(session_sha256)
+                .take_for_session_end(
+                    session_sha256,
+                    admitted.generation(),
+                    observed_at_unix_seconds,
+                )
                 .map_err(|_| AnchorSelectionError::Anchor)?
                 .ok_or(AnchorSelectionError::Workspace),
             super::CodexHookEvent::PreToolUse
@@ -288,7 +313,12 @@ impl CodexHookRuntime {
                     .workspace_identity_sha256(context.cwd())
                     .map_err(|_| AnchorSelectionError::Workspace)?;
                 self.root_workspace_anchors
-                    .select_existing_or_observe_mismatch(session_sha256, &observed_identity)
+                    .select_existing_or_observe_mismatch(
+                        session_sha256,
+                        admitted.generation(),
+                        observed_at_unix_seconds,
+                        &observed_identity,
+                    )
                     .map_err(|_| AnchorSelectionError::Anchor)?
                     .ok_or(AnchorSelectionError::Workspace)
             }
@@ -303,19 +333,21 @@ impl CodexHookRuntime {
         &self,
         context: &super::CodexHookContext,
         admitted: &super::generation::AdmittedGeneration,
+        observed_at_unix_seconds: u64,
         source: RootWorkspaceBindingSource,
     ) -> Result<RootWorkspaceSelection, AnchorSelectionError> {
         let resolved = self
             .identity_resolver
             .resolve(context.cwd())
             .map_err(|_| AnchorSelectionError::Workspace)?;
-        self.bind_resolved_root_workspace(&resolved, admitted, source)
+        self.bind_resolved_root_workspace(&resolved, admitted, observed_at_unix_seconds, source)
     }
 
     fn bind_resolved_root_workspace(
         &self,
         resolved: &crate::repo::ResolvedWorkspaceIdentity,
         admitted: &super::generation::AdmittedGeneration,
+        observed_at_unix_seconds: u64,
         source: RootWorkspaceBindingSource,
     ) -> Result<RootWorkspaceSelection, AnchorSelectionError> {
         let identity_sha256 = format!(
@@ -326,6 +358,7 @@ impl CodexHookRuntime {
             .bind(
                 admitted.session_sha256(),
                 admitted.generation(),
+                observed_at_unix_seconds,
                 &identity_sha256,
                 &resolved.effective_alias,
                 source,

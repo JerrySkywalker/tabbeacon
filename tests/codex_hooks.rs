@@ -1281,10 +1281,29 @@ fn root_workspace_anchor_keeps_titles_stable_and_persists_only_safe_observations
         ),
         HookDispatchOutcome::Applied
     );
-    assert!(
-        !anchor_state.exists(),
-        "session end retires the owned session anchor"
+    let retired_state = fs::read_to_string(&anchor_state).expect("retired state reads");
+    assert!(retired_state.contains("\"anchor\": null"));
+    assert!(!retired_state.contains("effective_alias"));
+    assert!(!retired_state.contains("workspace_identity_sha256"));
+
+    let reused_prompt = hook_payload_for_turn(
+        "UserPromptSubmit",
+        "session-anchor",
+        "reused-turn",
+        &alternate_workspace,
     );
+    output.clear();
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&reused_prompt).expect("reused prompt serializes"),
+            UNIX_EPOCH + Duration::from_secs(24 * 60 * 60 + 1),
+            &mut output,
+        ),
+        HookDispatchOutcome::Applied
+    );
+    let reused_title = String::from_utf8_lossy(&output);
+    assert!(reused_title.contains(" ALT"));
+    assert!(!reused_title.contains(" ROOT"));
 }
 
 #[test]
