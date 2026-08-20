@@ -9,7 +9,7 @@ param(
     [string]$ExpectedHead,
     [Parameter(Mandatory = $true)]
     [string]$EvidenceDirectory,
-    [string]$RunId = 'TB-G51-REAL-WT-SMOKE',
+    [string]$RunId = 'TB-G55-REAL-WT-SMOKE',
     [ValidateRange(10, 120)]
     [int]$TimeoutSeconds = 60
 )
@@ -33,7 +33,7 @@ $wtCommand = Get-Command wt.exe -CommandType Application -ErrorAction Stop |
 New-Item -ItemType Directory -Path $EvidenceDirectory -Force | Out-Null
 $resolvedEvidence = (Resolve-Path -LiteralPath $EvidenceDirectory).Path
 $token = [Guid]::NewGuid().ToString('N')
-$windowTitle = "TabBeacon-G51-$token"
+$windowTitle = "TabBeacon-G55-$token"
 $sentinelPath = Join-Path $resolvedEvidence "sentinel-$token.txt"
 $processReceiptPath = Join-Path $resolvedEvidence "child-$token.pid"
 $fixtureResultPath = Join-Path $resolvedEvidence "fixture-$token.txt"
@@ -219,8 +219,12 @@ if ($sentinelObserved) {
 $localeSwitched = $false
 $interfaceReverted = $false
 $interfaceApplyStaged = $false
+$liveRefresh = $false
+$workspaceSessions = $false
 if (Test-Path -LiteralPath $fixtureResultPath) {
     $fixtureResult = Get-Content -LiteralPath $fixtureResultPath
+    $liveRefresh = $fixtureResult -contains 'TUI_LIVE_REFRESH=true'
+    $workspaceSessions = $fixtureResult -contains 'TUI_WORKSPACE_SESSIONS=true'
     $localeSwitched = $fixtureResult -contains 'TUI_LANGUAGE_LIVE_SWITCH=true'
     $interfaceReverted = $fixtureResult -contains 'TUI_INTERFACE_REVERT=true'
     $interfaceApplyStaged = $fixtureResult -contains 'TUI_INTERFACE_STAGED_APPLY=true'
@@ -228,7 +232,8 @@ if (Test-Path -LiteralPath $fixtureResultPath) {
 
 $passed = $windowObserved -and $windowOwnerBound -and $windowChildLineageBound -and
     $windowCompleted -and $childCompleted -and $sentinelObserved -and $shellUsable -and
-    $fixtureExitCode -eq 0 -and $localeSwitched -and $interfaceReverted -and $interfaceApplyStaged
+    $fixtureExitCode -eq 0 -and $liveRefresh -and $workspaceSessions -and $localeSwitched -and
+    $interfaceReverted -and $interfaceApplyStaged
 $receipt = @(
     "RUN_ID=$RunId"
     "EXPECTED_HEAD=$ExpectedHead"
@@ -241,6 +246,8 @@ $receipt = @(
     "CHILD_PROCESS_COMPLETED=$($childCompleted.ToString().ToLowerInvariant())"
     "SENTINEL_OBSERVED=$($sentinelObserved.ToString().ToLowerInvariant())"
     "FIXTURE_EXIT_CODE=$fixtureExitCode"
+    "TUI_LIVE_REFRESH=$($liveRefresh.ToString().ToLowerInvariant())"
+    "TUI_WORKSPACE_SESSIONS=$($workspaceSessions.ToString().ToLowerInvariant())"
     "TUI_LANGUAGE_LIVE_SWITCH=$($localeSwitched.ToString().ToLowerInvariant())"
     "TUI_INTERFACE_REVERT=$($interfaceReverted.ToString().ToLowerInvariant())"
     "TUI_INTERFACE_STAGED_APPLY=$($interfaceApplyStaged.ToString().ToLowerInvariant())"

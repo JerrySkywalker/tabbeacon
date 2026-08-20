@@ -32,7 +32,9 @@ fn main() -> ExitCode {
         Ok(report) => {
             if let Some(path) = std::env::var_os("TABBEACON_TUI_SMOKE_RESULT_PATH") {
                 let result = format!(
-                    "TUI_LANGUAGE_LIVE_SWITCH={}\nTUI_INTERFACE_REVERT={}\nTUI_INTERFACE_STAGED_APPLY={}\nOWNER_MUTATIONS=none\n",
+                    "TUI_LIVE_REFRESH={}\nTUI_WORKSPACE_SESSIONS={}\nTUI_LANGUAGE_LIVE_SWITCH={}\nTUI_INTERFACE_REVERT={}\nTUI_INTERFACE_STAGED_APPLY={}\nOWNER_MUTATIONS=none\n",
+                    report.live_refresh_merged,
+                    report.workspace_and_sessions_visited,
                     report.interface_locale_switched,
                     report.interface_draft_reverted,
                     report.interface_apply_staged,
@@ -45,6 +47,11 @@ fn main() -> ExitCode {
             }
             println!("WINDOWS_TERMINAL_TUI_SMOKE=PASS");
             println!("SCREENS_VISITED={}", report.screens_visited);
+            println!("TUI_LIVE_REFRESH={}", report.live_refresh_merged);
+            println!(
+                "TUI_WORKSPACE_SESSIONS={}",
+                report.workspace_and_sessions_visited
+            );
             println!("DRAFT_CHANGED={}", report.draft_changed);
             println!("DRAFT_REVERTED={}", report.draft_reverted);
             println!(

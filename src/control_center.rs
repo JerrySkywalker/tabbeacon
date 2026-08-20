@@ -1,6 +1,9 @@
 //! Staged Control Center frontend and bounded Ratatui renderer.
 
-use std::{io, time::Duration};
+use std::{
+    io,
+    time::{Duration, Instant},
+};
 
 use crossterm::{
     cursor::Show,
@@ -18,6 +21,7 @@ use ratatui::{
 };
 
 use crate::{
+    activity::SessionsOverview,
     core::{Attention, Health, Phase},
     human_presentation::{
         HumanMessageKey, ManagementTextKind, ResolvedLocale, catalog, color_enabled,
@@ -30,27 +34,35 @@ use crate::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput,
         WindowsTerminalCapabilities, WindowsTerminalRenderer,
     },
+    repo::WorkspaceAliasInspection,
     settings::{ActivityMode, PresentationSettings, SpinnerPreset, TabColorMode, TitleMode},
 };
+
+/// Bounded local refresh cadence for the daemonless Control Center.
+pub const CONTROL_CENTER_REFRESH_INTERVAL: Duration = Duration::from_millis(750);
 
 /// One bounded daily-management screen.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Screen {
     Overview,
     Appearance,
-    Interface,
+    Workspace,
+    Sessions,
     Integration,
     Diagnostics,
+    Interface,
     Preview,
 }
 
 impl Screen {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 8] = [
         Self::Overview,
         Self::Appearance,
-        Self::Interface,
+        Self::Workspace,
+        Self::Sessions,
         Self::Integration,
         Self::Diagnostics,
+        Self::Interface,
         Self::Preview,
     ];
 
@@ -59,9 +71,11 @@ impl Screen {
         match self {
             Self::Overview => "Overview",
             Self::Appearance => "Appearance",
-            Self::Interface => "Interface",
+            Self::Workspace => "Workspace",
+            Self::Sessions => "Sessions",
             Self::Integration => "Codex Integration",
             Self::Diagnostics => "Diagnostics",
+            Self::Interface => "Interface",
             Self::Preview => "Preview",
         }
     }
@@ -70,9 +84,11 @@ impl Screen {
         match self {
             Self::Overview => HumanMessageKey::Overview,
             Self::Appearance => HumanMessageKey::Appearance,
-            Self::Interface => HumanMessageKey::Interface,
+            Self::Workspace => HumanMessageKey::Workspace,
+            Self::Sessions => HumanMessageKey::Sessions,
             Self::Integration => HumanMessageKey::CodexIntegration,
             Self::Diagnostics => HumanMessageKey::Diagnostics,
+            Self::Interface => HumanMessageKey::Interface,
             Self::Preview => HumanMessageKey::Preview,
         }
     }
@@ -144,8 +160,29 @@ pub struct ControlCenterDraft {
     pub interface: InterfacePreferences,
 }
 
+/// One bounded, read-only observation merged into the live Control Center.
+///
+/// It deliberately contains only already-approved management, workspace, and
+/// session projections. Collecting it never writes user settings, preferences,
+/// repository state, Hook configuration, or terminal state.
+#[derive(Clone, Debug)]
+pub struct ControlCenterRefresh {
+    /// Latest read-only Presentation baseline.
+    pub presentation: PresentationSettings,
+    /// Latest read-only Interface baseline.
+    pub interface: InterfacePreferences,
+    /// Shared bounded management projection.
+    pub snapshot: ManagementSnapshot,
+    /// Compact operational overview derived from the same diagnostic pass.
+    pub overview: ManagementOverview,
+    /// Privacy-safe current-workspace naming projection, when available.
+    pub workspace: Option<WorkspaceAliasInspection>,
+    /// Read-only, content-minimal activity lease projection.
+    pub sessions: SessionsOverview,
+}
+
 /// A frontend request that must be executed by an existing ownership-aware API.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlCenterCommand {
     /// No persistent operation was requested.
     None,
@@ -158,10 +195,19 @@ pub enum ControlCenterCommand {
         /// Staged typed state to apply.
         after: ControlCenterDraft,
     },
+    /// Persist one staged, device-local workspace alias override through the
+    /// caller-owned collision-safe resolver.
+    ApplyWorkspace {
+        /// Custom alias observed when the workspace screen was opened.
+        before: Option<String>,
+        /// Explicit custom alias, or `None` to use the generated default.
+        after: Option<String>,
+    },
 }
 
 /// In-memory frontend state. No mutation authority is stored here.
 #[derive(Clone, Debug)]
+#[allow(clippy::struct_excessive_bools)] // Independent dirty/conflict/interaction safety state is auditable.
 pub struct ControlCenterApp {
     base_locale: ResolvedLocale,
     screen: Screen,
@@ -171,7 +217,16 @@ pub struct ControlCenterApp {
     draft: PresentationSettings,
     current_interface: InterfacePreferences,
     interface_draft: InterfacePreferences,
+    workspace: Option<WorkspaceAliasInspection>,
+    sessions: Option<SessionsOverview>,
+    current_workspace_override: Option<String>,
+    workspace_draft: Option<String>,
+    workspace_editor: Option<String>,
+    workspace_explaining: bool,
     dirty: bool,
+    presentation_conflict: bool,
+    interface_conflict: bool,
+    workspace_conflict: bool,
     confirm_discard: bool,
     appearance_field: Option<AppearanceField>,
     interface_field: Option<InterfaceField>,
@@ -194,7 +249,16 @@ impl ControlCenterApp {
             draft: current,
             current_interface: InterfacePreferences::default(),
             interface_draft: InterfacePreferences::default(),
+            workspace: None,
+            sessions: None,
+            current_workspace_override: None,
+            workspace_draft: None,
+            workspace_editor: None,
+            workspace_explaining: false,
             dirty: false,
+            presentation_conflict: false,
+            interface_conflict: false,
+            workspace_conflict: false,
             confirm_discard: false,
             appearance_field: None,
             interface_field: None,
@@ -213,6 +277,13 @@ impl ControlCenterApp {
     pub fn with_interface_preferences(mut self, preferences: InterfacePreferences) -> Self {
         self.current_interface = preferences;
         self.interface_draft = preferences;
+        self
+    }
+
+    /// Seeds the frontend with one already-collected read-only live snapshot.
+    #[must_use]
+    pub fn with_refresh(mut self, refresh: ControlCenterRefresh) -> Self {
+        self.merge_refresh(refresh);
         self
     }
 
@@ -286,14 +357,102 @@ impl ControlCenterApp {
         self.confirm_discard
     }
 
+    /// Whether a refresh observed an externally changed baseline while its
+    /// related local draft remained dirty. Apply is refused until Revert.
+    #[must_use]
+    pub const fn has_concurrent_conflict(&self) -> bool {
+        self.presentation_conflict || self.interface_conflict || self.workspace_conflict
+    }
+
+    /// Merges a new bounded observation without ever persisting state.
+    ///
+    /// A clean draft follows its current baseline. A dirty draft is retained;
+    /// if the matching persisted baseline moved, the app marks a visible
+    /// conflict and refuses stale Apply until the user Reverts.
+    pub fn merge_refresh(&mut self, refresh: ControlCenterRefresh) {
+        self.snapshot = refresh.snapshot;
+        self.overview = refresh.overview;
+        if let Some(workspace) = refresh.workspace {
+            let override_alias = workspace
+                .custom_alias()
+                .map(|alias| alias.as_str().to_owned());
+            if self.workspace_draft == self.current_workspace_override {
+                self.current_workspace_override = override_alias.clone();
+                self.workspace_draft = override_alias;
+                self.workspace_conflict = false;
+            } else if override_alias != self.current_workspace_override {
+                self.current_workspace_override = override_alias;
+                self.workspace_conflict = true;
+            }
+            self.workspace = Some(workspace);
+        }
+        self.sessions = Some(refresh.sessions);
+
+        if self.draft == self.current {
+            self.current = refresh.presentation;
+            self.draft = refresh.presentation;
+            self.presentation_conflict = false;
+        } else if refresh.presentation != self.current {
+            self.current = refresh.presentation;
+            self.presentation_conflict = true;
+        }
+
+        if self.interface_draft == self.current_interface {
+            self.current_interface = refresh.interface;
+            self.interface_draft = refresh.interface;
+            self.interface_conflict = false;
+        } else if refresh.interface != self.current_interface {
+            self.current_interface = refresh.interface;
+            self.interface_conflict = true;
+        }
+        self.update_dirty();
+    }
+
     fn editing(&self) -> bool {
-        self.appearance_field.is_some() || self.interface_field.is_some()
+        self.appearance_field.is_some()
+            || self.interface_field.is_some()
+            || self.workspace_editor.is_some()
     }
 
     /// Applies one event to staged state and returns a caller-owned action request.
     pub fn handle_key(&mut self, key: KeyCode) -> ControlCenterCommand {
         if self.confirm_discard {
             return self.handle_discard_key(key);
+        }
+        if self.workspace_editor.is_some() {
+            self.handle_workspace_editor_key(key);
+            return ControlCenterCommand::None;
+        }
+        if self.screen == Screen::Workspace {
+            match key {
+                KeyCode::Char('d' | 'x') => {
+                    self.workspace_draft = None;
+                    self.update_dirty();
+                    return ControlCenterCommand::None;
+                }
+                KeyCode::Char('c') => {
+                    self.workspace_editor = Some(self.workspace_draft.clone().unwrap_or_default());
+                    return ControlCenterCommand::None;
+                }
+                KeyCode::Char('?') => {
+                    self.workspace_explaining = !self.workspace_explaining;
+                    return ControlCenterCommand::None;
+                }
+                KeyCode::Char(candidate @ '1'..='4') => {
+                    if let Some(alias) = self.workspace.as_ref().and_then(|workspace| {
+                        let index = usize::from(candidate as u8 - b'1');
+                        workspace
+                            .candidates()
+                            .get(index)
+                            .map(|item| item.alias().as_str())
+                    }) {
+                        self.workspace_draft = Some(alias.to_owned());
+                        self.update_dirty();
+                    }
+                    return ControlCenterCommand::None;
+                }
+                _ => {}
+            }
         }
         match key {
             KeyCode::Up | KeyCode::Char('k') => self.step(-1),
@@ -334,7 +493,17 @@ impl ControlCenterApp {
     pub fn apply_succeeded(&mut self) {
         self.current = self.draft;
         self.current_interface = self.interface_draft;
-        self.dirty = false;
+        self.presentation_conflict = false;
+        self.interface_conflict = false;
+        self.update_dirty();
+    }
+
+    /// Marks a successfully caller-owned workspace preference Apply accepted.
+    pub fn workspace_apply_succeeded(&mut self) {
+        self.current_workspace_override = self.workspace_draft.clone();
+        self.workspace_conflict = false;
+        self.workspace_editor = None;
+        self.update_dirty();
     }
 
     fn handle_discard_key(&mut self, key: KeyCode) -> ControlCenterCommand {
@@ -350,7 +519,16 @@ impl ControlCenterApp {
     }
 
     fn request_apply(&self) -> ControlCenterCommand {
-        if self.dirty {
+        if self.screen == Screen::Workspace
+            && self.workspace_draft != self.current_workspace_override
+            && !self.has_concurrent_conflict()
+        {
+            return ControlCenterCommand::ApplyWorkspace {
+                before: self.current_workspace_override.clone(),
+                after: self.workspace_draft.clone(),
+            };
+        }
+        if self.settings_or_interface_dirty() && !self.has_concurrent_conflict() {
             ControlCenterCommand::Apply {
                 before: self.current_draft(),
                 after: self.staged_draft(),
@@ -363,9 +541,14 @@ impl ControlCenterApp {
     fn revert(&mut self) {
         self.draft = self.current;
         self.interface_draft = self.current_interface;
-        self.dirty = false;
+        self.presentation_conflict = false;
+        self.interface_conflict = false;
+        self.workspace_draft = self.current_workspace_override.clone();
+        self.workspace_editor = None;
+        self.workspace_conflict = false;
         self.appearance_field = None;
         self.interface_field = None;
+        self.update_dirty();
     }
 
     fn toggle_appearance_focus(&mut self) {
@@ -462,7 +645,36 @@ impl ControlCenterApp {
     }
 
     fn update_dirty(&mut self) {
-        self.dirty = self.draft != self.current || self.interface_draft != self.current_interface;
+        self.dirty = self.settings_or_interface_dirty()
+            || self.workspace_draft != self.current_workspace_override;
+    }
+
+    fn settings_or_interface_dirty(&self) -> bool {
+        self.draft != self.current || self.interface_draft != self.current_interface
+    }
+
+    fn handle_workspace_editor_key(&mut self, key: KeyCode) {
+        match key {
+            KeyCode::Enter => {
+                let submitted = self.workspace_editor.take().unwrap_or_default();
+                self.workspace_draft = (!submitted.trim().is_empty()).then_some(submitted);
+                self.update_dirty();
+            }
+            KeyCode::Esc => self.workspace_editor = None,
+            KeyCode::Backspace => {
+                if let Some(editor) = self.workspace_editor.as_mut() {
+                    editor.pop();
+                }
+            }
+            KeyCode::Char(character) if !character.is_control() => {
+                if let Some(editor) = self.workspace_editor.as_mut()
+                    && editor.chars().count() < 20
+                {
+                    editor.push(character);
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -563,19 +775,31 @@ fn cycle<T: Copy + Eq>(values: impl AsRef<[T]>, value: T, offset: isize) -> T {
     values[shifted_index(index, values.len(), offset)]
 }
 
-/// Runs the TUI and delegates Apply to the caller's existing typed operation.
+/// Runs the live TUI, delegating Apply and bounded read-only refresh to the
+/// caller's existing ownership-aware operations.
 ///
 /// # Errors
 ///
 /// Returns terminal I/O errors or an Apply error after the terminal has been restored.
-pub fn run<F>(mut app: ControlCenterApp, mut apply: F) -> io::Result<()>
+pub fn run<F, W, R>(
+    mut app: ControlCenterApp,
+    mut apply: F,
+    mut apply_workspace: W,
+    mut refresh: R,
+) -> io::Result<()>
 where
     F: FnMut(ControlCenterDraft, ControlCenterDraft) -> io::Result<()>,
+    W: FnMut(Option<String>, Option<String>) -> io::Result<()>,
+    R: FnMut() -> io::Result<ControlCenterRefresh>,
 {
     let mut session = TerminalSession::enter()?;
+    let mut next_refresh = Instant::now() + CONTROL_CENTER_REFRESH_INTERVAL;
     loop {
         session.terminal.draw(|frame| render(frame, &app))?;
-        if !event::poll(Duration::from_millis(250))? {
+        let wait = next_refresh.saturating_duration_since(Instant::now());
+        if !event::poll(wait)? {
+            app.merge_refresh(refresh()?);
+            next_refresh = Instant::now() + CONTROL_CENTER_REFRESH_INTERVAL;
             continue;
         }
         if let Event::Key(key) = event::read()? {
@@ -585,6 +809,10 @@ where
                 ControlCenterCommand::Apply { before, after } => {
                     apply(before, after)?;
                     app.apply_succeeded();
+                }
+                ControlCenterCommand::ApplyWorkspace { before, after } => {
+                    apply_workspace(before, after)?;
+                    app.workspace_apply_succeeded();
                 }
                 ControlCenterCommand::Quit => break,
                 ControlCenterCommand::None => {}
@@ -602,8 +830,12 @@ where
 #[allow(clippy::struct_excessive_bools)] // Receipt fields stay independently auditable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalSmokeReport {
-    /// The fixture rendered Overview, Appearance, Interface, and Integration in order.
+    /// The fixture rendered the required live Control Center screens in order.
     pub screens_visited: usize,
+    /// A bounded operational refresh was merged without persistence authority.
+    pub live_refresh_merged: bool,
+    /// Workspace and Sessions navigation reached their production render paths.
+    pub workspace_and_sessions_visited: bool,
     /// An appearance value changed in the in-memory draft.
     pub draft_changed: bool,
     /// Revert restored the draft to the original settings without Apply.
@@ -647,8 +879,22 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
     let original = app.current();
     let original_interface = app.current_interface();
     let original_locale = app.locale();
+    let refresh = ControlCenterRefresh {
+        presentation: original,
+        interface: original_interface,
+        snapshot: app.snapshot.clone(),
+        overview: app.overview.clone(),
+        workspace: None,
+        sessions: SessionsOverview::default(),
+    };
+    app.merge_refresh(refresh);
+    let live_refresh_merged = app.sessions.is_some() && !app.dirty();
     let mut session = TerminalSession::enter()?;
     let result = (|| {
+        invariant(
+            live_refresh_merged,
+            "fixture did not merge a bounded live refresh",
+        )?;
         invariant(
             app.screen() == Screen::Overview,
             "fixture did not start on Overview",
@@ -671,6 +917,39 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         let _ = app.handle_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
         let draft_reverted = !app.dirty() && app.draft() == original && app.current() == original;
         invariant(draft_reverted, "fixture did not revert its in-memory draft")?;
+
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        invariant(
+            app.screen() == Screen::Workspace,
+            "fixture did not reach Workspace",
+        )?;
+        draw(&mut session, &app)?;
+
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        invariant(
+            app.screen() == Screen::Sessions,
+            "fixture did not reach Sessions",
+        )?;
+        draw(&mut session, &app)?;
+        let workspace_and_sessions_visited = app.sessions.is_some();
+        invariant(
+            workspace_and_sessions_visited,
+            "fixture did not retain the refreshed Sessions projection",
+        )?;
+
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        invariant(
+            app.screen() == Screen::Integration,
+            "fixture did not reach Integration",
+        )?;
+        draw(&mut session, &app)?;
+
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        invariant(
+            app.screen() == Screen::Diagnostics,
+            "fixture did not reach Diagnostics",
+        )?;
+        draw(&mut session, &app)?;
 
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(
@@ -715,7 +994,8 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         )?;
         let _ = app.handle_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
 
-        let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         invariant(
             app.screen() == Screen::Integration,
             "fixture did not reach Integration",
@@ -730,7 +1010,9 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         )?;
 
         Ok(TerminalSmokeReport {
-            screens_visited: 4,
+            screens_visited: 7,
+            live_refresh_merged,
+            workspace_and_sessions_visited,
             draft_changed,
             draft_reverted,
             interface_locale_switched,
@@ -948,6 +1230,8 @@ pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
     );
     let footer = if app.confirm_discard {
         catalog(app.locale(), HumanMessageKey::FooterDiscard).to_owned()
+    } else if app.has_concurrent_conflict() {
+        catalog(app.locale(), HumanMessageKey::RefreshConflict).to_owned()
     } else if app.editing() {
         catalog(app.locale(), HumanMessageKey::FooterEditing).to_owned()
     } else {
@@ -979,9 +1263,11 @@ fn content(app: &ControlCenterApp) -> Paragraph<'static> {
     Paragraph::new(match app.screen {
         Screen::Overview => overview_lines(app),
         Screen::Appearance => appearance_lines(app),
-        Screen::Interface => interface_lines(app),
+        Screen::Workspace => workspace_lines(app),
+        Screen::Sessions => sessions_lines(app),
         Screen::Integration => integration_lines(app),
         Screen::Diagnostics => diagnostics_lines(app),
+        Screen::Interface => interface_lines(app),
         Screen::Preview => preview_lines(app),
     })
 }
@@ -1062,6 +1348,93 @@ fn appearance_lines(app: &ControlCenterApp) -> String {
         } else {
             catalog(app.locale(), HumanMessageKey::PressEnterToSelect)
         }
+    )
+}
+
+fn workspace_lines(app: &ControlCenterApp) -> String {
+    let Some(workspace) = app.workspace.as_ref() else {
+        return format!(
+            "{}\n\n{}",
+            catalog(app.locale(), HumanMessageKey::Workspace),
+            catalog(app.locale(), HumanMessageKey::NoAutomatedActionAvailable),
+        );
+    };
+    let candidates = workspace
+        .candidates()
+        .iter()
+        .take(4)
+        .enumerate()
+        .map(|(index, candidate)| format!("  {}. {}", index + 1, candidate.alias().as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let guidance = if let Some(editor) = app.workspace_editor.as_deref() {
+        format!(
+            "{}\n> {editor}",
+            catalog(app.locale(), HumanMessageKey::WorkspaceCustomAliasInput)
+        )
+    } else if app.workspace_explaining {
+        catalog(app.locale(), HumanMessageKey::WorkspaceExplain).to_owned()
+    } else {
+        catalog(app.locale(), HumanMessageKey::WorkspaceActions).to_owned()
+    };
+    format!(
+        "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n\n{}:\n{}\n\n{}\n{}",
+        catalog(app.locale(), HumanMessageKey::ProjectDisplayHint),
+        workspace.workspace().as_str(),
+        catalog(app.locale(), HumanMessageKey::AutomaticAlias),
+        workspace.automatic_alias().as_str(),
+        catalog(app.locale(), HumanMessageKey::EffectiveAlias),
+        app.workspace_draft
+            .as_deref()
+            .unwrap_or_else(|| workspace.automatic_alias().as_str()),
+        catalog(app.locale(), HumanMessageKey::CustomAlias),
+        app.workspace_draft.as_deref().unwrap_or("—"),
+        catalog(app.locale(), HumanMessageKey::NamingPolicy),
+        workspace.policy_version(),
+        catalog(app.locale(), HumanMessageKey::Candidates),
+        if candidates.is_empty() {
+            "—"
+        } else {
+            &candidates
+        },
+        guidance,
+        catalog(app.locale(), HumanMessageKey::WorkspaceLocalOnly),
+    )
+}
+
+fn sessions_lines(app: &ControlCenterApp) -> String {
+    let Some(sessions) = app.sessions.as_ref() else {
+        return catalog(app.locale(), HumanMessageKey::NoInspectableSessionLeases).to_owned();
+    };
+    let rows = if sessions.sessions.is_empty() {
+        catalog(app.locale(), HumanMessageKey::NoInspectableSessionLeases).to_owned()
+    } else {
+        sessions
+            .sessions
+            .iter()
+            .take(12)
+            .map(|session| {
+                format!(
+                    "{} — {} — {}s — {}",
+                    session.workspace_alias,
+                    session.semantic_state,
+                    session.age_seconds,
+                    session.worker_health.as_str().replace('_', " "),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    format!(
+        "{}: {} · {}: {} · {}: {}\n\n{}\n\n{}",
+        catalog(app.locale(), HumanMessageKey::Active),
+        sessions.active_sessions,
+        catalog(app.locale(), HumanMessageKey::Stale),
+        sessions.stale_sessions,
+        catalog(app.locale(), HumanMessageKey::InvalidLeases),
+        sessions.invalid_leases,
+        rows,
+        catalog(app.locale(), HumanMessageKey::LeaseObservationOnly),
     )
 }
 
@@ -1367,6 +1740,10 @@ mod tests {
     };
 
     use super::*;
+    use crate::activity::{
+        ActivityLeaseHealth, SessionOverview, SessionRecency, SessionWorkerHealth,
+        SessionsBoundaries,
+    };
     use ratatui::{Terminal, backend::TestBackend};
 
     #[derive(Clone)]
@@ -1427,6 +1804,139 @@ mod tests {
             },
             ManagementOverview::default(),
         )
+    }
+
+    fn refresh(
+        presentation: PresentationSettings,
+        interface: InterfacePreferences,
+    ) -> ControlCenterRefresh {
+        ControlCenterRefresh {
+            presentation,
+            interface,
+            snapshot: ManagementSnapshot {
+                health: ManagementHealth::Healthy,
+                issues: Vec::new(),
+                recommended_actions: Vec::new(),
+                change_plans: Vec::new(),
+            },
+            overview: ManagementOverview::default(),
+            workspace: None,
+            sessions: SessionsOverview::default(),
+        }
+    }
+
+    #[test]
+    fn read_only_refresh_updates_clean_baselines_without_creating_a_draft() {
+        let mut app = app();
+        let refreshed = app
+            .current()
+            .with_theme(crate::settings::PresentationTheme::Classic);
+
+        app.merge_refresh(refresh(refreshed, app.current_interface()));
+
+        assert_eq!(app.current(), refreshed);
+        assert_eq!(app.draft(), refreshed);
+        assert!(!app.dirty());
+        assert!(!app.has_concurrent_conflict());
+    }
+
+    #[test]
+    fn refresh_preserves_dirty_draft_and_refuses_stale_apply_until_revert() {
+        let mut app = app();
+        app.screen = Screen::Appearance;
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Right);
+        let draft = app.draft();
+        let externally_changed = app
+            .current()
+            .with_theme(crate::settings::PresentationTheme::Classic);
+
+        app.merge_refresh(refresh(externally_changed, app.current_interface()));
+
+        assert_eq!(app.draft(), draft, "refresh never overwrites a dirty draft");
+        assert!(app.has_concurrent_conflict());
+        assert!(matches!(
+            app.handle_key(KeyCode::Char('a')),
+            ControlCenterCommand::None
+        ));
+
+        app.handle_key(KeyCode::Char('r'));
+        assert_eq!(app.current(), externally_changed);
+        assert_eq!(app.draft(), externally_changed);
+        assert!(!app.has_concurrent_conflict());
+        assert!(!app.dirty());
+    }
+
+    #[test]
+    fn workspace_custom_alias_is_staged_and_requires_explicit_apply() {
+        let mut app = app();
+        app.screen = Screen::Workspace;
+        app.handle_key(KeyCode::Char('c'));
+        app.handle_key(KeyCode::Char('T'));
+        app.handle_key(KeyCode::Char('B'));
+        app.handle_key(KeyCode::Enter);
+
+        assert!(app.dirty());
+        assert_eq!(
+            app.handle_key(KeyCode::Char('a')),
+            ControlCenterCommand::ApplyWorkspace {
+                before: None,
+                after: Some("TB".to_owned()),
+            }
+        );
+        assert!(app.dirty(), "frontend Apply remains a request");
+        app.workspace_apply_succeeded();
+        assert!(!app.dirty());
+    }
+
+    #[test]
+    fn sessions_screen_is_localized_and_never_renders_prohibited_fields() {
+        let mut app = app().with_interface_preferences(
+            InterfacePreferences::default().with_language(InterfaceLanguage::ZhCn),
+        );
+        app.merge_refresh(ControlCenterRefresh {
+            presentation: app.current(),
+            interface: app.current_interface(),
+            snapshot: ManagementSnapshot {
+                health: ManagementHealth::Healthy,
+                issues: Vec::new(),
+                recommended_actions: Vec::new(),
+                change_plans: Vec::new(),
+            },
+            overview: ManagementOverview::default(),
+            workspace: None,
+            sessions: SessionsOverview {
+                schema_version: 1,
+                observation: "ephemeral_lease_snapshot",
+                health: ActivityLeaseHealth::Healthy,
+                active_sessions: 1,
+                stale_sessions: 0,
+                invalid_leases: 0,
+                sessions: vec![SessionOverview {
+                    workspace_alias: "TB".to_owned(),
+                    semantic_state: "working".to_owned(),
+                    age_seconds: 3,
+                    recency: SessionRecency::JustNow,
+                    worker_health: SessionWorkerHealth::RecentlyAuthorized,
+                }],
+                read_only: true,
+                boundaries: SessionsBoundaries {
+                    raw_native_session_ids: false,
+                    prompt_content: false,
+                    remote_control: false,
+                },
+            },
+        });
+        app.screen = Screen::Sessions;
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("test terminal starts");
+        terminal.draw(|frame| render(frame, &app)).expect("renders");
+        let rendered = format!("{:?}", terminal.backend().buffer());
+
+        assert!(rendered.contains("会话"));
+        assert!(rendered.contains("TB"));
+        assert!(!rendered.contains("native_session"));
+        assert!(!rendered.contains("prompt"));
+        assert!(!rendered.contains("turn_id"));
     }
 
     #[test]

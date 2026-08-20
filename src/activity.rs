@@ -206,6 +206,12 @@ impl SessionsOverview {
     }
 }
 
+impl Default for SessionsOverview {
+    fn default() -> Self {
+        Self::empty(ActivityLeaseHealth::Unavailable)
+    }
+}
+
 impl ActivityLeaseDiagnostics {
     /// Overall read-only inspection health.
     #[must_use]
