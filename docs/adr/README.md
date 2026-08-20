@@ -15,6 +15,7 @@ ADRs capture decisions that constrain future implementation.
 - `0010-title-authority-and-motion.md`
 - `0011-human-interface-and-guided-management.md`
 - `0012-localized-human-presentation-and-workspace-preferences.md`
+- `0013-reliability-explainability-multi-provider-boundaries.md`
 
 ADR 0009 generalizes the presentation-facing identity from Git repository-only to workspace identity. Existing repository identity remains the Git specialization; ordinary non-Git directories gain a local fallback before production G11.
 
@@ -23,5 +24,7 @@ ADR 0010 (session-scoped ephemeral activity worker) admits the G11 direct epheme
 ADR 0011 defines the shared v0.4 Human management architecture: Human status/doctor, inline guided Setup, full-screen Control Center, and stable automation interfaces over one management/domain model.
 
 ADR 0012 defines the v0.5 Human/i18n boundary, deterministic Adaptive Naming v2, device-local workspace preference overlay, top-level import/export portability, and daemonless Live Control Center architecture.
+
+ADR 0013 defines the v0.5.1/v0.6 boundaries: session-scoped Root Workspace ownership, count-only subagent observability, typed Hook/naming/title explainability, upgrade-safe runtime worker images, provider capability truthfulness, and real-environment-only Agy admission after public v0.5.1.
 
 A later ADR may supersede an earlier decision, but implementation code must not silently reverse one.
