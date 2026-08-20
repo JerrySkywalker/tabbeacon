@@ -15,6 +15,8 @@ use tabbeacon::{
     settings::PresentationSettings,
 };
 
+const FIXTURE_CODEX_VERSION_PROBE_ARGUMENT: &str = "--tabbeacon-g60-codex-version-probe";
+
 fn fixture_hook_inventory() -> Result<HookInventory, String> {
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -37,9 +39,17 @@ fn fixture_hook_inventory() -> Result<HookInventory, String> {
         .map_err(|_| "owned fixture Hook document could not be written".to_owned())?;
         let executable = env::current_exe()
             .map_err(|_| "fixture executable could not be resolved".to_owned())?;
-        let inventory =
-            CodexIntegration::new(root.join("codex-home"), root.join("state"), executable)
-                .hook_inventory();
+        let inventory = CodexIntegration::new(
+            root.join("codex-home"),
+            root.join("state"),
+            executable.clone(),
+        )
+        // The fixture's profile probe is its own short-lived executable,
+        // which the owned Windows Terminal child tree can terminate if the
+        // real-terminal watchdog expires. It never probes an Owner Codex
+        // installation during visual acceptance.
+        .with_codex_program(executable)
+        .hook_inventory();
         (inventory.availability == HookInventoryAvailability::Available)
             .then_some(inventory)
             .ok_or_else(|| "fixture provider Hook shape was not admitted".to_owned())
@@ -49,6 +59,12 @@ fn fixture_hook_inventory() -> Result<HookInventory, String> {
 }
 
 fn main() -> ExitCode {
+    if env::args().nth(1).as_deref() == Some(FIXTURE_CODEX_VERSION_PROBE_ARGUMENT) {
+        // Keep the adapter proof on the exact admitted Codex profile without
+        // consulting any Owner configuration or executable.
+        println!("codex-cli 0.147.0");
+        return ExitCode::SUCCESS;
+    }
     if std::env::var_os("WT_SESSION").is_none()
         || !std::io::stdin().is_terminal()
         || !std::io::stdout().is_terminal()
@@ -131,7 +147,7 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::fixture_hook_inventory;
+    use super::{FIXTURE_CODEX_VERSION_PROBE_ARGUMENT, fixture_hook_inventory};
     use tabbeacon::hook_inventory::HookInventoryAvailability;
 
     #[test]
@@ -146,5 +162,13 @@ mod tests {
         );
         let json = serde_json::to_string(&inventory).expect("inventory serializes");
         assert!(!json.contains("fixture-private-command"));
+    }
+
+    #[test]
+    fn fixture_version_probe_argument_is_distinct_from_the_interactive_fixture() {
+        assert_eq!(
+            FIXTURE_CODEX_VERSION_PROBE_ARGUMENT,
+            "--tabbeacon-g60-codex-version-probe"
+        );
     }
 }

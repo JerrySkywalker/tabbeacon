@@ -121,6 +121,48 @@ function Test-ProcessAncestor {
     return $false
 }
 
+function Wait-ProcessExit {
+    param(
+        [int]$ProcessId,
+        [DateTimeOffset]$Deadline
+    )
+    while ([DateTimeOffset]::UtcNow -lt $Deadline) {
+        if ($null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+            return $true
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    return $null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
+}
+
+function Stop-OwnedProcessTree {
+    param(
+        [int]$ProcessId,
+        [int]$TimeoutMilliseconds = 5000
+    )
+    $taskkillPath = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+    if (-not (Test-Path -LiteralPath $taskkillPath)) {
+        $taskkillPath = 'taskkill.exe'
+    }
+    # taskkill itself is isolated so a platform failure cannot consume the
+    # harness deadline. The target PID is admitted from the owned terminal
+    # child lineage before this function is called.
+    $taskkill = Start-Process -FilePath $taskkillPath -ArgumentList @(
+        '/PID', [string]$ProcessId, '/T', '/F'
+    ) -PassThru -WindowStyle Hidden
+    $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    while ([DateTimeOffset]::UtcNow -lt $deadline) {
+        if ($taskkill.HasExited) {
+            return $taskkill.ExitCode -eq 0
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $taskkill.HasExited) {
+        Stop-Process -Id $taskkill.Id -Force -ErrorAction SilentlyContinue
+    }
+    return $false
+}
+
 $arguments = @(
     '-w', 'new',
     'new-tab',
@@ -137,13 +179,9 @@ $arguments = @(
     '-RunId', $RunId
 )
 
-& $wtCommand.Source @arguments
-$launchExitCode = $LASTEXITCODE
-if ($launchExitCode -ne 0) {
-    throw "wt.exe launch failed with exit code $launchExitCode"
-}
-
 $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+$wtLauncher = Start-Process -FilePath $wtCommand.Source -ArgumentList $arguments -PassThru
+$launchExitCode = $null
 $windowObserved = $false
 $windowHandle = [IntPtr]::Zero
 $windowProcessId = $null
@@ -153,6 +191,10 @@ $childProcessId = $null
 $sentinelObserved = $false
 $childCompleted = $false
 $windowCompleted = $false
+$ownedTreeTerminationAttempted = $false
+$ownedTreeTerminationSucceeded = $false
+$launcherTerminationAttempted = $false
+$launcherCompleted = $false
 
 while ([DateTimeOffset]::UtcNow -lt $deadline) {
     $windows = [TabBeaconSmokeWindows]::FindExactTitle($windowTitle)
@@ -206,6 +248,40 @@ if (-not $windowCompleted -and $windowOwnerBound) {
     }
 }
 
+# A hung fixture (including its bounded adapter probe) remains contained in
+# the exact owned Windows Terminal child tree. After an exact-handle close,
+# wait briefly for normal shutdown, then terminate that admitted tree only if
+# it remains live. No process without the verified owned lineage is targeted.
+$cleanupDeadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+if ($windowOwnerBound -and (-not $windowCompleted -or -not $childCompleted)) {
+    while ([DateTimeOffset]::UtcNow -lt $cleanupDeadline) {
+        $boundWindow = [TabBeaconSmokeWindows]::GetRecord($windowHandle)
+        $windowCompleted = $null -eq $boundWindow -or
+            $boundWindow.ProcessId -ne $windowProcessId
+        if ($null -ne $childProcessId) {
+            $childCompleted = $null -eq (Get-Process -Id $childProcessId -ErrorAction SilentlyContinue)
+        }
+        if ($windowCompleted -and $childCompleted) {
+            break
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $childCompleted -and $windowChildLineageBound -and $null -ne $childProcessId) {
+        $ownedTreeTerminationAttempted = $true
+        $ownedTreeTerminationSucceeded = Stop-OwnedProcessTree -ProcessId $childProcessId
+        $childCompleted = Wait-ProcessExit -ProcessId $childProcessId -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(5))
+    }
+    $boundWindow = [TabBeaconSmokeWindows]::GetRecord($windowHandle)
+    $windowCompleted = $null -eq $boundWindow -or $boundWindow.ProcessId -ne $windowProcessId
+}
+
+if (-not $wtLauncher.HasExited) {
+    $launcherTerminationAttempted = $true
+    Stop-Process -Id $wtLauncher.Id -Force -ErrorAction SilentlyContinue
+}
+$launcherCompleted = Wait-ProcessExit -ProcessId $wtLauncher.Id -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(5))
+$launchExitCode = if ($wtLauncher.HasExited) { $wtLauncher.ExitCode } else { $null }
+
 $fixtureExitCode = $null
 $shellUsable = $false
 if ($sentinelObserved) {
@@ -250,6 +326,12 @@ $receipt = @(
     "WINDOW_CHILD_LINEAGE_BOUND=$($windowChildLineageBound.ToString().ToLowerInvariant())"
     "WINDOW_COMPLETED=$($windowCompleted.ToString().ToLowerInvariant())"
     "CHILD_PROCESS_COMPLETED=$($childCompleted.ToString().ToLowerInvariant())"
+    "WT_LAUNCHER_PROCESS_ID=$($wtLauncher.Id)"
+    "WT_LAUNCHER_EXIT_CODE=$launchExitCode"
+    "WT_LAUNCHER_COMPLETED=$($launcherCompleted.ToString().ToLowerInvariant())"
+    "WT_LAUNCHER_TERMINATION_ATTEMPTED=$($launcherTerminationAttempted.ToString().ToLowerInvariant())"
+    "OWNED_CHILD_TREE_TERMINATION_ATTEMPTED=$($ownedTreeTerminationAttempted.ToString().ToLowerInvariant())"
+    "OWNED_CHILD_TREE_TERMINATION_SUCCEEDED=$($ownedTreeTerminationSucceeded.ToString().ToLowerInvariant())"
     "SENTINEL_OBSERVED=$($sentinelObserved.ToString().ToLowerInvariant())"
     "FIXTURE_EXIT_CODE=$fixtureExitCode"
     "TUI_LIVE_REFRESH=$($liveRefresh.ToString().ToLowerInvariant())"
