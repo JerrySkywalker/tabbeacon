@@ -863,6 +863,7 @@ pub struct TerminalSmokeReport {
 /// Returns terminal I/O errors or an invariant error if the scripted path stops
 /// exercising the intended production state transitions.
 #[cfg(feature = "terminal-smoke-fixture")]
+#[allow(clippy::too_many_lines)] // The deterministic smoke trace keeps its receipt assertions in one auditable sequence.
 pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<TerminalSmokeReport> {
     fn invariant(condition: bool, message: &'static str) -> io::Result<()> {
         condition
