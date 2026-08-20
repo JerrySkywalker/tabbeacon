@@ -600,6 +600,36 @@ impl PresentationSettingsStore {
         self.snapshot_unlocked()
     }
 
+    /// Returns whether an opaque snapshot is still byte-exactly current.
+    ///
+    /// This is read-only and exposes no configuration bytes. Guided recovery
+    /// uses it to verify a completed compensation before reporting success.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same safe read error as [`Self::snapshot_read_only`].
+    pub fn snapshot_is_current(
+        &self,
+        expected: &PresentationSettingsSnapshot,
+    ) -> Result<bool, SettingsError> {
+        Ok(self.snapshot_read_only()?.matches(expected))
+    }
+
+    /// Returns whether a guided write receipt is still byte-exactly current.
+    ///
+    /// This lets a multi-store operation perform its final drift check without
+    /// exposing the serialized user configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same safe read error as [`Self::snapshot_read_only`].
+    pub fn write_receipt_is_current(
+        &self,
+        receipt: &PresentationSettingsWriteReceipt,
+    ) -> Result<bool, SettingsError> {
+        Ok(receipt.matches(&self.snapshot_read_only()?))
+    }
+
     /// Reads valid settings, defaulting safely for absent or malformed input.
     #[must_use]
     pub fn load_or_default(&self) -> PresentationSettings {

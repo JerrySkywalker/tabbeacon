@@ -86,6 +86,27 @@ pub enum Command {
         #[command(flatten)]
         output: OutputArgs,
     },
+    /// Export portable user configuration as canonical tabbeacon-export-v1 JSON.
+    Export {
+        /// Write the canonical document to a new file instead of stdout.
+        #[arg(long = "output", value_name = "PATH")]
+        destination: Option<PathBuf>,
+        /// Explicitly replace an existing requested export file.
+        #[arg(long, requires = "destination")]
+        force: bool,
+        #[command(flatten)]
+        output: HumanOutputArgs,
+    },
+    /// Preview or explicitly apply a portable user-configuration import.
+    Import {
+        /// Bounded canonical tabbeacon-export-v1 JSON document to inspect.
+        path: PathBuf,
+        /// Apply the displayed plan; non-interactive imports never mutate without it.
+        #[arg(long)]
+        apply: bool,
+        #[command(flatten)]
+        output: HumanOutputArgs,
+    },
     /// Render a temporary presentation preview without persisting a change.
     Preview(PreviewArgs),
     /// Emit a shell-completion script to stdout.
@@ -353,6 +374,7 @@ mod tests {
     };
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn parses_supported_production_commands_with_typed_output_modes() {
         let status =
             Cli::try_parse_from(["tabbeacon", "status", "--plain"]).expect("plain status parses");
@@ -450,6 +472,21 @@ mod tests {
             }
         ));
 
+        let export =
+            Cli::try_parse_from(["tabbeacon", "export", "--output", "backup.json", "--force"])
+                .expect("export file options parse");
+        assert!(matches!(
+            export.command,
+            Some(Command::Export { force: true, .. })
+        ));
+
+        let import = Cli::try_parse_from(["tabbeacon", "import", "backup.json", "--apply"])
+            .expect("explicit import apply parses");
+        assert!(matches!(
+            import.command,
+            Some(Command::Import { apply: true, .. })
+        ));
+
         let uninstall = Cli::try_parse_from(["tabbeacon", "uninstall", "codex", "--plain"])
             .expect("legacy uninstall output parses after the provider");
         let Command::Uninstall { output, .. } = uninstall.command.expect("uninstall command")
@@ -466,6 +503,7 @@ mod tests {
         assert!(Cli::try_parse_from(["tabbeacon", "sessions", "--json", "--plain"]).is_err());
         assert!(Cli::try_parse_from(["tabbeacon", "alias", "show", "--json", "--plain"]).is_err());
         assert!(Cli::try_parse_from(["tabbeacon", "convergence", "verify"]).is_err());
+        assert!(Cli::try_parse_from(["tabbeacon", "export", "--force"]).is_err());
 
         let parsed = Cli::try_parse_from([
             "tabbeacon",

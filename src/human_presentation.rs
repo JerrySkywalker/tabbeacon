@@ -421,6 +421,20 @@ pub enum HumanMessageKey {
     ProtectedPreviewableRepair,
     ProtectedOwnerExplicit,
     ProtectedUnsupportedAutomation,
+    Export,
+    Import,
+    ImportPreview,
+    ImportApplied,
+    ImportCancelled,
+    ImportConflict,
+    ImportRolledBack,
+    ImportPartialState,
+    ExportWritten,
+    PortableAliasesMatched,
+    PortableAliasesUnmatched,
+    DeviceLocalAliasesOmitted,
+    ImportApplyRequired,
+    ImportConfirmApply,
 }
 
 /// A semantic Human text fragment, independent from a concrete language.
@@ -1876,6 +1890,68 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::ProtectedUnsupportedAutomation) => {
             "TabBeacon 不会虚构不受支持的自动化路径。"
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::Export) => "TabBeacon export",
+        (ResolvedLocale::EnUs, HumanMessageKey::Import) => "TabBeacon import",
+        (ResolvedLocale::EnUs, HumanMessageKey::ImportPreview) => {
+            "Import preview; no settings have changed."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::ImportApplied) => "Import applied and verified.",
+        (ResolvedLocale::EnUs, HumanMessageKey::ImportCancelled) => "Import cancelled.",
+        (ResolvedLocale::EnUs, HumanMessageKey::ImportConflict) => {
+            "Import was not applied because an alias conflicts with local state."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::ImportRolledBack) => {
+            "Import was refused and all earlier changes were restored."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::ImportPartialState) => {
+            "Import failed and TabBeacon could not verify complete rollback."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::ExportWritten) => "Export written safely.",
+        (ResolvedLocale::EnUs, HumanMessageKey::PortableAliasesMatched) => {
+            "{0} portable workspace alias(es) matched locally."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::PortableAliasesUnmatched) => {
+            "{0} portable workspace alias(es) were not matched locally."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::DeviceLocalAliasesOmitted) => {
+            "{0} device-local workspace alias(es) were omitted."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::ImportApplyRequired) => {
+            "Preview only. Use --apply to change settings outside an interactive terminal."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::ImportConfirmApply) => {
+            "Apply this preview to user-local TabBeacon settings?"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::Export) => "TabBeacon 导出",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Import) => "TabBeacon 导入",
+        (ResolvedLocale::ZhCn, HumanMessageKey::ImportPreview) => "导入预览；设置尚未更改。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::ImportApplied) => "导入已应用并验证。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::ImportCancelled) => "导入已取消。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::ImportConflict) => {
+            "导入未应用，因为别名与本地状态冲突。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::ImportRolledBack) => {
+            "导入已拒绝，之前的更改已恢复。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::ImportPartialState) => {
+            "导入失败，TabBeacon 无法验证完整回滚。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::ExportWritten) => "导出已安全写入。",
+        (ResolvedLocale::ZhCn, HumanMessageKey::PortableAliasesMatched) => {
+            "已在本地匹配 {0} 个可移植工作区别名。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::PortableAliasesUnmatched) => {
+            "{0} 个可移植工作区别名未在本地匹配。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::DeviceLocalAliasesOmitted) => {
+            "已省略 {0} 个仅限此设备的工作区别名。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::ImportApplyRequired) => {
+            "仅预览。在非交互式终端中请使用 --apply 更改设置。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::ImportConfirmApply) => {
+            "要将此预览应用到用户本地 TabBeacon 设置吗？"
         }
     }
 }

@@ -20,6 +20,7 @@ pub mod presentation;
 pub mod providers;
 pub mod repo;
 pub mod settings;
+pub mod settings_transfer;
 pub mod setup;
 pub mod title_authority;
 pub mod visual;

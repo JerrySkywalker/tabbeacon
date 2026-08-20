@@ -331,6 +331,33 @@ impl InterfacePreferencesStore {
         self.snapshot_unlocked()
     }
 
+    /// Returns whether an opaque snapshot is still byte-exactly current.
+    ///
+    /// This read-only check proves a completed compensation before a caller
+    /// reports that a multi-store operation was fully rolled back.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same safe read error as [`Self::snapshot_read_only`].
+    pub fn snapshot_is_current(
+        &self,
+        expected: &InterfacePreferencesSnapshot,
+    ) -> Result<bool, InterfacePreferencesError> {
+        Ok(self.snapshot_read_only()?.matches(expected))
+    }
+
+    /// Returns whether a guided write receipt is still byte-exactly current.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same safe read error as [`Self::snapshot_read_only`].
+    pub fn write_receipt_is_current(
+        &self,
+        receipt: &InterfacePreferencesWriteReceipt,
+    ) -> Result<bool, InterfacePreferencesError> {
+        Ok(receipt.matches(&self.snapshot_read_only()?))
+    }
+
     /// Reads effective preferences, defaulting safely without rewriting malformed input.
     #[must_use]
     pub fn load_or_default(&self) -> InterfacePreferences {
