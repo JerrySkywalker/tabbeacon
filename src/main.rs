@@ -36,12 +36,14 @@ use tabbeacon::setup::{
     detect_windows_terminal,
 };
 use tabbeacon::{
-    activity::{run_activity_cleanup_observer_system, run_activity_worker_system},
+    activity::{
+        inspect_system_sessions, run_activity_cleanup_observer_system, run_activity_worker_system,
+    },
     core::{Attention, Health, Phase},
     interface_preferences::{
         HumanColor, InterfaceLanguage, InterfacePreferences,
-        InterfacePreferencesConditionalOutcome, InterfacePreferencesSnapshot,
-        InterfacePreferencesSnapshotSaveOutcome, InterfacePreferencesStore,
+        InterfacePreferencesConditionalOutcome, InterfacePreferencesSnapshotSaveOutcome,
+        InterfacePreferencesStore,
     },
     presentation::{
         PresentationPolicy, SemanticPresentationInput, WindowsTerminalCapabilities,
@@ -3031,51 +3033,77 @@ fn ui() -> ExitCode {
         Ok(store) => store,
         Err(error) => return management_error("UI", &error),
     };
-    let mut settings_snapshot = match store.snapshot_read_only() {
-        Ok(snapshot) => snapshot,
-        Err(error) => return management_error("UI", &error),
-    };
-    let settings = settings_snapshot.settings();
     let interface_store = match InterfacePreferencesStore::from_environment() {
         Ok(store) => store,
         Err(error) => return management_error("UI", &error),
     };
-    let mut interface_snapshot = match interface_store.snapshot_read_only() {
-        Ok(snapshot) => snapshot,
+    let refresh = match collect_control_center_refresh(&store, &interface_store, true) {
+        Ok(refresh) => refresh,
         Err(error) => return management_error("UI", &error),
     };
-    let interface = interface_snapshot.preferences();
-    let report = collect_operational_diagnostics();
-    let snapshot = ManagementSnapshot::from_diagnostics(&report);
-    let overview = tabbeacon::management::ManagementOverview::from_diagnostics(&report);
     match tabbeacon::control_center::run(
-        tabbeacon::control_center::ControlCenterApp::new(settings, snapshot, overview)
-            .with_interface_preferences(interface)
-            .with_locale(resolve_runtime_locale(None, interface.language()).locale()),
-        |before, after| {
-            apply_control_center_drafts(
-                &store,
-                &mut settings_snapshot,
-                &interface_store,
-                &mut interface_snapshot,
-                before,
-                after,
-            )
-        },
+        tabbeacon::control_center::ControlCenterApp::new(
+            refresh.presentation,
+            refresh.snapshot.clone(),
+            refresh.overview.clone(),
+        )
+        .with_interface_preferences(refresh.interface)
+        .with_locale(resolve_runtime_locale(None, refresh.interface.language()).locale())
+        .with_refresh(refresh),
+        |before, after| apply_control_center_drafts(&store, &interface_store, before, after),
+        apply_control_center_workspace_override,
+        || collect_control_center_refresh(&store, &interface_store, false),
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => management_error("UI", &error),
     }
 }
 
+fn collect_control_center_refresh(
+    settings_store: &PresentationSettingsStore,
+    interface_store: &InterfacePreferencesStore,
+    include_workspace: bool,
+) -> io::Result<tabbeacon::control_center::ControlCenterRefresh> {
+    let presentation = settings_store
+        .snapshot_read_only()
+        .map_err(io::Error::other)?
+        .settings();
+    let interface = interface_store
+        .snapshot_read_only()
+        .map_err(io::Error::other)?
+        .preferences();
+    let report = collect_operational_diagnostics();
+    let workspace = include_workspace
+        .then(|| {
+            std::env::current_dir().ok().and_then(|cwd| {
+                WorkspaceIdentityResolver::with_default_state_root()
+                    .ok()
+                    .and_then(|resolver| resolver.inspect_alias(cwd).ok())
+            })
+        })
+        .flatten();
+    Ok(tabbeacon::control_center::ControlCenterRefresh {
+        presentation,
+        interface,
+        snapshot: ManagementSnapshot::from_diagnostics(&report),
+        overview: tabbeacon::management::ManagementOverview::from_diagnostics(&report),
+        workspace,
+        sessions: inspect_system_sessions(),
+    })
+}
+
 fn apply_control_center_drafts(
     settings_store: &PresentationSettingsStore,
-    settings_snapshot: &mut PresentationSettingsSnapshot,
     interface_store: &InterfacePreferencesStore,
-    interface_snapshot: &mut InterfacePreferencesSnapshot,
     before: tabbeacon::control_center::ControlCenterDraft,
     after: tabbeacon::control_center::ControlCenterDraft,
 ) -> io::Result<()> {
+    let settings_snapshot = settings_store
+        .snapshot_read_only()
+        .map_err(io::Error::other)?;
+    let interface_snapshot = interface_store
+        .snapshot_read_only()
+        .map_err(io::Error::other)?;
     if settings_snapshot.settings() != before.presentation
         || interface_snapshot.preferences() != before.interface
     {
@@ -3086,7 +3114,7 @@ fn apply_control_center_drafts(
         None
     } else {
         match interface_store
-            .save_snapshot_if_unchanged(interface_snapshot, after.interface)
+            .save_snapshot_if_unchanged(&interface_snapshot, after.interface)
             .map_err(io::Error::other)?
         {
             InterfacePreferencesSnapshotSaveOutcome::Saved(receipt) => Some(receipt),
@@ -3099,15 +3127,13 @@ fn apply_control_center_drafts(
     // Verify the first per-store write before entering the second store. If
     // this readback cannot prove the Interface draft, no Presentation write
     // has occurred and the exact receipt can still compensate safely.
-    let next_interface_snapshot = if before.interface == after.interface {
-        None
-    } else {
+    if before.interface != after.interface {
         match interface_store.snapshot_read_only() {
-            Ok(snapshot) if snapshot.preferences() == after.interface => Some(snapshot),
+            Ok(snapshot) if snapshot.preferences() == after.interface => {}
             Ok(_) => {
                 let restored = interface_receipt.as_ref().is_some_and(|receipt| {
                     matches!(
-                        interface_store.restore_snapshot_if_unchanged(receipt, interface_snapshot),
+                        interface_store.restore_snapshot_if_unchanged(receipt, &interface_snapshot),
                         Ok(InterfacePreferencesConditionalOutcome::Saved)
                     )
                 });
@@ -3121,7 +3147,7 @@ fn apply_control_center_drafts(
             Err(error) => {
                 let restored = interface_receipt.as_ref().is_some_and(|receipt| {
                     matches!(
-                        interface_store.restore_snapshot_if_unchanged(receipt, interface_snapshot),
+                        interface_store.restore_snapshot_if_unchanged(receipt, &interface_snapshot),
                         Ok(InterfacePreferencesConditionalOutcome::Saved)
                     )
                 });
@@ -3135,20 +3161,20 @@ fn apply_control_center_drafts(
                 return Err(io::Error::other(reason));
             }
         }
-    };
+    }
 
     if before.presentation != after.presentation {
         match apply_control_center_settings_change(
             settings_store,
-            settings_snapshot,
+            &settings_snapshot,
             before.presentation,
             after.presentation,
         ) {
-            Ok((_, next_snapshot)) => *settings_snapshot = next_snapshot,
+            Ok(_) => {}
             Err(error) => {
                 if let Some(receipt) = interface_receipt.as_ref() {
                     let restored = matches!(
-                        interface_store.restore_snapshot_if_unchanged(receipt, interface_snapshot),
+                        interface_store.restore_snapshot_if_unchanged(receipt, &interface_snapshot),
                         Ok(InterfacePreferencesConditionalOutcome::Saved)
                     );
                     if !restored {
@@ -3161,10 +3187,41 @@ fn apply_control_center_drafts(
             }
         }
     }
+    Ok(())
+}
 
-    if let Some(next_snapshot) = next_interface_snapshot {
-        *interface_snapshot = next_snapshot;
+fn apply_control_center_workspace_override(
+    before: Option<String>,
+    after: Option<String>,
+) -> io::Result<()> {
+    let resolver =
+        WorkspaceIdentityResolver::with_default_state_root().map_err(io::Error::other)?;
+    let cwd = std::env::current_dir().map_err(io::Error::other)?;
+    apply_control_center_workspace_override_with(&resolver, &cwd, before, after)
+}
+
+#[allow(clippy::needless_pass_by_value)] // The Control Center apply callback transfers its owned baseline snapshot.
+fn apply_control_center_workspace_override_with(
+    resolver: &WorkspaceIdentityResolver,
+    cwd: &std::path::Path,
+    before: Option<String>,
+    after: Option<String>,
+) -> io::Result<()> {
+    let inspection = resolver.inspect_alias(cwd).map_err(io::Error::other)?;
+    let observed = inspection
+        .custom_alias()
+        .map(|alias| alias.as_str().to_owned());
+    if observed != before {
+        return Err(settings_conflict_error());
     }
+    match after {
+        Some(alias) => resolver
+            .set_alias_override(cwd, alias)
+            .map_err(io::Error::other)?,
+        None => resolver
+            .reset_alias_override(cwd)
+            .map_err(io::Error::other)?,
+    };
     Ok(())
 }
 
@@ -3232,8 +3289,8 @@ mod tests {
         let root = std::env::temp_dir().join(format!("tabbeacon-ui-interface-{unique}"));
         let settings_store = PresentationSettingsStore::new(root.join("config.toml"));
         let interface_store = InterfacePreferencesStore::new(root.join("interface.toml"));
-        let mut settings_snapshot = settings_store.snapshot_read_only().unwrap();
-        let mut interface_snapshot = interface_store.snapshot_read_only().unwrap();
+        let settings_snapshot = settings_store.snapshot_read_only().unwrap();
+        let interface_snapshot = interface_store.snapshot_read_only().unwrap();
         let before = tabbeacon::control_center::ControlCenterDraft {
             presentation: settings_snapshot.settings(),
             interface: interface_snapshot.preferences(),
@@ -3243,15 +3300,7 @@ mod tests {
             interface: before.interface.with_language(InterfaceLanguage::ZhCn),
         };
 
-        apply_control_center_drafts(
-            &settings_store,
-            &mut settings_snapshot,
-            &interface_store,
-            &mut interface_snapshot,
-            before,
-            after,
-        )
-        .unwrap();
+        apply_control_center_drafts(&settings_store, &interface_store, before, after).unwrap();
 
         assert!(!settings_store.path().exists());
         assert_eq!(
@@ -3270,8 +3319,8 @@ mod tests {
         let root = std::env::temp_dir().join(format!("tabbeacon-ui-combined-{unique}"));
         let settings_store = PresentationSettingsStore::new(root.join("config.toml"));
         let interface_store = InterfacePreferencesStore::new(root.join("interface.toml"));
-        let mut settings_snapshot = settings_store.snapshot_read_only().unwrap();
-        let mut interface_snapshot = interface_store.snapshot_read_only().unwrap();
+        let settings_snapshot = settings_store.snapshot_read_only().unwrap();
+        let interface_snapshot = interface_store.snapshot_read_only().unwrap();
         let before = tabbeacon::control_center::ControlCenterDraft {
             presentation: settings_snapshot.settings(),
             interface: interface_snapshot.preferences(),
@@ -3284,15 +3333,7 @@ mod tests {
         };
 
         assert!(
-            apply_control_center_drafts(
-                &settings_store,
-                &mut settings_snapshot,
-                &interface_store,
-                &mut interface_snapshot,
-                before,
-                after,
-            )
-            .is_err()
+            apply_control_center_drafts(&settings_store, &interface_store, before, after,).is_err()
         );
         assert_eq!(settings_store.load().unwrap(), concurrent);
         assert!(
@@ -3300,6 +3341,63 @@ mod tests {
             "the guarded Interface write is compensated when presentation conflicts"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn control_center_workspace_apply_refuses_a_collision_without_writing_the_target_override() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tabbeacon-ui-workspace-{unique}"));
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let resolver = WorkspaceIdentityResolver::new(root.join("registry"));
+        resolver.set_alias_override(&second, "TAKEN").unwrap();
+
+        assert!(
+            apply_control_center_workspace_override_with(
+                &resolver,
+                &first,
+                None,
+                Some("TAKEN".to_owned()),
+            )
+            .is_err()
+        );
+        assert!(
+            resolver
+                .inspect_alias(&first)
+                .unwrap()
+                .custom_alias()
+                .is_none(),
+            "a collided staged alias must not write a target preference"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn control_center_refresh_reads_injected_stores_without_creating_state() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tabbeacon-ui-refresh-{unique}"));
+        let settings_store = PresentationSettingsStore::new(root.join("config.toml"));
+        let interface_store = InterfacePreferencesStore::new(root.join("interface.toml"));
+
+        let refresh = collect_control_center_refresh(&settings_store, &interface_store, false)
+            .expect("read-only refresh succeeds for absent injected state");
+
+        assert_eq!(refresh.presentation, PresentationSettings::default());
+        assert_eq!(refresh.interface, InterfacePreferences::default());
+        assert!(!settings_store.path().exists());
+        assert!(!interface_store.path().exists());
+        assert!(
+            !root.exists(),
+            "refresh must not create a store parent or lock"
+        );
     }
 
     #[test]

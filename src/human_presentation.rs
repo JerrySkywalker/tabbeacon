@@ -236,6 +236,10 @@ pub enum HumanMessageKey {
     InterfacePreferences,
     WorkspaceAlias,
     Workspace,
+    WorkspaceLocalOnly,
+    WorkspaceActions,
+    WorkspaceCustomAliasInput,
+    WorkspaceExplain,
     AutomaticAlias,
     CustomAlias,
     EffectiveAlias,
@@ -248,6 +252,7 @@ pub enum HumanMessageKey {
     CandidateStrategy,
     CandidateScore,
     CandidateComponents,
+    RefreshConflict,
     AliasProspective,
     AliasOverrideSaved,
     AliasOverrideReset,
@@ -1100,6 +1105,18 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::EnUs, HumanMessageKey::InterfacePreferences) => "Interface preferences",
         (ResolvedLocale::EnUs, HumanMessageKey::WorkspaceAlias) => "Workspace alias",
         (ResolvedLocale::EnUs, HumanMessageKey::Workspace) => "Workspace",
+        (ResolvedLocale::EnUs, HumanMessageKey::WorkspaceLocalOnly) => {
+            "Stored locally only. Project files are never modified."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::WorkspaceActions) => {
+            "d default · 1–4 suggestion · c custom · ? explain · a apply"
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::WorkspaceCustomAliasInput) => {
+            "Type a custom alias, then press Enter to stage it."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::WorkspaceExplain) => {
+            "Adaptive candidates are local, deterministic naming suggestions."
+        }
         (ResolvedLocale::EnUs, HumanMessageKey::AutomaticAlias) => "Automatic alias",
         (ResolvedLocale::EnUs, HumanMessageKey::CustomAlias) => "Custom alias",
         (ResolvedLocale::EnUs, HumanMessageKey::EffectiveAlias) => "Effective alias",
@@ -1112,6 +1129,9 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::EnUs, HumanMessageKey::CandidateStrategy) => "Candidate strategy",
         (ResolvedLocale::EnUs, HumanMessageKey::CandidateScore) => "Candidate score",
         (ResolvedLocale::EnUs, HumanMessageKey::CandidateComponents) => "Score components",
+        (ResolvedLocale::EnUs, HumanMessageKey::RefreshConflict) => {
+            "Settings changed externally. Revert the stale draft before Apply."
+        }
         (ResolvedLocale::EnUs, HumanMessageKey::AliasProspective) => "prospective (not saved)",
         (ResolvedLocale::EnUs, HumanMessageKey::AliasOverrideSaved) => {
             "Workspace alias override saved."
@@ -1550,6 +1570,18 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::ZhCn, HumanMessageKey::InterfacePreferences) => "界面偏好",
         (ResolvedLocale::ZhCn, HumanMessageKey::WorkspaceAlias) => "工作区别名",
         (ResolvedLocale::ZhCn, HumanMessageKey::Workspace) => "工作区",
+        (ResolvedLocale::ZhCn, HumanMessageKey::WorkspaceLocalOnly) => {
+            "仅存储在本机；绝不修改项目文件。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::WorkspaceActions) => {
+            "d 使用默认 · 1–4 选择候选 · c 自定义 · ? 说明 · a 应用"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::WorkspaceCustomAliasInput) => {
+            "输入自定义别名，然后按 Enter 暂存。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::WorkspaceExplain) => {
+            "自适应候选是本地、确定性的命名建议。"
+        }
         (ResolvedLocale::ZhCn, HumanMessageKey::AutomaticAlias) => "自动别名",
         (ResolvedLocale::ZhCn, HumanMessageKey::CustomAlias) => "自定义别名",
         (ResolvedLocale::ZhCn, HumanMessageKey::EffectiveAlias) => "生效别名",
@@ -1562,6 +1594,9 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::ZhCn, HumanMessageKey::CandidateStrategy) => "候选策略",
         (ResolvedLocale::ZhCn, HumanMessageKey::CandidateScore) => "候选评分",
         (ResolvedLocale::ZhCn, HumanMessageKey::CandidateComponents) => "评分组成",
+        (ResolvedLocale::ZhCn, HumanMessageKey::RefreshConflict) => {
+            "设置已在外部变更；请先还原过期草稿再应用。"
+        }
         (ResolvedLocale::ZhCn, HumanMessageKey::AliasProspective) => "候选（尚未保存）",
         (ResolvedLocale::ZhCn, HumanMessageKey::AliasOverrideSaved) => "工作区别名覆盖已保存。",
         (ResolvedLocale::ZhCn, HumanMessageKey::AliasOverrideReset) => "工作区别名覆盖已移除。",
