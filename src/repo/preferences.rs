@@ -91,6 +91,13 @@ impl WorkspacePreferences {
         self.overrides.values().cloned().collect()
     }
 
+    /// Returns the internal canonical identities for coordination code. Human
+    /// renderers must never display these device-local/private identities.
+    #[must_use]
+    pub fn identities(&self) -> BTreeSet<CanonicalRepositoryIdentity> {
+        self.overrides.keys().cloned().collect()
+    }
+
     /// Returns a copy with an identity-local override set.
     #[must_use]
     pub fn with_override(
@@ -252,6 +259,33 @@ impl WorkspacePreferenceStore {
         &self,
     ) -> Result<WorkspacePreferencesSnapshot, WorkspacePreferenceError> {
         self.snapshot_unlocked()
+    }
+
+    /// Returns whether an opaque snapshot is still byte-exactly current.
+    ///
+    /// This is deliberately read-only so rollback verification cannot create
+    /// state while reporting an import failure.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same safe read error as [`Self::snapshot_read_only`].
+    pub fn snapshot_is_current(
+        &self,
+        expected: &WorkspacePreferencesSnapshot,
+    ) -> Result<bool, WorkspacePreferenceError> {
+        Ok(self.snapshot_read_only()?.matches(expected))
+    }
+
+    /// Returns whether a guided write receipt is still byte-exactly current.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same safe read error as [`Self::snapshot_read_only`].
+    pub fn write_receipt_is_current(
+        &self,
+        receipt: &WorkspacePreferencesWriteReceipt,
+    ) -> Result<bool, WorkspacePreferenceError> {
+        Ok(receipt.matches(&self.snapshot_read_only()?))
     }
 
     /// Saves a replacement only when the original bytes are still current.

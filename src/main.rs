@@ -1,4 +1,6 @@
 use std::{
+    collections::BTreeMap,
+    fs,
     io::{self, IsTerminal, Read, Write},
     process::ExitCode,
     thread,
@@ -7,7 +9,7 @@ use std::{
 
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
-use dialoguer::Select;
+use dialoguer::{Confirm, Select};
 use tabbeacon::cli::{
     AliasCommand, Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, HumanOutputArgs,
     InterfaceCommand, InterfacePreferenceKey, OutputMode, PreviewArgs, Provider, SetupCommand,
@@ -46,13 +48,17 @@ use tabbeacon::{
         WindowsTerminalRenderer,
     },
     repo::{
-        AliasCandidate, RepositoryAlias, WorkspaceAliasError, WorkspaceAliasInspection,
-        WorkspaceIdentityResolver,
+        AliasCandidate, RepositoryAlias, StableAliasRegistry, WorkspaceAliasError,
+        WorkspaceAliasInspection, WorkspaceIdentityResolver, WorkspacePreferenceStore,
     },
     settings::{
         ActivityMode, ConditionalSaveOutcome, PresentationSettings, PresentationSettingsSnapshot,
         PresentationSettingsStore, PresentationTheme, SnapshotSaveOutcome, SpinnerPreset,
         TabColorMode, TitleMode,
+    },
+    settings_transfer::{
+        ImportApplyOutcome, ImportPlan, MAX_EXPORT_BYTES, SettingsExportV1, apply_import_plan,
+        write_export_file,
     },
     windows_terminal_policy::WindowsTerminalPolicyStore,
 };
@@ -71,6 +77,7 @@ fn main() -> ExitCode {
     dispatch(cli)
 }
 
+#[allow(clippy::too_many_lines)]
 fn dispatch(cli: Cli) -> ExitCode {
     match cli.command {
         None | Some(Command::Ui) => ui(),
@@ -167,6 +174,16 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Alias { command, output }) => {
             alias_command(command, output.mode(), output.language.preference())
         }
+        Some(Command::Export {
+            destination,
+            force,
+            output,
+        }) => export_settings(destination.as_deref(), force, output),
+        Some(Command::Import {
+            path,
+            apply,
+            output,
+        }) => import_settings(&path, apply, output),
         Some(Command::Preview(arguments)) => preview(arguments),
         Some(Command::Completions { shell }) => completions(shell),
     }
@@ -2275,6 +2292,356 @@ fn wizard_error(
         );
     }
     ExitCode::from(2)
+}
+
+fn export_settings(
+    destination: Option<&std::path::Path>,
+    force: bool,
+    output: HumanOutputArgs,
+) -> ExitCode {
+    let presentation_store = match settings_store() {
+        Ok(store) => store,
+        Err(error) => return transfer_failure("EXPORT", &error, output),
+    };
+    let interface_store = match interface_store() {
+        Ok(store) => store,
+        Err(error) => return transfer_failure("EXPORT", &error, output),
+    };
+    let workspace_store = match WorkspacePreferenceStore::from_environment() {
+        Ok(store) => store,
+        Err(error) => return transfer_failure("EXPORT", &error, output),
+    };
+    let presentation = match presentation_store.snapshot_read_only() {
+        Ok(snapshot) => (!snapshot.is_absent()).then_some(snapshot.settings()),
+        Err(error) => return transfer_failure("EXPORT", &error, output),
+    };
+    let interface = match interface_store.snapshot_read_only() {
+        Ok(snapshot) => (!snapshot.is_absent()).then_some(snapshot.preferences()),
+        Err(error) => return transfer_failure("EXPORT", &error, output),
+    };
+    let workspace = match workspace_store.snapshot_read_only() {
+        Ok(snapshot) => snapshot.preferences().clone(),
+        Err(error) => return transfer_failure("EXPORT", &error, output),
+    };
+    let document = SettingsExportV1::new(presentation, interface, &workspace);
+    let bytes = match document.to_canonical_json() {
+        Ok(bytes) => bytes,
+        Err(error) => return transfer_failure("EXPORT", &error, output),
+    };
+
+    let Some(destination) = destination else {
+        return match io::stdout()
+            .write_all(&bytes)
+            .and_then(|()| io::stdout().flush())
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    };
+
+    match write_export_file(destination, &bytes, force) {
+        Ok(()) => {
+            print_export_summary(&document, output);
+            ExitCode::SUCCESS
+        }
+        Err(error) => transfer_failure("EXPORT", &error, output),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn import_settings(path: &std::path::Path, apply: bool, output: HumanOutputArgs) -> ExitCode {
+    let Ok(file) = fs::File::open(path) else {
+        return transfer_failure("IMPORT", &io::Error::other("input is unreadable"), output);
+    };
+    let mut bytes = Vec::new();
+    let mut bounded = file.take(u64::try_from(MAX_EXPORT_BYTES + 1).unwrap_or(u64::MAX));
+    if bounded.read_to_end(&mut bytes).is_err() {
+        return transfer_failure("IMPORT", &io::Error::other("input is unreadable"), output);
+    }
+    let document = match SettingsExportV1::parse(&bytes) {
+        Ok(document) => document,
+        Err(error) => return transfer_failure("IMPORT", &error, output),
+    };
+    let presentation_store = match settings_store() {
+        Ok(store) => store,
+        Err(error) => return transfer_failure("IMPORT", &error, output),
+    };
+    let interface_store = match interface_store() {
+        Ok(store) => store,
+        Err(error) => return transfer_failure("IMPORT", &error, output),
+    };
+    let workspace_store = match WorkspacePreferenceStore::from_environment() {
+        Ok(store) => store,
+        Err(error) => return transfer_failure("IMPORT", &error, output),
+    };
+    let presentation_snapshot = match presentation_store.snapshot_read_only() {
+        Ok(snapshot) => snapshot,
+        Err(error) => return transfer_failure("IMPORT", &error, output),
+    };
+    let interface_snapshot = match interface_store.snapshot_read_only() {
+        Ok(snapshot) => snapshot,
+        Err(error) => return transfer_failure("IMPORT", &error, output),
+    };
+    let workspace_snapshot = match workspace_store.snapshot_read_only() {
+        Ok(snapshot) => snapshot,
+        Err(error) => return transfer_failure("IMPORT", &error, output),
+    };
+    let mut known_identities = workspace_snapshot.preferences().identities();
+    let registry = match StableAliasRegistry::default_state_root() {
+        Ok(root) => StableAliasRegistry::new(root),
+        Err(error) => return transfer_failure("IMPORT", &error, output),
+    };
+    let mut generated_aliases = BTreeMap::new();
+    match registry.assignments_read_only() {
+        Ok(assignments) => {
+            for (identity, assignment) in assignments {
+                known_identities.insert(identity.clone());
+                generated_aliases.insert(identity, assignment.generated_alias().clone());
+            }
+        }
+        Err(error) => return transfer_failure("IMPORT", &error, output),
+    }
+    let plan = match document.import_plan(
+        &presentation_snapshot,
+        &interface_snapshot,
+        &workspace_snapshot,
+        &known_identities,
+        &generated_aliases,
+    ) {
+        Ok(plan) => plan,
+        Err(error) => return transfer_failure("IMPORT", &error, output),
+    };
+
+    print_import_summary(&plan, &document, None, output);
+    if !plan.is_applicable() {
+        return ExitCode::from(2);
+    }
+
+    let apply = if apply {
+        true
+    } else if is_interactive_terminal() {
+        let prompt = tabbeacon::human_presentation::catalog(
+            human_runtime_presentation(output.language.preference()).locale,
+            HumanMessageKey::ImportConfirmApply,
+        );
+        match Confirm::new().with_prompt(prompt).default(false).interact() {
+            Ok(true) => true,
+            Ok(false) => {
+                print_import_summary(&plan, &document, Some("cancelled"), output);
+                return ExitCode::SUCCESS;
+            }
+            Err(_) => return ExitCode::from(2),
+        }
+    } else {
+        return ExitCode::SUCCESS;
+    };
+
+    if !apply {
+        return ExitCode::SUCCESS;
+    }
+    let outcome = apply_import_plan(
+        &plan,
+        &presentation_store,
+        &presentation_snapshot,
+        &interface_store,
+        &interface_snapshot,
+        &workspace_store,
+        &workspace_snapshot,
+    );
+    print_import_summary(&plan, &document, Some(import_outcome_name(outcome)), output);
+    match outcome {
+        ImportApplyOutcome::Applied => ExitCode::SUCCESS,
+        ImportApplyOutcome::Conflict
+        | ImportApplyOutcome::RolledBack
+        | ImportApplyOutcome::PartialState => ExitCode::from(2),
+    }
+}
+
+fn import_outcome_name(outcome: ImportApplyOutcome) -> &'static str {
+    match outcome {
+        ImportApplyOutcome::Applied => "applied",
+        ImportApplyOutcome::RolledBack => "rolled_back",
+        ImportApplyOutcome::PartialState => "partial_state",
+        ImportApplyOutcome::Conflict => "conflict",
+    }
+}
+
+fn print_export_summary(document: &SettingsExportV1, output: HumanOutputArgs) {
+    if output.mode() == OutputMode::Plain {
+        println!("EXPORT=PASS");
+        println!("EXPORT_SCHEMA=tabbeacon-export-v1");
+        println!("PRESENTATION_EXPORTED={}", document.has_presentation());
+        println!("INTERFACE_EXPORTED={}", document.has_interface());
+        println!(
+            "PORTABLE_WORKSPACE_ALIASES={}",
+            document.portable_workspace_alias_count()
+        );
+        println!(
+            "DEVICE_LOCAL_WORKSPACE_ALIASES_OMITTED={}",
+            document.omitted_device_local_workspace_aliases()
+        );
+        return;
+    }
+    let document = HumanDocument::new(
+        HumanText::message(HumanMessageKey::Export),
+        Some(HumanText::message(HumanMessageKey::ExportWritten)),
+    )
+    .with_section(
+        HumanSection::new(Some(HumanText::message(HumanMessageKey::Configuration)))
+            .with_field(HumanField::new(
+                None::<String>,
+                HumanText::message(HumanMessageKey::Presentation),
+                human_boolean_text(document.has_presentation()),
+                HumanTone::Plain,
+            ))
+            .with_field(HumanField::new(
+                None::<String>,
+                HumanText::message(HumanMessageKey::Interface),
+                human_boolean_text(document.has_interface()),
+                HumanTone::Plain,
+            ))
+            .with_message(HumanMessage::plain(
+                HumanText::template(
+                    HumanMessageKey::DeviceLocalAliasesOmitted,
+                    [document
+                        .omitted_device_local_workspace_aliases()
+                        .to_string()],
+                ),
+                HumanTone::Dim,
+            )),
+    );
+    print_human_document(&document, output.language.preference());
+}
+
+fn print_import_summary(
+    plan: &ImportPlan,
+    document: &SettingsExportV1,
+    outcome: Option<&str>,
+    output: HumanOutputArgs,
+) {
+    if output.mode() == OutputMode::Plain {
+        println!("IMPORT={}", outcome.unwrap_or("PREVIEW"));
+        println!("IMPORT_SCHEMA=tabbeacon-export-v1");
+        println!("PRESENTATION_CHANGES={}", plan.changes_presentation());
+        println!("INTERFACE_CHANGES={}", plan.changes_interface());
+        println!(
+            "WORKSPACE_PREFERENCE_CHANGES={}",
+            plan.changes_workspace_preferences()
+        );
+        println!("PORTABLE_WORKSPACE_MATCHES={}", plan.portable_matches());
+        println!("PORTABLE_WORKSPACE_UNMATCHED={}", plan.unmatched_entries());
+        println!(
+            "DEVICE_LOCAL_WORKSPACE_ALIASES_OMITTED={}",
+            document.omitted_device_local_workspace_aliases()
+        );
+        println!("ALIAS_IMPORT_CONFLICTS={}", plan.conflicts().len());
+        println!("NON_TTY_MUTATION_REQUIRES_APPLY=true");
+        return;
+    }
+
+    let status = match outcome {
+        Some("applied") => HumanMessageKey::ImportApplied,
+        Some("conflict") | None if !plan.is_applicable() => HumanMessageKey::ImportConflict,
+        Some("rolled_back") => HumanMessageKey::ImportRolledBack,
+        Some("partial_state") => HumanMessageKey::ImportPartialState,
+        Some("cancelled") => HumanMessageKey::ImportCancelled,
+        _ => HumanMessageKey::ImportPreview,
+    };
+    let tone = match outcome {
+        Some("applied") => HumanTone::Success,
+        Some("partial_state" | "conflict") => HumanTone::Failure,
+        Some("rolled_back") => HumanTone::Attention,
+        _ if !plan.is_applicable() => HumanTone::Failure,
+        _ => HumanTone::Plain,
+    };
+    let section = HumanSection::new(Some(HumanText::message(HumanMessageKey::PlannedChanges)))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Presentation),
+            human_boolean_text(plan.changes_presentation()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Interface),
+            human_boolean_text(plan.changes_interface()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Workspace),
+            human_boolean_text(plan.changes_workspace_preferences()),
+            HumanTone::Plain,
+        ))
+        .with_message(HumanMessage::plain(
+            HumanText::template(
+                HumanMessageKey::PortableAliasesMatched,
+                [plan.portable_matches().to_string()],
+            ),
+            HumanTone::Dim,
+        ))
+        .with_message(HumanMessage::plain(
+            HumanText::template(
+                HumanMessageKey::PortableAliasesUnmatched,
+                [plan.unmatched_entries().to_string()],
+            ),
+            HumanTone::Dim,
+        ))
+        .with_message(HumanMessage::plain(
+            HumanText::template(
+                HumanMessageKey::DeviceLocalAliasesOmitted,
+                [document
+                    .omitted_device_local_workspace_aliases()
+                    .to_string()],
+            ),
+            HumanTone::Dim,
+        ));
+    let section = if outcome.is_none() && plan.is_applicable() {
+        section.with_message(HumanMessage::plain(
+            HumanText::message(HumanMessageKey::ImportApplyRequired),
+            tone,
+        ))
+    } else {
+        section
+    };
+    let document = HumanDocument::new(
+        HumanText::message(HumanMessageKey::Import),
+        Some(HumanText::message(status)),
+    )
+    .with_section(section);
+    print_human_document(&document, output.language.preference());
+}
+
+fn transfer_failure(
+    operation: &str,
+    error: &dyn std::error::Error,
+    output: HumanOutputArgs,
+) -> ExitCode {
+    if output.mode() == OutputMode::Plain {
+        eprintln!("{operation}=FAIL");
+        eprintln!("REASON={error}");
+    } else {
+        let key = if operation == "EXPORT" {
+            HumanMessageKey::Export
+        } else {
+            HumanMessageKey::Import
+        };
+        eprint_human_text(
+            HumanTone::Failure,
+            &HumanText::template(
+                HumanMessageKey::OperationCouldNotComplete,
+                [
+                    render_human_text(
+                        human_runtime_presentation(output.language.preference()).locale,
+                        &HumanText::message(key),
+                    ),
+                    error.to_string(),
+                ],
+            ),
+            output.language.preference(),
+        );
+    }
+    ExitCode::FAILURE
 }
 
 fn preview(arguments: PreviewArgs) -> ExitCode {

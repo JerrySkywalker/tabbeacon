@@ -329,6 +329,203 @@ fn alias_set_reset_and_collision_remain_device_local_and_generic() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn export_import_is_preview_first_portable_and_non_tty_apply_is_explicit() {
+    let source = TestRoot::new("export-source");
+    let target = TestRoot::new("import-target");
+    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let export_path = source.child("portable-settings.json");
+
+    let config = isolated_command(&source)
+        .current_dir(&repository)
+        .args(["config", "set", "spinner", "pulse", "--plain"])
+        .output()
+        .expect("source presentation setting starts");
+    assert!(config.status.success());
+    let interface = isolated_command(&source)
+        .current_dir(&repository)
+        .args(["interface", "set", "language", "zh-CN", "--plain"])
+        .output()
+        .expect("source Interface setting starts");
+    assert!(interface.status.success());
+    let alias = isolated_command(&source)
+        .current_dir(&repository)
+        .args(["alias", "set", "TB", "--plain"])
+        .output()
+        .expect("source alias setting starts");
+    assert!(alias.status.success());
+
+    let exported = isolated_command(&source)
+        .args([
+            "export",
+            "--output",
+            export_path.to_str().expect("test path is UTF-8"),
+            "--plain",
+        ])
+        .output()
+        .expect("export starts");
+    assert!(exported.status.success());
+    let exported = String::from_utf8(exported.stdout).expect("export receipt is UTF-8");
+    assert!(exported.contains("EXPORT=PASS"));
+    let export_document = fs::read_to_string(&export_path).expect("export document reads");
+    assert!(export_document.contains("tabbeacon-export-v1"));
+    assert!(!export_document.contains("remote:"));
+    assert!(!export_document.contains("dir-v1:"));
+    assert!(!export_document.contains("session_id"));
+    assert!(!export_document.contains("LOCALAPPDATA"));
+
+    let no_overwrite = isolated_command(&source)
+        .args([
+            "export",
+            "--output",
+            export_path.to_str().expect("test path is UTF-8"),
+            "--plain",
+        ])
+        .output()
+        .expect("second export starts");
+    assert!(!no_overwrite.status.success());
+    assert!(
+        String::from_utf8(no_overwrite.stderr)
+            .expect("overwrite failure is UTF-8")
+            .contains("EXPORT=FAIL")
+    );
+    assert_eq!(
+        fs::read_to_string(&export_path).expect("original export remains readable"),
+        export_document,
+        "a refused overwrite must leave the complete original document intact"
+    );
+    let forced_overwrite = isolated_command(&source)
+        .args([
+            "export",
+            "--output",
+            export_path.to_str().expect("test path is UTF-8"),
+            "--force",
+            "--plain",
+        ])
+        .output()
+        .expect("forced export starts");
+    assert!(forced_overwrite.status.success());
+    assert_eq!(
+        fs::read_to_string(&export_path).expect("forced export remains readable"),
+        export_document,
+        "forced replacement must install one complete canonical document"
+    );
+    let human_export = isolated_command(&source)
+        .args([
+            "export",
+            "--output",
+            export_path.to_str().expect("test path is UTF-8"),
+            "--force",
+            "--lang",
+            "zh-CN",
+        ])
+        .output()
+        .expect("Chinese Human export starts");
+    assert!(human_export.status.success());
+    let human_export = String::from_utf8(human_export.stdout).expect("Human export is UTF-8");
+    assert!(human_export.contains("TabBeacon 导出"));
+    assert!(!human_export.contains("EXPORT="));
+
+    let target_alias = isolated_command(&target)
+        .current_dir(&repository)
+        .args(["alias", "set", "OTHER", "--plain"])
+        .output()
+        .expect("target identity bootstrap starts");
+    assert!(target_alias.status.success());
+    let preview = isolated_command(&target)
+        .args([
+            "import",
+            export_path.to_str().expect("test path is UTF-8"),
+            "--plain",
+        ])
+        .output()
+        .expect("non-TTY preview starts");
+    assert!(preview.status.success());
+    let preview = String::from_utf8(preview.stdout).expect("preview receipt is UTF-8");
+    assert!(preview.contains("IMPORT=PREVIEW"));
+    assert!(preview.contains("NON_TTY_MUTATION_REQUIRES_APPLY=true"));
+    assert!(
+        !target.child("local-appdata/TabBeacon/config.toml").exists(),
+        "preview did not write Presentation state"
+    );
+    let human_preview = isolated_command(&target)
+        .args([
+            "import",
+            export_path.to_str().expect("test path is UTF-8"),
+            "--lang",
+            "zh-CN",
+        ])
+        .output()
+        .expect("Chinese Human preview starts");
+    assert!(human_preview.status.success());
+    let human_preview = String::from_utf8(human_preview.stdout).expect("Human preview is UTF-8");
+    assert!(human_preview.contains("TabBeacon 导入"));
+    assert!(human_preview.contains("导入预览"));
+    assert!(!human_preview.contains("IMPORT="));
+    let oversize_path = target.child("oversize.json");
+    fs::write(&oversize_path, vec![b' '; 1024 * 1024 + 1]).expect("oversize fixture writes");
+    let oversize = isolated_command(&target)
+        .args([
+            "import",
+            oversize_path.to_str().expect("test path is UTF-8"),
+            "--plain",
+        ])
+        .output()
+        .expect("oversize import starts");
+    assert!(!oversize.status.success());
+    assert!(
+        String::from_utf8(oversize.stderr)
+            .expect("oversize failure is UTF-8")
+            .contains("IMPORT=FAIL")
+    );
+
+    let applied = isolated_command(&target)
+        .args([
+            "import",
+            export_path.to_str().expect("test path is UTF-8"),
+            "--apply",
+            "--plain",
+        ])
+        .output()
+        .expect("explicit import starts");
+    assert!(applied.status.success());
+    let applied = String::from_utf8(applied.stdout).expect("apply receipt is UTF-8");
+    assert!(applied.contains("IMPORT=applied"));
+
+    let settings = isolated_command(&target)
+        .args(["config", "show", "--plain"])
+        .output()
+        .expect("target settings read");
+    assert!(settings.status.success());
+    assert!(
+        String::from_utf8(settings.stdout)
+            .expect("settings receipt is UTF-8")
+            .contains("SPINNER_PRESET=pulse")
+    );
+    let interface = isolated_command(&target)
+        .args(["interface", "show", "--plain"])
+        .output()
+        .expect("target Interface read");
+    assert!(interface.status.success());
+    assert!(
+        String::from_utf8(interface.stdout)
+            .expect("Interface receipt is UTF-8")
+            .contains("INTERFACE_LANGUAGE=zh-CN")
+    );
+    let alias = isolated_command(&target)
+        .current_dir(&repository)
+        .args(["alias", "show", "--plain"])
+        .output()
+        .expect("target alias read");
+    assert!(alias.status.success());
+    assert!(
+        String::from_utf8(alias.stdout)
+            .expect("alias receipt is UTF-8")
+            .contains("CUSTOM_ALIAS=TB")
+    );
+}
+
+#[test]
 fn human_locale_and_interface_state_stay_user_local() {
     let root = TestRoot::new("localized-human-interface");
 
