@@ -622,14 +622,14 @@ fn assert_real_hook_ingress(root: &TestRoot, command: &str) {
             .any(|entry| {
                 entry.is_ok_and(|entry| {
                     entry.file_name().to_str().is_some_and(|name| {
-                        name.starts_with("registry-v1-")
+                        name.starts_with("registry-v2-")
                             && Path::new(name)
                                 .extension()
                                 .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
                     })
                 })
             }),
-        "the real binary must receive Codex stdin and reach repository identity"
+        "the real binary must receive Codex stdin and publish v2 repository identity state"
     );
 }
 
