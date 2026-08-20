@@ -125,6 +125,16 @@ impl RootWorkspaceAnchorStore {
                     "root anchor binding is stale relative to a retired generation",
                 ));
             }
+            if state
+                .anchor
+                .as_ref()
+                .is_some_and(|anchor| anchor.bound_at_generation > generation)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "root anchor binding is stale relative to a newer binding",
+                ));
+            }
             state.anchor = Some(PersistedRootWorkspaceAnchor {
                 workspace_identity_sha256: workspace_identity_sha256.to_owned(),
                 effective_alias: effective_alias.as_str().to_owned(),
@@ -528,6 +538,28 @@ mod tests {
                     RootWorkspaceBindingSource::SessionStartStartup,
                 )
                 .is_ok()
+        );
+        let older_alias = RepositoryAlias::new("ALT".to_owned()).expect("safe alias");
+        assert!(
+            store
+                .bind(
+                    &session,
+                    2,
+                    10,
+                    &identity(),
+                    &older_alias,
+                    RootWorkspaceBindingSource::UserPromptFallback,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .select_existing_or_observe_mismatch(&session, 3, 10, &identity())
+                .expect("newer anchor remains readable")
+                .expect("newer anchor remains present")
+                .effective_alias()
+                .as_str(),
+            "ROOT"
         );
 
         fs::remove_dir_all(root).expect("owned test root is removed");

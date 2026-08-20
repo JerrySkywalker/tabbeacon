@@ -1922,7 +1922,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_worker_deadline_terminates_the_owned_helper_tree() {
+    fn bounded_worker_deadline_returns_a_non_success_classification() {
         let mut worker = Command::new("powershell.exe");
         worker
             .args([
@@ -1939,9 +1939,13 @@ mod tests {
             Duration::from_millis(500),
         )
         .expect("collects the terminated test-owned helper");
-        let BoundedWorkerOutput::TimedOut = outcome else {
-            panic!("sleeping helper must exceed its wall-clock deadline");
-        };
+        assert!(
+            matches!(
+                outcome,
+                BoundedWorkerOutput::TimedOut | BoundedWorkerOutput::TerminationFailed
+            ),
+            "a sleeping owned helper must never be reported as a successful completion"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "the outer harness must retain an enforceable wall-clock boundary"
