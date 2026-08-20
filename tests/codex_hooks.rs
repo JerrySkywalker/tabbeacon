@@ -1137,6 +1137,157 @@ fn subagent_start_stop_and_activity_cannot_replace_or_terminate_root_state() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn root_workspace_anchor_keeps_titles_stable_and_persists_only_safe_observations() {
+    let root = TestRoot::new("root-workspace-anchor");
+    let root_workspace = root.child("root-workspace");
+    let alternate_workspace = root.child("temporary-worktree");
+    let state = root.child("state");
+    init_repo(
+        &root_workspace,
+        "https://example.invalid/team/root-workspace.git",
+    );
+    init_repo(
+        &alternate_workspace,
+        "https://example.invalid/team/temporary-worktree.git",
+    );
+    let resolver = WorkspaceIdentityResolver::new(&state);
+    resolver
+        .set_alias_override(&root_workspace, "ROOT")
+        .expect("root alias is configured for deterministic title assertions");
+    resolver
+        .set_alias_override(&alternate_workspace, "ALT")
+        .expect("alternate alias is configured without changing the root binding");
+
+    let runtime = CodexHookRuntime::new(&state, true);
+    let mut start = hook_payload("SessionStart", "session-anchor", &root_workspace);
+    start["source"] = Value::String("startup".to_owned());
+    let mut output = Vec::new();
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&start).expect("start serializes"),
+            UNIX_EPOCH,
+            &mut output,
+        ),
+        HookDispatchOutcome::Applied
+    );
+    assert!(String::from_utf8_lossy(&output).contains("]0;○ ROOT"));
+
+    let tool = hook_payload_for_turn(
+        "PostToolUse",
+        "session-anchor",
+        "root-turn",
+        &alternate_workspace,
+    );
+    output.clear();
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&tool).expect("alternate tool serializes"),
+            UNIX_EPOCH,
+            &mut output,
+        ),
+        HookDispatchOutcome::Applied
+    );
+    let tool_title = String::from_utf8_lossy(&output);
+    assert!(tool_title.contains("]0;○ ROOT"));
+    assert!(!tool_title.contains("]0;○ ALT"));
+
+    let mut subagent_start = hook_payload_for_turn(
+        "SubagentStart",
+        "session-anchor",
+        "child-turn",
+        &alternate_workspace,
+    );
+    subagent_start["agent_id"] = Value::String("agent-private-child".to_owned());
+    subagent_start["agent_type"] = Value::String("explorer".to_owned());
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&subagent_start).expect("subagent start serializes"),
+            UNIX_EPOCH,
+            &mut Vec::new(),
+        ),
+        HookDispatchOutcome::IgnoredSubagent
+    );
+    let anchor_state = files_under(&state)
+        .into_iter()
+        .find(|path| {
+            path.to_string_lossy()
+                .contains("codex-root-workspace-anchor-v1")
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+        })
+        .expect("explicit lifecycle observation writes one owned anchor state");
+    let anchor_text = fs::read_to_string(&anchor_state).expect("anchor state reads");
+    assert!(anchor_text.contains("\"active_subagents\": 1"));
+    let alternate_path = alternate_workspace.to_string_lossy().into_owned();
+    for forbidden in [
+        "agent-private-child",
+        "temporary-worktree",
+        alternate_path.as_str(),
+        "session-anchor",
+    ] {
+        assert!(
+            !anchor_text.contains(forbidden),
+            "anchor state leaked {forbidden}"
+        );
+    }
+
+    let mut subagent_stop = subagent_start.clone();
+    subagent_stop["hook_event_name"] = Value::String("SubagentStop".to_owned());
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&subagent_stop).expect("subagent stop serializes"),
+            UNIX_EPOCH,
+            &mut Vec::new(),
+        ),
+        HookDispatchOutcome::IgnoredSubagent
+    );
+    let anchor_text = fs::read_to_string(&anchor_state).expect("anchor state rereads");
+    assert!(anchor_text.contains("\"active_subagents\": 0"));
+
+    let mut rebind = hook_payload("SessionStart", "session-anchor", &alternate_workspace);
+    rebind["source"] = Value::String("clear".to_owned());
+    output.clear();
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&rebind).expect("authorized rebind serializes"),
+            UNIX_EPOCH,
+            &mut output,
+        ),
+        HookDispatchOutcome::Applied
+    );
+    assert!(String::from_utf8_lossy(&output).contains("]0;○ ALT"));
+
+    let mut resume = hook_payload("SessionStart", "session-anchor", &root_workspace);
+    resume["source"] = Value::String("resume".to_owned());
+    output.clear();
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&resume).expect("authorized resume serializes"),
+            UNIX_EPOCH,
+            &mut output,
+        ),
+        HookDispatchOutcome::Applied
+    );
+    assert!(String::from_utf8_lossy(&output).contains("]0;○ ROOT"));
+
+    let end = hook_payload("SessionEnd", "session-anchor", &root_workspace);
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&end).expect("end serializes"),
+            UNIX_EPOCH,
+            &mut Vec::new(),
+        ),
+        HookDispatchOutcome::Applied
+    );
+    assert!(
+        !anchor_state.exists(),
+        "session end retires the owned session anchor"
+    );
+}
+
+#[test]
 fn persisted_generation_state_contains_no_prompt_or_tool_bodies() {
     let root = TestRoot::new("persisted-content-minimization");
     let repo = root.child("repo");

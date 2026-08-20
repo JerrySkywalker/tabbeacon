@@ -1942,6 +1942,7 @@ fn human_boolean(locale: ResolvedLocale, value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use crate::activity::SessionWorkspaceObservability;
     use std::{
         cell::RefCell,
         panic::{AssertUnwindSafe, catch_unwind},
@@ -2127,6 +2128,7 @@ mod tests {
                     age_seconds: 3,
                     recency: SessionRecency::JustNow,
                     worker_health: SessionWorkerHealth::RecentlyAuthorized,
+                    workspace_observability: SessionWorkspaceObservability::default(),
                 }],
                 read_only: true,
                 boundaries: SessionsBoundaries {

@@ -204,6 +204,14 @@ confined to a newly created
 `<evidence-root>/<run-id>` directory; it refuses an existing run directory or
 artifact name rather than overwriting it.
 
+`--fixture root-workspace-anchor` first captures the normal `ready` color
+baseline, then launches a distinct owned terminal tab whose child executes the
+real Codex Hook runtime. That sequence binds a root workspace, observes an
+alternate tool CWD and explicit subagent CWD, and proves that the live visible
+title retains the root alias. The fixture owns only a temporary injected state
+root; no Owner Hook configuration, Windows Terminal settings, or external
+window is changed.
+
 The runner writes `manifest.json`, `assertions.json`, `environment.json`,
 `uia.json`, and a final `integrity.json`, plus target-only UIA diagnostics and,
 when trusted capture executes, full-window, tab, ROI PNGs and per-fixture

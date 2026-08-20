@@ -17,7 +17,10 @@ pub use evidence::{
     EvidenceManifest, EvidenceWriter, FailureCategory, MachineEnvironment, UiaDump,
     WindowActivation,
 };
-pub use fixture::{FixtureDriver, FixtureReplay, VisualTestCase};
+pub use fixture::{
+    FixtureDriver, FixtureReplay, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME, VisualTestCase,
+    root_workspace_anchor_fixture_alias,
+};
 pub use image::{Rgb, RgbaFrame, Roi, ScreenRect};
 pub use oracle::{
     AnimationOutcome, AnimationThreshold, ColorClassification, ColorMetrics, ColorSemantic,
