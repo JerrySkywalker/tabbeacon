@@ -94,6 +94,19 @@ public static class TabBeaconSmokeWindows {
         }, IntPtr.Zero);
         return records.ToArray();
     }
+
+    public static IntPtr[] FindHandlesForProcess(uint expectedProcessId) {
+        var handles = new List<IntPtr>();
+        EnumWindows(delegate (IntPtr handle, IntPtr state) {
+            uint processId;
+            GetWindowThreadProcessId(handle, out processId);
+            if (processId == expectedProcessId) {
+                handles.Add(handle);
+            }
+            return true;
+        }, IntPtr.Zero);
+        return handles.ToArray();
+    }
 }
 '@
 
@@ -341,6 +354,8 @@ $treeEnumerationProven = $true
 $windowCompleted = $false
 $ownedTreeTerminationAttempted = $false
 $ownedTreeTerminationSucceeded = $false
+$ownedWindowTerminationAttempted = $false
+$ownedWindowTerminationSucceeded = $false
 $launcherTerminationAttempted = $false
 $launcherCompleted = $false
 
@@ -414,18 +429,24 @@ while ([DateTimeOffset]::UtcNow -lt $deadline) {
     } else {
         $null
     }
-    $windowIdentityState = if ($windowObserved) {
+    $windowIdentityState = if ($null -ne $boundWindow -and
+        $boundWindow.ProcessId -eq $windowProcessId) {
         Get-ProcessIdentityState -ProcessId $windowProcessId -ExpectedStartTimeUtcTicks $windowProcessStartTimeUtcTicks
     } else {
-        'unknown'
+        'exited'
     }
     if ($windowIdentityState -eq 'unknown') {
         $identityQueriesProven = $false
     }
     $boundWindowPresent = $null -ne $boundWindow -and
         $boundWindow.ProcessId -eq $windowProcessId -and $windowIdentityState -eq 'live'
-    $windowCompleted = $windowObserved -and $windowIdentityState -eq 'exited' -and -not $boundWindowPresent
-    if ($sentinelObserved -and $childCompleted -and $childTreeCompleted -and $windowCompleted) {
+    $windowCompleted = $windowObserved -and -not $boundWindowPresent -and
+        $windowIdentityState -ne 'unknown'
+    # Once the owned child has completed, close the exact observed fixture
+    # promptly instead of spending the full watchdog interval waiting for a
+    # Windows Terminal close-on-exit preference.
+    if ($sentinelObserved -and $childCompleted -and $childTreeCompleted -and
+        ($windowCompleted -or $windowOwnerBound)) {
         break
     }
     Start-Sleep -Milliseconds 100
@@ -461,13 +482,18 @@ $cleanupDeadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
 if ($windowOwnerBound -and (-not $windowCompleted -or -not $childTreeCompleted)) {
     while ([DateTimeOffset]::UtcNow -lt $cleanupDeadline) {
         $boundWindow = [TabBeaconSmokeWindows]::GetRecord($windowHandle)
-        $windowIdentityState = Get-ProcessIdentityState -ProcessId $windowProcessId -ExpectedStartTimeUtcTicks $windowProcessStartTimeUtcTicks
+        $windowIdentityState = if ($null -ne $boundWindow -and
+            $boundWindow.ProcessId -eq $windowProcessId) {
+            Get-ProcessIdentityState -ProcessId $windowProcessId -ExpectedStartTimeUtcTicks $windowProcessStartTimeUtcTicks
+        } else {
+            'exited'
+        }
         if ($windowIdentityState -eq 'unknown') {
             $identityQueriesProven = $false
         }
         $boundWindowPresent = $null -ne $boundWindow -and
             $boundWindow.ProcessId -eq $windowProcessId -and $windowIdentityState -eq 'live'
-        $windowCompleted = $windowIdentityState -eq 'exited' -and -not $boundWindowPresent
+        $windowCompleted = -not $boundWindowPresent -and $windowIdentityState -ne 'unknown'
         if ($null -ne $childProcessId) {
             if ($windowChildLineageBound) {
                 $treeSnapshotState = Add-OwnedProcessTreeSnapshot -RootProcessId $childProcessId -RootStartTimeUtcTicks $childProcessStartTimeUtcTicks -TrackedProcesses $ownedProcessTree
@@ -526,13 +552,47 @@ if ($windowOwnerBound -and (-not $windowCompleted -or -not $childTreeCompleted))
         $ownedTreeTerminationSucceeded = $ownedTreeTerminationSucceeded -and $childTreeCompleted
     }
     $boundWindow = [TabBeaconSmokeWindows]::GetRecord($windowHandle)
-    $windowIdentityState = Get-ProcessIdentityState -ProcessId $windowProcessId -ExpectedStartTimeUtcTicks $windowProcessStartTimeUtcTicks
+    $windowIdentityState = if ($null -ne $boundWindow -and
+        $boundWindow.ProcessId -eq $windowProcessId) {
+        Get-ProcessIdentityState -ProcessId $windowProcessId -ExpectedStartTimeUtcTicks $windowProcessStartTimeUtcTicks
+    } else {
+        'exited'
+    }
     if ($windowIdentityState -eq 'unknown') {
         $identityQueriesProven = $false
     }
     $boundWindowPresent = $null -ne $boundWindow -and
         $boundWindow.ProcessId -eq $windowProcessId -and $windowIdentityState -eq 'live'
-    $windowCompleted = $windowIdentityState -eq 'exited' -and -not $boundWindowPresent
+    $windowCompleted = -not $boundWindowPresent -and $windowIdentityState -ne 'unknown'
+}
+
+# A WM_CLOSE that does not retire the disposable window cannot be treated as
+# cleanup. A last-resort tree termination is admitted only when the exact
+# owner PID/start time remains live and every top-level window of that process
+# is this one run-token-bound fixture window; a shared Owner terminal is never
+# an eligible target.
+if (-not $windowCompleted -and $windowIdentityState -eq 'live') {
+    $ownerWindowHandles = [TabBeaconSmokeWindows]::FindHandlesForProcess($windowProcessId)
+    $revalidatedOwnedWindow = [TabBeaconSmokeWindows]::GetRecord($windowHandle)
+    $ownedWindowProcessExact = $ownerWindowHandles.Count -eq 1 -and
+        $ownerWindowHandles[0] -eq $windowHandle -and
+        $null -ne $revalidatedOwnedWindow -and
+        $revalidatedOwnedWindow.ProcessId -eq $windowProcessId -and
+        $revalidatedOwnedWindow.Title -eq $windowTitle -and
+        (Get-ProcessIdentityState -ProcessId $windowProcessId -ExpectedStartTimeUtcTicks $windowProcessStartTimeUtcTicks) -eq 'live'
+    if ($ownedWindowProcessExact) {
+        $ownedWindowTerminationAttempted = $true
+        $ownedWindowTerminationSucceeded = Stop-OwnedProcessTree -ProcessId $windowProcessId -ExpectedStartTimeUtcTicks $windowProcessStartTimeUtcTicks
+        $windowIdentityState = Wait-ProcessIdentityExit -ProcessId $windowProcessId -ExpectedStartTimeUtcTicks $windowProcessStartTimeUtcTicks -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(5))
+        if ($windowIdentityState -eq 'unknown') {
+            $identityQueriesProven = $false
+        }
+        $boundWindow = [TabBeaconSmokeWindows]::GetRecord($windowHandle)
+        $boundWindowPresent = $null -ne $boundWindow -and
+            $boundWindow.ProcessId -eq $windowProcessId -and $windowIdentityState -eq 'live'
+        $windowCompleted = -not $boundWindowPresent -and $windowIdentityState -ne 'unknown'
+        $ownedWindowTerminationSucceeded = $ownedWindowTerminationSucceeded -and $windowCompleted
+    }
 }
 
 if ($null -eq $wtLauncherStartTimeUtcTicks) {
@@ -596,8 +656,10 @@ if (Test-Path -LiteralPath $fixtureResultPath) {
 $ownedTreeTracked = $ownedProcessTree.Count -gt 0
 $cleanupBounded = -not $ownedTreeTerminationAttempted -or
     ($ownedTreeTerminationSucceeded -and $childTreeCompleted)
+$windowCleanupBounded = -not $ownedWindowTerminationAttempted -or
+    ($ownedWindowTerminationSucceeded -and $windowCompleted)
 $passed = -not $watchdogExpired -and $identityQueriesProven -and $treeEnumerationProven -and
-    $ownedTreeTracked -and $launcherCompleted -and $cleanupBounded -and
+    $ownedTreeTracked -and $launcherCompleted -and $cleanupBounded -and $windowCleanupBounded -and
     $windowObserved -and $windowOwnerBound -and $windowChildLineageBound -and
     $windowCompleted -and $childCompleted -and $childTreeCompleted -and $sentinelObserved -and $shellUsable -and
     $fixtureExitCode -eq 0 -and $liveRefresh -and $workspaceSessions -and $hookInventory -and $hookProviderAdapter -and $helpOverlay -and $localeSwitched -and
@@ -633,6 +695,8 @@ $receipt = @(
     "WT_LAUNCHER_TERMINATION_ATTEMPTED=$($launcherTerminationAttempted.ToString().ToLowerInvariant())"
     "OWNED_CHILD_TREE_TERMINATION_ATTEMPTED=$($ownedTreeTerminationAttempted.ToString().ToLowerInvariant())"
     "OWNED_CHILD_TREE_TERMINATION_SUCCEEDED=$($ownedTreeTerminationSucceeded.ToString().ToLowerInvariant())"
+    "OWNED_WINDOW_TERMINATION_ATTEMPTED=$($ownedWindowTerminationAttempted.ToString().ToLowerInvariant())"
+    "OWNED_WINDOW_TERMINATION_SUCCEEDED=$($ownedWindowTerminationSucceeded.ToString().ToLowerInvariant())"
     "WATCHDOG_EXPIRED=$($watchdogExpired.ToString().ToLowerInvariant())"
     "VISUAL_OPERATION_DISPOSITION=$visualOperationDisposition"
     "SENTINEL_OBSERVED=$($sentinelObserved.ToString().ToLowerInvariant())"

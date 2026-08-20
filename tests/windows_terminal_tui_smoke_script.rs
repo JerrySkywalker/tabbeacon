@@ -37,6 +37,10 @@ fn smoke_launch_and_cleanup_are_watchdog_bounded_and_owner_correlated() {
         "the harness must not synchronously wait for wt.exe"
     );
     assert!(
+        script.contains("($windowCompleted -or $windowOwnerBound)"),
+        "the watchdog must request exact-window cleanup as soon as its owned child completes"
+    );
+    assert!(
         script.contains("function Stop-OwnedProcessTree"),
         "a bounded owned-tree termination helper is required"
     );
@@ -60,6 +64,12 @@ fn smoke_launch_and_cleanup_are_watchdog_bounded_and_owner_correlated() {
             && script.contains("return 'unknown'")
             && script.contains("TREE_ENUMERATION_PROVEN="),
         "descendant enumeration failures must be durable unproven evidence"
+    );
+    assert!(
+        script.contains("FindHandlesForProcess")
+            && script.contains("$ownerWindowHandles.Count -eq 1")
+            && script.contains("$ownedWindowProcessExact"),
+        "last-resort terminal termination must be confined to one exact owned window"
     );
     assert!(
         script.contains("WATCHDOG_EXPIRED=")
