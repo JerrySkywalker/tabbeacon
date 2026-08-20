@@ -13,7 +13,7 @@ use dialoguer::{Confirm, Select};
 use tabbeacon::cli::{
     AliasCommand, Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, HumanOutputArgs,
     InterfaceCommand, InterfacePreferenceKey, OutputMode, PreviewArgs, Provider, SetupCommand,
-    TitlePolicyCommand,
+    TitlePolicyCommand, UpgradePreflightArgs,
 };
 use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_title_probe,
@@ -61,6 +61,10 @@ use tabbeacon::{
     settings_transfer::{
         ImportApplyOutcome, ImportPlan, MAX_EXPORT_BYTES, SettingsExportV1, apply_import_plan,
         write_export_file,
+    },
+    upgrade_preflight::{
+        UpgradePreflight, UpgradeProcessInspection, UpgradeReplaceability,
+        inspect_system_upgrade_preflight,
     },
     windows_terminal_policy::{TitleRemediationState, WindowsTerminalPolicyStore},
 };
@@ -148,6 +152,7 @@ fn dispatch(cli: Cli) -> ExitCode {
         })) => doctor(output.mode(), probe_title, output.language.preference()),
         Some(Command::Status(output)) => status(output.mode(), output.language.preference()),
         Some(Command::Sessions(output)) => sessions(output.mode(), output.language.preference()),
+        Some(Command::UpgradePreflight(arguments)) => upgrade_preflight(arguments),
         Some(Command::TitlePolicy { command }) => match command {
             TitlePolicyCommand::Inspect(output) => title_policy_inspect(output.json),
             TitlePolicyCommand::Repair(output) => title_policy_repair(output.json),
@@ -1004,6 +1009,134 @@ fn sessions(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> Exi
 
     print_human_document(&sessions_document(&report), language);
     ExitCode::SUCCESS
+}
+
+fn upgrade_preflight(arguments: UpgradePreflightArgs) -> ExitCode {
+    let report = inspect_system_upgrade_preflight(arguments.drain);
+    match arguments.output.mode() {
+        OutputMode::Json => match serde_json::to_string(&report) {
+            Ok(json) => println!("{json}"),
+            Err(error) => return management_error("UPGRADE_PREFLIGHT", &error),
+        },
+        OutputMode::Plain => print_upgrade_preflight_plain(&report),
+        OutputMode::Human => print_upgrade_preflight_human(&report),
+    }
+    if report.process_inspection == UpgradeProcessInspection::Unavailable
+        || report.target_executable.is_none()
+    {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn print_upgrade_preflight_plain(report: &UpgradePreflight) {
+    println!("UPGRADE_PREFLIGHT_SCHEMA_VERSION={}", report.schema_version);
+    println!("TABBEACON_VERSION={}", report.tabbeacon_version);
+    println!(
+        "CURRENT_EXECUTABLE={}",
+        report
+            .current_executable
+            .as_deref()
+            .unwrap_or("unavailable")
+    );
+    println!("TARGET_SOURCE={}", report.target_source.as_str());
+    println!(
+        "TARGET_EXECUTABLE={}",
+        report.target_executable.as_deref().unwrap_or("unavailable")
+    );
+    println!("PROCESS_INSPECTION={}", report.process_inspection.as_str());
+    println!("WORKER_LEASE_HEALTH={}", report.worker_lease_health);
+    println!("REPLACEABILITY={}", report.replaceability.as_str());
+    println!("OWNED_WORKERS={}", report.proved_owned_worker_count());
+    println!("AMBIGUOUS_PROCESSES={}", report.ambiguous_process_count());
+    println!("DRAIN_REQUESTED={}", report.drain_requested);
+    println!("DRAINED_OWNED_WORKERS={}", report.drained_owned_workers);
+    println!(
+        "UPGRADE_PREFLIGHT_DEFAULT_READ_ONLY={}",
+        report.boundaries.default_read_only
+    );
+    println!(
+        "EXPLICIT_DRAIN_ONLY={}",
+        report.boundaries.explicit_drain_only
+    );
+    println!("RAW_COMMAND_LINES={}", report.boundaries.raw_command_lines);
+    println!(
+        "RAW_NATIVE_SESSION_IDS={}",
+        report.boundaries.raw_native_session_ids
+    );
+    for worker in &report.workers {
+        println!(
+            "WORKER=process_id={}|ownership={}|drain={}",
+            worker.process_id,
+            worker.ownership.as_str(),
+            worker.drain.as_str(),
+        );
+    }
+    let disposition = if report.process_inspection == UpgradeProcessInspection::Unavailable
+        || report.target_executable.is_none()
+    {
+        "UNPROVEN"
+    } else {
+        "PASS"
+    };
+    println!("UPGRADE_PREFLIGHT={disposition}");
+}
+
+fn print_upgrade_preflight_human(report: &UpgradePreflight) {
+    print_human_tone(HumanTone::Plain, "Upgrade preflight");
+    print_human_tone(
+        HumanTone::Plain,
+        format!("Version: {}", report.tabbeacon_version),
+    );
+    print_human_tone(
+        HumanTone::Plain,
+        format!(
+            "Current executable: {}",
+            report
+                .current_executable
+                .as_deref()
+                .unwrap_or("unavailable")
+        ),
+    );
+    print_human_tone(
+        HumanTone::Plain,
+        format!(
+            "Upgrade target: {} ({})",
+            report.target_executable.as_deref().unwrap_or("unavailable"),
+            report.target_source.as_str()
+        ),
+    );
+    print_human_tone(
+        if report.replaceability == UpgradeReplaceability::Blocked {
+            HumanTone::Attention
+        } else {
+            HumanTone::Plain
+        },
+        format!("Replaceability: {}", report.replaceability.as_str()),
+    );
+    print_human_tone(
+        HumanTone::Plain,
+        format!(
+            "Proved owned workers: {}; preserved ambiguous processes: {}",
+            report.proved_owned_worker_count(),
+            report.ambiguous_process_count()
+        ),
+    );
+    if report.drain_requested {
+        print_human_tone(
+            HumanTone::Plain,
+            format!(
+                "Explicit drain stopped {} proved worker(s).",
+                report.drained_owned_workers
+            ),
+        );
+    } else {
+        print_human_tone(
+            HumanTone::Dim,
+            "Read-only. Use --drain only to stop freshly proven TabBeacon activity workers.",
+        );
+    }
 }
 
 fn sessions_document(report: &tabbeacon::activity::SessionsOverview) -> HumanDocument {

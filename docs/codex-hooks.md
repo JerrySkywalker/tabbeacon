@@ -186,10 +186,35 @@ After setup:
    output;
 4. run `tabbeacon doctor`.
 
-Doctor reports declaration presence, modified owned hooks, trusted versus
-inactive hooks, title ownership, executable presence, version compatibility,
-the exact Hook profile, and manifest consistency. Declaration presence alone is not reported as
-active.
+Doctor reports declaration exactness, currentness, trust review or
+trusted-hash drift, disabled Hooks, title ownership, executable presence,
+version compatibility, the exact Hook profile, and manifest consistency. A
+trusted-hash mismatch does not imply that the Hook declaration itself was
+modified. Declaration presence alone is not reported as active.
+
+## Upgrade preflight
+
+Use the bounded local preflight before a package replacement when an active
+worker may still have the installed executable mapped:
+
+```powershell
+tabbeacon upgrade-preflight
+tabbeacon upgrade-preflight --json
+```
+
+The default command is read-only. It reports the current executable/version,
+the installed Cargo target when present, whether a `TabBeacon` worker lock is
+known to remain, and only content-minimal ownership classifications for
+matching processes. It never opens the target for writing or prints arbitrary
+process command lines, Hook payloads, or native session IDs.
+
+`tabbeacon upgrade-preflight --drain` is an explicit local operation. Before a
+stop, TabBeacon rechecks that the exact process uses the inspected executable,
+has the internal activity-worker arguments, and matches a current valid local
+lease. Unowned or ambiguous processes are preserved. It never targets Codex,
+Windows Terminal, PowerShell, Cargo, or another `tabbeacon` executable path.
+After a requested drain leaves no matching process, it performs the final
+replacement-access probe without writing bytes to the target.
 
 The admitted production profile is `codex-hooks-rust-v0.147.0`, audited from
 the official `rust-v0.147.0` source tag. It is turn-aware, thread-spawn

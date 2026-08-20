@@ -2075,7 +2075,17 @@ fn doctor_supports_current_codex_trust_shape_and_detects_inactive_or_conflicting
     assert!(report.checks().iter().any(|check| {
         check.id() == "hooks.trust"
             && check.status() == DoctorStatus::Fail
-            && check.summary().contains("modified/inactive")
+            && check.summary().contains("TRUST_HASH_STALE_OR_CHANGED")
+    }));
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.declarations"
+            && check.status() == DoctorStatus::Pass
+            && check.summary().contains("DECLARATION_EXACT")
+    }));
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.currentness"
+            && check.status() == DoctorStatus::Pass
+            && check.summary().contains("CURRENTNESS_CURRENT")
     }));
 
     install_current_codex_trust_state(&codex_home);

@@ -390,6 +390,7 @@ impl CodexIntegration {
 
     /// Audits binary, manifest, hook, trust, and terminal-title state read-only.
     #[must_use]
+    #[allow(clippy::too_many_lines)] // Ordered read-only checks are the public doctor contract.
     pub fn doctor(&self) -> CodexDoctorReport {
         let mut checks = Vec::new();
         let version = self.probe_codex_version();
@@ -425,22 +426,25 @@ impl CodexIntegration {
             checks.push(match locate_owned_hooks(hooks, &manifest.hooks) {
                 Ok(locations) if locations.len() == manifest.hooks.len() => pass(
                     "hooks.declarations",
-                    "all owned hook declarations are exact",
+                    "DECLARATION_EXACT: all owned hook declarations are exact",
                 ),
-                _ => fail("hooks.declarations", "owned hooks are missing or modified"),
+                _ => fail(
+                    "hooks.declarations",
+                    "DECLARATION_MODIFIED: owned hooks are missing or modified",
+                ),
             });
             checks.push(match desired_hooks(&self.tabbeacon_executable) {
                 Ok(desired) if desired == manifest.hooks => pass(
                     "hooks.currentness",
-                    "owned hook declarations match the current TabBeacon integration",
+                    "CURRENTNESS_CURRENT: owned hook declarations match the current TabBeacon integration",
                 ),
                 Ok(_) => fail(
                     "hooks.currentness",
-                    "owned hook declarations require a TabBeacon upgrade",
+                    "CURRENTNESS_STALE: owned hook declarations require a TabBeacon upgrade",
                 ),
                 Err(_) => fail(
                     "hooks.currentness",
-                    "current TabBeacon hook declarations cannot be generated safely",
+                    "CURRENTNESS_UNPROVEN: current TabBeacon hook declarations cannot be generated safely",
                 ),
             });
             checks.push(match (&version, &config) {
@@ -455,9 +459,12 @@ impl CodexIntegration {
         } else {
             checks.push(fail(
                 "hooks.declarations",
-                "hooks file is missing or incompatible",
+                "HOOK_UNOWNED_OR_AMBIGUOUS: hooks file is missing or incompatible",
             ));
-            checks.push(fail("hooks.trust", "hook trust is not proven"));
+            checks.push(fail(
+                "hooks.trust",
+                "HOOK_UNOWNED_OR_AMBIGUOUS: hook trust is not proven",
+            ));
         }
         checks.push(match (&manifest, config) {
             (Some(manifest), Ok(config))
@@ -1151,19 +1158,28 @@ fn hook_trust_check(
         }
     }
     if modified > 0 || disabled > 0 {
-        fail(
-            "hooks.trust",
+        let summary = if disabled > 0 {
             format!(
-                "{modified} owned hook definitions are modified/inactive; {disabled} owned hooks are disabled"
-            ),
-        )
+                "HOOK_DISABLED: {disabled} owned hooks are disabled; TRUST_HASH_STALE_OR_CHANGED: {modified} trusted hashes differ while declarations remain exact"
+            )
+        } else {
+            format!(
+                "TRUST_HASH_STALE_OR_CHANGED: {modified} trusted hashes differ while declarations remain exact"
+            )
+        };
+        fail("hooks.trust", summary)
     } else if untrusted > 0 {
         warning(
             "hooks.trust",
-            format!("{untrusted} owned hooks require review in Codex /hooks"),
+            format!(
+                "TRUST_REVIEW_REQUIRED: {untrusted} owned hooks require review in Codex /hooks"
+            ),
         )
     } else {
-        pass("hooks.trust", "all owned hooks are trusted and active")
+        pass(
+            "hooks.trust",
+            "TRUST_HASH_CURRENT_AND_ACTIVE: all owned hooks are trusted and active",
+        )
     }
 }
 

@@ -23,6 +23,7 @@ pub mod settings;
 pub mod settings_transfer;
 pub mod setup;
 pub mod title_authority;
+pub mod upgrade_preflight;
 pub mod visual;
 pub mod windows_terminal_policy;
 
