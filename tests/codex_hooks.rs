@@ -23,6 +23,7 @@ use tabbeacon::{
         CodexIntegrationError, CodexNormalization, DoctorStatus, HookDispatchOutcome, SetupOutcome,
         TitleOwnershipOutcome, UninstallOutcome, UnknownEventPolicy,
     },
+    repo::WorkspaceIdentityResolver,
     settings::{
         ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
         TitleMode,
@@ -980,7 +981,7 @@ fn runtime_uses_repository_identity_reconciler_and_existing_renderer() {
         HookDispatchOutcome::Applied
     );
     let rendered = String::from_utf8_lossy(&output);
-    assert!(rendered.contains("\u{1b}]0;○ WM\u{1b}\\"));
+    assert!(rendered.contains("\u{1b}]0;○ WORKMANA\u{1b}\\"));
     assert!(!rendered.contains("working"));
     assert!(rendered.contains("\u{1b}]9;4;3;0\u{1b}\\"));
     assert!(rendered.contains("rgb:2e/cc/71"));
@@ -996,10 +997,39 @@ fn runtime_uses_repository_identity_reconciler_and_existing_renderer() {
         HookDispatchOutcome::Applied
     );
     let rendered = String::from_utf8_lossy(&output);
-    assert!(rendered.contains("○ WM"));
+    assert!(rendered.contains("○ WORKMANA"));
     assert!(!rendered.contains("reset"));
     assert!(rendered.contains("\u{1b}]9;4;0;0\u{1b}\\"));
     assert!(rendered.contains("\u{1b}]104;264\u{1b}\\"));
+}
+
+#[test]
+fn runtime_renders_the_effective_workspace_alias_override() {
+    let root = TestRoot::new("runtime-effective-alias");
+    let repo = root.child("workstation-manager");
+    let state = root.child("state");
+    init_repo(
+        &repo,
+        "https://github.com/JerrySkywalker/workstation-manager.git",
+    );
+    WorkspaceIdentityResolver::new(&state)
+        .set_alias_override(&repo, "LOCAL")
+        .expect("local override is staged before the hook runtime");
+
+    let runtime = CodexHookRuntime::new(&state, true);
+    let prompt = hook_payload("UserPromptSubmit", "session-a", &repo);
+    let mut output = Vec::new();
+    assert_eq!(
+        runtime.dispatch_to(
+            &serde_json::to_vec(&prompt).expect("prompt serializes"),
+            UNIX_EPOCH,
+            &mut output,
+        ),
+        HookDispatchOutcome::Applied
+    );
+    let rendered = String::from_utf8_lossy(&output);
+    assert!(rendered.contains("\u{1b}]0;○ LOCAL\u{1b}\\"));
+    assert!(!rendered.contains("WORKMANA"));
 }
 
 #[test]
@@ -1221,7 +1251,7 @@ fn production_hook_path_applies_each_required_v0_1_channel_combination() {
                 SpinnerPreset::Codex,
                 PresentationTheme::MutedDark,
             ),
-            ["• WM", "rgb:1b/4e/3a", "]9;4;0;0"].as_slice(),
+            ["• WORKMANA", "rgb:1b/4e/3a", "]9;4;0;0"].as_slice(),
             ["9;4;3;0"].as_slice(),
         ),
         (
@@ -1245,7 +1275,7 @@ fn production_hook_path_applies_each_required_v0_1_channel_combination() {
                 SpinnerPreset::Codex,
                 PresentationTheme::MutedDark,
             ),
-            ["• WM", "]104;264"].as_slice(),
+            ["• WORKMANA", "]104;264"].as_slice(),
             ["rgb:", "9;4;3;0"].as_slice(),
         ),
         (
@@ -1257,7 +1287,7 @@ fn production_hook_path_applies_each_required_v0_1_channel_combination() {
                 SpinnerPreset::Braille,
                 PresentationTheme::MutedDark,
             ),
-            ["⠋ WM", "]104;264"].as_slice(),
+            ["⠋ WORKMANA", "]104;264"].as_slice(),
             ["rgb:", "9;4;3;0"].as_slice(),
         ),
         (
@@ -1269,8 +1299,8 @@ fn production_hook_path_applies_each_required_v0_1_channel_combination() {
                 SpinnerPreset::Codex,
                 PresentationTheme::MutedDark,
             ),
-            ["○ WM", "rgb:1b/4e/3a", "]9;4;3;0"].as_slice(),
-            ["• WM", "working"].as_slice(),
+            ["○ WORKMANA", "rgb:1b/4e/3a", "]9;4;3;0"].as_slice(),
+            ["• WORKMANA", "working"].as_slice(),
         ),
         (
             "activity-off",
@@ -1281,8 +1311,8 @@ fn production_hook_path_applies_each_required_v0_1_channel_combination() {
                 SpinnerPreset::Codex,
                 PresentationTheme::MutedDark,
             ),
-            ["○ WM", "rgb:1b/4e/3a", "]9;4;0;0"].as_slice(),
-            ["• WM", "working", "9;4;3;0"].as_slice(),
+            ["○ WORKMANA", "rgb:1b/4e/3a", "]9;4;0;0"].as_slice(),
+            ["• WORKMANA", "working", "9;4;3;0"].as_slice(),
         ),
     ];
     for (name, settings, expected, absent) in cases {

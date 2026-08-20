@@ -6,7 +6,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use tabbeacon::repo::{RepositoryIdentityResolver, WorkspaceIdentityResolver, WorkspaceKind};
+use tabbeacon::repo::{
+    RepositoryAlias, RepositoryIdentityResolver, WorkspaceAliasError, WorkspaceIdentityResolver,
+    WorkspaceKind,
+};
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -259,4 +262,160 @@ fn unicode_long_and_hostile_directory_hints_remain_presentation_safe() {
         assert!(!resolved.alias.as_str().contains(']'));
         assert!(!resolved.alias.as_str().contains(';'));
     }
+}
+
+#[test]
+fn alias_inspection_is_passive_and_set_reset_preserve_generated_history() {
+    let root = TestRoot::new("alias-preferences");
+    let state = root.child("state");
+    let workspace = root.child("ordinary-workspace");
+    fs::create_dir_all(&workspace).expect("ordinary workspace is created");
+    let resolver = WorkspaceIdentityResolver::with_home_directory(&state, None);
+
+    let preview = resolver
+        .inspect_alias(&workspace)
+        .expect("passive alias inspection succeeds");
+    assert!(!preview.is_assigned());
+    assert!(
+        !state.exists(),
+        "inspection must not create a registry root"
+    );
+    assert!(
+        !root.child("workspace-preferences").exists(),
+        "inspection must not create a preference root or lock"
+    );
+
+    let saved = resolver
+        .set_alias_override(&workspace, "CUSTOM")
+        .expect("explicit alias saves");
+    assert!(saved.is_assigned());
+    assert_eq!(
+        saved.custom_alias().map(RepositoryAlias::as_str),
+        Some("CUSTOM")
+    );
+    assert_eq!(saved.effective_alias().as_str(), "CUSTOM");
+    let generated = saved.automatic_alias().clone();
+    let runtime_identity = resolver
+        .resolve(&workspace)
+        .expect("runtime resolve succeeds");
+    assert_eq!(
+        runtime_identity.alias, generated,
+        "compatibility alias remains generated"
+    );
+    assert_eq!(runtime_identity.effective_alias.as_str(), "CUSTOM");
+
+    let reset = resolver
+        .reset_alias_override(&workspace)
+        .expect("override reset succeeds");
+    assert_eq!(reset.custom_alias(), None);
+    assert_eq!(reset.automatic_alias(), &generated);
+    assert_eq!(reset.effective_alias(), &generated);
+    assert_eq!(
+        resolver
+            .resolve(&workspace)
+            .expect("runtime resolve after reset")
+            .effective_alias,
+        generated
+    );
+}
+
+#[test]
+fn alias_override_collision_is_generic_and_preserves_both_workspaces() {
+    let root = TestRoot::new("alias-collision");
+    let state = root.child("state");
+    let first = root.child("first");
+    let second = root.child("second");
+    fs::create_dir_all(&first).expect("first workspace is created");
+    fs::create_dir_all(&second).expect("second workspace is created");
+    let resolver = WorkspaceIdentityResolver::with_home_directory(&state, None);
+
+    resolver
+        .set_alias_override(&first, "CUSTOM")
+        .expect("first alias saves");
+    assert_eq!(
+        resolver.set_alias_override(&second, "CUSTOM"),
+        Err(WorkspaceAliasError::Collision)
+    );
+    let first_view = resolver.inspect_alias(&first).expect("first inspection");
+    let second_view = resolver.inspect_alias(&second).expect("second inspection");
+    assert_eq!(
+        first_view.custom_alias().map(RepositoryAlias::as_str),
+        Some("CUSTOM")
+    );
+    assert_eq!(second_view.custom_alias(), None);
+    assert_ne!(first_view.effective_alias(), second_view.effective_alias());
+}
+
+#[test]
+fn automatic_registry_allocation_reserves_existing_local_overrides() {
+    let root = TestRoot::new("override-reservation");
+    let state = root.child("state");
+    let directory = root.child("directory");
+    let repository = root.child("repository");
+    fs::create_dir_all(&directory).expect("directory workspace is created");
+    init_repo(&repository, Some("https://example.invalid/team/custom.git"));
+    let workspace_resolver = WorkspaceIdentityResolver::with_home_directory(&state, None);
+    workspace_resolver
+        .set_alias_override(&directory, "CUSTOM")
+        .expect("directory override saves");
+
+    let generated = RepositoryIdentityResolver::new(&state)
+        .resolve(&repository)
+        .expect("automatic repository alias resolves");
+    assert_ne!(
+        generated.alias.as_str(),
+        "CUSTOM",
+        "automatic allocation must reserve every explicit local override"
+    );
+}
+
+#[test]
+fn linked_worktrees_share_one_device_local_alias_override() {
+    let root = TestRoot::new("linked-override");
+    let state = root.child("state");
+    let repo = root.child("repo");
+    let linked = root.child("linked");
+    init_repo(&repo, Some("https://example.invalid/team/linked.git"));
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            linked.to_str().expect("linked path is Unicode"),
+        ],
+    );
+    let resolver = WorkspaceIdentityResolver::with_home_directory(&state, None);
+
+    resolver
+        .set_alias_override(&repo, "LINKED")
+        .expect("main worktree alias saves");
+    let linked_view = resolver.inspect_alias(&linked).expect("linked inspection");
+    assert_eq!(
+        linked_view.custom_alias().map(RepositoryAlias::as_str),
+        Some("LINKED")
+    );
+    assert_eq!(linked_view.effective_alias().as_str(), "LINKED");
+}
+
+#[test]
+fn custom_alias_validation_uses_nfc_and_display_width_bounds() {
+    let root = TestRoot::new("alias-validation");
+    let workspace = root.child("workspace");
+    fs::create_dir_all(&workspace).expect("workspace is created");
+    let resolver = WorkspaceIdentityResolver::with_home_directory(root.child("state"), None);
+
+    let nfc = resolver
+        .set_alias_override(&workspace, "e\u{301}")
+        .expect("NFC-composable alias is accepted");
+    assert_eq!(nfc.effective_alias().as_str(), "é");
+    assert_eq!(
+        resolver.set_alias_override(&workspace, "中".repeat(11)),
+        Err(WorkspaceAliasError::InvalidAlias)
+    );
+    assert_eq!(
+        resolver.set_alias_override(&workspace, "unsafe!"),
+        Err(WorkspaceAliasError::InvalidAlias)
+    );
 }
