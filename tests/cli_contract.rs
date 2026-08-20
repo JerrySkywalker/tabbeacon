@@ -124,6 +124,56 @@ fn output_modes_preserve_machine_json_and_admit_legacy_plain_output() {
 }
 
 #[test]
+fn hooks_cli_is_machine_stable_localized_for_humans_and_never_reveals_commands() {
+    let root = TestRoot::new("hooks-cli");
+
+    let json_en = isolated_command(&root)
+        .args(["hooks", "--json", "--lang", "en-US"])
+        .output()
+        .expect("English JSON Hook inventory starts");
+    let json_zh = isolated_command(&root)
+        .args(["hooks", "--json", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese JSON Hook inventory starts");
+    assert!(json_en.status.success());
+    assert!(json_zh.status.success());
+    let json: serde_json::Value =
+        serde_json::from_slice(&json_en.stdout).expect("Hook inventory JSON parses");
+    assert_eq!(json["schema_version"], 1);
+    assert_eq!(json["read_only"], true);
+    assert_eq!(json["availability"], "unavailable");
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&json_en.stdout)
+            .expect("English Hook JSON parses"),
+        serde_json::from_slice::<serde_json::Value>(&json_zh.stdout)
+            .expect("Chinese Hook JSON parses"),
+        "machine Hook inventory is locale independent"
+    );
+
+    let plain = isolated_command(&root)
+        .args(["hooks", "--plain"])
+        .output()
+        .expect("plain Hook inventory starts");
+    assert!(plain.status.success());
+    let plain = String::from_utf8(plain.stdout).expect("plain Hook inventory is UTF-8");
+    assert!(plain.contains("HOOKS_SCHEMA_VERSION=1"));
+    assert!(plain.contains("HOOKS_READ_ONLY=true"));
+    assert!(plain.contains("ARBITRARY_COMMANDS_REDACTED=true"));
+    assert!(plain.contains("AUTO_HOOK_TRUST=false"));
+    assert!(!plain.contains("powershell.exe"));
+    assert!(!plain.contains("commandWindows"));
+
+    let human = isolated_command(&root)
+        .args(["hooks", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese Human Hook inventory starts");
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).expect("Human Hook inventory is UTF-8");
+    assert!(human.contains("钩子"));
+    assert!(human.contains("未更改任何配置"));
+}
+
+#[test]
 fn machine_transports_are_locale_independent() {
     let root = TestRoot::new("localized-human-output");
 

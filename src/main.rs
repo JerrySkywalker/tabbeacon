@@ -152,6 +152,7 @@ fn dispatch(cli: Cli) -> ExitCode {
         })) => doctor(output.mode(), probe_title, output.language.preference()),
         Some(Command::Status(output)) => status(output.mode(), output.language.preference()),
         Some(Command::Sessions(output)) => sessions(output.mode(), output.language.preference()),
+        Some(Command::Hooks(output)) => hooks(output.mode(), output.language.preference()),
         Some(Command::UpgradePreflight(arguments)) => upgrade_preflight(arguments),
         Some(Command::TitlePolicy { command }) => match command {
             TitlePolicyCommand::Inspect(output) => title_policy_inspect(output.json),
@@ -1008,6 +1009,29 @@ fn sessions(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> Exi
     }
 
     print_human_document(&sessions_document(&report), language);
+    ExitCode::SUCCESS
+}
+
+fn hooks(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
+    let inventory = match CodexIntegration::from_environment() {
+        Ok(integration) => integration.hook_inventory(),
+        Err(_) => tabbeacon::hook_inventory::HookInventory::unavailable(),
+    };
+    match output_mode {
+        OutputMode::Json => match serde_json::to_string(&inventory) {
+            Ok(json) => println!("{json}"),
+            Err(error) => return management_error("HOOKS", &error),
+        },
+        OutputMode::Plain => {
+            for line in inventory.plain_lines() {
+                println!("{line}");
+            }
+        }
+        OutputMode::Human => {
+            let presentation = human_runtime_presentation(language);
+            println!("{}", inventory.human_table(presentation.locale));
+        }
+    }
     ExitCode::SUCCESS
 }
 
@@ -3216,6 +3240,9 @@ fn collect_control_center_refresh(
             })
         })
         .flatten();
+    let hooks = CodexIntegration::from_environment()
+        .map(|integration| integration.hook_inventory())
+        .unwrap_or_default();
     Ok(tabbeacon::control_center::ControlCenterRefresh {
         presentation,
         interface,
@@ -3223,6 +3250,7 @@ fn collect_control_center_refresh(
         overview: tabbeacon::management::ManagementOverview::from_diagnostics(&report),
         workspace,
         sessions: inspect_system_sessions(),
+        hooks,
     })
 }
 

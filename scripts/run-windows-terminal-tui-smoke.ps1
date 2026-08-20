@@ -221,11 +221,15 @@ $interfaceReverted = $false
 $interfaceApplyStaged = $false
 $liveRefresh = $false
 $workspaceSessions = $false
+$hookInventory = $false
+$hookProviderAdapter = $false
 $helpOverlay = $false
 if (Test-Path -LiteralPath $fixtureResultPath) {
     $fixtureResult = Get-Content -LiteralPath $fixtureResultPath
     $liveRefresh = $fixtureResult -contains 'TUI_LIVE_REFRESH=true'
     $workspaceSessions = $fixtureResult -contains 'TUI_WORKSPACE_SESSIONS=true'
+    $hookInventory = $fixtureResult -contains 'TUI_HOOK_INVENTORY=true'
+    $hookProviderAdapter = $fixtureResult -contains 'TUI_HOOK_PROVIDER_ADAPTER=true'
     $helpOverlay = $fixtureResult -contains 'TUI_HELP_OVERLAY=true'
     $localeSwitched = $fixtureResult -contains 'TUI_LANGUAGE_LIVE_SWITCH=true'
     $interfaceReverted = $fixtureResult -contains 'TUI_INTERFACE_REVERT=true'
@@ -234,7 +238,7 @@ if (Test-Path -LiteralPath $fixtureResultPath) {
 
 $passed = $windowObserved -and $windowOwnerBound -and $windowChildLineageBound -and
     $windowCompleted -and $childCompleted -and $sentinelObserved -and $shellUsable -and
-    $fixtureExitCode -eq 0 -and $liveRefresh -and $workspaceSessions -and $helpOverlay -and $localeSwitched -and
+    $fixtureExitCode -eq 0 -and $liveRefresh -and $workspaceSessions -and $hookInventory -and $hookProviderAdapter -and $helpOverlay -and $localeSwitched -and
     $interfaceReverted -and $interfaceApplyStaged
 $receipt = @(
     "RUN_ID=$RunId"
@@ -250,6 +254,8 @@ $receipt = @(
     "FIXTURE_EXIT_CODE=$fixtureExitCode"
     "TUI_LIVE_REFRESH=$($liveRefresh.ToString().ToLowerInvariant())"
     "TUI_WORKSPACE_SESSIONS=$($workspaceSessions.ToString().ToLowerInvariant())"
+    "TUI_HOOK_INVENTORY=$($hookInventory.ToString().ToLowerInvariant())"
+    "TUI_HOOK_PROVIDER_ADAPTER=$($hookProviderAdapter.ToString().ToLowerInvariant())"
     "TUI_HELP_OVERLAY=$($helpOverlay.ToString().ToLowerInvariant())"
     "TUI_LANGUAGE_LIVE_SWITCH=$($localeSwitched.ToString().ToLowerInvariant())"
     "TUI_INTERFACE_REVERT=$($interfaceReverted.ToString().ToLowerInvariant())"

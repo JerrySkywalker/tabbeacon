@@ -192,6 +192,31 @@ version compatibility, the exact Hook profile, and manifest consistency. A
 trusted-hash mismatch does not imply that the Hook declaration itself was
 modified. Declaration presence alone is not reported as active.
 
+## Hook Inspector
+
+Inspect the same state per Hook without mutating Codex configuration or trust:
+
+```powershell
+tabbeacon hooks
+tabbeacon hooks --json
+tabbeacon hooks --plain
+```
+
+The inspector and the `Hooks / 钩子` Control Center screen expose a typed,
+provider-neutral inventory: provider, event, proven owner, enabled state,
+manual trust state, declaration currentness, source/handler class, timeout,
+and a declaration fingerprint. Human output is localized; JSON and plain keys
+remain stable lower-snake-case values. Every output marks command visibility
+as `redacted`: it never prints arbitrary Hook command strings, raw config
+state keys, or provider configuration paths.
+
+For owned declarations it distinguishes `review_required`,
+`hash_stale_or_changed`, `disabled`, and
+`declaration_modified_or_missing`. A stale trusted hash means the declaration
+can still be exact; it does not claim the declaration changed. Third-party,
+unowned, malformed, and unsupported shapes remain read-only and are never
+auto-trusted, edited, disabled, or adopted.
+
 ## Upgrade preflight
 
 Use the bounded local preflight before a package replacement when an active
