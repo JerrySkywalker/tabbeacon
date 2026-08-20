@@ -51,7 +51,8 @@ fn smoke_launch_and_cleanup_are_watchdog_bounded_and_owner_correlated() {
     assert!(
         script.contains("function Get-TrackedProcessTreeState")
             && script.contains("function Get-ProcessIdentityState")
-            && script.contains("State = 'unknown'"),
+            && script.contains("State = 'unknown'")
+            && script.contains("Get-Process -Id $ProcessId -ErrorAction Stop | Out-Null"),
         "cleanup must distinguish unknown process state from proven completion"
     );
     assert!(

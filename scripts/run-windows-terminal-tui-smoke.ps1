@@ -139,6 +139,16 @@ function Get-ProcessObservation {
             StartTimeUtcTicks = $process.StartTime.ToUniversalTime().Ticks
         }
     } catch {
+        # A process can exit between Get-Process and StartTime. Re-read only
+        # to distinguish that ordinary completion race from an inaccessible
+        # or otherwise unknown process; unknown never counts as completion.
+        try {
+            Get-Process -Id $ProcessId -ErrorAction Stop | Out-Null
+        } catch {
+            if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
+                return [pscustomobject]@{ State = 'exited'; StartTimeUtcTicks = $null }
+            }
+        }
         return [pscustomobject]@{ State = 'unknown'; StartTimeUtcTicks = $null }
     }
 }
@@ -608,14 +618,18 @@ $receipt = @(
     "WINDOW_OWNER_BOUND=$($windowOwnerBound.ToString().ToLowerInvariant())"
     "WINDOW_CHILD_LINEAGE_BOUND=$($windowChildLineageBound.ToString().ToLowerInvariant())"
     "WINDOW_COMPLETED=$($windowCompleted.ToString().ToLowerInvariant())"
+    "WINDOW_IDENTITY_STATE=$windowIdentityState"
     "CHILD_PROCESS_COMPLETED=$($childCompleted.ToString().ToLowerInvariant())"
+    "CHILD_IDENTITY_STATE=$childIdentityState"
     "OWNED_CHILD_TREE_COMPLETED=$($childTreeCompleted.ToString().ToLowerInvariant())"
+    "OWNED_CHILD_TREE_STATE=$childTreeState"
     "OWNED_CHILD_TREE_TRACKED=$($ownedTreeTracked.ToString().ToLowerInvariant())"
     "IDENTITY_QUERIES_PROVEN=$($identityQueriesProven.ToString().ToLowerInvariant())"
     "TREE_ENUMERATION_PROVEN=$($treeEnumerationProven.ToString().ToLowerInvariant())"
     "WT_LAUNCHER_PROCESS_ID=$($wtLauncher.Id)"
     "WT_LAUNCHER_EXIT_CODE=$launchExitCode"
     "WT_LAUNCHER_COMPLETED=$($launcherCompleted.ToString().ToLowerInvariant())"
+    "WT_LAUNCHER_IDENTITY_STATE=$launcherIdentityState"
     "WT_LAUNCHER_TERMINATION_ATTEMPTED=$($launcherTerminationAttempted.ToString().ToLowerInvariant())"
     "OWNED_CHILD_TREE_TERMINATION_ATTEMPTED=$($ownedTreeTerminationAttempted.ToString().ToLowerInvariant())"
     "OWNED_CHILD_TREE_TERMINATION_SUCCEEDED=$($ownedTreeTerminationSucceeded.ToString().ToLowerInvariant())"
