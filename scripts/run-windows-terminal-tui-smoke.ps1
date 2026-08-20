@@ -653,6 +653,12 @@ if (Test-Path -LiteralPath $fixtureResultPath) {
     $interfaceApplyStaged = $fixtureResult -contains 'TUI_INTERFACE_STAGED_APPLY=true'
 }
 
+# A transient polling uncertainty does not amend an ownership or cleanup
+# decision. Only a final exact state can establish completion; no `unknown`
+# observation is interpreted as `exited` or used to authorize termination.
+$identityQueriesProven = $windowIdentityState -ne 'unknown' -and
+    $childIdentityState -ne 'unknown' -and $childTreeState -ne 'unknown' -and
+    $launcherIdentityState -ne 'unknown'
 $ownedTreeTracked = $ownedProcessTree.Count -gt 0
 $cleanupBounded = -not $ownedTreeTerminationAttempted -or
     ($ownedTreeTerminationSucceeded -and $childTreeCompleted)

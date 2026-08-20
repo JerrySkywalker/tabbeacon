@@ -74,6 +74,7 @@ fn smoke_launch_and_cleanup_are_watchdog_bounded_and_owner_correlated() {
     assert!(
         script.contains("WATCHDOG_EXPIRED=")
             && script.contains("$passed = -not $watchdogExpired -and $identityQueriesProven")
+            && script.contains("$identityQueriesProven = $windowIdentityState -ne 'unknown'")
             && script.contains("$ownedTreeTracked -and $launcherCompleted"),
         "an expired watchdog, unknown identity, or unfinished launcher/tree cannot produce PASS"
     );
