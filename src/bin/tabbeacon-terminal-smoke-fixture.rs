@@ -15,7 +15,7 @@ use tabbeacon::{
     settings::PresentationSettings,
 };
 
-const FIXTURE_CODEX_VERSION_PROBE_ARGUMENT: &str = "--tabbeacon-g60-codex-version-probe";
+const FIXTURE_CODEX_VERSION_PROBE_ARGUMENT: &str = "--version";
 
 fn fixture_hook_inventory() -> Result<HookInventory, String> {
     let nonce = SystemTime::now()
@@ -166,9 +166,6 @@ mod tests {
 
     #[test]
     fn fixture_version_probe_argument_is_distinct_from_the_interactive_fixture() {
-        assert_eq!(
-            FIXTURE_CODEX_VERSION_PROBE_ARGUMENT,
-            "--tabbeacon-g60-codex-version-probe"
-        );
+        assert_eq!(FIXTURE_CODEX_VERSION_PROBE_ARGUMENT, "--version");
     }
 }

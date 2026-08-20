@@ -121,6 +121,92 @@ function Test-ProcessAncestor {
     return $false
 }
 
+function Get-ProcessStartTimeUtcTicks {
+    param(
+        [int]$ProcessId
+    )
+    $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if ($null -eq $process) {
+        return $null
+    }
+    try {
+        return $process.StartTime.ToUniversalTime().Ticks
+    } catch {
+        return $null
+    }
+}
+
+function Test-ProcessIdentity {
+    param(
+        [int]$ProcessId,
+        [long]$ExpectedStartTimeUtcTicks
+    )
+    $actualStartTimeUtcTicks = Get-ProcessStartTimeUtcTicks -ProcessId $ProcessId
+    return $null -ne $actualStartTimeUtcTicks -and
+        $actualStartTimeUtcTicks -eq $ExpectedStartTimeUtcTicks
+}
+
+function Add-OwnedProcessTreeSnapshot {
+    param(
+        [int]$RootProcessId,
+        [long]$RootStartTimeUtcTicks,
+        [hashtable]$TrackedProcesses
+    )
+    if (-not (Test-ProcessIdentity -ProcessId $RootProcessId -ExpectedStartTimeUtcTicks $RootStartTimeUtcTicks)) {
+        return $false
+    }
+    $pending = [System.Collections.Generic.Queue[object]]::new()
+    $pending.Enqueue([pscustomobject]@{
+        ProcessId = $RootProcessId
+        StartTimeUtcTicks = $RootStartTimeUtcTicks
+    })
+    while ($pending.Count -gt 0) {
+        $current = $pending.Dequeue()
+        if (-not (Test-ProcessIdentity -ProcessId $current.ProcessId -ExpectedStartTimeUtcTicks $current.StartTimeUtcTicks)) {
+            continue
+        }
+        $TrackedProcesses[[string]$current.ProcessId] = [long]$current.StartTimeUtcTicks
+        $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($current.ProcessId)" -ErrorAction SilentlyContinue)
+        foreach ($child in $children) {
+            $childProcessId = [int]$child.ProcessId
+            if ($TrackedProcesses.ContainsKey([string]$childProcessId)) {
+                continue
+            }
+            $childStartTimeUtcTicks = Get-ProcessStartTimeUtcTicks -ProcessId $childProcessId
+            if ($null -ne $childStartTimeUtcTicks) {
+                $pending.Enqueue([pscustomobject]@{
+                    ProcessId = $childProcessId
+                    StartTimeUtcTicks = $childStartTimeUtcTicks
+                })
+            }
+        }
+    }
+    return $true
+}
+
+function Test-TrackedProcessTreeCompleted {
+    param(
+        [hashtable]$TrackedProcesses
+    )
+    foreach ($processId in $TrackedProcesses.Keys) {
+        if (Test-ProcessIdentity -ProcessId ([int]$processId) -ExpectedStartTimeUtcTicks ([long]$TrackedProcesses[$processId])) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Get-LiveTrackedProcessIds {
+    param(
+        [hashtable]$TrackedProcesses
+    )
+    foreach ($processId in $TrackedProcesses.Keys) {
+        if (Test-ProcessIdentity -ProcessId ([int]$processId) -ExpectedStartTimeUtcTicks ([long]$TrackedProcesses[$processId])) {
+            [int]$processId
+        }
+    }
+}
+
 function Wait-ProcessExit {
     param(
         [int]$ProcessId,
@@ -138,8 +224,12 @@ function Wait-ProcessExit {
 function Stop-OwnedProcessTree {
     param(
         [int]$ProcessId,
+        [long]$ExpectedStartTimeUtcTicks,
         [int]$TimeoutMilliseconds = 5000
     )
+    if (-not (Test-ProcessIdentity -ProcessId $ProcessId -ExpectedStartTimeUtcTicks $ExpectedStartTimeUtcTicks)) {
+        return $false
+    }
     $taskkillPath = Join-Path $env:SystemRoot 'System32\taskkill.exe'
     if (-not (Test-Path -LiteralPath $taskkillPath)) {
         $taskkillPath = 'taskkill.exe'
@@ -185,11 +275,15 @@ $launchExitCode = $null
 $windowObserved = $false
 $windowHandle = [IntPtr]::Zero
 $windowProcessId = $null
+$windowProcessStartTimeUtcTicks = $null
 $windowOwnerBound = $false
 $windowChildLineageBound = $false
 $childProcessId = $null
+$childProcessStartTimeUtcTicks = $null
+$ownedProcessTree = @{}
 $sentinelObserved = $false
 $childCompleted = $false
+$childTreeCompleted = $false
 $windowCompleted = $false
 $ownedTreeTerminationAttempted = $false
 $ownedTreeTerminationSucceeded = $false
@@ -200,32 +294,46 @@ while ([DateTimeOffset]::UtcNow -lt $deadline) {
     $windows = [TabBeaconSmokeWindows]::FindExactTitle($windowTitle)
     if (-not $windowObserved -and $windows.Count -eq 1) {
         $candidateOwner = Get-Process -Id $windows[0].ProcessId -ErrorAction SilentlyContinue
-        if ($null -ne $candidateOwner -and $candidateOwner.ProcessName -eq 'WindowsTerminal') {
+        $candidateOwnerStartTimeUtcTicks = Get-ProcessStartTimeUtcTicks -ProcessId $windows[0].ProcessId
+        if ($null -ne $candidateOwner -and $candidateOwner.ProcessName -eq 'WindowsTerminal' -and
+            $null -ne $candidateOwnerStartTimeUtcTicks) {
             $windowObserved = $true
             $windowOwnerBound = $true
             $windowHandle = $windows[0].Handle
             $windowProcessId = $windows[0].ProcessId
+            $windowProcessStartTimeUtcTicks = $candidateOwnerStartTimeUtcTicks
         }
     }
     if ($null -eq $childProcessId -and (Test-Path -LiteralPath $processReceiptPath)) {
-        $childProcessId = [int](Get-Content -LiteralPath $processReceiptPath -Raw)
+        $candidateChildProcessId = [int](Get-Content -LiteralPath $processReceiptPath -Raw)
+        $candidateChildStartTimeUtcTicks = Get-ProcessStartTimeUtcTicks -ProcessId $candidateChildProcessId
+        if ($null -ne $candidateChildStartTimeUtcTicks) {
+            $childProcessId = $candidateChildProcessId
+            $childProcessStartTimeUtcTicks = $candidateChildStartTimeUtcTicks
+        }
     }
-    if (-not $windowChildLineageBound -and $windowOwnerBound -and $null -ne $childProcessId) {
+    if (-not $windowChildLineageBound -and $windowOwnerBound -and $null -ne $childProcessId -and
+        $null -ne $windowProcessStartTimeUtcTicks -and $null -ne $childProcessStartTimeUtcTicks) {
         $windowChildLineageBound = Test-ProcessAncestor -ProcessId $childProcessId -ExpectedAncestorId $windowProcessId
+    }
+    if ($windowChildLineageBound -and $null -ne $childProcessId) {
+        [void](Add-OwnedProcessTreeSnapshot -RootProcessId $childProcessId -RootStartTimeUtcTicks $childProcessStartTimeUtcTicks -TrackedProcesses $ownedProcessTree)
     }
     $sentinelObserved = Test-Path -LiteralPath $sentinelPath
     if ($null -ne $childProcessId) {
-        $childCompleted = $null -eq (Get-Process -Id $childProcessId -ErrorAction SilentlyContinue)
+        $childCompleted = -not (Test-ProcessIdentity -ProcessId $childProcessId -ExpectedStartTimeUtcTicks $childProcessStartTimeUtcTicks)
     }
+    $childTreeCompleted = $windowChildLineageBound -and (Test-TrackedProcessTreeCompleted -TrackedProcesses $ownedProcessTree)
     $boundWindow = if ($windowObserved) {
         [TabBeaconSmokeWindows]::GetRecord($windowHandle)
     } else {
         $null
     }
     $boundWindowPresent = $null -ne $boundWindow -and
-        $boundWindow.ProcessId -eq $windowProcessId
+        $boundWindow.ProcessId -eq $windowProcessId -and
+        (Test-ProcessIdentity -ProcessId $windowProcessId -ExpectedStartTimeUtcTicks $windowProcessStartTimeUtcTicks)
     $windowCompleted = $windowObserved -and -not $boundWindowPresent
-    if ($sentinelObserved -and $childCompleted -and $windowCompleted) {
+    if ($sentinelObserved -and $childCompleted -and $childTreeCompleted -and $windowCompleted) {
         break
     }
     Start-Sleep -Milliseconds 100
@@ -253,26 +361,48 @@ if (-not $windowCompleted -and $windowOwnerBound) {
 # wait briefly for normal shutdown, then terminate that admitted tree only if
 # it remains live. No process without the verified owned lineage is targeted.
 $cleanupDeadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
-if ($windowOwnerBound -and (-not $windowCompleted -or -not $childCompleted)) {
+if ($windowOwnerBound -and (-not $windowCompleted -or -not $childTreeCompleted)) {
     while ([DateTimeOffset]::UtcNow -lt $cleanupDeadline) {
         $boundWindow = [TabBeaconSmokeWindows]::GetRecord($windowHandle)
         $windowCompleted = $null -eq $boundWindow -or
-            $boundWindow.ProcessId -ne $windowProcessId
+            $boundWindow.ProcessId -ne $windowProcessId -or
+            -not (Test-ProcessIdentity -ProcessId $windowProcessId -ExpectedStartTimeUtcTicks $windowProcessStartTimeUtcTicks)
         if ($null -ne $childProcessId) {
-            $childCompleted = $null -eq (Get-Process -Id $childProcessId -ErrorAction SilentlyContinue)
+            if ($windowChildLineageBound) {
+                [void](Add-OwnedProcessTreeSnapshot -RootProcessId $childProcessId -RootStartTimeUtcTicks $childProcessStartTimeUtcTicks -TrackedProcesses $ownedProcessTree)
+            }
+            $childCompleted = -not (Test-ProcessIdentity -ProcessId $childProcessId -ExpectedStartTimeUtcTicks $childProcessStartTimeUtcTicks)
         }
-        if ($windowCompleted -and $childCompleted) {
+        $childTreeCompleted = $windowChildLineageBound -and (Test-TrackedProcessTreeCompleted -TrackedProcesses $ownedProcessTree)
+        if ($windowCompleted -and $childTreeCompleted) {
             break
         }
         Start-Sleep -Milliseconds 100
     }
-    if (-not $childCompleted -and $windowChildLineageBound -and $null -ne $childProcessId) {
+    if (-not $childTreeCompleted -and $windowChildLineageBound -and $ownedProcessTree.Count -gt 0) {
         $ownedTreeTerminationAttempted = $true
-        $ownedTreeTerminationSucceeded = Stop-OwnedProcessTree -ProcessId $childProcessId
-        $childCompleted = Wait-ProcessExit -ProcessId $childProcessId -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(5))
+        $ownedTreeTerminationSucceeded = $true
+        foreach ($ownedProcessId in @(Get-LiveTrackedProcessIds -TrackedProcesses $ownedProcessTree)) {
+            # PID/start-time revalidation occurs in Get-LiveTrackedProcessIds
+            # immediately before every forced termination request.
+            if (-not (Stop-OwnedProcessTree -ProcessId $ownedProcessId -ExpectedStartTimeUtcTicks ([long]$ownedProcessTree[[string]$ownedProcessId]))) {
+                $ownedTreeTerminationSucceeded = $false
+            }
+        }
+        $terminationDeadline = [DateTimeOffset]::UtcNow.AddSeconds(5)
+        while ([DateTimeOffset]::UtcNow -lt $terminationDeadline) {
+            if (Test-TrackedProcessTreeCompleted -TrackedProcesses $ownedProcessTree) {
+                break
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        $childTreeCompleted = Test-TrackedProcessTreeCompleted -TrackedProcesses $ownedProcessTree
+        $childCompleted = -not (Test-ProcessIdentity -ProcessId $childProcessId -ExpectedStartTimeUtcTicks $childProcessStartTimeUtcTicks)
+        $ownedTreeTerminationSucceeded = $ownedTreeTerminationSucceeded -and $childTreeCompleted
     }
     $boundWindow = [TabBeaconSmokeWindows]::GetRecord($windowHandle)
-    $windowCompleted = $null -eq $boundWindow -or $boundWindow.ProcessId -ne $windowProcessId
+    $windowCompleted = $null -eq $boundWindow -or $boundWindow.ProcessId -ne $windowProcessId -or
+        -not (Test-ProcessIdentity -ProcessId $windowProcessId -ExpectedStartTimeUtcTicks $windowProcessStartTimeUtcTicks)
 }
 
 if (-not $wtLauncher.HasExited) {
@@ -281,6 +411,7 @@ if (-not $wtLauncher.HasExited) {
 }
 $launcherCompleted = Wait-ProcessExit -ProcessId $wtLauncher.Id -Deadline ([DateTimeOffset]::UtcNow.AddSeconds(5))
 $launchExitCode = if ($wtLauncher.HasExited) { $wtLauncher.ExitCode } else { $null }
+$watchdogExpired = [DateTimeOffset]::UtcNow -ge $deadline
 
 $fixtureExitCode = $null
 $shellUsable = $false
@@ -312,10 +443,20 @@ if (Test-Path -LiteralPath $fixtureResultPath) {
     $interfaceApplyStaged = $fixtureResult -contains 'TUI_INTERFACE_STAGED_APPLY=true'
 }
 
-$passed = $windowObserved -and $windowOwnerBound -and $windowChildLineageBound -and
-    $windowCompleted -and $childCompleted -and $sentinelObserved -and $shellUsable -and
+$cleanupBounded = -not $ownedTreeTerminationAttempted -or
+    ($ownedTreeTerminationSucceeded -and $childTreeCompleted)
+$passed = -not $watchdogExpired -and $launcherCompleted -and $cleanupBounded -and
+    $windowObserved -and $windowOwnerBound -and $windowChildLineageBound -and
+    $windowCompleted -and $childCompleted -and $childTreeCompleted -and $sentinelObserved -and $shellUsable -and
     $fixtureExitCode -eq 0 -and $liveRefresh -and $workspaceSessions -and $hookInventory -and $hookProviderAdapter -and $helpOverlay -and $localeSwitched -and
     $interfaceReverted -and $interfaceApplyStaged
+$visualOperationDisposition = if ($passed) {
+    'PASS'
+} elseif ($watchdogExpired) {
+    'UNPROVEN'
+} else {
+    'FAIL'
+}
 $receipt = @(
     "RUN_ID=$RunId"
     "EXPECTED_HEAD=$ExpectedHead"
@@ -326,12 +467,15 @@ $receipt = @(
     "WINDOW_CHILD_LINEAGE_BOUND=$($windowChildLineageBound.ToString().ToLowerInvariant())"
     "WINDOW_COMPLETED=$($windowCompleted.ToString().ToLowerInvariant())"
     "CHILD_PROCESS_COMPLETED=$($childCompleted.ToString().ToLowerInvariant())"
+    "OWNED_CHILD_TREE_COMPLETED=$($childTreeCompleted.ToString().ToLowerInvariant())"
     "WT_LAUNCHER_PROCESS_ID=$($wtLauncher.Id)"
     "WT_LAUNCHER_EXIT_CODE=$launchExitCode"
     "WT_LAUNCHER_COMPLETED=$($launcherCompleted.ToString().ToLowerInvariant())"
     "WT_LAUNCHER_TERMINATION_ATTEMPTED=$($launcherTerminationAttempted.ToString().ToLowerInvariant())"
     "OWNED_CHILD_TREE_TERMINATION_ATTEMPTED=$($ownedTreeTerminationAttempted.ToString().ToLowerInvariant())"
     "OWNED_CHILD_TREE_TERMINATION_SUCCEEDED=$($ownedTreeTerminationSucceeded.ToString().ToLowerInvariant())"
+    "WATCHDOG_EXPIRED=$($watchdogExpired.ToString().ToLowerInvariant())"
+    "VISUAL_OPERATION_DISPOSITION=$visualOperationDisposition"
     "SENTINEL_OBSERVED=$($sentinelObserved.ToString().ToLowerInvariant())"
     "FIXTURE_EXIT_CODE=$fixtureExitCode"
     "TUI_LIVE_REFRESH=$($liveRefresh.ToString().ToLowerInvariant())"

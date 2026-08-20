@@ -14,6 +14,11 @@ fn smoke_script() -> String {
     std::fs::read_to_string(path).expect("real Windows Terminal smoke script reads")
 }
 
+fn repository_source(path: &str) -> String {
+    std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path))
+        .expect("repository source reads")
+}
+
 #[test]
 fn smoke_launch_and_cleanup_are_watchdog_bounded_and_owner_correlated() {
     let script = smoke_script();
@@ -42,5 +47,33 @@ fn smoke_launch_and_cleanup_are_watchdog_bounded_and_owner_correlated() {
     assert!(
         script.contains("OWNED_CHILD_TREE_TERMINATION_SUCCEEDED="),
         "cleanup disposition must be recorded in durable evidence"
+    );
+    assert!(
+        script.contains("function Test-TrackedProcessTreeCompleted")
+            && script.contains("function Test-ProcessIdentity"),
+        "cleanup must confirm every tracked descendant by PID and start time"
+    );
+    assert!(
+        script.contains("WATCHDOG_EXPIRED=")
+            && script.contains("$passed = -not $watchdogExpired -and $launcherCompleted"),
+        "an expired watchdog or unfinished launcher cannot produce PASS"
+    );
+}
+
+#[test]
+fn fixture_profile_probe_uses_the_same_version_contract_as_the_codex_adapter() {
+    let fixture = repository_source("src/bin/tabbeacon-terminal-smoke-fixture.rs");
+    let adapter = repository_source("src/providers/codex/config.rs");
+    assert!(
+        fixture.contains("const FIXTURE_CODEX_VERSION_PROBE_ARGUMENT: &str = \"--version\""),
+        "the fixture must recognize the adapter's version argument"
+    );
+    assert!(
+        fixture.contains(".with_codex_program(executable)"),
+        "the real adapter proof must use the owned fixture executable"
+    );
+    assert!(
+        adapter.contains(".arg(\"--version\")"),
+        "the checked Codex adapter contract must remain explicit"
     );
 }
