@@ -295,6 +295,13 @@ impl WindowsUiaLocator {
             set_focus: true,
         };
         dump.activation = Some(activation);
+        if !set_foreground {
+            return Ok(OwnedTabActivation::Refused {
+                dump,
+                detail: "Windows did not accept foreground activation for the owned fixture window"
+                    .to_owned(),
+            });
+        }
         Ok(OwnedTabActivation::Activated {
             dump,
             title_reader: OwnedTabTitleReader { tab },
