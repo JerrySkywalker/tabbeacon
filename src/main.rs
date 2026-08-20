@@ -1479,7 +1479,7 @@ fn config_preset(
     let Some(preset) = PresentationSettings::preset(name) else {
         print_config_failure(output_mode, "unsupported preset", language);
         if output_mode == OutputMode::Plain {
-            eprintln!("PRESETS=native|minimal|balanced|full");
+            eprintln!("PRESETS=native|minimal|balanced|terminal-ring|full");
         } else {
             eprint_human_text(
                 HumanTone::Dim,

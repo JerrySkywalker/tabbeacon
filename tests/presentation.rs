@@ -361,6 +361,10 @@ fn muted_dark_default_uses_the_braille_title_spinner_with_semantic_color() {
     assert!(terminal_output.contains("]0;⠋ JPC semantic fixture"));
     assert!(terminal_output.contains("rgb:1b/4e/3a"));
     assert!(terminal_output.contains("]9;4;0;0"));
+    assert!(
+        !terminal_output.contains("]9;4;3;0"),
+        "the default Human preset must not emit the Terminal Ring while its title spinner is active"
+    );
     assert_eq!(settings.theme(), PresentationTheme::MutedDark);
 }
 

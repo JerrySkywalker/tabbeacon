@@ -37,7 +37,7 @@ pub fn choose_presentation(
             &[
                 "Recommended",
                 "Minimal",
-                "Full",
+                "Terminal Ring",
                 "Native",
                 "Customize",
                 "Back",
@@ -49,7 +49,7 @@ pub fn choose_presentation(
                 let preset = match choice {
                     0 => "balanced",
                     1 => "minimal",
-                    2 => "full",
+                    2 => "terminal-ring",
                     3 => "native",
                     _ => unreachable!("preset choice is bounded"),
                 };
@@ -218,7 +218,7 @@ fn customize(
                         "Title spinner",
                         "Title indicator",
                         "Terminal ring",
-                        "Both",
+                        "Dual indicators (Advanced)",
                         "Native",
                         "Off",
                     ],
@@ -278,11 +278,12 @@ mod tests {
     use super::{GuidedInput, choose_interface_preferences, choose_presentation};
     use crate::human_presentation::ResolvedLocale;
     use crate::interface_preferences::{HumanColor, InterfaceLanguage, InterfacePreferences};
-    use crate::settings::{PresentationSettings, SpinnerPreset, TitleMode};
+    use crate::settings::{ActivityMode, PresentationSettings, SpinnerPreset, TitleMode};
 
     struct ScriptedInput {
         choices: Vec<usize>,
         prompts: Vec<String>,
+        offered: Vec<Vec<String>>,
     }
 
     impl ScriptedInput {
@@ -290,6 +291,7 @@ mod tests {
             Self {
                 choices: choices.iter().rev().copied().collect(),
                 prompts: Vec::new(),
+                offered: Vec::new(),
             }
         }
     }
@@ -298,10 +300,12 @@ mod tests {
         fn select(
             &mut self,
             prompt: &str,
-            _items: &[&str],
+            items: &[&str],
             _default: usize,
         ) -> Result<usize, String> {
             self.prompts.push(prompt.to_owned());
+            self.offered
+                .push(items.iter().map(|item| (*item).to_owned()).collect());
             self.choices
                 .pop()
                 .ok_or_else(|| "missing scripted choice".to_owned())
@@ -316,6 +320,40 @@ mod tests {
                 .unwrap();
         assert_eq!(result, Some(PresentationSettings::default()));
         assert_eq!(input.prompts, ["Choose presentation", "Preset"]);
+    }
+
+    #[test]
+    fn terminal_ring_is_a_normal_single_channel_preset() {
+        let mut input = ScriptedInput::new(&[2, 0]);
+        let result = choose_presentation(&mut input, PresentationSettings::default())
+            .expect("selection resolves")
+            .expect("preset selected");
+
+        assert_eq!(result.activity(), ActivityMode::WindowsTerminalRing);
+        assert!(!result.activity().uses_worker_animation());
+        assert!(result.activity().uses_windows_terminal_ring());
+        assert_eq!(
+            input.offered[0],
+            [
+                "Recommended",
+                "Minimal",
+                "Terminal Ring",
+                "Native",
+                "Customize",
+                "Back",
+            ]
+        );
+    }
+
+    #[test]
+    fn dual_indicators_remain_an_explicit_advanced_customize_choice() {
+        let mut input = ScriptedInput::new(&[4, 2, 3, 5]);
+        let result = choose_presentation(&mut input, PresentationSettings::default())
+            .expect("customization resolves")
+            .expect("customization selected");
+
+        assert_eq!(result.activity(), ActivityMode::Both);
+        assert_eq!(input.offered[2][3], "Dual indicators (Advanced)");
     }
 
     #[test]

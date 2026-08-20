@@ -1257,7 +1257,9 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::EnUs, HumanMessageKey::TitleSpinner) => "Title spinner",
         (ResolvedLocale::EnUs, HumanMessageKey::TitleIndicator) => "Title indicator",
         (ResolvedLocale::EnUs, HumanMessageKey::TerminalRing) => "Windows Terminal ring",
-        (ResolvedLocale::EnUs, HumanMessageKey::TitleSpinnerAndRing) => "Title spinner + ring",
+        (ResolvedLocale::EnUs, HumanMessageKey::TitleSpinnerAndRing) => {
+            "Dual indicators (Advanced)"
+        }
         (ResolvedLocale::EnUs, HumanMessageKey::Native) => "Native",
         (ResolvedLocale::EnUs, HumanMessageKey::PresentationSettings) => "Presentation settings",
         (ResolvedLocale::EnUs, HumanMessageKey::UserLocalState) => {
@@ -1294,7 +1296,7 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
             "TabBeacon presentation wizard (press Enter to keep each current value)."
         }
         (ResolvedLocale::EnUs, HumanMessageKey::SupportedPresets) => {
-            "Supported presets: native, minimal, balanced, full."
+            "Supported presets: native, minimal, balanced, terminal-ring; full is a compatibility alias."
         }
         (ResolvedLocale::EnUs, HumanMessageKey::TitleOwnershipReconciled) => {
             "Title ownership was reconciled safely."
@@ -1745,7 +1747,7 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::ZhCn, HumanMessageKey::TitleSpinner) => "标题旋转指示器",
         (ResolvedLocale::ZhCn, HumanMessageKey::TitleIndicator) => "标题指示器",
         (ResolvedLocale::ZhCn, HumanMessageKey::TerminalRing) => "Windows Terminal 圆环",
-        (ResolvedLocale::ZhCn, HumanMessageKey::TitleSpinnerAndRing) => "标题旋转指示器 + 圆环",
+        (ResolvedLocale::ZhCn, HumanMessageKey::TitleSpinnerAndRing) => "双重指示器（高级）",
         (ResolvedLocale::ZhCn, HumanMessageKey::Native) => "原生",
         (ResolvedLocale::ZhCn, HumanMessageKey::PresentationSettings) => "外观呈现设置",
         (ResolvedLocale::ZhCn, HumanMessageKey::UserLocalState) => {
@@ -1776,7 +1778,7 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
             "TabBeacon 外观呈现向导（按 Enter 保留每个当前值）。"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::SupportedPresets) => {
-            "支持的预设：native、minimal、balanced、full。"
+            "支持的预设：native、minimal、balanced、terminal-ring；full 为兼容别名。"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::TitleOwnershipReconciled) => {
             "已安全协调标题所有权。"

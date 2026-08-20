@@ -445,7 +445,10 @@ fn fixture_driver_uses_a_unique_title_without_changing_g02_semantics() {
     assert!(working.case.expected_title.starts_with("⠋ "));
     assert!(working.case.expected_title.ends_with("-working"));
     assert_eq!(working.case.theme, PresentationTheme::MutedDark);
-    assert!(working.case.expects_animation);
+    assert!(
+        !working.case.expects_animation,
+        "the normal Human preset reserves animation for the title, not the Terminal Ring"
+    );
     assert!(working.case.expects_title_animation);
     assert!(
         working.case.expected_title_frames.len() >= 3,
