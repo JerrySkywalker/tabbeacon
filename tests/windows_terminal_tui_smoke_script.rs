@@ -49,14 +49,22 @@ fn smoke_launch_and_cleanup_are_watchdog_bounded_and_owner_correlated() {
         "cleanup disposition must be recorded in durable evidence"
     );
     assert!(
-        script.contains("function Test-TrackedProcessTreeCompleted")
-            && script.contains("function Test-ProcessIdentity"),
-        "cleanup must confirm every tracked descendant by PID and start time"
+        script.contains("function Get-TrackedProcessTreeState")
+            && script.contains("function Get-ProcessIdentityState")
+            && script.contains("State = 'unknown'"),
+        "cleanup must distinguish unknown process state from proven completion"
+    );
+    assert!(
+        script.contains("Get-CimInstance Win32_Process")
+            && script.contains("return 'unknown'")
+            && script.contains("TREE_ENUMERATION_PROVEN="),
+        "descendant enumeration failures must be durable unproven evidence"
     );
     assert!(
         script.contains("WATCHDOG_EXPIRED=")
-            && script.contains("$passed = -not $watchdogExpired -and $launcherCompleted"),
-        "an expired watchdog or unfinished launcher cannot produce PASS"
+            && script.contains("$passed = -not $watchdogExpired -and $identityQueriesProven")
+            && script.contains("$ownedTreeTracked -and $launcherCompleted"),
+        "an expired watchdog, unknown identity, or unfinished launcher/tree cannot produce PASS"
     );
 }
 
