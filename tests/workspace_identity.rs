@@ -128,6 +128,27 @@ fn git_identity_alias_linked_worktree_and_originless_behavior_are_unchanged() {
 }
 
 #[test]
+fn workspace_identity_fingerprint_observes_an_alternate_cwd_without_registry_writes() {
+    let root = TestRoot::new("anchor-fingerprint");
+    let state = root.child("state");
+    let alternate = root.child("temporary-worktree");
+    init_repo(
+        &alternate,
+        Some("https://example.invalid/team/temporary-worktree.git"),
+    );
+    let resolver = WorkspaceIdentityResolver::with_home_directory(&state, None);
+
+    let fingerprint = resolver
+        .workspace_identity_sha256(&alternate)
+        .expect("alternate workspace identity is observable without assignment");
+    assert_eq!(fingerprint.len(), 64);
+    assert!(
+        !state.exists(),
+        "a non-authoritative cwd observation must not allocate local alias state"
+    );
+}
+
+#[test]
 fn ordinary_directory_is_stable_opaque_and_creates_no_local_marker() {
     let root = TestRoot::new("ordinary");
     let state = root.child("state");

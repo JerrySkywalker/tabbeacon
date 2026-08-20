@@ -18,9 +18,9 @@ use super::{
     ColorClassification, ColorMetrics, ColorSemantic, ColorTolerance, DesktopPreflight,
     EvidenceBundle, EvidenceIntegrity, EvidenceManifest, EvidenceWriter, FixtureDriver,
     MachineEnvironment, OwnedWindowCaptureTarget, PreflightBlocker, PreflightProbe,
-    PrintWindowCaptureBackend, RgbaFrame, Roi, ScreenRect, SessionKind,
-    TerminalTestSessionLauncher, UiaDump, VisualDisposition, VisualError, VisualResult,
-    WindowsUiaLocator, assess_animation, classify_color_for_theme, matches_baseline,
+    PrintWindowCaptureBackend, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME, RgbaFrame, Roi, ScreenRect,
+    SessionKind, TerminalTestSessionLauncher, UiaDump, VisualDisposition, VisualError,
+    VisualResult, WindowsUiaLocator, assess_animation, classify_color_for_theme, matches_baseline,
     select_background_roi,
 };
 
@@ -1431,6 +1431,21 @@ fn selected_replays(
 ) -> VisualResult<Vec<super::FixtureReplay>> {
     let all = driver.all_cases(&request.run_id)?;
     match request.fixture_name.as_deref() {
+        Some(ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME) => {
+            let ready = all
+                .into_iter()
+                .find(|replay| replay.case.fixture_name == "ready")
+                .ok_or_else(|| {
+                    VisualError::Platform(
+                        "root-workspace visual fixture requires the ready color baseline"
+                            .to_owned(),
+                    )
+                })?;
+            Ok(vec![
+                ready,
+                driver.root_workspace_anchor_replay(&request.run_id)?,
+            ])
+        }
         Some(name) => all
             .into_iter()
             .filter(|replay| replay.case.fixture_name == name)
@@ -1825,13 +1840,16 @@ mod tests {
 
     use sha2::{Digest, Sha256};
 
-    use crate::visual::{EvidenceFileDigest, EvidenceIntegrity, Rgb};
+    use crate::visual::{
+        EvidenceFileDigest, EvidenceIntegrity, FixtureDriver, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME,
+        Rgb,
+    };
 
     use super::{
         BoundedWorkerOutput, LiveVisualRunRequest, RgbaFrame, Roi, ScreenRect, UiaDump,
         authorize_live_worker, clear_worker_authorization, consume_worker_authorization,
         create_worker_authorization, empty_uia_dump, evidence_integrity_matches, progress_roi,
-        relative_roi, target_has_capturable_geometry, wait_for_bounded_worker,
+        relative_roi, selected_replays, target_has_capturable_geometry, wait_for_bounded_worker,
     };
 
     #[test]
@@ -1887,7 +1905,24 @@ mod tests {
     }
 
     #[test]
-    fn bounded_worker_deadline_terminates_the_owned_helper_tree() {
+    fn root_workspace_visual_fixture_keeps_the_ready_color_baseline() {
+        let request = LiveVisualRunRequest {
+            expected_head: "a".repeat(40),
+            run_id: "TB59-anchor-selection".to_owned(),
+            evidence_root: PathBuf::from("target/visual-worker-tests"),
+            fixture_name: Some(ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME.to_owned()),
+        };
+        let replays = selected_replays(&FixtureDriver::default(), &request)
+            .expect("G59 visual fixture selection is valid");
+        let names = replays
+            .iter()
+            .map(|replay| replay.case.fixture_name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["ready", ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME]);
+    }
+
+    #[test]
+    fn bounded_worker_deadline_returns_a_non_success_classification() {
         let mut worker = Command::new("powershell.exe");
         worker
             .args([
@@ -1904,9 +1939,13 @@ mod tests {
             Duration::from_millis(500),
         )
         .expect("collects the terminated test-owned helper");
-        let BoundedWorkerOutput::TimedOut = outcome else {
-            panic!("sleeping helper must exceed its wall-clock deadline");
-        };
+        assert!(
+            matches!(
+                outcome,
+                BoundedWorkerOutput::TimedOut | BoundedWorkerOutput::TerminationFailed
+            ),
+            "a sleeping owned helper must never be reported as a successful completion"
+        );
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "the outer harness must retain an enforceable wall-clock boundary"

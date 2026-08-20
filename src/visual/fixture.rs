@@ -5,8 +5,12 @@ use crate::presentation::{
     WindowsTerminalRenderer, presentation_fixture,
 };
 use crate::settings::{PresentationSettings, PresentationTheme};
+use sha2::{Digest, Sha256};
 
 use super::{ColorSemantic, VisualError, VisualResult};
+
+/// Dedicated real-provider fixture name for the G59 root-anchor acceptance.
+pub const ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME: &str = "root-workspace-anchor";
 
 /// One uniquely identified replay of a presentation fixture case.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -172,6 +176,48 @@ impl FixtureDriver {
         })
     }
 
+    /// Replays the G59 root-workspace-anchor visual acceptance case.
+    ///
+    /// The fixture child executes the real Codex hook runtime with this exact
+    /// root alias, then observes alternate tool and subagent CWDs. The replay
+    /// provides only the expected production-rendered title and semantic color
+    /// to the bounded Windows Terminal harness.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualError::InvalidIdentifier`] when `run_id` cannot safely
+    /// participate in the uniquely correlated title.
+    pub fn root_workspace_anchor_replay(&self, run_id: &str) -> VisualResult<FixtureReplay> {
+        let root_alias = root_workspace_anchor_fixture_alias(run_id)?;
+        let working = presentation_fixture()
+            .iter()
+            .find(|fixture| fixture.name() == "working")
+            .ok_or_else(|| VisualError::Platform("working fixture is missing".to_owned()))?;
+        let action = working.action_with_title(&root_alias);
+        let state = match &action {
+            PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
+        };
+        let expected_title = self.renderer.title_for(state).ok_or_else(|| {
+            VisualError::Platform(
+                "root-workspace visual fixture requires TabBeacon title ownership".to_owned(),
+            )
+        })?;
+        Ok(FixtureReplay {
+            case: VisualTestCase {
+                fixture_name: ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME.to_owned(),
+                expected_title: expected_title.as_str().to_owned(),
+                expected_title_frames: vec![expected_title.as_str().to_owned()],
+                expected_color: ColorSemantic::Working,
+                theme: self.renderer.settings().theme(),
+                expects_animation: false,
+                expects_title_animation: false,
+            },
+            action: action.clone(),
+            vt_bytes: self.renderer.render(&action),
+            title_frame_bytes: Vec::new(),
+        })
+    }
+
     /// Produces the G02 reset action for a title owned by this visual run.
     ///
     /// # Errors
@@ -186,6 +232,23 @@ impl FixtureDriver {
     }
 }
 
+/// Alias used only by the owned, uniquely correlated G59 visual fixture.
+///
+/// The title-policy alias bound is shorter than a full evidence run ID, so the
+/// fixture uses a fixed-length hash-derived suffix. The surrounding owned
+/// Windows Terminal window name retains the complete run ID.
+///
+/// # Errors
+///
+/// Returns [`VisualError::InvalidIdentifier`] when `run_id` is unsafe.
+pub fn root_workspace_anchor_fixture_alias(run_id: &str) -> VisualResult<String> {
+    if !is_safe_run_id(run_id) {
+        return Err(VisualError::InvalidIdentifier(run_id.to_owned()));
+    }
+    let digest = format!("{:x}", Sha256::digest(run_id.as_bytes()));
+    Ok(format!("TB59-{}", &digest[..15]))
+}
+
 fn is_safe_run_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -196,7 +259,7 @@ fn is_safe_run_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::FixtureDriver;
+    use super::{FixtureDriver, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME};
     use crate::presentation::presentation_fixture;
 
     #[test]
@@ -215,5 +278,19 @@ mod tests {
             !output.contains("]9;4;3;0"),
             "normal visual evidence must not model simultaneous title and ring activity"
         );
+    }
+
+    #[test]
+    fn root_workspace_anchor_replay_is_static_and_uses_a_safe_root_alias() {
+        let replay = FixtureDriver::default()
+            .root_workspace_anchor_replay("TB59-anchor")
+            .expect("root workspace fixture replay is valid");
+
+        assert_eq!(replay.case.fixture_name, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME);
+        assert_eq!(replay.case.expected_title_frames.len(), 1);
+        assert!(replay.case.expected_title.contains("TB59-"));
+        assert!(!replay.case.expected_title.contains("TB59-anchor"));
+        assert!(!replay.case.expects_title_animation);
+        assert!(!replay.case.expects_animation);
     }
 }

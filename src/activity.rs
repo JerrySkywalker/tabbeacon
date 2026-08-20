@@ -140,6 +140,20 @@ impl SessionWorkerHealth {
     }
 }
 
+/// Bounded workspace facts that provider adapters may project into activity
+/// leases without retaining raw paths or agent/session identifiers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionWorkspaceObservability {
+    /// Whether the session has an admitted root workspace anchor.
+    pub root_binding_stable: bool,
+    /// Whether an accepted event observed a different workspace identity.
+    pub workspace_mismatch_observed: bool,
+    /// Explicit lifecycle-derived count, capped by the provider adapter.
+    pub active_subagents: u16,
+    /// Absent unless a provider proves a background-task count.
+    pub background_tasks: Option<u16>,
+}
+
 /// One privacy-preserving row in the read-only sessions view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SessionOverview {
@@ -153,6 +167,8 @@ pub struct SessionOverview {
     pub recency: SessionRecency,
     /// Lease-backed worker health without a process-liveness claim.
     pub worker_health: SessionWorkerHealth,
+    /// Content-minimal root-workspace and background facts.
+    pub workspace_observability: SessionWorkspaceObservability,
 }
 
 /// Explicitly absent data and capabilities in the sessions interface.
@@ -344,38 +360,81 @@ pub struct WorkerPresentation {
     workspace_alias: String,
     semantic_state: String,
     spinner_preset: String,
+    #[serde(default)]
+    workspace_observability: SessionWorkspaceObservability,
 }
 
 impl WorkerPresentation {
     /// Creates an animated working-title presentation.
     #[must_use]
     pub fn working(workspace_alias: &str, spinner: SpinnerPreset) -> Self {
+        Self::working_with_workspace_observability(
+            workspace_alias,
+            spinner,
+            SessionWorkspaceObservability::default(),
+        )
+    }
+
+    fn working_with_workspace_observability(
+        workspace_alias: &str,
+        spinner: SpinnerPreset,
+        workspace_observability: SessionWorkspaceObservability,
+    ) -> Self {
         Self {
             workspace_alias: workspace_alias.to_owned(),
             semantic_state: "working".to_owned(),
             spinner_preset: spinner.as_str().to_owned(),
+            workspace_observability,
         }
     }
 
     /// Creates a static result title that remains owned after a one-shot Hook
     /// returns control to its shell host.
     #[must_use]
+    #[allow(dead_code)]
     fn result_ready(workspace_alias: &str, spinner: SpinnerPreset) -> Self {
+        Self::result_ready_with_workspace_observability(
+            workspace_alias,
+            spinner,
+            SessionWorkspaceObservability::default(),
+        )
+    }
+
+    fn result_ready_with_workspace_observability(
+        workspace_alias: &str,
+        spinner: SpinnerPreset,
+        workspace_observability: SessionWorkspaceObservability,
+    ) -> Self {
         Self {
             workspace_alias: workspace_alias.to_owned(),
             semantic_state: "result-ready".to_owned(),
             spinner_preset: spinner.as_str().to_owned(),
+            workspace_observability,
         }
     }
 
     /// Creates a static approval title that remains owned after a one-shot Hook
     /// returns control to its shell host.
     #[must_use]
+    #[allow(dead_code)]
     fn approval(workspace_alias: &str, spinner: SpinnerPreset) -> Self {
+        Self::approval_with_workspace_observability(
+            workspace_alias,
+            spinner,
+            SessionWorkspaceObservability::default(),
+        )
+    }
+
+    fn approval_with_workspace_observability(
+        workspace_alias: &str,
+        spinner: SpinnerPreset,
+        workspace_observability: SessionWorkspaceObservability,
+    ) -> Self {
         Self {
             workspace_alias: workspace_alias.to_owned(),
             semantic_state: "approval".to_owned(),
             spinner_preset: spinner.as_str().to_owned(),
+            workspace_observability,
         }
     }
 
@@ -456,6 +515,7 @@ impl ActivityCoordinator {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub(crate) fn reconcile(
         &self,
         session_sha256: &str,
@@ -465,6 +525,30 @@ impl ActivityCoordinator {
         workspace_alias: &str,
         action: &PresentationAction,
         settings: PresentationSettings,
+    ) -> ActivityRender {
+        self.reconcile_with_workspace_observability(
+            session_sha256,
+            turn_sha256,
+            generation,
+            event_sequence,
+            workspace_alias,
+            action,
+            settings,
+            SessionWorkspaceObservability::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub(crate) fn reconcile_with_workspace_observability(
+        &self,
+        session_sha256: &str,
+        turn_sha256: Option<&str>,
+        generation: u64,
+        event_sequence: u64,
+        workspace_alias: &str,
+        action: &PresentationAction,
+        settings: PresentationSettings,
+        workspace_observability: SessionWorkspaceObservability,
     ) -> ActivityRender {
         let ActivityExecution::System {
             executable,
@@ -487,17 +571,27 @@ impl ActivityCoordinator {
         };
         let worker_presentation = if settings.title() == TitleMode::TabBeacon {
             match title_status {
-                TitleStatus::Working if settings.activity().uses_worker_animation() => Some(
-                    WorkerPresentation::working(workspace_alias, settings.spinner()),
+                TitleStatus::Working if settings.activity().uses_worker_animation() => {
+                    Some(WorkerPresentation::working_with_workspace_observability(
+                        workspace_alias,
+                        settings.spinner(),
+                        workspace_observability.clone(),
+                    ))
+                }
+                TitleStatus::ResultReady => Some(
+                    WorkerPresentation::result_ready_with_workspace_observability(
+                        workspace_alias,
+                        settings.spinner(),
+                        workspace_observability.clone(),
+                    ),
                 ),
-                TitleStatus::ResultReady => Some(WorkerPresentation::result_ready(
-                    workspace_alias,
-                    settings.spinner(),
-                )),
-                TitleStatus::Approval => Some(WorkerPresentation::approval(
-                    workspace_alias,
-                    settings.spinner(),
-                )),
+                TitleStatus::Approval => {
+                    Some(WorkerPresentation::approval_with_workspace_observability(
+                        workspace_alias,
+                        settings.spinner(),
+                        workspace_observability,
+                    ))
+                }
                 _ => None,
             }
         } else {
@@ -1426,6 +1520,7 @@ fn inspect_sessions_read_only(state_root: &Path, now: u64) -> SessionsOverview {
             age_seconds,
             recency,
             worker_health,
+            workspace_observability: presentation.workspace_observability,
         });
     }
     overview.sessions.sort_by(|left, right| {

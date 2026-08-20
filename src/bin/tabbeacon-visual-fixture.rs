@@ -1,18 +1,23 @@
 //! G03 fixture renderer and bounded visual-harness entrypoint.
 
 use std::{
-    env,
+    env, fs,
     io::{self, Write},
     path::PathBuf,
-    thread,
+    process, thread,
     time::{Duration, Instant},
 };
 
+use serde_json::json;
 use tabbeacon::{
     activity::next_animation_frame_deadline,
     presentation::presentation_fixture,
+    providers::codex::{CodexHookRuntime, HookDispatchOutcome},
+    repo::WorkspaceIdentityResolver,
+    settings::PresentationSettings,
     visual::{
-        FixtureDriver, LiveVisualRunRequest, VisualDisposition, VisualError, VisualResult,
+        FixtureDriver, LiveVisualRunRequest, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME, VisualDisposition,
+        VisualError, VisualResult, root_workspace_anchor_fixture_alias,
         runner::{authorize_live_worker, run_live, run_live_in_worker},
     },
 };
@@ -43,6 +48,9 @@ fn emit(arguments: &[String]) -> VisualResult<()> {
     let hold_millis = argument_value(arguments, "--hold-ms")?
         .parse::<u64>()
         .map_err(|error| VisualError::Platform(format!("invalid --hold-ms: {error}")))?;
+    if fixture_name == ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME {
+        return emit_root_workspace_anchor(&run_id, hold_millis);
+    }
     let fixture = presentation_fixture()
         .iter()
         .find(|fixture| fixture.name() == fixture_name)
@@ -75,6 +83,108 @@ fn emit(arguments: &[String]) -> VisualResult<()> {
     }
     stdout.write_all(&reset.vt_bytes)?;
     stdout.flush()?;
+    Ok(())
+}
+
+/// Emits a real Codex hook sequence with an anchored root and alternate CWDs.
+///
+/// The temporary state belongs solely to this uniquely correlated fixture. It
+/// is removed on normal completion and contains no alternate alias assignment:
+/// the alternate CWD is observed only through the G59 anchor runtime path.
+fn emit_root_workspace_anchor(run_id: &str, hold_millis: u64) -> VisualResult<()> {
+    let state_root =
+        env::temp_dir().join(format!("tabbeacon-g59-visual-{run_id}-{}", process::id()));
+    if state_root.exists() {
+        return Err(VisualError::Platform(
+            "owned root-workspace visual state already exists".to_owned(),
+        ));
+    }
+    fs::create_dir_all(state_root.join("alternate-workspace"))?;
+    let result = emit_root_workspace_anchor_in_state(&state_root, run_id, hold_millis);
+    let _ = fs::remove_dir_all(&state_root);
+    result
+}
+
+fn emit_root_workspace_anchor_in_state(
+    state_root: &std::path::Path,
+    run_id: &str,
+    hold_millis: u64,
+) -> VisualResult<()> {
+    let root_cwd = env::current_dir()?;
+    let alternate_cwd = state_root.join("alternate-workspace");
+    let root_alias = root_workspace_anchor_fixture_alias(run_id)?;
+    WorkspaceIdentityResolver::new(state_root)
+        .set_alias_override(&root_cwd, &root_alias)
+        .map_err(|_| VisualError::Platform("could not prepare owned root alias".to_owned()))?;
+    let runtime =
+        CodexHookRuntime::with_settings(state_root, true, PresentationSettings::default());
+    let session_id = format!("g59-visual-{run_id}");
+    let mut stdout = io::stdout().lock();
+
+    dispatch_anchor_event(
+        &runtime,
+        &json!({
+            "hook_event_name": "SessionStart",
+            "session_id": &session_id,
+            "turn_id": "root-turn",
+            "cwd": &root_cwd,
+            "source": "startup",
+        }),
+        &mut stdout,
+    )?;
+    dispatch_anchor_event(
+        &runtime,
+        &json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": &session_id,
+            "turn_id": "root-turn",
+            "cwd": &alternate_cwd,
+        }),
+        &mut stdout,
+    )?;
+    dispatch_anchor_event(
+        &runtime,
+        &json!({
+            "hook_event_name": "SubagentStart",
+            "session_id": &session_id,
+            "turn_id": "subagent-turn",
+            "agent_id": "owned-visual-subagent",
+            "agent_type": "thread",
+            "cwd": &alternate_cwd,
+        }),
+        &mut stdout,
+    )?;
+    dispatch_anchor_event(
+        &runtime,
+        &json!({
+            "hook_event_name": "PostToolUse",
+            "session_id": &session_id,
+            "turn_id": "root-turn",
+            "cwd": &alternate_cwd,
+        }),
+        &mut stdout,
+    )?;
+    thread::sleep(Duration::from_millis(hold_millis));
+    let reset = FixtureDriver::default().reset(run_id)?;
+    stdout.write_all(&reset.vt_bytes)?;
+    stdout.flush()?;
+    Ok(())
+}
+
+fn dispatch_anchor_event(
+    runtime: &CodexHookRuntime,
+    payload: &serde_json::Value,
+    stdout: &mut impl Write,
+) -> VisualResult<()> {
+    let raw = serde_json::to_vec(&payload).map_err(VisualError::Json)?;
+    if !matches!(
+        runtime.dispatch_to(&raw, std::time::SystemTime::now(), stdout),
+        HookDispatchOutcome::Applied | HookDispatchOutcome::IgnoredSubagent
+    ) {
+        return Err(VisualError::Platform(
+            "owned root-workspace fixture hook sequence was not admitted".to_owned(),
+        ));
+    }
     Ok(())
 }
 

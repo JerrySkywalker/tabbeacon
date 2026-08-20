@@ -259,6 +259,27 @@ impl WorkspaceIdentityResolver {
         })
     }
 
+    /// Resolves only a privacy-preserving canonical-workspace fingerprint.
+    ///
+    /// Unlike [`Self::resolve`], this does not allocate an alias or write the
+    /// shared registry. Provider session anchoring uses it to classify an
+    /// alternate event cwd without making that cwd presentation authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same local discovery or canonicalization failures as
+    /// [`Self::resolve`].
+    pub fn workspace_identity_sha256(
+        &self,
+        cwd: impl AsRef<Path>,
+    ) -> Result<String, RepositoryIdentityError> {
+        let facts = self.workspace_facts(cwd.as_ref())?;
+        Ok(format!(
+            "{:x}",
+            Sha256::digest(facts.identity.as_str().as_bytes())
+        ))
+    }
+
     /// Inspects the current workspace without creating a registry generation,
     /// preference document, directory, or lock.
     ///

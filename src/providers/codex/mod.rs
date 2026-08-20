@@ -3,6 +3,7 @@
 //! Raw Codex payloads stop at this module. Only provider-neutral evidence is
 //! exposed to the core reconciler.
 
+mod anchor;
 mod config;
 mod generation;
 mod profile;
@@ -47,6 +48,17 @@ pub enum CodexNormalization {
     UnsupportedEvent,
 }
 
+/// The admitted semantic source of a root `SessionStart` event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexSessionStartSource {
+    /// A fresh root session began.
+    Startup,
+    /// A compatible root session resumed.
+    Resume,
+    /// The provider cleared prior root session state.
+    Clear,
+}
+
 /// Non-sensitive identity and ordering fields retained from one Hook payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CodexHookContext {
@@ -55,6 +67,7 @@ pub struct CodexHookContext {
     turn_id: Option<String>,
     agent_id: Option<String>,
     agent_type: Option<String>,
+    session_start_source: Option<CodexSessionStartSource>,
     cwd: PathBuf,
 }
 
@@ -87,6 +100,12 @@ impl CodexHookContext {
     #[must_use]
     pub fn agent_type(&self) -> Option<&str> {
         self.agent_type.as_deref()
+    }
+
+    /// Typed root-session binding authority when this is an admitted start.
+    #[must_use]
+    pub const fn session_start_source(&self) -> Option<CodexSessionStartSource> {
+        self.session_start_source
     }
 
     /// Local working directory used only for offline repository identity.
@@ -175,6 +194,7 @@ impl CodexHookNormalizer {
     ///
     /// Returns a content-free classification for malformed input, missing
     /// required fields, or invalid provider-neutral identifiers.
+    #[allow(clippy::too_many_lines)]
     pub fn normalize(
         self,
         raw: &[u8],
@@ -204,12 +224,24 @@ impl CodexHookNormalizer {
             agent_id = Some(required_string(object, "agent_id")?.to_owned());
             agent_type = Some(required_string(object, "agent_type")?.to_owned());
         }
+        let session_start_source = if event == CodexHookEvent::SessionStart {
+            match required_string(object, "source")? {
+                "startup" => Some(CodexSessionStartSource::Startup),
+                "resume" => Some(CodexSessionStartSource::Resume),
+                "clear" => Some(CodexSessionStartSource::Clear),
+                "compact" => None,
+                _ => return Ok(CodexNormalization::UnsupportedEvent),
+            }
+        } else {
+            None
+        };
         let context = CodexHookContext {
             event,
             session_id: session_id.to_owned(),
             turn_id,
             agent_id,
             agent_type,
+            session_start_source,
             cwd: PathBuf::from(cwd),
         };
 
@@ -221,14 +253,13 @@ impl CodexHookNormalizer {
         }
 
         let patch = match event {
-            CodexHookEvent::SessionStart => match required_string(object, "source")? {
-                "startup" | "resume" | "clear" => StatePatch {
+            CodexHookEvent::SessionStart => match context.session_start_source() {
+                Some(_) => StatePatch {
                     phase: FieldUpdate::set(Phase::Ready),
                     attention: FieldUpdate::clear(),
                     health: FieldUpdate::unchanged(),
                 },
-                "compact" => return Ok(CodexNormalization::PreserveCurrentState(context)),
-                _ => return Ok(CodexNormalization::UnsupportedEvent),
+                None => return Ok(CodexNormalization::PreserveCurrentState(context)),
             },
             CodexHookEvent::UserPromptSubmit
             | CodexHookEvent::PreToolUse

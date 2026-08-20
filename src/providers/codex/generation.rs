@@ -316,6 +316,7 @@ mod tests {
             turn_id: turn_id.map(str::to_owned),
             agent_id: None,
             agent_type: None,
+            session_start_source: None,
             cwd: PathBuf::from("workspace"),
         }
     }
