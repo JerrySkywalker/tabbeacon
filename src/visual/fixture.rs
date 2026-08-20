@@ -4,7 +4,7 @@ use crate::presentation::{
     PresentationAction, PresentationFixtureCase, WindowsTerminalCapabilities,
     WindowsTerminalRenderer, presentation_fixture,
 };
-use crate::settings::{ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset};
+use crate::settings::{PresentationSettings, PresentationTheme};
 
 use super::{ColorSemantic, VisualError, VisualResult};
 
@@ -51,9 +51,7 @@ impl Default for FixtureDriver {
     fn default() -> Self {
         Self::with_settings(
             WindowsTerminalCapabilities::new(true),
-            PresentationSettings::default()
-                .with_activity(ActivityMode::Both)
-                .with_spinner(SpinnerPreset::Braille),
+            PresentationSettings::default(),
         )
     }
 }
@@ -67,7 +65,7 @@ impl FixtureDriver {
         }
     }
 
-    /// Creates a driver using the supplied v0.1 settings for a visual candidate.
+    /// Creates a driver using the supplied presentation settings for a visual candidate.
     #[must_use]
     pub const fn with_settings(
         capabilities: WindowsTerminalCapabilities,
@@ -194,4 +192,28 @@ fn is_safe_run_id(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FixtureDriver;
+    use crate::presentation::presentation_fixture;
+
+    #[test]
+    fn default_driver_uses_the_normal_single_channel_presentation() {
+        let working = presentation_fixture()
+            .iter()
+            .find(|fixture| fixture.name() == "working")
+            .expect("working fixture exists");
+        let replay = FixtureDriver::default()
+            .replay(working, "G58-normal")
+            .expect("normal fixture replay is valid");
+        let output = String::from_utf8(replay.vt_bytes).expect("fixture output is UTF-8");
+
+        assert!(replay.case.expects_title_animation);
+        assert!(
+            !output.contains("]9;4;3;0"),
+            "normal visual evidence must not model simultaneous title and ring activity"
+        );
+    }
 }

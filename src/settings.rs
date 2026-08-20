@@ -388,10 +388,10 @@ impl PresentationSettings {
                 PresentationTheme::MutedDark,
             )),
             "balanced" => Some(Self::default()),
-            "full" => Some(Self::new(
+            "terminal-ring" | "full" => Some(Self::new(
                 TitleMode::TabBeacon,
                 TabColorMode::TabBeacon,
-                ActivityMode::Both,
+                ActivityMode::WindowsTerminalRing,
                 SpinnerPreset::Braille,
                 PresentationTheme::MutedDark,
             )),
@@ -964,7 +964,7 @@ mod tests {
     }
 
     #[test]
-    fn v03_presets_keep_their_declared_channel_boundaries() {
+    fn human_presets_keep_one_primary_activity_channel() {
         let native = PresentationSettings::preset("native").expect("native preset");
         assert_eq!(native.title(), TitleMode::Native);
         assert_eq!(native.tab_color(), TabColorMode::Native);
@@ -979,11 +979,18 @@ mod tests {
         assert_eq!(balanced, PresentationSettings::default());
         assert_eq!(balanced.spinner(), SpinnerPreset::Braille);
 
-        let full = PresentationSettings::preset("full").expect("full preset");
-        assert_eq!(full.title(), TitleMode::TabBeacon);
-        assert_eq!(full.tab_color(), TabColorMode::TabBeacon);
-        assert_eq!(full.activity(), ActivityMode::Both);
-        assert_eq!(full.spinner(), SpinnerPreset::Braille);
+        let terminal_ring =
+            PresentationSettings::preset("terminal-ring").expect("terminal ring preset");
+        assert_eq!(terminal_ring.title(), TitleMode::TabBeacon);
+        assert_eq!(terminal_ring.tab_color(), TabColorMode::TabBeacon);
+        assert_eq!(terminal_ring.activity(), ActivityMode::WindowsTerminalRing);
+        assert!(!terminal_ring.activity().uses_worker_animation());
+        assert!(terminal_ring.activity().uses_windows_terminal_ring());
+        assert_eq!(terminal_ring.spinner(), SpinnerPreset::Braille);
+
+        let legacy_full_name = PresentationSettings::preset("full").expect("legacy full name");
+        assert_eq!(legacy_full_name, terminal_ring);
+        assert_ne!(legacy_full_name.activity(), ActivityMode::Both);
     }
 
     #[test]
@@ -1080,6 +1087,33 @@ mod tests {
             custom
         );
         fs::remove_file(path).expect("existing fixture removes");
+    }
+
+    #[test]
+    fn legacy_both_token_stays_readable_and_byte_exact_until_explicit_apply() {
+        let path = temporary_config("legacy-both");
+        let legacy_both = concat!(
+            "[presentation]\n",
+            "title = \"tabbeacon\"\n",
+            "tab_color = \"tabbeacon\"\n",
+            "activity = \"both\"\n",
+            "spinner = \"braille\"\n",
+            "theme = \"muted-dark\"\n",
+        );
+        fs::write(&path, legacy_both).expect("legacy fixture writes");
+
+        let store = PresentationSettingsStore::new(&path);
+        assert_eq!(
+            store.load_or_default().activity(),
+            ActivityMode::Both,
+            "the legacy machine token remains an explicit dual-activity preference"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("legacy fixture rereads"),
+            legacy_both,
+            "normal reads must never rewrite an existing user choice"
+        );
+        fs::remove_file(path).expect("legacy fixture removes");
     }
 
     #[test]
