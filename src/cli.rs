@@ -46,6 +46,9 @@ pub enum Command {
     Status(OutputArgs),
     /// Show privacy-preserving, read-only live session observations.
     Sessions(OutputArgs),
+    /// Diagnose whether a local package upgrade is blocked by a live owned worker.
+    #[command(name = "upgrade-preflight")]
+    UpgradePreflight(UpgradePreflightArgs),
     /// Inspect or explicitly remediate Windows Terminal title ownership.
     #[command(name = "title-policy")]
     TitlePolicy {
@@ -246,6 +249,32 @@ impl LanguageArgument {
     }
 }
 
+#[cfg(test)]
+mod upgrade_preflight_tests {
+    use clap::Parser;
+
+    use super::{Cli, Command, OutputMode};
+
+    #[test]
+    fn upgrade_preflight_keeps_drain_explicit_and_machine_output_typed() {
+        let default = Cli::try_parse_from(["tabbeacon", "upgrade-preflight"])
+            .expect("default preflight parses");
+        let Some(Command::UpgradePreflight(arguments)) = default.command else {
+            panic!("upgrade preflight command is selected");
+        };
+        assert!(!arguments.drain);
+        assert_eq!(arguments.output.mode(), OutputMode::Human);
+
+        let drained = Cli::try_parse_from(["tabbeacon", "upgrade-preflight", "--drain", "--json"])
+            .expect("explicit drain parses");
+        let Some(Command::UpgradePreflight(arguments)) = drained.command else {
+            panic!("upgrade preflight command is selected");
+        };
+        assert!(arguments.drain);
+        assert_eq!(arguments.output.mode(), OutputMode::Json);
+    }
+}
+
 /// Doctor-specific observational flags.
 #[derive(Clone, Copy, Debug, Args)]
 pub struct DoctorArgs {
@@ -254,6 +283,16 @@ pub struct DoctorArgs {
     /// Include the existing bounded visible-title probe.
     #[arg(long)]
     pub probe_title: bool,
+}
+
+/// Arguments for the package-upgrade preflight.
+#[derive(Clone, Copy, Debug, Args)]
+pub struct UpgradePreflightArgs {
+    /// Stop only processes freshly proven to be active `TabBeacon` activity workers.
+    #[arg(long)]
+    pub drain: bool,
+    #[command(flatten)]
+    pub output: OutputArgs,
 }
 
 /// Codex is the only production provider admitted in this train.

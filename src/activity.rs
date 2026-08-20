@@ -267,6 +267,38 @@ pub fn inspect_system_sessions() -> SessionsOverview {
     inspect_sessions_read_only(&state_root, unix_ms())
 }
 
+/// One opaque activity-worker identity used only to prove a drain target.
+///
+/// The values remain internal to the preflight correlation. They are never
+/// emitted through a Human or machine diagnostic surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActiveWorkerLeaseIdentity {
+    pub(crate) key_sha256: String,
+    pub(crate) generation: u64,
+    pub(crate) revision: u64,
+}
+
+/// Read-only availability of the opaque worker identities needed for an
+/// ownership-scoped upgrade drain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ActiveWorkerLeaseInspection {
+    pub(crate) health: ActivityLeaseHealth,
+    pub(crate) identities: Vec<ActiveWorkerLeaseIdentity>,
+}
+
+/// Reads active worker identities without creating state, taking a lock, or
+/// exposing the hashes outside the ownership correlation path.
+#[must_use]
+pub(crate) fn inspect_system_active_worker_identities() -> ActiveWorkerLeaseInspection {
+    let Ok(state_root) = crate::repo::StableAliasRegistry::default_state_root() else {
+        return ActiveWorkerLeaseInspection {
+            health: ActivityLeaseHealth::Unavailable,
+            identities: Vec::new(),
+        };
+    };
+    inspect_active_worker_identities_read_only(&state_root, unix_ms())
+}
+
 /// Minimal provider-neutral identity for one ephemeral worker generation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerKey {
@@ -1203,6 +1235,108 @@ impl ActivityLeaseStore {
 
 fn inspect_activity_leases_read_only(state_root: &Path, now: u64) -> ActivityLeaseDiagnostics {
     inspect_sessions_read_only(state_root, now).diagnostics()
+}
+
+fn inspect_active_worker_identities_read_only(
+    state_root: &Path,
+    now: u64,
+) -> ActiveWorkerLeaseInspection {
+    let directory = state_root.join(STATE_DIRECTORY);
+    let metadata = match fs::symlink_metadata(&directory) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return ActiveWorkerLeaseInspection {
+                health: ActivityLeaseHealth::Unavailable,
+                identities: Vec::new(),
+            };
+        }
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return ActiveWorkerLeaseInspection {
+                health: ActivityLeaseHealth::Healthy,
+                identities: Vec::new(),
+            };
+        }
+        Err(_) => {
+            return ActiveWorkerLeaseInspection {
+                health: ActivityLeaseHealth::Unavailable,
+                identities: Vec::new(),
+            };
+        }
+    };
+    if !metadata.is_dir() {
+        return ActiveWorkerLeaseInspection {
+            health: ActivityLeaseHealth::Unavailable,
+            identities: Vec::new(),
+        };
+    }
+    let Ok(entries) = fs::read_dir(&directory) else {
+        return ActiveWorkerLeaseInspection {
+            health: ActivityLeaseHealth::Unavailable,
+            identities: Vec::new(),
+        };
+    };
+
+    let mut inspection = ActiveWorkerLeaseInspection {
+        health: ActivityLeaseHealth::Healthy,
+        identities: Vec::new(),
+    };
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_DIAGNOSTIC_LEASE_FILES {
+            inspection.health = ActivityLeaseHealth::Warning;
+            break;
+        }
+        let Ok(entry) = entry else {
+            inspection.health = ActivityLeaseHealth::Warning;
+            continue;
+        };
+        let name = entry.file_name();
+        let Some(key_digest) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("lease-"))
+            .and_then(|value| value.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        let path = entry.path();
+        let valid_entry = fs::symlink_metadata(&path)
+            .ok()
+            .is_some_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
+        if !is_sha256(key_digest)
+            || !valid_entry
+            || fs::metadata(&path)
+                .map_or(true, |metadata| metadata.len() > MAX_DIAGNOSTIC_LEASE_BYTES)
+        {
+            inspection.health = ActivityLeaseHealth::Warning;
+            continue;
+        }
+        let lease = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<WorkerLease>(&bytes).ok());
+        let Some(lease) =
+            lease.filter(|lease| lease.key_sha256 == key_digest && validate_lease(lease).is_ok())
+        else {
+            inspection.health = ActivityLeaseHealth::Warning;
+            continue;
+        };
+        if lease.updated_unix_ms > now {
+            inspection.health = ActivityLeaseHealth::Warning;
+            continue;
+        }
+        if lease.active && lease.presentation.is_some() && now <= lease.expires_unix_ms {
+            inspection.identities.push(ActiveWorkerLeaseIdentity {
+                key_sha256: lease.key_sha256,
+                generation: lease.generation,
+                revision: lease.revision,
+            });
+        }
+    }
+    inspection.identities.sort_by(|left, right| {
+        left.key_sha256
+            .cmp(&right.key_sha256)
+            .then(left.generation.cmp(&right.generation))
+            .then(left.revision.cmp(&right.revision))
+    });
+    inspection
 }
 
 fn inspect_sessions_read_only(state_root: &Path, now: u64) -> SessionsOverview {
