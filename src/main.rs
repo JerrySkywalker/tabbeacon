@@ -62,7 +62,7 @@ use tabbeacon::{
         ImportApplyOutcome, ImportPlan, MAX_EXPORT_BYTES, SettingsExportV1, apply_import_plan,
         write_export_file,
     },
-    windows_terminal_policy::WindowsTerminalPolicyStore,
+    windows_terminal_policy::{TitleRemediationState, WindowsTerminalPolicyStore},
 };
 
 const MAX_HOOK_INPUT_BYTES: u64 = 1024 * 1024;
@@ -3053,6 +3053,7 @@ fn ui() -> ExitCode {
         |before, after| apply_control_center_drafts(&store, &interface_store, before, after),
         apply_control_center_workspace_override,
         || collect_control_center_refresh(&store, &interface_store, false),
+        apply_control_center_repair,
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => management_error("UI", &error),
@@ -3198,6 +3199,42 @@ fn apply_control_center_workspace_override(
         WorkspaceIdentityResolver::with_default_state_root().map_err(io::Error::other)?;
     let cwd = std::env::current_dir().map_err(io::Error::other)?;
     apply_control_center_workspace_override_with(&resolver, &cwd, before, after)
+}
+
+fn apply_control_center_repair(action_id: &str) -> io::Result<()> {
+    let store = WindowsTerminalPolicyStore::from_environment();
+    apply_control_center_repair_with(&store, action_id)
+}
+
+fn apply_control_center_repair_with(
+    store: &WindowsTerminalPolicyStore,
+    action_id: &str,
+) -> io::Result<()> {
+    if action_id != "terminal.title_policy_repair" {
+        return Err(io::Error::other(
+            "The requested repair is not admitted in Control Center",
+        ));
+    }
+    if store.inspect().remediation != TitleRemediationState::Available {
+        return Err(io::Error::other(
+            "The previewed title-policy repair is no longer available; no change was made",
+        ));
+    }
+    let result = store.repair().map_err(io::Error::other)?;
+    if result.state != TitleRemediationState::Available
+        || !result.document_modified
+        || !result.user_config_preserved
+    {
+        return Err(io::Error::other(
+            "The title-policy repair could not be verified; inspect diagnostics before retrying",
+        ));
+    }
+    if store.inspect().remediation != TitleRemediationState::AlreadyOwned {
+        return Err(io::Error::other(
+            "The title-policy repair was written but post-apply ownership verification was not proven",
+        ));
+    }
+    Ok(())
 }
 
 #[allow(clippy::needless_pass_by_value)] // The Control Center apply callback transfers its owned baseline snapshot.
@@ -3374,6 +3411,50 @@ mod tests {
                 .is_none(),
             "a collided staged alias must not write a target preference"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn control_center_title_repair_requires_the_typed_preview_action_and_preserves_unrelated_state()
+    {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tabbeacon-ui-title-repair-{unique}"));
+        let path = root.join("settings.json");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &path,
+            r#"{
+  "profiles": { "list": [{ "guid": "{11111111-1111-1111-1111-111111111111}", "suppressApplicationTitle": true }] },
+  "unknown": { "preserved": true }
+}"#,
+        )
+        .unwrap();
+        let store = WindowsTerminalPolicyStore::new_for_testing(
+            vec![tabbeacon::windows_terminal_policy::SettingsCandidate::new(
+                tabbeacon::windows_terminal_policy::WindowsTerminalInstallation::Stable,
+                &path,
+            )],
+            root.join("state"),
+            true,
+            Some("{11111111-1111-1111-1111-111111111111}".to_owned()),
+        );
+
+        assert!(apply_control_center_repair_with(&store, "hooks.review_in_codex").is_err());
+        assert_eq!(
+            store.inspect().remediation,
+            TitleRemediationState::Available
+        );
+        apply_control_center_repair_with(&store, "terminal.title_policy_repair").unwrap();
+        assert_eq!(
+            store.inspect().remediation,
+            TitleRemediationState::AlreadyOwned
+        );
+        let updated = fs::read_to_string(&path).unwrap();
+        assert!(updated.contains("\"suppressApplicationTitle\": false"));
+        assert!(updated.contains("\"unknown\": { \"preserved\": true }"));
         fs::remove_dir_all(root).unwrap();
     }
 
