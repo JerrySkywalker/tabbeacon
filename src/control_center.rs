@@ -29,7 +29,9 @@ use crate::{
         pad_display_width, render_human_text,
     },
     interface_preferences::{HumanColor, InterfaceLanguage, InterfacePreferences},
-    management::{ActionSafety, ManagementHealth, ManagementOverview, ManagementSnapshot},
+    management::{
+        ActionSafety, ChangePlan, ManagementHealth, ManagementOverview, ManagementSnapshot,
+    },
     presentation::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput,
         WindowsTerminalCapabilities, WindowsTerminalRenderer,
@@ -203,6 +205,34 @@ pub enum ControlCenterCommand {
         /// Explicit custom alias, or `None` to use the generated default.
         after: Option<String>,
     },
+    /// Apply one already-previewed, ownership-scoped repair through the
+    /// caller-owned operation. Only a `PreviewableSafeRepair` can produce it.
+    ApplyRepair {
+        /// Stable action identity from the shared management snapshot.
+        action_id: String,
+    },
+}
+
+/// A focused modal surface that owns its keyboard events until dismissed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ControlCenterOverlay {
+    None,
+    Help,
+    RepairPreview(ChangePlan),
+}
+
+impl ControlCenterOverlay {
+    const fn is_open(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    fn title(&self, locale: ResolvedLocale) -> Option<&'static str> {
+        match self {
+            Self::None => None,
+            Self::Help => Some(catalog(locale, HumanMessageKey::Help)),
+            Self::RepairPreview(_) => Some(catalog(locale, HumanMessageKey::RepairPreview)),
+        }
+    }
 }
 
 /// In-memory frontend state. No mutation authority is stored here.
@@ -223,6 +253,7 @@ pub struct ControlCenterApp {
     workspace_draft: Option<String>,
     workspace_editor: Option<String>,
     workspace_explaining: bool,
+    overlay: ControlCenterOverlay,
     dirty: bool,
     presentation_conflict: bool,
     interface_conflict: bool,
@@ -255,6 +286,7 @@ impl ControlCenterApp {
             workspace_draft: None,
             workspace_editor: None,
             workspace_explaining: false,
+            overlay: ControlCenterOverlay::None,
             dirty: false,
             presentation_conflict: false,
             interface_conflict: false,
@@ -364,6 +396,12 @@ impl ControlCenterApp {
         self.presentation_conflict || self.interface_conflict || self.workspace_conflict
     }
 
+    /// Whether a help or repair surface is receiving all normal key events.
+    #[must_use]
+    pub fn overlay_open(&self) -> bool {
+        self.overlay.is_open()
+    }
+
     /// Merges a new bounded observation without ever persisting state.
     ///
     /// A clean draft follows its current baseline. A dirty draft is retained;
@@ -419,8 +457,15 @@ impl ControlCenterApp {
         if self.confirm_discard {
             return self.handle_discard_key(key);
         }
+        if self.overlay.is_open() {
+            return self.handle_overlay_key(key);
+        }
         if self.workspace_editor.is_some() {
             self.handle_workspace_editor_key(key);
+            return ControlCenterCommand::None;
+        }
+        if key == KeyCode::Char('?') {
+            self.overlay = ControlCenterOverlay::Help;
             return ControlCenterCommand::None;
         }
         if self.screen == Screen::Workspace {
@@ -432,10 +477,6 @@ impl ControlCenterApp {
                 }
                 KeyCode::Char('c') => {
                     self.workspace_editor = Some(self.workspace_draft.clone().unwrap_or_default());
-                    return ControlCenterCommand::None;
-                }
-                KeyCode::Char('?') => {
-                    self.workspace_explaining = !self.workspace_explaining;
                     return ControlCenterCommand::None;
                 }
                 KeyCode::Char(candidate @ '1'..='4') => {
@@ -463,6 +504,11 @@ impl ControlCenterApp {
             KeyCode::Enter if self.screen == Screen::Interface => self.toggle_interface_focus(),
             KeyCode::Char('r') => self.revert(),
             KeyCode::Char('a') => return self.request_apply(),
+            KeyCode::Char('p')
+                if matches!(self.screen, Screen::Integration | Screen::Diagnostics) =>
+            {
+                self.open_previewable_repair();
+            }
             KeyCode::Char('q') if self.dirty => self.confirm_discard = true,
             _ => {}
         }
@@ -481,8 +527,13 @@ impl ControlCenterApp {
             }
             return ControlCenterCommand::Quit;
         }
+        let overlay_was_open = self.overlay.is_open();
         let command = self.handle_key(key.code);
-        if key.code == KeyCode::Char('q') && !self.dirty && !self.confirm_discard {
+        if key.code == KeyCode::Char('q')
+            && !overlay_was_open
+            && !self.dirty
+            && !self.confirm_discard
+        {
             ControlCenterCommand::Quit
         } else {
             command
@@ -506,6 +557,11 @@ impl ControlCenterApp {
         self.update_dirty();
     }
 
+    /// Completes a caller-owned repair and leaves all drafts untouched.
+    pub fn repair_apply_succeeded(&mut self) {
+        self.overlay = ControlCenterOverlay::None;
+    }
+
     fn handle_discard_key(&mut self, key: KeyCode) -> ControlCenterCommand {
         match key {
             KeyCode::Char('d') => {
@@ -516,6 +572,41 @@ impl ControlCenterApp {
             _ => {}
         }
         ControlCenterCommand::None
+    }
+
+    fn handle_overlay_key(&mut self, key: KeyCode) -> ControlCenterCommand {
+        match &self.overlay {
+            ControlCenterOverlay::Help => {
+                if matches!(key, KeyCode::Esc | KeyCode::Char('?' | 'q')) {
+                    self.overlay = ControlCenterOverlay::None;
+                }
+            }
+            ControlCenterOverlay::RepairPreview(plan) => match key {
+                KeyCode::Char('a') => {
+                    let action_id = plan.action_id.clone();
+                    self.overlay = ControlCenterOverlay::None;
+                    return ControlCenterCommand::ApplyRepair { action_id };
+                }
+                KeyCode::Esc | KeyCode::Char('p' | 'q') => {
+                    self.overlay = ControlCenterOverlay::None;
+                }
+                _ => {}
+            },
+            ControlCenterOverlay::None => {}
+        }
+        ControlCenterCommand::None
+    }
+
+    fn open_previewable_repair(&mut self) {
+        if let Some(plan) = self
+            .snapshot
+            .change_plans
+            .iter()
+            .find(|plan| plan.safety == ActionSafety::PreviewableSafeRepair)
+            .cloned()
+        {
+            self.overlay = ControlCenterOverlay::RepairPreview(plan);
+        }
     }
 
     fn request_apply(&self) -> ControlCenterCommand {
@@ -781,16 +872,18 @@ fn cycle<T: Copy + Eq>(values: impl AsRef<[T]>, value: T, offset: isize) -> T {
 /// # Errors
 ///
 /// Returns terminal I/O errors or an Apply error after the terminal has been restored.
-pub fn run<F, W, R>(
+pub fn run<F, W, R, P>(
     mut app: ControlCenterApp,
     mut apply: F,
     mut apply_workspace: W,
     mut refresh: R,
+    mut repair: P,
 ) -> io::Result<()>
 where
     F: FnMut(ControlCenterDraft, ControlCenterDraft) -> io::Result<()>,
     W: FnMut(Option<String>, Option<String>) -> io::Result<()>,
     R: FnMut() -> io::Result<ControlCenterRefresh>,
+    P: FnMut(&str) -> io::Result<()>,
 {
     let mut session = TerminalSession::enter()?;
     let mut next_refresh = Instant::now() + CONTROL_CENTER_REFRESH_INTERVAL;
@@ -814,6 +907,11 @@ where
                     apply_workspace(before, after)?;
                     app.workspace_apply_succeeded();
                 }
+                ControlCenterCommand::ApplyRepair { action_id } => {
+                    repair(&action_id)?;
+                    app.repair_apply_succeeded();
+                    app.merge_refresh(refresh()?);
+                }
                 ControlCenterCommand::Quit => break,
                 ControlCenterCommand::None => {}
             }
@@ -836,6 +934,8 @@ pub struct TerminalSmokeReport {
     pub live_refresh_merged: bool,
     /// Workspace and Sessions navigation reached their production render paths.
     pub workspace_and_sessions_visited: bool,
+    /// `?` opened and `Esc` dismissed the event-isolating help overlay.
+    pub help_overlay_exercised: bool,
     /// An appearance value changed in the in-memory draft.
     pub draft_changed: bool,
     /// Revert restored the draft to the original settings without Apply.
@@ -945,6 +1045,13 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         )?;
         draw(&mut session, &app)?;
 
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        let help_overlay_exercised = app.overlay_open();
+        invariant(help_overlay_exercised, "fixture did not open Help")?;
+        draw(&mut session, &app)?;
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        invariant(!app.overlay_open(), "fixture did not dismiss Help")?;
+
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(
             app.screen() == Screen::Diagnostics,
@@ -1014,6 +1121,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
             screens_visited: 7,
             live_refresh_merged,
             workspace_and_sessions_visited,
+            help_overlay_exercised,
             draft_changed,
             draft_reverted,
             interface_locale_switched,
@@ -1150,6 +1258,7 @@ const MIN_TERMINAL_WIDTH: u16 = 24;
 const MIN_TERMINAL_HEIGHT: u16 = 10;
 
 /// Renders all Control Center screens into the active Ratatui frame.
+#[allow(clippy::too_many_lines)] // The compact layout keeps terminal-size, focus, and overlay safety together.
 pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
     let style = tui_human_style(
         app.interface_draft.color(),
@@ -1220,16 +1329,23 @@ pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
         ),
         body[0],
     );
+    let content_title = app
+        .overlay
+        .title(app.locale())
+        .unwrap_or_else(|| app.screen.localized_title(app.locale()))
+        .to_owned();
     frame.render_widget(
         content(app).style(style).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(app.screen.localized_title(app.locale()))
+                .title(content_title)
                 .style(style),
         ),
         body[1],
     );
-    let footer = if app.confirm_discard {
+    let footer = if app.overlay.is_open() {
+        catalog(app.locale(), HumanMessageKey::OverlayDismiss).to_owned()
+    } else if app.confirm_discard {
         catalog(app.locale(), HumanMessageKey::FooterDiscard).to_owned()
     } else if app.has_concurrent_conflict() {
         catalog(app.locale(), HumanMessageKey::RefreshConflict).to_owned()
@@ -1261,6 +1377,9 @@ fn tui_human_style(color: HumanColor, no_color_is_set: bool) -> Style {
 }
 
 fn content(app: &ControlCenterApp) -> Paragraph<'static> {
+    if app.overlay.is_open() {
+        return Paragraph::new(overlay_lines(app));
+    }
     Paragraph::new(match app.screen {
         Screen::Overview => overview_lines(app),
         Screen::Appearance => appearance_lines(app),
@@ -1271,6 +1390,81 @@ fn content(app: &ControlCenterApp) -> Paragraph<'static> {
         Screen::Interface => interface_lines(app),
         Screen::Preview => preview_lines(app),
     })
+}
+
+fn overlay_lines(app: &ControlCenterApp) -> String {
+    match &app.overlay {
+        ControlCenterOverlay::Help => format!(
+            "{}\n\n{}\n{}\n{}\n{}\n{}",
+            catalog(app.locale(), HumanMessageKey::HelpNavigation),
+            catalog(app.locale(), HumanMessageKey::HelpSettings),
+            catalog(app.locale(), HumanMessageKey::HelpWorkspaceSessions),
+            catalog(app.locale(), HumanMessageKey::HelpAccessibility),
+            catalog(app.locale(), HumanMessageKey::HelpRepair),
+            catalog(app.locale(), HumanMessageKey::OverlayDismiss),
+        ),
+        ControlCenterOverlay::RepairPreview(plan) => {
+            let issue = app.snapshot.issues.iter().find(|issue| {
+                issue
+                    .remediation
+                    .as_ref()
+                    .is_some_and(|action| action.id == plan.action_id)
+            });
+            let (title, explanation, instruction) = issue.map_or_else(
+                || ("—".to_owned(), "—".to_owned(), "—".to_owned()),
+                |issue| {
+                    let instruction = issue.remediation.as_ref().map_or_else(
+                        || "—".to_owned(),
+                        |action| {
+                            render_human_text(
+                                app.locale(),
+                                &management_action_text(
+                                    &issue.id,
+                                    &action.id,
+                                    action.instruction.clone(),
+                                ),
+                            )
+                        },
+                    );
+                    (
+                        render_human_text(
+                            app.locale(),
+                            &management_text(
+                                ManagementTextKind::IssueTitle,
+                                &issue.id,
+                                issue.title.clone(),
+                            ),
+                        ),
+                        render_human_text(
+                            app.locale(),
+                            &management_text(
+                                ManagementTextKind::IssueExplanation,
+                                &issue.id,
+                                issue.explanation.clone(),
+                            ),
+                        ),
+                        instruction,
+                    )
+                },
+            );
+            format!(
+                "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}\n{}",
+                catalog(app.locale(), HumanMessageKey::WhatIsWrong),
+                title,
+                catalog(app.locale(), HumanMessageKey::WhyItMatters),
+                explanation,
+                catalog(app.locale(), HumanMessageKey::RecommendedAction),
+                instruction,
+                catalog(app.locale(), HumanMessageKey::WhatWillChange),
+                catalog(app.locale(), HumanMessageKey::RepairTitleScope),
+                catalog(app.locale(), HumanMessageKey::WhatWillNotChange),
+                catalog(app.locale(), HumanMessageKey::RepairTitlePreserved),
+                catalog(app.locale(), HumanMessageKey::RepairApplyHint),
+                catalog(app.locale(), HumanMessageKey::OverlayDismiss),
+            )
+        }
+        ControlCenterOverlay::None => String::new(),
+    }
 }
 
 fn overview_lines(app: &ControlCenterApp) -> String {
@@ -1541,7 +1735,8 @@ fn diagnostics_lines(app: &ControlCenterApp) -> String {
             catalog(app.locale(), HumanMessageKey::NoAutomatedAction)
         );
     }
-    app.snapshot
+    let issues = app
+        .snapshot
         .issues
         .iter()
         .map(|issue| {
@@ -1586,7 +1781,20 @@ fn diagnostics_lines(app: &ControlCenterApp) -> String {
             )
         })
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+    if app
+        .snapshot
+        .change_plans
+        .iter()
+        .any(|plan| plan.safety == ActionSafety::PreviewableSafeRepair)
+    {
+        format!(
+            "{issues}\n\n{}",
+            catalog(app.locale(), HumanMessageKey::RepairPreviewHint)
+        )
+    } else {
+        issues
+    }
 }
 
 fn preview_lines(app: &ControlCenterApp) -> String {
@@ -2387,5 +2595,152 @@ mod tests {
         assert!(rendered.contains("Working"));
         assert!(rendered.contains("Result ready"));
         assert!(rendered.contains("Approval"));
+    }
+
+    #[test]
+    fn help_overlay_is_localized_event_isolated_and_draft_lossless() {
+        let mut app = app().with_interface_preferences(
+            InterfacePreferences::default().with_language(InterfaceLanguage::ZhCn),
+        );
+        app.screen = Screen::Appearance;
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Right);
+        let draft = app.staged_draft();
+
+        assert_eq!(
+            app.handle_key(KeyCode::Char('?')),
+            ControlCenterCommand::None
+        );
+        assert!(app.overlay_open());
+        let _ = app.handle_key(KeyCode::Down);
+        assert_eq!(
+            app.screen(),
+            Screen::Appearance,
+            "overlay blocks page navigation"
+        );
+        assert_eq!(app.staged_draft(), draft, "help never changes a draft");
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("terminal starts");
+        terminal
+            .draw(|frame| render(frame, &app))
+            .expect("help renders");
+        let rendered = format!("{:?}", terminal.backend().buffer());
+        assert!(rendered.contains("帮助"));
+        assert!(rendered.contains("Hook 信任"));
+
+        assert_eq!(
+            app.handle_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            ControlCenterCommand::None,
+            "overlay dismissal must not fall through to global quit"
+        );
+        assert!(!app.overlay_open());
+        let _ = app.handle_key(KeyCode::Char('?'));
+        assert_eq!(app.handle_key(KeyCode::Esc), ControlCenterCommand::None);
+        assert!(!app.overlay_open());
+        assert_eq!(app.staged_draft(), draft, "dismiss remains lossless");
+    }
+
+    #[test]
+    fn only_previewable_repair_can_request_apply_after_preview_and_cancel_is_lossless() {
+        let title_action = crate::management::RecommendedAction {
+            id: "terminal.title_policy_repair".to_owned(),
+            title: "Preview title policy repair".to_owned(),
+            instruction: "Inspect the scoped repair first.".to_owned(),
+            safety: ActionSafety::PreviewableSafeRepair,
+        };
+        let manual_action = crate::management::RecommendedAction {
+            id: "hooks.review_in_codex".to_owned(),
+            title: "Review hooks in Codex".to_owned(),
+            instruction: "Launch codex and open /hooks.".to_owned(),
+            safety: ActionSafety::ManualAction,
+        };
+        let mut app = ControlCenterApp::new(
+            PresentationSettings::default(),
+            ManagementSnapshot {
+                health: ManagementHealth::Warning,
+                issues: vec![
+                    crate::management::HealthIssue {
+                        id: "terminal.title_repair_available".to_owned(),
+                        severity: crate::management::HealthSeverity::Warning,
+                        title: title_action.title.clone(),
+                        explanation: "One active profile is safely scoped.".to_owned(),
+                        remediation: Some(title_action.clone()),
+                    },
+                    crate::management::HealthIssue {
+                        id: "hooks.review_required".to_owned(),
+                        severity: crate::management::HealthSeverity::Warning,
+                        title: manual_action.title.clone(),
+                        explanation: "Trust remains manual.".to_owned(),
+                        remediation: Some(manual_action),
+                    },
+                ],
+                recommended_actions: vec![title_action.clone()],
+                change_plans: vec![ChangePlan {
+                    action_id: title_action.id.clone(),
+                    safety: ActionSafety::PreviewableSafeRepair,
+                    proposed_changes: vec!["active profile only".to_owned()],
+                    protected_state: vec!["unrelated settings".to_owned()],
+                    manual_follow_up: Vec::new(),
+                }],
+            },
+            ManagementOverview::default(),
+        );
+        app.screen = Screen::Diagnostics;
+        let draft = app.staged_draft();
+
+        assert_eq!(
+            app.handle_key(KeyCode::Char('p')),
+            ControlCenterCommand::None
+        );
+        assert!(app.overlay_open());
+        assert_eq!(app.handle_key(KeyCode::Esc), ControlCenterCommand::None);
+        assert!(!app.overlay_open());
+        assert_eq!(app.staged_draft(), draft, "repair cancel is lossless");
+
+        let _ = app.handle_key(KeyCode::Char('p'));
+        assert_eq!(
+            app.handle_key(KeyCode::Char('a')),
+            ControlCenterCommand::ApplyRepair {
+                action_id: "terminal.title_policy_repair".to_owned(),
+            }
+        );
+        assert!(!app.overlay_open());
+        assert_eq!(
+            app.staged_draft(),
+            draft,
+            "repair request cannot alter drafts"
+        );
+    }
+
+    #[test]
+    fn action_safety_labels_and_monochrome_focus_remain_textual() {
+        let mut app = app();
+        app.screen = Screen::Interface;
+        app.handle_key(KeyCode::Enter);
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).expect("terminal starts");
+        terminal.draw(|frame| render(frame, &app)).expect("renders");
+        let rendered = format!("{:?}", terminal.backend().buffer());
+        assert!(rendered.contains('>'), "focus is not color-only");
+        assert_eq!(tui_human_style(HumanColor::Never, false), Style::default());
+        assert_eq!(
+            safety_label(ResolvedLocale::EnUs, ActionSafety::ReadOnly),
+            "Read only"
+        );
+        assert_eq!(
+            safety_label(ResolvedLocale::EnUs, ActionSafety::ManualAction),
+            "Manual action"
+        );
+        assert_eq!(
+            safety_label(ResolvedLocale::EnUs, ActionSafety::PreviewableSafeRepair),
+            "Previewable repair"
+        );
+        assert_eq!(
+            safety_label(ResolvedLocale::EnUs, ActionSafety::OwnerExplicitRequired),
+            "Owner apply required"
+        );
+        assert_eq!(
+            safety_label(ResolvedLocale::EnUs, ActionSafety::UnsupportedAutomation),
+            "Not automated"
+        );
     }
 }

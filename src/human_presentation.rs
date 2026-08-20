@@ -287,6 +287,23 @@ pub enum HumanMessageKey {
     ReadOnly,
     ManualAction,
     PreviewableRepair,
+    Help,
+    HelpNavigation,
+    HelpSettings,
+    HelpWorkspaceSessions,
+    HelpAccessibility,
+    HelpRepair,
+    OverlayDismiss,
+    RepairPreview,
+    RepairPreviewHint,
+    WhatIsWrong,
+    WhyItMatters,
+    RecommendedAction,
+    WhatWillChange,
+    WhatWillNotChange,
+    RepairTitleScope,
+    RepairTitlePreserved,
+    RepairApplyHint,
     OwnerApplyRequired,
     NotAutomated,
     Failure,
@@ -1190,6 +1207,43 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::EnUs, HumanMessageKey::ReadOnly) => "Read only",
         (ResolvedLocale::EnUs, HumanMessageKey::ManualAction) => "Manual action",
         (ResolvedLocale::EnUs, HumanMessageKey::PreviewableRepair) => "Previewable repair",
+        (ResolvedLocale::EnUs, HumanMessageKey::Help) => "Help",
+        (ResolvedLocale::EnUs, HumanMessageKey::HelpNavigation) => {
+            "Navigate pages with ↑/↓ or j/k. Enter selects Appearance or Interface fields; ←/→ changes the focused value."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::HelpSettings) => {
+            "a applies a staged draft; r reverts it. q asks before discarding unsaved changes."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::HelpWorkspaceSessions) => {
+            "Workspace aliases are device-local: 1-4 chooses a candidate, c enters a bounded custom alias, and a applies. Sessions are read-only."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::HelpAccessibility) => {
+            "Language, color, and reduced motion are staged Interface preferences. Focus is marked with > even without color."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::HelpRepair) => {
+            "On Diagnostics or Codex Integration, p previews only a typed safe repair. Hook trust stays manual: launch codex and review /hooks."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::OverlayDismiss) => {
+            "Esc closes this overlay without changing drafts."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::RepairPreview) => "Repair preview",
+        (ResolvedLocale::EnUs, HumanMessageKey::RepairPreviewHint) => {
+            "Press p to preview the ownership-scoped repair."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::WhatIsWrong) => "What is wrong",
+        (ResolvedLocale::EnUs, HumanMessageKey::WhyItMatters) => "Why it matters",
+        (ResolvedLocale::EnUs, HumanMessageKey::RecommendedAction) => "Recommended action",
+        (ResolvedLocale::EnUs, HumanMessageKey::WhatWillChange) => "What will change",
+        (ResolvedLocale::EnUs, HumanMessageKey::WhatWillNotChange) => "What will not change",
+        (ResolvedLocale::EnUs, HumanMessageKey::RepairTitleScope) => {
+            "Only the proven active Windows Terminal profile title policy, after drift revalidation."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::RepairTitlePreserved) => {
+            "Unrelated Windows Terminal, Codex, PowerShell, repository, and user settings remain untouched."
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::RepairApplyHint) => {
+            "Press a to Apply this previewed repair; p, q, or Esc cancels it."
+        }
         (ResolvedLocale::EnUs, HumanMessageKey::OwnerApplyRequired) => "Owner apply required",
         (ResolvedLocale::EnUs, HumanMessageKey::NotAutomated) => "Not automated",
         (ResolvedLocale::EnUs, HumanMessageKey::Failure) => "Failure",
@@ -1641,6 +1695,43 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::ZhCn, HumanMessageKey::ReadOnly) => "只读",
         (ResolvedLocale::ZhCn, HumanMessageKey::ManualAction) => "手动操作",
         (ResolvedLocale::ZhCn, HumanMessageKey::PreviewableRepair) => "可预览修复",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Help) => "帮助",
+        (ResolvedLocale::ZhCn, HumanMessageKey::HelpNavigation) => {
+            "使用 ↑/↓ 或 j/k 切换页面。Enter 选择外观或界面字段；←/→ 修改焦点值。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::HelpSettings) => {
+            "a 应用暂存草稿；r 还原草稿。q 在丢弃未保存更改前会确认。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::HelpWorkspaceSessions) => {
+            "工作区别名仅存于本机：1-4 选择候选项，c 输入受限自定义别名，a 应用。会话仅可只读查看。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::HelpAccessibility) => {
+            "语言、颜色和减少动画都是暂存的界面偏好；即使无颜色，> 也会标明焦点。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::HelpRepair) => {
+            "在“诊断”或“Codex 集成”中按 p 只预览已类型化的安全修复。Hook 信任始终需要手动：启动 codex 并检查 /hooks。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::OverlayDismiss) => {
+            "Esc 会关闭此覆盖层，不会更改草稿。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::RepairPreview) => "修复预览",
+        (ResolvedLocale::ZhCn, HumanMessageKey::RepairPreviewHint) => {
+            "按 p 预览此经过所有权限定的修复。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::WhatIsWrong) => "问题是什么",
+        (ResolvedLocale::ZhCn, HumanMessageKey::WhyItMatters) => "为何重要",
+        (ResolvedLocale::ZhCn, HumanMessageKey::RecommendedAction) => "建议操作",
+        (ResolvedLocale::ZhCn, HumanMessageKey::WhatWillChange) => "将会更改",
+        (ResolvedLocale::ZhCn, HumanMessageKey::WhatWillNotChange) => "不会更改",
+        (ResolvedLocale::ZhCn, HumanMessageKey::RepairTitleScope) => {
+            "仅在重新验证未漂移后，修改已证明的当前 Windows Terminal 配置文件标题策略。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::RepairTitlePreserved) => {
+            "不会修改无关的 Windows Terminal、Codex、PowerShell、仓库或用户设置。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::RepairApplyHint) => {
+            "按 a 应用已预览修复；p、q 或 Esc 取消。"
+        }
         (ResolvedLocale::ZhCn, HumanMessageKey::OwnerApplyRequired) => "需要所有者应用",
         (ResolvedLocale::ZhCn, HumanMessageKey::NotAutomated) => "不自动化",
         (ResolvedLocale::ZhCn, HumanMessageKey::Failure) => "失败",
