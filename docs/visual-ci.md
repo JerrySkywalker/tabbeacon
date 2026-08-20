@@ -169,11 +169,11 @@ whole-image golden comparison, or a cross-platform screenshot product feature.
 
 ## Local harness
 
-The dedicated G03 binary has two modes. `emit` is the child launched inside an
-owned Windows Terminal tab; it renders a named G02 fixture, waits for a bounded
-interval, then writes the existing G02 reset action. `run` is the outer harness
-and must be given an exact checked-out SHA, a unique safe run ID, and a fresh
-owned evidence root:
+The dedicated G03 binary has an `emit` mode and a bounded `run` harness. `emit`
+is the child launched inside an owned Windows Terminal tab; it renders a named
+G02 fixture, waits for a bounded interval, then writes the existing G02 reset
+action. `run` is the outer supervisor and must be given an exact checked-out
+SHA, a unique safe run ID, and a fresh owned evidence root:
 
 ```text
 cargo run --locked --features visual-fixture --bin tabbeacon-visual-fixture -- run \
@@ -183,11 +183,26 @@ cargo run --locked --features visual-fixture --bin tabbeacon-visual-fixture -- r
   [--fixture working]
 ```
 
-Without `--fixture`, it replays the complete G02 fixture set. A `PASS` summary
-requires `EXPECTED_HEAD == CHECKED_OUT_HEAD == VISUAL_HEAD`; the binary uses a
-classified nonzero exit for `BLOCKED`, `UNPROVEN`, and `FAIL`. Evidence is
-always confined to a newly created `<evidence-root>/<run-id>` directory; it
-refuses an existing run directory or artifact name rather than overwriting it.
+Without `--fixture`, it replays the complete G02 fixture set. `run` launches a
+private `run-worker` process with a 90-second wall-clock limit. The worker is
+admitted only by a one-time supervisor authorization for the exact staging run;
+direct `run-worker` invocation cannot reach platform observation. UIA discovery,
+owned-window activation, live-title sampling, and `PrintWindow` capture run
+only in that worker. On expiry the supervisor uses the direct worker PID with
+`taskkill /T /F`, then confirms a transient pre-termination owned-PID tree is
+gone. If either taskkill or that confirmation cannot complete within its own
+bounded cleanup step, the direct worker is still terminated but the result is
+`BLOCKED` / `RUNNER_ENVIRONMENT_DEFECT`; a deadline is never a visual pass. The
+transient PIDs are never written into evidence. The worker writes
+`worker-supervision.json` into its staged bundle, and
+the supervisor independently recomputes every staged artifact digest, validates
+the manifest/run/head fields, then promotes the complete bundle atomically to
+the final evidence directory. A `PASS` summary requires
+`EXPECTED_HEAD == CHECKED_OUT_HEAD == VISUAL_HEAD`; the binary uses a classified
+nonzero exit for `BLOCKED`, `UNPROVEN`, and `FAIL`. Final evidence is always
+confined to a newly created
+`<evidence-root>/<run-id>` directory; it refuses an existing run directory or
+artifact name rather than overwriting it.
 
 The runner writes `manifest.json`, `assertions.json`, `environment.json`,
 `uia.json`, and a final `integrity.json`, plus target-only UIA diagnostics and,

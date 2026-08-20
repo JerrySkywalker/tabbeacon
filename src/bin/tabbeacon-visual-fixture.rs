@@ -1,7 +1,9 @@
-//! Child process used only inside an owned G03 Windows Terminal test tab.
+//! G03 fixture renderer and bounded visual-harness entrypoint.
 
 use std::{
+    env,
     io::{self, Write},
+    path::PathBuf,
     thread,
     time::{Duration, Instant},
 };
@@ -11,7 +13,7 @@ use tabbeacon::{
     presentation::presentation_fixture,
     visual::{
         FixtureDriver, LiveVisualRunRequest, VisualDisposition, VisualError, VisualResult,
-        runner::run_live,
+        runner::{authorize_live_worker, run_live, run_live_in_worker},
     },
 };
 
@@ -28,6 +30,7 @@ fn run(arguments: &[String]) -> VisualResult<()> {
     match command {
         "emit" => emit(arguments),
         "run" => run_live_harness(arguments),
+        "run-worker" => run_live_worker(arguments),
         _ => Err(VisualError::Platform(
             "expected `emit` or `run` visual fixture subcommand".to_owned(),
         )),
@@ -76,16 +79,35 @@ fn emit(arguments: &[String]) -> VisualResult<()> {
 }
 
 fn run_live_harness(arguments: &[String]) -> VisualResult<()> {
+    let summary = run_live(&live_request(arguments)?)?;
+    print_live_summary(&summary)
+}
+
+fn run_live_worker(arguments: &[String]) -> VisualResult<()> {
+    let request = live_request(arguments)?;
+    let authorization_path = PathBuf::from(argument_value(arguments, "--worker-authorization")?);
+    let nonce = env::var("TABBEACON_VISUAL_WORKER_NONCE").map_err(|_| {
+        VisualError::Platform("visual worker requires supervisor authorization".to_owned())
+    })?;
+    authorize_live_worker(&request, &authorization_path, &nonce)?;
+    run_live_in_worker(&request)?;
+    Ok(())
+}
+
+fn live_request(arguments: &[String]) -> VisualResult<LiveVisualRunRequest> {
     let expected_head = argument_value(arguments, "--expected-head")?;
     let run_id = argument_value(arguments, "--run-id")?;
     let evidence_root = argument_value(arguments, "--evidence-root")?;
     let fixture_name = optional_argument_value(arguments, "--fixture");
-    let summary = run_live(&LiveVisualRunRequest {
+    Ok(LiveVisualRunRequest {
         expected_head,
         run_id,
         evidence_root: evidence_root.into(),
         fixture_name,
-    })?;
+    })
+}
+
+fn print_live_summary(summary: &tabbeacon::visual::LiveVisualRunSummary) -> VisualResult<()> {
     println!(
         "{}",
         serde_json::to_string(&summary).map_err(VisualError::Json)?
