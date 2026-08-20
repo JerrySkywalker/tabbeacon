@@ -10,15 +10,16 @@ The project is intentionally narrow: it keeps the user's existing terminal and a
 - **Fail open:** if TabBeacon is absent or broken, Codex must remain usable.
 - **Offline-first identity:** repository naming must not require GitHub or network access.
 - **Provider-neutral core:** Codex, Claude, OpenCode, and future agents are adapters beneath one evidence/state model.
-- **Terminal-native presentation:** v0.4 targets Windows Terminal using terminal control sequences rather than replacing the PTY or terminal UI.
+- **Terminal-native presentation:** v0.5 targets Windows Terminal using terminal control sequences rather than replacing the PTY or terminal UI.
 - **Machine-verifiable UI:** title, animation, and color behavior must eventually be covered by visual CI.
 
 ## Current status
 
 The provider-neutral core, Windows Terminal presentation layer, deterministic
 visual infrastructure, Git and non-Git workspace identity, first Codex hooks
-provider, session-scoped ephemeral title animator, human-first diagnostics,
-guided setup presets, and keyboard-only Control Center are implemented. See
+provider, session-scoped ephemeral title animator, bilingual human-first
+diagnostics, guided setup presets, portable local preferences, and keyboard-only
+live Control Center are implemented. See
 [`dev_governance_files/ROADMAP.md`](dev_governance_files/ROADMAP.md) and the
 [`Codex hooks integration guide`](docs/codex-hooks.md).
 
@@ -50,7 +51,7 @@ The Codex-first product is intentionally limited to:
 - global Codex integration with no change to the `codex` launch command;
 - autonomous functional and visual verification.
 
-Claude and OpenCode support are architectural extension points, not part of the v0.4 Codex-first release.
+Claude and OpenCode support are architectural extension points, not part of the v0.5 Codex-first release.
 
 ## Installation
 
@@ -67,7 +68,7 @@ TabBeacon has two first-class installation channels:
   To install this release exactly:
 
   ```powershell
-  cargo install tabbeacon --version 0.4.1 --locked
+  cargo install tabbeacon --version 0.5.0 --locked
   ```
 
 TabBeacon requires Rust 1.97.1. If your default Rust toolchain is older, use a
@@ -116,7 +117,7 @@ to stdout and keeps the normal doctor exit contract: a failure is nonzero while
 warning and pass are successful. `status --json` remains observational and
 successful even when its nested doctor verdict is a failure.
 
-TabBeacon 0.4.1 publishes `sessions`, a read-only projection of
+TabBeacon 0.5.0 publishes `sessions`, a read-only projection of
 ephemeral activity leases. Each row contains only a safe workspace alias,
 semantic state, age/recency, and lease-backed worker health. A current lease is
 reported as `recently_authorized`, not as proof that an operating-system process
@@ -126,10 +127,10 @@ credentials, process control, and session control are outside this interface.
 ### Rust library target
 
 The published package includes the `tabbeacon` library target used internally
-by the CLI and its tests. TabBeacon v0.4.x is CLI-first and does not promise a
+by the CLI and its tests. TabBeacon v0.5.x is CLI-first and does not promise a
 mature public Rust library API beyond normal SemVer expectations.
 
-## Non-goals for v0.4
+## Non-goals for v0.5
 
 TabBeacon is not a PTY host, session manager, worktree manager, agent orchestrator, prompt router, remote-control service, terminal replacement, or web dashboard.
 

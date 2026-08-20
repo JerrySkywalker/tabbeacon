@@ -2,7 +2,23 @@
 
 All notable changes to TabBeacon will be documented here.
 
-## [Unreleased]
+## [0.5.0] - 2026-08-20
+
+### Added
+
+- Added bilingual Human presentation (`en-US` and `zh-CN`) while preserving
+  stable JSON and plain automation contracts.
+- Added deterministic Adaptive Naming v2, device-local Workspace alias
+  preferences, and privacy-bounded top-level `export` / `import` portability.
+- Added the daemonless live Control Center Workspace, Sessions, Interface,
+  Help, and guided safe-repair surfaces.
+
+### Changed
+
+- Control Center refreshes only bounded local observations, preserves dirty
+  drafts, refuses concurrent drift, and keeps all writes explicit.
+- Kept Hook trust manual-only, added no provider, daemon, wrapper, PATH
+  interception, project-local configuration, remote control, or self-update.
 
 ## [0.4.1] - 2026-08-20
 
