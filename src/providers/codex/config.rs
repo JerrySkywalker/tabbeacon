@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env, fmt,
     fs::{self, File, OpenOptions},
     io::{self, Write},
@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use toml_edit::{Array, DocumentMut, Item, Table, value};
+
+use crate::hook_inventory::{
+    HookCurrentness, HookHandlerKind, HookInventory, HookInventoryEntry, HookOwner, HookSourceKind,
+    HookTrustState,
+};
 
 use super::{CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookProfile};
 
@@ -500,6 +505,153 @@ impl CodexIntegration {
             owned_hook_count,
             title_owned,
         )
+    }
+
+    /// Produces a provider-neutral, command-redacted Hook inventory without
+    /// mutating provider configuration, trust, or ownership state.
+    #[must_use]
+    #[allow(clippy::too_many_lines)] // The read-only parser keeps ownership and redaction decisions adjacent.
+    pub fn hook_inventory(&self) -> HookInventory {
+        if [self.hooks_path(), self.config_path(), self.manifest_path()]
+            .iter()
+            .any(|path| reject_symbolic_link(path).is_err())
+        {
+            return HookInventory::unavailable();
+        }
+        let Ok(hooks) = read_hooks_document(&self.hooks_path()) else {
+            return HookInventory::unavailable();
+        };
+        let Ok(config) = read_config_document(&self.config_path()) else {
+            return HookInventory::unavailable();
+        };
+        let manifest = self
+            .load_manifest()
+            .ok()
+            .flatten()
+            .filter(|manifest| self.validate_manifest_scope(manifest).is_ok());
+        let profile_is_supported = self
+            .probe_codex_version()
+            .is_some_and(|(_, state)| state.is_supported());
+        let desired = desired_hooks(&self.tabbeacon_executable).ok();
+        let Ok(events) = hooks_events(&hooks) else {
+            return HookInventory::unavailable();
+        };
+
+        let mut exact_owned_events = BTreeSet::new();
+        let mut entries = Vec::new();
+        for (event, groups) in events {
+            let Some(groups) = groups.as_array() else {
+                return HookInventory::unavailable();
+            };
+            for (group_index, group) in groups.iter().enumerate() {
+                let Some(handlers) = group.get("hooks").and_then(Value::as_array) else {
+                    return HookInventory::unavailable();
+                };
+                let matching_declaration = manifest.as_ref().and_then(|manifest| {
+                    manifest.hooks.iter().find(|declaration| {
+                        declaration.event == *event && declaration.group == *group
+                    })
+                });
+                if matching_declaration.is_some() {
+                    exact_owned_events.insert(event.clone());
+                }
+                for (handler_index, handler) in handlers.iter().enumerate() {
+                    let (owner, trust_state, currentness, source_kind, fingerprint) =
+                        if let Some(declaration) = matching_declaration {
+                            let state_key = inventory_state_key(
+                                &self.hooks_path(),
+                                event,
+                                group_index,
+                                handler_index,
+                            );
+                            let enabled = hook_is_enabled(&config, &state_key);
+                            let trust_state = inventory_trust_state(
+                                profile_is_supported,
+                                enabled,
+                                trusted_hash(&config, &state_key),
+                                declaration,
+                            );
+                            let currentness = inventory_currentness(
+                                profile_is_supported,
+                                desired.as_deref(),
+                                declaration,
+                            );
+                            entries.push(HookInventoryEntry::new(
+                                "codex",
+                                inventory_event_id(event),
+                                HookOwner::TabBeacon,
+                                enabled,
+                                trust_state,
+                                currentness,
+                                HookSourceKind::ProviderUserGlobal,
+                                inventory_handler_kind(handler),
+                                inventory_timeout(handler),
+                                normalized_hook_hash(declaration),
+                            ));
+                            continue;
+                        } else if contains_tabbeacon_like_group(group) {
+                            (
+                                HookOwner::UnownedOrAmbiguous,
+                                HookTrustState::UnownedOrAmbiguous,
+                                HookCurrentness::UnownedOrAmbiguous,
+                                HookSourceKind::ProviderUserGlobal,
+                                inventory_fingerprint(handler),
+                            )
+                        } else {
+                            (
+                                HookOwner::ThirdParty,
+                                HookTrustState::UnownedOrAmbiguous,
+                                HookCurrentness::UnownedOrAmbiguous,
+                                HookSourceKind::ProviderUserGlobal,
+                                inventory_fingerprint(handler),
+                            )
+                        };
+                    let enabled = inventory_event_id(event) != "unsupported"
+                        && hook_is_enabled(
+                            &config,
+                            &inventory_state_key(
+                                &self.hooks_path(),
+                                event,
+                                group_index,
+                                handler_index,
+                            ),
+                        );
+                    entries.push(HookInventoryEntry::new(
+                        "codex",
+                        inventory_event_id(event),
+                        owner,
+                        enabled,
+                        trust_state,
+                        currentness,
+                        source_kind,
+                        inventory_handler_kind(handler),
+                        inventory_timeout(handler),
+                        fingerprint,
+                    ));
+                }
+            }
+        }
+
+        if let Some(manifest) = manifest.as_ref() {
+            for declaration in &manifest.hooks {
+                if exact_owned_events.contains(&declaration.event) {
+                    continue;
+                }
+                entries.push(HookInventoryEntry::new(
+                    "codex",
+                    inventory_event_id(&declaration.event),
+                    HookOwner::UnownedOrAmbiguous,
+                    false,
+                    HookTrustState::UnownedOrAmbiguous,
+                    HookCurrentness::DeclarationModifiedOrMissing,
+                    HookSourceKind::OwnedManifestExpectation,
+                    HookHandlerKind::Command,
+                    inventory_timeout(&declaration.group["hooks"][0]),
+                    normalized_hook_hash(declaration),
+                ));
+            }
+        }
+        HookInventory::available(entries)
     }
 
     fn setup_locked(
@@ -1008,23 +1160,97 @@ fn locate_owned_hooks(
 fn contains_tabbeacon_like_hook(hooks: &Value) -> bool {
     hooks_events(hooks).is_ok_and(|events| {
         events.values().any(|groups| {
-            groups.as_array().is_some_and(|groups| {
-                groups.iter().any(|group| {
-                    group
-                        .get("hooks")
-                        .and_then(Value::as_array)
-                        .is_some_and(|handlers| {
-                            handlers.iter().any(|handler| {
-                                ["command", "commandWindows"]
-                                    .into_iter()
-                                    .filter_map(|key| handler.get(key).and_then(Value::as_str))
-                                    .any(|command| command.contains("tabbeacon hook codex"))
-                            })
-                        })
-                })
-            })
+            groups
+                .as_array()
+                .is_some_and(|groups| groups.iter().any(contains_tabbeacon_like_group))
         })
     })
+}
+
+fn contains_tabbeacon_like_group(group: &Value) -> bool {
+    group
+        .get("hooks")
+        .and_then(Value::as_array)
+        .is_some_and(|handlers| {
+            handlers.iter().any(|handler| {
+                ["command", "commandWindows"]
+                    .into_iter()
+                    .filter_map(|key| handler.get(key).and_then(Value::as_str))
+                    .any(|command| command.contains("tabbeacon hook codex"))
+            })
+        })
+}
+
+fn inventory_event_id(event: &str) -> &'static str {
+    match event_key_label(event) {
+        "unsupported" => "unsupported",
+        value => value,
+    }
+}
+
+fn inventory_state_key(
+    hooks_path: &Path,
+    event: &str,
+    group_index: usize,
+    handler_index: usize,
+) -> String {
+    format!(
+        "{}:{}:{group_index}:{handler_index}",
+        hooks_path.display(),
+        event_key_label(event)
+    )
+}
+
+fn inventory_handler_kind(handler: &Value) -> HookHandlerKind {
+    if handler.get("type").and_then(Value::as_str) == Some("command") {
+        HookHandlerKind::Command
+    } else {
+        HookHandlerKind::Unsupported
+    }
+}
+
+fn inventory_timeout(handler: &Value) -> Option<u64> {
+    handler.get("timeout").and_then(Value::as_u64)
+}
+
+fn inventory_fingerprint(value: &Value) -> String {
+    let bytes = serde_json::to_vec(&canonical_json(value)).expect("JSON values always serialize");
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn inventory_trust_state(
+    profile_is_supported: bool,
+    enabled: bool,
+    trusted: Option<&str>,
+    declaration: &OwnedHook,
+) -> HookTrustState {
+    if !profile_is_supported {
+        HookTrustState::UnsupportedOrUnavailable
+    } else if !enabled {
+        HookTrustState::Disabled
+    } else if trusted.is_none() {
+        HookTrustState::ReviewRequired
+    } else if trusted == Some(normalized_hook_hash(declaration).as_str()) {
+        HookTrustState::Trusted
+    } else {
+        HookTrustState::HashStaleOrChanged
+    }
+}
+
+fn inventory_currentness(
+    profile_is_supported: bool,
+    desired: Option<&[OwnedHook]>,
+    declaration: &OwnedHook,
+) -> HookCurrentness {
+    if !profile_is_supported {
+        HookCurrentness::UnsupportedOrUnavailable
+    } else if desired
+        .is_some_and(|desired| desired.iter().any(|candidate| candidate == declaration))
+    {
+        HookCurrentness::Current
+    } else {
+        HookCurrentness::Stale
+    }
 }
 
 fn hooks_events(hooks: &Value) -> Result<&Map<String, Value>, CodexIntegrationError> {

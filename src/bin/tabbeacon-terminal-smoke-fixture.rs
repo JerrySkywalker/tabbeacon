@@ -1,14 +1,70 @@
-//! Feature-gated real-terminal lifecycle fixture for TB-G46.
+//! Feature-gated real-terminal lifecycle fixture for TB-G46 and TB-G60.
 
-use std::{io::IsTerminal, process::ExitCode};
+use std::{
+    env, fs,
+    io::IsTerminal,
+    process::ExitCode,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use tabbeacon::{
     control_center::{ControlCenterApp, run_terminal_smoke_fixture},
+    hook_inventory::{HookInventory, HookInventoryAvailability},
     management::{ManagementHealth, ManagementOverview, ManagementSnapshot},
+    providers::codex::CodexIntegration,
     settings::PresentationSettings,
 };
 
+const FIXTURE_CODEX_VERSION_PROBE_ARGUMENT: &str = "--version";
+
+fn fixture_hook_inventory() -> Result<HookInventory, String> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "fixture clock is unavailable".to_owned())?
+        .as_nanos();
+    let root = env::temp_dir().join(format!(
+        "tabbeacon-g60-tui-hook-inventory-{}-{nonce}",
+        std::process::id()
+    ));
+    fs::create_dir_all(root.join("codex-home"))
+        .map_err(|_| "owned fixture Hook root could not be created".to_owned())?;
+    let result = (|| {
+        // The adapter sees a valid Codex Hook document, but the arbitrary
+        // command remains inside owned temporary fixture state and is never
+        // rendered or recorded by the smoke receipt.
+        fs::write(
+            root.join("codex-home/hooks.json"),
+            br#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"fixture-private-command"}]}]}}"#,
+        )
+        .map_err(|_| "owned fixture Hook document could not be written".to_owned())?;
+        let executable = env::current_exe()
+            .map_err(|_| "fixture executable could not be resolved".to_owned())?;
+        let inventory = CodexIntegration::new(
+            root.join("codex-home"),
+            root.join("state"),
+            executable.clone(),
+        )
+        // The fixture's profile probe is its own short-lived executable,
+        // which the owned Windows Terminal child tree can terminate if the
+        // real-terminal watchdog expires. It never probes an Owner Codex
+        // installation during visual acceptance.
+        .with_codex_program(executable)
+        .hook_inventory();
+        (inventory.availability == HookInventoryAvailability::Available)
+            .then_some(inventory)
+            .ok_or_else(|| "fixture provider Hook shape was not admitted".to_owned())
+    })();
+    let _ = fs::remove_dir_all(&root);
+    result
+}
+
 fn main() -> ExitCode {
+    if env::args().nth(1).as_deref() == Some(FIXTURE_CODEX_VERSION_PROBE_ARGUMENT) {
+        // Keep the adapter proof on the exact admitted Codex profile without
+        // consulting any Owner configuration or executable.
+        println!("codex-cli 0.147.0");
+        return ExitCode::SUCCESS;
+    }
     if std::env::var_os("WT_SESSION").is_none()
         || !std::io::stdin().is_terminal()
         || !std::io::stdout().is_terminal()
@@ -18,6 +74,14 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
+    let hook_inventory = match fixture_hook_inventory() {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            eprintln!("WINDOWS_TERMINAL_TUI_SMOKE=FAIL");
+            eprintln!("REASON={error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let app = ControlCenterApp::new(
         PresentationSettings::default(),
         ManagementSnapshot {
@@ -27,14 +91,16 @@ fn main() -> ExitCode {
             change_plans: Vec::new(),
         },
         ManagementOverview::default(),
-    );
+    )
+    .with_hook_inventory(hook_inventory);
     match run_terminal_smoke_fixture(app) {
         Ok(report) => {
             if let Some(path) = std::env::var_os("TABBEACON_TUI_SMOKE_RESULT_PATH") {
                 let result = format!(
-                    "TUI_LIVE_REFRESH={}\nTUI_WORKSPACE_SESSIONS={}\nTUI_HELP_OVERLAY={}\nTUI_LANGUAGE_LIVE_SWITCH={}\nTUI_INTERFACE_REVERT={}\nTUI_INTERFACE_STAGED_APPLY={}\nOWNER_MUTATIONS=none\n",
+                    "TUI_LIVE_REFRESH={}\nTUI_WORKSPACE_SESSIONS={}\nTUI_HOOK_INVENTORY={}\nTUI_HOOK_PROVIDER_ADAPTER=true\nTUI_HELP_OVERLAY={}\nTUI_LANGUAGE_LIVE_SWITCH={}\nTUI_INTERFACE_REVERT={}\nTUI_INTERFACE_STAGED_APPLY={}\nOWNER_MUTATIONS=none\n",
                     report.live_refresh_merged,
                     report.workspace_and_sessions_visited,
+                    report.hook_inventory_visited,
                     report.help_overlay_exercised,
                     report.interface_locale_switched,
                     report.interface_draft_reverted,
@@ -53,6 +119,8 @@ fn main() -> ExitCode {
                 "TUI_WORKSPACE_SESSIONS={}",
                 report.workspace_and_sessions_visited
             );
+            println!("TUI_HOOK_INVENTORY={}", report.hook_inventory_visited);
+            println!("TUI_HOOK_PROVIDER_ADAPTER=true");
             println!("TUI_HELP_OVERLAY={}", report.help_overlay_exercised);
             println!("DRAFT_CHANGED={}", report.draft_changed);
             println!("DRAFT_REVERTED={}", report.draft_reverted);
@@ -74,5 +142,30 @@ fn main() -> ExitCode {
             eprintln!("REASON={error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FIXTURE_CODEX_VERSION_PROBE_ARGUMENT, fixture_hook_inventory};
+    use tabbeacon::hook_inventory::HookInventoryAvailability;
+
+    #[test]
+    fn fixture_uses_the_real_codex_adapter_without_command_exposure() {
+        let inventory = fixture_hook_inventory().expect("owned fixture inventory is available");
+        assert_eq!(inventory.availability, HookInventoryAvailability::Available);
+        assert!(
+            inventory
+                .entries
+                .iter()
+                .any(|entry| entry.provider == "codex")
+        );
+        let json = serde_json::to_string(&inventory).expect("inventory serializes");
+        assert!(!json.contains("fixture-private-command"));
+    }
+
+    #[test]
+    fn fixture_version_probe_argument_is_distinct_from_the_interactive_fixture() {
+        assert_eq!(FIXTURE_CODEX_VERSION_PROBE_ARGUMENT, "--version");
     }
 }

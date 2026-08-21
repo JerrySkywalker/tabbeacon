@@ -11,6 +11,7 @@ pub mod convergence_evidence;
 pub mod core;
 pub mod diagnostics;
 pub mod guided_setup;
+pub mod hook_inventory;
 pub mod human_diagnostics;
 pub mod human_output;
 pub mod human_presentation;

@@ -17,7 +17,7 @@ use crate::interface_preferences::InterfaceLanguage;
     name = "tabbeacon",
     version,
     about = "Live identity and status beacons for Codex CLI tabs in Windows Terminal.",
-    after_help = "Common commands:\n  tabbeacon setup codex\n  tabbeacon status --json\n  tabbeacon sessions --json\n  tabbeacon doctor --json\n  tabbeacon config show\n  tabbeacon alias show\n  tabbeacon completions powershell"
+    after_help = "Common commands:\n  tabbeacon setup codex\n  tabbeacon status --json\n  tabbeacon sessions --json\n  tabbeacon hooks --json\n  tabbeacon doctor --json\n  tabbeacon config show\n  tabbeacon alias show\n  tabbeacon completions powershell"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -46,6 +46,8 @@ pub enum Command {
     Status(OutputArgs),
     /// Show privacy-preserving, read-only live session observations.
     Sessions(OutputArgs),
+    /// Inspect the provider-neutral, command-redacted Hook inventory.
+    Hooks(OutputArgs),
     /// Diagnose whether a local package upgrade is blocked by a live owned worker.
     #[command(name = "upgrade-preflight")]
     UpgradePreflight(UpgradePreflightArgs),
@@ -460,6 +462,13 @@ mod tests {
         };
         assert_eq!(output.mode(), OutputMode::Json);
 
+        let hooks = Cli::try_parse_from(["tabbeacon", "hooks", "--plain"])
+            .expect("plain Hook inventory parses");
+        let Command::Hooks(output) = hooks.command.expect("Hooks command is typed") else {
+            panic!("Hooks command is typed");
+        };
+        assert_eq!(output.mode(), OutputMode::Plain);
+
         let doctor = Cli::try_parse_from(["tabbeacon", "doctor", "--json", "--probe-title"])
             .expect("doctor options parse in either declared order");
         let Command::Doctor(doctor) = doctor.command.expect("doctor command") else {
@@ -540,6 +549,7 @@ mod tests {
         assert!(Cli::try_parse_from(["tabbeacon", "status", "--json", "--plain"]).is_err());
         assert!(Cli::try_parse_from(["tabbeacon", "status", "--lang", "fr-FR"]).is_err());
         assert!(Cli::try_parse_from(["tabbeacon", "sessions", "--json", "--plain"]).is_err());
+        assert!(Cli::try_parse_from(["tabbeacon", "hooks", "--json", "--plain"]).is_err());
         assert!(Cli::try_parse_from(["tabbeacon", "alias", "show", "--json", "--plain"]).is_err());
         assert!(Cli::try_parse_from(["tabbeacon", "convergence", "verify"]).is_err());
         assert!(Cli::try_parse_from(["tabbeacon", "export", "--force"]).is_err());

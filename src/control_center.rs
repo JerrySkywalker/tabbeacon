@@ -23,6 +23,7 @@ use ratatui::{
 use crate::{
     activity::SessionsOverview,
     core::{Attention, Health, Phase},
+    hook_inventory::HookInventory,
     human_presentation::{
         HumanMessageKey, ManagementTextKind, ResolvedLocale, catalog, color_enabled,
         health_label as shared_health_label, management_action_text, management_text,
@@ -51,18 +52,20 @@ pub enum Screen {
     Workspace,
     Sessions,
     Integration,
+    Hooks,
     Diagnostics,
     Interface,
     Preview,
 }
 
 impl Screen {
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Overview,
         Self::Appearance,
         Self::Workspace,
         Self::Sessions,
         Self::Integration,
+        Self::Hooks,
         Self::Diagnostics,
         Self::Interface,
         Self::Preview,
@@ -76,6 +79,7 @@ impl Screen {
             Self::Workspace => "Workspace",
             Self::Sessions => "Sessions",
             Self::Integration => "Codex Integration",
+            Self::Hooks => "Hooks",
             Self::Diagnostics => "Diagnostics",
             Self::Interface => "Interface",
             Self::Preview => "Preview",
@@ -89,6 +93,7 @@ impl Screen {
             Self::Workspace => HumanMessageKey::Workspace,
             Self::Sessions => HumanMessageKey::Sessions,
             Self::Integration => HumanMessageKey::CodexIntegration,
+            Self::Hooks => HumanMessageKey::Hooks,
             Self::Diagnostics => HumanMessageKey::Diagnostics,
             Self::Interface => HumanMessageKey::Interface,
             Self::Preview => HumanMessageKey::Preview,
@@ -181,6 +186,8 @@ pub struct ControlCenterRefresh {
     pub workspace: Option<WorkspaceAliasInspection>,
     /// Read-only, content-minimal activity lease projection.
     pub sessions: SessionsOverview,
+    /// Provider-neutral, command-redacted Hook inventory.
+    pub hooks: HookInventory,
 }
 
 /// A frontend request that must be executed by an existing ownership-aware API.
@@ -249,6 +256,7 @@ pub struct ControlCenterApp {
     interface_draft: InterfacePreferences,
     workspace: Option<WorkspaceAliasInspection>,
     sessions: Option<SessionsOverview>,
+    hooks: HookInventory,
     current_workspace_override: Option<String>,
     workspace_draft: Option<String>,
     workspace_editor: Option<String>,
@@ -282,6 +290,7 @@ impl ControlCenterApp {
             interface_draft: InterfacePreferences::default(),
             workspace: None,
             sessions: None,
+            hooks: HookInventory::default(),
             current_workspace_override: None,
             workspace_draft: None,
             workspace_editor: None,
@@ -309,6 +318,13 @@ impl ControlCenterApp {
     pub fn with_interface_preferences(mut self, preferences: InterfacePreferences) -> Self {
         self.current_interface = preferences;
         self.interface_draft = preferences;
+        self
+    }
+
+    /// Supplies one already-parsed, read-only provider Hook projection.
+    #[must_use]
+    pub fn with_hook_inventory(mut self, hooks: HookInventory) -> Self {
+        self.hooks = hooks;
         self
     }
 
@@ -410,6 +426,7 @@ impl ControlCenterApp {
     pub fn merge_refresh(&mut self, refresh: ControlCenterRefresh) {
         self.snapshot = refresh.snapshot;
         self.overview = refresh.overview;
+        self.hooks = refresh.hooks;
         if let Some(workspace) = refresh.workspace {
             let override_alias = workspace
                 .custom_alias()
@@ -934,6 +951,8 @@ pub struct TerminalSmokeReport {
     pub live_refresh_merged: bool,
     /// Workspace and Sessions navigation reached their production render paths.
     pub workspace_and_sessions_visited: bool,
+    /// The command-redacted Hook inventory screen reached its production renderer.
+    pub hook_inventory_visited: bool,
     /// `?` opened and `Esc` dismissed the event-isolating help overlay.
     pub help_overlay_exercised: bool,
     /// An appearance value changed in the in-memory draft.
@@ -987,6 +1006,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         overview: app.overview.clone(),
         workspace: None,
         sessions: SessionsOverview::default(),
+        hooks: app.hooks.clone(),
     };
     app.merge_refresh(refresh);
     let live_refresh_merged = app.sessions.is_some() && !app.dirty();
@@ -1053,6 +1073,11 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         invariant(!app.overlay_open(), "fixture did not dismiss Help")?;
 
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        invariant(app.screen() == Screen::Hooks, "fixture did not reach Hooks")?;
+        draw(&mut session, &app)?;
+        let hook_inventory_visited = true;
+
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(
             app.screen() == Screen::Diagnostics,
             "fixture did not reach Diagnostics",
@@ -1104,6 +1129,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
 
         let _ = app.handle_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         let _ = app.handle_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         invariant(
             app.screen() == Screen::Integration,
             "fixture did not reach Integration",
@@ -1118,9 +1144,10 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         )?;
 
         Ok(TerminalSmokeReport {
-            screens_visited: 7,
+            screens_visited: 8,
             live_refresh_merged,
             workspace_and_sessions_visited,
+            hook_inventory_visited,
             help_overlay_exercised,
             draft_changed,
             draft_reverted,
@@ -1386,6 +1413,7 @@ fn content(app: &ControlCenterApp) -> Paragraph<'static> {
         Screen::Workspace => workspace_lines(app),
         Screen::Sessions => sessions_lines(app),
         Screen::Integration => integration_lines(app),
+        Screen::Hooks => hooks_lines(app),
         Screen::Diagnostics => diagnostics_lines(app),
         Screen::Interface => interface_lines(app),
         Screen::Preview => preview_lines(app),
@@ -1727,6 +1755,10 @@ fn integration_lines(app: &ControlCenterApp) -> String {
     )
 }
 
+fn hooks_lines(app: &ControlCenterApp) -> String {
+    app.hooks.human_table(app.locale())
+}
+
 fn diagnostics_lines(app: &ControlCenterApp) -> String {
     if app.snapshot.issues.is_empty() {
         return format!(
@@ -2032,6 +2064,7 @@ mod tests {
             overview: ManagementOverview::default(),
             workspace: None,
             sessions: SessionsOverview::default(),
+            hooks: HookInventory::default(),
         }
     }
 
@@ -2137,6 +2170,7 @@ mod tests {
                     remote_control: false,
                 },
             },
+            hooks: HookInventory::default(),
         });
         app.screen = Screen::Sessions;
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("test terminal starts");
@@ -2148,6 +2182,67 @@ mod tests {
         assert!(!rendered.contains("native_session"));
         assert!(!rendered.contains("prompt"));
         assert!(!rendered.contains("turn_id"));
+    }
+
+    #[test]
+    fn hooks_screen_is_localized_narrow_safe_and_command_redacted() {
+        use crate::hook_inventory::{
+            HookCurrentness, HookHandlerKind, HookInventoryEntry, HookOwner, HookSourceKind,
+            HookTrustState,
+        };
+
+        let mut english_app = app();
+        let mut snapshot = refresh(english_app.current(), english_app.current_interface());
+        snapshot.hooks = HookInventory::available(vec![HookInventoryEntry::new(
+            "codex",
+            "pre_tool_use",
+            HookOwner::TabBeacon,
+            true,
+            HookTrustState::Trusted,
+            HookCurrentness::Current,
+            HookSourceKind::ProviderUserGlobal,
+            HookHandlerKind::Command,
+            Some(1),
+            "sha256:fixture",
+        )]);
+        english_app.merge_refresh(snapshot);
+        english_app.screen = Screen::Hooks;
+        let mut terminal = Terminal::new(TestBackend::new(24, 12)).expect("narrow terminal starts");
+        terminal
+            .draw(|frame| render(frame, &english_app))
+            .expect("English Hooks render");
+        let rendered = format!("{:?}", terminal.backend().buffer());
+        assert!(rendered.contains("Provider"));
+        assert!(rendered.contains("PreToolUse"));
+        assert!(!rendered.contains("powershell.exe"));
+        assert!(!rendered.contains("commandWindows"));
+
+        let mut chinese_app = app().with_interface_preferences(
+            InterfacePreferences::default().with_language(InterfaceLanguage::ZhCn),
+        );
+        let mut snapshot = refresh(chinese_app.current(), chinese_app.current_interface());
+        snapshot.hooks = HookInventory::available(vec![HookInventoryEntry::new(
+            "codex",
+            "pre_tool_use",
+            HookOwner::TabBeacon,
+            true,
+            HookTrustState::Trusted,
+            HookCurrentness::Current,
+            HookSourceKind::ProviderUserGlobal,
+            HookHandlerKind::Command,
+            Some(1),
+            "sha256:fixture",
+        )]);
+        chinese_app.merge_refresh(snapshot);
+        chinese_app.screen = Screen::Hooks;
+        let mut terminal =
+            Terminal::new(TestBackend::new(24, 12)).expect("Chinese terminal starts");
+        terminal
+            .draw(|frame| render(frame, &chinese_app))
+            .expect("Chinese Hooks render");
+        let rendered = format!("{:?}", terminal.backend().buffer());
+        assert!(rendered.contains("提供方"));
+        assert!(rendered.contains("可信"));
     }
 
     #[test]

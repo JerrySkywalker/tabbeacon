@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tabbeacon::{
     core::{Attention, AuthoritySet, FieldUpdate, Health, Phase, StateAxis},
+    hook_inventory::{HookCurrentness, HookInventoryAvailability, HookOwner, HookTrustState},
     providers::codex::{
         CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookError, CodexHookEvent,
         CodexHookNormalizer, CodexHookProfile, CodexHookRuntime, CodexIntegration,
@@ -2273,6 +2274,135 @@ fn doctor_supports_current_codex_trust_shape_and_detects_inactive_or_conflicting
             && check.status() == DoctorStatus::Fail
             && check.summary().contains("conflicts")
     }));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One progression proves the distinct inventory state transitions.
+fn hook_inventory_is_exact_redacted_and_distinguishes_trust_from_declaration_drift() {
+    let root = TestRoot::new("hook-inventory");
+    let integration = test_integration(&root);
+    integration.setup().expect("setup succeeds");
+    let codex_home = root.child("codex-home");
+    let trusted_keys = install_current_codex_trust_state(&codex_home);
+
+    let before = files_under(&root.path)
+        .into_iter()
+        .map(|path| {
+            let relative = path
+                .strip_prefix(&root.path)
+                .expect("owned state remains below the fixture root")
+                .to_owned();
+            (relative, fs::read(path).expect("fixture state reads"))
+        })
+        .collect::<Vec<_>>();
+    let inventory = integration.hook_inventory();
+    let after = files_under(&root.path)
+        .into_iter()
+        .map(|path| {
+            let relative = path
+                .strip_prefix(&root.path)
+                .expect("owned state remains below the fixture root")
+                .to_owned();
+            (relative, fs::read(path).expect("fixture state rereads"))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(before, after, "inventory refresh is read-only");
+    assert_eq!(inventory.availability, HookInventoryAvailability::Available);
+    assert_eq!(
+        inventory
+            .entries
+            .iter()
+            .filter(|entry| entry.owner == HookOwner::TabBeacon)
+            .count(),
+        11,
+        "all admitted Codex lifecycle declarations appear once"
+    );
+    assert!(inventory.entries.iter().all(|entry| {
+        entry.owner != HookOwner::TabBeacon
+            || (entry.trust_state == HookTrustState::Trusted
+                && entry.currentness == HookCurrentness::Current)
+    }));
+
+    let config_path = codex_home.join("config.toml");
+    let mut config = fs::read_to_string(&config_path)
+        .expect("trusted config reads")
+        .parse::<DocumentMut>()
+        .expect("trusted config parses");
+    config["hooks"]["state"][&trusted_keys[0]]["enabled"] = value(false);
+    fs::write(&config_path, config.to_string()).expect("disabled state writes");
+    let disabled = integration.hook_inventory();
+    assert!(disabled.entries.iter().any(
+        |entry| entry.event == "pre_tool_use" && entry.trust_state == HookTrustState::Disabled
+    ));
+
+    install_current_codex_trust_state(&codex_home);
+    let mut config = fs::read_to_string(&config_path)
+        .expect("restored config reads")
+        .parse::<DocumentMut>()
+        .expect("restored config parses");
+    config["hooks"]["state"][&trusted_keys[0]]["trusted_hash"] = value("sha256:stale");
+    fs::write(&config_path, config.to_string()).expect("stale hash writes");
+    let stale_hash = integration.hook_inventory();
+    assert!(stale_hash.entries.iter().any(|entry| {
+        entry.event == "pre_tool_use"
+            && entry.trust_state == HookTrustState::HashStaleOrChanged
+            && entry.currentness == HookCurrentness::Current
+    }));
+
+    let hooks_path = codex_home.join("hooks.json");
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("hooks read")).expect("hooks parse");
+    hooks["hooks"]["Stop"]
+        .as_array_mut()
+        .expect("Stop groups are an array")
+        .push(json!({
+            "hooks": [{"type": "command", "command": "secret-token=do-not-leak"}]
+        }));
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("third-party hooks serialize"),
+    )
+    .expect("third-party hooks write");
+    let mixed = integration.hook_inventory();
+    assert!(
+        mixed
+            .entries
+            .iter()
+            .any(|entry| entry.owner == HookOwner::ThirdParty)
+    );
+    let json = serde_json::to_string(&mixed).expect("inventory serializes");
+    assert!(!json.contains("secret-token"));
+    assert!(!mixed.plain_lines().join("\n").contains("secret-token"));
+    assert!(
+        !mixed
+            .human_table(tabbeacon::human_presentation::ResolvedLocale::EnUs)
+            .contains("secret-token")
+    );
+    assert!(
+        !mixed
+            .human_table(tabbeacon::human_presentation::ResolvedLocale::ZhCn)
+            .contains("secret-token")
+    );
+
+    hooks["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = json!(2);
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("modified hooks serialize"),
+    )
+    .expect("modified owned hook writes");
+    let declaration_modified = integration.hook_inventory();
+    assert!(declaration_modified.entries.iter().any(|entry| {
+        entry.event == "pre_tool_use"
+            && entry.currentness == HookCurrentness::DeclarationModifiedOrMissing
+            && entry.owner == HookOwner::UnownedOrAmbiguous
+    }));
+
+    fs::write(&hooks_path, b"[]").expect("malformed hooks write");
+    assert_eq!(
+        integration.hook_inventory().availability,
+        HookInventoryAvailability::Unavailable,
+        "malformed provider state fails closed without a parse panic"
+    );
 }
 
 #[test]

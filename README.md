@@ -105,6 +105,8 @@ tabbeacon status
 tabbeacon status --json
 tabbeacon sessions
 tabbeacon sessions --json
+tabbeacon hooks
+tabbeacon hooks --json
 tabbeacon doctor
 tabbeacon doctor --json
 ```
