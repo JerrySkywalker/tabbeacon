@@ -1397,12 +1397,15 @@ const MIN_TERMINAL_WIDTH: u16 = 24;
 const MIN_TERMINAL_HEIGHT: u16 = 10;
 
 /// Renders all Control Center screens into the active Ratatui frame.
-#[allow(clippy::too_many_lines)] // The compact layout keeps terminal-size, focus, and overlay safety together.
 pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
-    let style = tui_human_style(
-        app.interface_draft.color(),
-        std::env::var_os("NO_COLOR").is_some(),
-    );
+    render_with_no_color(frame, app, std::env::var_os("NO_COLOR").is_some());
+}
+
+/// Renders with an explicit `NO_COLOR` observation so deterministic render
+/// tests do not depend on the process environment.
+#[allow(clippy::too_many_lines)] // The compact layout keeps terminal-size, focus, and overlay safety together.
+fn render_with_no_color(frame: &mut Frame, app: &ControlCenterApp, no_color_is_set: bool) {
+    let style = tui_human_style(app.interface_draft.color(), no_color_is_set);
     let area = frame.area();
     if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
         frame.render_widget(
@@ -2699,7 +2702,9 @@ mod tests {
         );
         let before = app.current_interface();
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("test terminal starts");
-        terminal.draw(|frame| render(frame, &app)).expect("renders");
+        terminal
+            .draw(|frame| render_with_no_color(frame, &app, false))
+            .expect("renders");
         assert!(
             terminal
                 .backend()
@@ -2712,7 +2717,7 @@ mod tests {
 
         app.interface_draft = app.interface_draft.with_color(HumanColor::Never);
         terminal
-            .draw(|frame| render(frame, &app))
+            .draw(|frame| render_with_no_color(frame, &app, false))
             .expect("rerenders");
         assert!(
             terminal

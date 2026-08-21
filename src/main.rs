@@ -1388,6 +1388,25 @@ fn print_upgrade_preflight_plain(report: &UpgradePreflight) {
     );
     println!("PROCESS_INSPECTION={}", report.process_inspection.as_str());
     println!("WORKER_LEASE_HEALTH={}", report.worker_lease_health);
+    println!(
+        "RUNTIME_IMAGE_INSPECTION={}",
+        report.runtime_images.inspection.as_str()
+    );
+    println!(
+        "ACTIVE_RUNTIME_IMAGES={}",
+        report.runtime_images.active_image_hashes.len()
+    );
+    println!(
+        "STALE_RUNTIME_IMAGES={}",
+        report
+            .runtime_images
+            .stale_image_count
+            .map_or_else(|| "unavailable".to_owned(), |count| count.to_string())
+    );
+    println!(
+        "RUNTIME_IMAGE_CLEANUP_SAFE={}",
+        report.runtime_images.cleanup_safe
+    );
     println!("REPLACEABILITY={}", report.replaceability.as_str());
     println!("OWNED_WORKERS={}", report.proved_owned_worker_count());
     println!("AMBIGUOUS_PROCESSES={}", report.ambiguous_process_count());
@@ -1455,6 +1474,22 @@ fn print_upgrade_preflight_human(report: &UpgradePreflight) {
             HumanTone::Plain
         },
         format!("Replaceability: {}", report.replaceability.as_str()),
+    );
+    print_human_tone(
+        HumanTone::Plain,
+        format!(
+            "Runtime images: {} active, {} stale; cleanup safety: {}.",
+            report.runtime_images.active_image_hashes.len(),
+            report
+                .runtime_images
+                .stale_image_count
+                .map_or_else(|| "unavailable".to_owned(), |count| count.to_string()),
+            if report.runtime_images.cleanup_safe {
+                "proved"
+            } else {
+                "unproven"
+            }
+        ),
     );
     print_human_tone(
         HumanTone::Plain,
