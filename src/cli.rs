@@ -48,6 +48,11 @@ pub enum Command {
     Sessions(OutputArgs),
     /// Inspect the provider-neutral, command-redacted Hook inventory.
     Hooks(OutputArgs),
+    /// Run bounded, no-mutation Agy qualification helpers; this never enables Agy.
+    Agy {
+        #[command(subcommand)]
+        command: AgyPreadmissionCommand,
+    },
     /// Diagnose whether a local package upgrade is blocked by a live owned worker.
     #[command(name = "upgrade-preflight")]
     UpgradePreflight(UpgradePreflightArgs),
@@ -152,6 +157,67 @@ pub enum Command {
 pub enum SetupCommand {
     /// Install or reconcile the Codex hook declarations.
     Codex,
+}
+
+/// Explicitly pre-admission Agy qualification operations.
+#[derive(Debug, Subcommand)]
+pub enum AgyPreadmissionCommand {
+    /// Print the Owner-present G64 qualification plan without running Agy.
+    Plan(OutputArgs),
+    /// Compare a direct `agy --version` result with the separately audited docs version.
+    Version {
+        /// Version emitted by a direct, non-authenticating `agy --version` command.
+        #[arg(long)]
+        observed: Option<String>,
+        /// Version heading recorded from the current official Agy documentation.
+        #[arg(long)]
+        documented: Option<String>,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Read one title/status JSON payload from stdin and print a content-minimal record.
+    #[command(name = "title-state")]
+    TitleState(OutputArgs),
+    /// Read one Hook JSON payload from stdin and print a content-minimal record.
+    #[command(name = "hook-state")]
+    HookState {
+        /// Known Hook event category; unknown events are intentionally not accepted here.
+        #[arg(value_enum)]
+        event: AgyHookEventArgument,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Internal disposable callback protocol harness: stdout is always one plain fallback title.
+    #[command(name = "__title-callback-v1", hide = true)]
+    TitleCallback,
+}
+
+/// Known Agy Hook event spellings offered by the qualification command.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum AgyHookEventArgument {
+    #[value(name = "pre-tool-use")]
+    PreToolUse,
+    #[value(name = "post-tool-use")]
+    PostToolUse,
+    #[value(name = "pre-invocation")]
+    PreInvocation,
+    #[value(name = "post-invocation")]
+    PostInvocation,
+    Stop,
+}
+
+impl AgyHookEventArgument {
+    /// Exact external Hook event spelling passed to the content-minimizing recorder.
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::PreToolUse => "PreToolUse",
+            Self::PostToolUse => "PostToolUse",
+            Self::PreInvocation => "PreInvocation",
+            Self::PostInvocation => "PostInvocation",
+            Self::Stop => "Stop",
+        }
+    }
 }
 
 /// Output options shared by observational commands.
@@ -424,8 +490,8 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::{
-        AliasCommand, Cli, Command, ConvergenceCommand, InterfaceCommand, InterfacePreferenceKey,
-        OutputMode, SetupCommand,
+        AgyHookEventArgument, AgyPreadmissionCommand, AliasCommand, Cli, Command,
+        ConvergenceCommand, InterfaceCommand, InterfacePreferenceKey, OutputMode, SetupCommand,
     };
 
     #[test]
@@ -497,6 +563,29 @@ mod tests {
             panic!("setup command is typed");
         };
         assert!(matches!(command, Some(SetupCommand::Codex)));
+
+        let agy_plan = Cli::try_parse_from(["tabbeacon", "agy", "plan", "--json"])
+            .expect("Agy pre-admission plan parses");
+        let Command::Agy { command } = agy_plan.command.expect("Agy command") else {
+            panic!("Agy command is typed");
+        };
+        assert!(
+            matches!(command, AgyPreadmissionCommand::Plan(output) if output.mode() == OutputMode::Json)
+        );
+
+        let agy_hook =
+            Cli::try_parse_from(["tabbeacon", "agy", "hook-state", "post-tool-use", "--plain"])
+                .expect("Agy Hook qualifier parses");
+        let Command::Agy { command } = agy_hook.command.expect("Agy Hook command") else {
+            panic!("Agy Hook command is typed");
+        };
+        assert!(matches!(
+            command,
+            AgyPreadmissionCommand::HookState {
+                event: AgyHookEventArgument::PostToolUse,
+                output,
+            } if output.mode() == OutputMode::Plain
+        ));
 
         let quick = Cli::try_parse_from(["tabbeacon", "setup", "--quick"])
             .expect("quick guided setup parses");

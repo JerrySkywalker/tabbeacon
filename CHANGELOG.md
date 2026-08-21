@@ -2,6 +2,14 @@
 
 All notable changes to TabBeacon will be documented here.
 
+## Unreleased
+
+### Added
+
+- Added content-minimal, no-mutation Agy pre-admission qualification fixtures,
+  version-drift diagnostics, and an Owner-present G64 runbook. Agy remains
+  explicitly unadmitted and unavailable for production use.
+
 ## [0.5.1] - 2026-08-21
 
 ### Added

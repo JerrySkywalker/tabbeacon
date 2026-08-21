@@ -11,9 +11,9 @@ use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use dialoguer::{Confirm, Select};
 use tabbeacon::cli::{
-    AliasCommand, Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, ExplainCommand,
-    HumanOutputArgs, InterfaceCommand, InterfacePreferenceKey, OutputMode, PreviewArgs, Provider,
-    SetupCommand, TitlePolicyCommand, UpgradePreflightArgs,
+    AgyPreadmissionCommand, AliasCommand, Cli, Command, ConfigCommand, ConvergenceCommand,
+    DoctorArgs, ExplainCommand, HumanOutputArgs, InterfaceCommand, InterfacePreferenceKey,
+    OutputMode, PreviewArgs, Provider, SetupCommand, TitlePolicyCommand, UpgradePreflightArgs,
 };
 use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_title_probe,
@@ -28,6 +28,10 @@ use tabbeacon::human_presentation::{
     resolve_runtime_locale,
 };
 use tabbeacon::management::ManagementSnapshot;
+use tabbeacon::providers::agy::{
+    AgyHookRecorder, AgyQualificationPlan, AgyStateRecorder, AgyTitleCallbackHarness,
+    AgyVersionDiagnostic, MAX_AGY_QUALIFICATION_INPUT_BYTES,
+};
 use tabbeacon::providers::codex::{
     CodexHookRuntime, CodexIntegration, SetupOutcome, TitleOwnershipOutcome, UninstallOutcome,
 };
@@ -155,6 +159,7 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Status(output)) => status(output.mode(), output.language.preference()),
         Some(Command::Sessions(output)) => sessions(output.mode(), output.language.preference()),
         Some(Command::Hooks(output)) => hooks(output.mode(), output.language.preference()),
+        Some(Command::Agy { command }) => agy_preadmission(command),
         Some(Command::UpgradePreflight(arguments)) => upgrade_preflight(arguments),
         Some(Command::TitlePolicy { command }) => match command {
             TitlePolicyCommand::Inspect(output) => title_policy_inspect(output.json),
@@ -1350,6 +1355,133 @@ fn hooks(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCo
         }
     }
     ExitCode::SUCCESS
+}
+
+fn agy_preadmission(command: AgyPreadmissionCommand) -> ExitCode {
+    match command {
+        AgyPreadmissionCommand::Plan(output) => {
+            let plan = AgyQualificationPlan::default();
+            match output.mode() {
+                OutputMode::Json => print_agy_json(&plan),
+                OutputMode::Plain => {
+                    println!("AGY_ADMISSION=unadmitted");
+                    println!("AGY_PROVIDER_ENABLED=false");
+                    println!("OWNER_PRESENT_REQUIRED=true");
+                    println!("AGY_LOGIN_REQUIRED=false");
+                    println!("OWNER_CONFIG_MUTATION=false");
+                    ExitCode::SUCCESS
+                }
+                OutputMode::Human => {
+                    println!("Agy pre-admission qualification is prepared but not run.");
+                    println!(
+                        "Owner-present authenticated G64 evidence is required before any provider enablement."
+                    );
+                    ExitCode::SUCCESS
+                }
+            }
+        }
+        AgyPreadmissionCommand::Version {
+            observed,
+            documented,
+            output,
+        } => {
+            let diagnostic =
+                AgyVersionDiagnostic::from_versions(observed.as_deref(), documented.as_deref());
+            match output.mode() {
+                OutputMode::Json => print_agy_json(&diagnostic),
+                OutputMode::Plain => {
+                    println!("AGY_ADMISSION=unadmitted");
+                    println!("AGY_VERSION_DRIFT={}", agy_version_drift_name(&diagnostic));
+                    println!("AGY_PROVIDER_ENABLED=false");
+                    ExitCode::SUCCESS
+                }
+                OutputMode::Human => {
+                    println!(
+                        "Agy version diagnostic: {} (unadmitted).",
+                        agy_version_drift_name(&diagnostic)
+                    );
+                    println!(
+                        "A matching version is not provider admission; run the Owner-present G64 spike."
+                    );
+                    ExitCode::SUCCESS
+                }
+            }
+        }
+        AgyPreadmissionCommand::TitleState(output) => {
+            let payload = read_agy_qualification_stdin();
+            let record = AgyStateRecorder::record(&payload);
+            match output.mode() {
+                OutputMode::Json => print_agy_json(&record),
+                OutputMode::Plain => {
+                    println!("AGY_ADMISSION=unadmitted");
+                    println!("AGY_TITLE_STATE={}", record.disposition.as_str());
+                    println!("RAW_AGY_CONTENT_PERSISTED=false");
+                    ExitCode::SUCCESS
+                }
+                OutputMode::Human => {
+                    println!(
+                        "Agy title-state sample: {} (content minimized; unadmitted).",
+                        record.disposition.as_str()
+                    );
+                    ExitCode::SUCCESS
+                }
+            }
+        }
+        AgyPreadmissionCommand::HookState { event, output } => {
+            let payload = read_agy_qualification_stdin();
+            let record = AgyHookRecorder::record(event.wire_name(), &payload);
+            match output.mode() {
+                OutputMode::Json => print_agy_json(&record),
+                OutputMode::Plain => {
+                    println!("AGY_ADMISSION=unadmitted");
+                    println!("AGY_HOOK_STATE={}", record.disposition.as_str());
+                    println!("RAW_AGY_CONTENT_PERSISTED=false");
+                    ExitCode::SUCCESS
+                }
+                OutputMode::Human => {
+                    println!(
+                        "Agy Hook sample: {} (content minimized; unadmitted).",
+                        record.disposition.as_str()
+                    );
+                    ExitCode::SUCCESS
+                }
+            }
+        }
+        AgyPreadmissionCommand::TitleCallback => {
+            let payload = read_agy_qualification_stdin();
+            let response = AgyTitleCallbackHarness::respond(&payload);
+            println!("{}", response.fallback_title);
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+fn read_agy_qualification_stdin() -> Vec<u8> {
+    let mut payload = Vec::new();
+    let limit = u64::try_from(MAX_AGY_QUALIFICATION_INPUT_BYTES)
+        .expect("qualification input limit fits in u64")
+        .saturating_add(1);
+    let _ = io::stdin().lock().take(limit).read_to_end(&mut payload);
+    payload
+}
+
+fn print_agy_json(value: &impl serde::Serialize) -> ExitCode {
+    match serde_json::to_string(value) {
+        Ok(json) => {
+            println!("{json}");
+            ExitCode::SUCCESS
+        }
+        Err(_) => ExitCode::FAILURE,
+    }
+}
+
+fn agy_version_drift_name(diagnostic: &AgyVersionDiagnostic) -> &'static str {
+    match diagnostic.drift {
+        tabbeacon::providers::agy::AgyVersionDrift::Unknown => "unknown",
+        tabbeacon::providers::agy::AgyVersionDrift::Match => "match",
+        tabbeacon::providers::agy::AgyVersionDrift::DocumentationOlder => "documentation_older",
+        tabbeacon::providers::agy::AgyVersionDrift::LocalCliOlder => "local_cli_older",
+    }
 }
 
 fn upgrade_preflight(arguments: UpgradePreflightArgs) -> ExitCode {
