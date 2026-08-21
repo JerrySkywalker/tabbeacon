@@ -39,6 +39,7 @@ use crate::{
     },
     repo::WorkspaceAliasInspection,
     settings::{ActivityMode, PresentationSettings, SpinnerPreset, TabColorMode, TitleMode},
+    title_explanation::TitleExplanation,
 };
 
 /// Bounded local refresh cadence for the daemonless Control Center.
@@ -188,6 +189,8 @@ pub struct ControlCenterRefresh {
     pub sessions: SessionsOverview,
     /// Provider-neutral, command-redacted Hook inventory.
     pub hooks: HookInventory,
+    /// Read-only safe provenance behind a potential title.
+    pub title_explanation: TitleExplanation,
 }
 
 /// A frontend request that must be executed by an existing ownership-aware API.
@@ -226,6 +229,7 @@ enum ControlCenterOverlay {
     None,
     Help,
     RepairPreview(ChangePlan),
+    TitleExplanation,
 }
 
 impl ControlCenterOverlay {
@@ -238,6 +242,7 @@ impl ControlCenterOverlay {
             Self::None => None,
             Self::Help => Some(catalog(locale, HumanMessageKey::Help)),
             Self::RepairPreview(_) => Some(catalog(locale, HumanMessageKey::RepairPreview)),
+            Self::TitleExplanation => Some(catalog(locale, HumanMessageKey::WhyThisTitle)),
         }
     }
 }
@@ -257,6 +262,7 @@ pub struct ControlCenterApp {
     workspace: Option<WorkspaceAliasInspection>,
     sessions: Option<SessionsOverview>,
     hooks: HookInventory,
+    title_explanation: TitleExplanation,
     current_workspace_override: Option<String>,
     workspace_draft: Option<String>,
     workspace_editor: Option<String>,
@@ -291,6 +297,7 @@ impl ControlCenterApp {
             workspace: None,
             sessions: None,
             hooks: HookInventory::default(),
+            title_explanation: TitleExplanation::default(),
             current_workspace_override: None,
             workspace_draft: None,
             workspace_editor: None,
@@ -427,6 +434,7 @@ impl ControlCenterApp {
         self.snapshot = refresh.snapshot;
         self.overview = refresh.overview;
         self.hooks = refresh.hooks;
+        self.title_explanation = refresh.title_explanation;
         if let Some(workspace) = refresh.workspace {
             let override_alias = workspace
                 .custom_alias()
@@ -481,6 +489,10 @@ impl ControlCenterApp {
             self.handle_workspace_editor_key(key);
             return ControlCenterCommand::None;
         }
+        if key == KeyCode::Char('t') {
+            self.overlay = ControlCenterOverlay::TitleExplanation;
+            return ControlCenterCommand::None;
+        }
         if key == KeyCode::Char('?') {
             self.overlay = ControlCenterOverlay::Help;
             return ControlCenterCommand::None;
@@ -494,6 +506,10 @@ impl ControlCenterApp {
                 }
                 KeyCode::Char('c') => {
                     self.workspace_editor = Some(self.workspace_draft.clone().unwrap_or_default());
+                    return ControlCenterCommand::None;
+                }
+                KeyCode::Char('e') => {
+                    self.workspace_explaining = !self.workspace_explaining;
                     return ControlCenterCommand::None;
                 }
                 KeyCode::Char(candidate @ '1'..='4') => {
@@ -609,6 +625,11 @@ impl ControlCenterApp {
                 }
                 _ => {}
             },
+            ControlCenterOverlay::TitleExplanation => {
+                if matches!(key, KeyCode::Esc | KeyCode::Char('t' | 'q')) {
+                    self.overlay = ControlCenterOverlay::None;
+                }
+            }
             ControlCenterOverlay::None => {}
         }
         ControlCenterCommand::None
@@ -955,6 +976,8 @@ pub struct TerminalSmokeReport {
     pub hook_inventory_visited: bool,
     /// `?` opened and `Esc` dismissed the event-isolating help overlay.
     pub help_overlay_exercised: bool,
+    /// `t` opened and `Esc` dismissed the read-only title provenance overlay.
+    pub title_explanation_exercised: bool,
     /// An appearance value changed in the in-memory draft.
     pub draft_changed: bool,
     /// Revert restored the draft to the original settings without Apply.
@@ -1007,6 +1030,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         workspace: None,
         sessions: SessionsOverview::default(),
         hooks: app.hooks.clone(),
+        title_explanation: TitleExplanation::default(),
     };
     app.merge_refresh(refresh);
     let live_refresh_merged = app.sessions.is_some() && !app.dirty();
@@ -1071,6 +1095,19 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         draw(&mut session, &app)?;
         let _ = app.handle_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         invariant(!app.overlay_open(), "fixture did not dismiss Help")?;
+
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        let title_explanation_exercised = app.overlay_open();
+        invariant(
+            title_explanation_exercised,
+            "fixture did not open Why this title",
+        )?;
+        draw(&mut session, &app)?;
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        invariant(
+            !app.overlay_open(),
+            "fixture did not dismiss Why this title",
+        )?;
 
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(app.screen() == Screen::Hooks, "fixture did not reach Hooks")?;
@@ -1149,6 +1186,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
             workspace_and_sessions_visited,
             hook_inventory_visited,
             help_overlay_exercised,
+            title_explanation_exercised,
             draft_changed,
             draft_reverted,
             interface_locale_switched,
@@ -1491,8 +1529,118 @@ fn overlay_lines(app: &ControlCenterApp) -> String {
                 catalog(app.locale(), HumanMessageKey::OverlayDismiss),
             )
         }
+        ControlCenterOverlay::TitleExplanation => title_explanation_lines(app),
         ControlCenterOverlay::None => String::new(),
     }
+}
+
+fn title_explanation_lines(app: &ControlCenterApp) -> String {
+    let explanation = &app.title_explanation;
+    let workspace = title_explanation_workspace_lines(app);
+    let facts = [
+        format!(
+            "{}: {}",
+            catalog(app.locale(), HumanMessageKey::Provider),
+            explanation.provider
+        ),
+        format!(
+            "{}: {}",
+            catalog(app.locale(), HumanMessageKey::SemanticPhase),
+            explanation.semantic_phase
+        ),
+        format!(
+            "{}: {}",
+            catalog(app.locale(), HumanMessageKey::Attention),
+            explanation.attention
+        ),
+        format!(
+            "{}: {}",
+            catalog(app.locale(), HumanMessageKey::ActivityHealth),
+            explanation.activity_health
+        ),
+        format!(
+            "{}: {}",
+            catalog(app.locale(), HumanMessageKey::ActivityChannel),
+            explanation.activity_channel
+        ),
+        format!(
+            "{}: {}",
+            catalog(app.locale(), HumanMessageKey::SessionCorrelation),
+            explanation.session_correlation
+        ),
+        format!(
+            "{}: {}",
+            catalog(app.locale(), HumanMessageKey::TitleOwner),
+            explanation.title_owner
+        ),
+        format!(
+            "{}: {}",
+            catalog(app.locale(), HumanMessageKey::CodexWriterState),
+            explanation.codex_writer_state
+        ),
+        format!(
+            "{}: {}",
+            catalog(app.locale(), HumanMessageKey::TitleAuthority),
+            explanation.title_authority
+        ),
+        format!(
+            "{}: {}",
+            catalog(app.locale(), HumanMessageKey::TitleConflict),
+            explanation.title_conflict
+        ),
+        format!(
+            "{}: {}",
+            catalog(app.locale(), HumanMessageKey::ProviderBadgePolicy),
+            explanation.provider_badge_policy
+        ),
+        format!(
+            "{}: {}",
+            catalog(app.locale(), HumanMessageKey::ProviderBadgeValue),
+            explanation.provider_badge_value
+        ),
+    ];
+    format!(
+        "{}\n\n{}\n\n{}",
+        facts.join("\n"),
+        workspace,
+        catalog(app.locale(), HumanMessageKey::OverlayDismiss),
+    )
+}
+
+fn title_explanation_workspace_lines(app: &ControlCenterApp) -> String {
+    app.title_explanation.workspace.as_ref().map_or_else(
+        || {
+            format!(
+                "{}: unavailable",
+                catalog(app.locale(), HumanMessageKey::Workspace)
+            )
+        },
+        |workspace| {
+            format!(
+                "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}",
+                catalog(app.locale(), HumanMessageKey::ProjectDisplayHint),
+                workspace.display_hint,
+                catalog(app.locale(), HumanMessageKey::IdentityClass),
+                workspace.identity_class,
+                catalog(app.locale(), HumanMessageKey::RootBindingSource),
+                workspace.root_binding_source,
+                catalog(app.locale(), HumanMessageKey::RootBindingStatus),
+                workspace.root_binding_status,
+                catalog(app.locale(), HumanMessageKey::WorkspaceMismatch),
+                workspace.workspace_mismatch_observation,
+                catalog(app.locale(), HumanMessageKey::AutomaticAlias),
+                workspace.automatic_alias,
+                catalog(app.locale(), HumanMessageKey::CustomAlias),
+                workspace.override_alias.as_deref().unwrap_or("—"),
+                catalog(app.locale(), HumanMessageKey::EffectiveAlias),
+                workspace.effective_alias,
+                catalog(app.locale(), HumanMessageKey::AliasSource),
+                workspace.alias_source,
+                catalog(app.locale(), HumanMessageKey::NamingPolicy),
+                workspace.naming_policy,
+            )
+        },
+    )
 }
 
 fn overview_lines(app: &ControlCenterApp) -> String {
@@ -1587,7 +1735,15 @@ fn workspace_lines(app: &ControlCenterApp) -> String {
         .iter()
         .take(4)
         .enumerate()
-        .map(|(index, candidate)| format!("  {}. {}", index + 1, candidate.alias().as_str()))
+        .map(|(index, candidate)| {
+            format!(
+                "  {}. {} · {} · {}",
+                index + 1,
+                candidate.alias().as_str(),
+                candidate.strategy().as_str(),
+                candidate.score(),
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let guidance = if let Some(editor) = app.workspace_editor.as_deref() {
@@ -1600,8 +1756,32 @@ fn workspace_lines(app: &ControlCenterApp) -> String {
     } else {
         catalog(app.locale(), HumanMessageKey::WorkspaceActions).to_owned()
     };
+    let score_explanation = if app.workspace_explaining {
+        workspace.selected_candidate().map_or_else(
+            || "unavailable".to_owned(),
+            |candidate| {
+                let components = candidate.components();
+                format!(
+                    "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}",
+                    catalog(app.locale(), HumanMessageKey::TokenCoverage), components.token_coverage,
+                    catalog(app.locale(), HumanMessageKey::AcronymPreservation), components.acronym_preservation,
+                    catalog(app.locale(), HumanMessageKey::RecognizablePrefix), components.recognizable_prefix,
+                    catalog(app.locale(), HumanMessageKey::BalancedRepresentation), components.balanced_representation,
+                    catalog(app.locale(), HumanMessageKey::DisplayWidth), components.display_width,
+                    catalog(app.locale(), HumanMessageKey::InformationLoss), components.information_loss,
+                    catalog(app.locale(), HumanMessageKey::TrivialAliasPenalty), components.trivial_alias,
+                    catalog(app.locale(), HumanMessageKey::RedundancyPenalty), components.redundancy,
+                    catalog(app.locale(), HumanMessageKey::CollisionPressure), components.collision_pressure,
+                    catalog(app.locale(), HumanMessageKey::StrategyAdjustment), components.strategy_adjustment,
+                    catalog(app.locale(), HumanMessageKey::Total), components.total(),
+                )
+            },
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n\n{}:\n{}\n\n{}\n{}",
+        "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n\n{}:\n{}\n\n{}\n{}\n{}",
         catalog(app.locale(), HumanMessageKey::ProjectDisplayHint),
         workspace.workspace().as_str(),
         catalog(app.locale(), HumanMessageKey::AutomaticAlias),
@@ -1621,6 +1801,7 @@ fn workspace_lines(app: &ControlCenterApp) -> String {
             &candidates
         },
         guidance,
+        score_explanation,
         catalog(app.locale(), HumanMessageKey::WorkspaceLocalOnly),
     )
 }
@@ -2065,6 +2246,7 @@ mod tests {
             workspace: None,
             sessions: SessionsOverview::default(),
             hooks: HookInventory::default(),
+            title_explanation: TitleExplanation::default(),
         }
     }
 
@@ -2171,6 +2353,7 @@ mod tests {
                 },
             },
             hooks: HookInventory::default(),
+            title_explanation: TitleExplanation::default(),
         });
         app.screen = Screen::Sessions;
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("test terminal starts");
@@ -2733,6 +2916,44 @@ mod tests {
         assert!(!app.overlay_open());
         let _ = app.handle_key(KeyCode::Char('?'));
         assert_eq!(app.handle_key(KeyCode::Esc), ControlCenterCommand::None);
+        assert!(!app.overlay_open());
+        assert_eq!(app.staged_draft(), draft, "dismiss remains lossless");
+    }
+
+    #[test]
+    fn why_this_title_overlay_is_localized_read_only_and_draft_lossless() {
+        let mut app = app().with_interface_preferences(
+            InterfacePreferences::default().with_language(InterfaceLanguage::ZhCn),
+        );
+        app.screen = Screen::Appearance;
+        app.handle_key(KeyCode::Enter);
+        app.handle_key(KeyCode::Right);
+        let draft = app.staged_draft();
+
+        assert_eq!(
+            app.handle_key(KeyCode::Char('t')),
+            ControlCenterCommand::None
+        );
+        assert!(app.overlay_open());
+        assert_eq!(
+            app.staged_draft(),
+            draft,
+            "title explanation cannot alter a draft"
+        );
+        let mut terminal = Terminal::new(TestBackend::new(44, 22)).expect("terminal starts");
+        terminal
+            .draw(|frame| render(frame, &app))
+            .expect("title explanation renders on a narrow terminal");
+        let rendered = format!("{:?}", terminal.backend().buffer());
+        assert!(rendered.contains("为何使用此标题"));
+        assert!(rendered.contains("提供方"));
+        assert!(!rendered.contains("C:\\Users"));
+
+        assert_eq!(
+            app.handle_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+            ControlCenterCommand::None,
+            "overlay dismissal must not fall through to global quit"
+        );
         assert!(!app.overlay_open());
         assert_eq!(app.staged_draft(), draft, "dismiss remains lossless");
     }

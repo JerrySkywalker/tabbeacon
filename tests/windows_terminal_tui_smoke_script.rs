@@ -3,7 +3,8 @@
 //! The interactive run is intentionally performed only by the admitted visual
 //! gate. This test keeps the two safety properties which previously regressed
 //! visible to ordinary CI: launch is asynchronous under a pre-existing outer
-//! deadline, and forceful cleanup is limited to the verified owned child tree.
+//! deadline, and a durable child receipt—not a process query or cleanup
+//! observation—decides the real-terminal verdict.
 
 use std::path::PathBuf;
 
@@ -20,7 +21,7 @@ fn repository_source(path: &str) -> String {
 }
 
 #[test]
-fn smoke_launch_and_cleanup_are_watchdog_bounded_and_owner_correlated() {
+fn smoke_completion_is_durable_bounded_and_owner_correlated() {
     let script = smoke_script();
     let deadline = script
         .find("$deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)")
@@ -37,52 +38,50 @@ fn smoke_launch_and_cleanup_are_watchdog_bounded_and_owner_correlated() {
         "the harness must not synchronously wait for wt.exe"
     );
     assert!(
-        script.contains("($windowCompleted -or $windowOwnerBound)"),
-        "the watchdog must request exact-window cleanup as soon as its owned child completes"
+        script.contains("COMPLETION_RECEIPT_TOKEN_BOUND=")
+            && script.contains("COMPLETION_RECEIPT_HEAD_BOUND=")
+            && script.contains("COMPLETION_RECEIPT_BINARY_BOUND=")
+            && script.contains("DURABLE_COMPLETION_PROVEN=")
+            && script.contains("PROCESS_QUERY_DEPENDENCY=none"),
+        "the child completion receipt must bind the owned run, candidate, and binary"
     );
     assert!(
-        script.contains("function Stop-OwnedProcessTree"),
-        "a bounded owned-tree termination helper is required"
-    );
-    assert!(
-        script.contains("$windowChildLineageBound -and $null -ne $childProcessId"),
-        "forceful cleanup must require a verified owned terminal-child lineage"
-    );
-    assert!(
-        script.contains("OWNED_CHILD_TREE_TERMINATION_SUCCEEDED="),
-        "cleanup disposition must be recorded in durable evidence"
-    );
-    assert!(
-        script.contains("function Get-TrackedProcessTreeState")
-            && script.contains("function Get-ProcessIdentityState")
-            && script.contains("State = 'unknown'")
-            && script.contains("function Invoke-BoundedProcessQuery")
-            && script.contains("-EncodedCommand")
-            && script.contains("$helper.WaitForExit($TimeoutMilliseconds)"),
-        "cleanup must distinguish unknown process state from proven completion"
-    );
-    assert!(
-        script.contains("Invoke-BoundedProcessQuery -Operation 'children'")
-            && script.contains("PROCESS_QUERY_TIMEOUT")
-            && script.contains("PROCESS_OBSERVATION_FAILURE_CLASS=")
-            && !script.contains("Stop-Process -Id $taskkill.Id")
-            && script.contains("return 'unknown'")
-            && script.contains("TREE_ENUMERATION_PROVEN="),
-        "process observation must be isolated, bounded, and durable unproven evidence"
-    );
-    assert!(
-        script.contains("FindHandlesForProcess")
-            && script.contains("$ownerWindowHandles.Count -eq 1")
-            && script.contains("$ownedWindowProcessExact"),
-        "last-resort terminal termination must be confined to one exact owned window"
+        script.contains("WaitForSingleObject")
+            && script.contains("RESIDUAL_OWNED_PROCESS_OBSERVATION=")
+            && script.contains("if ($durableCompletionProven)"),
+        "residual process observation must be bounded and strictly secondary"
     );
     assert!(
         script.contains("WATCHDOG_EXPIRED=")
-            && script.contains("$passed = -not $watchdogExpired -and $identityQueriesProven")
-            && script.contains("$identityQueriesProven = $windowIdentityState -ne 'unknown'")
-            && script.contains("$ownedTreeTracked -and $launcherCompleted"),
-        "an expired watchdog, unknown identity, or unfinished launcher/tree cannot produce PASS"
+            && script.contains("$passed = $durableCompletionProven -and")
+            && script.contains("VISUAL_OPERATION_DISPOSITION=$visualDisposition"),
+        "an expired watchdog or mismatched durable receipt cannot produce PASS"
     );
+    for forbidden in [
+        "Get-CimInstance",
+        "function Invoke-BoundedProcessQuery",
+        "function Stop-OwnedProcessTree",
+        "PostMessage",
+        "taskkill.exe",
+    ] {
+        assert!(
+            !script.contains(forbidden),
+            "completion must not depend on legacy process-query or termination logic: {forbidden}"
+        );
+    }
+    let child = repository_source("scripts/invoke-windows-terminal-tui-smoke-child.ps1");
+    for required in [
+        "COMPLETION_SCHEMA=tabbeacon-wt-child-completion-v1",
+        "COMPLETION_TOKEN=$CompletionToken",
+        "EXPECTED_HEAD=$ExpectedHead",
+        "BINARY_SHA256=$BinarySha256",
+        "[System.IO.File]::Move($temporaryPath, $Path)",
+    ] {
+        assert!(
+            child.contains(required),
+            "child must atomically bind completion evidence: {required}"
+        );
+    }
 }
 
 #[test]

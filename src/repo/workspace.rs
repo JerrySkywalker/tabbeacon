@@ -27,6 +27,32 @@ pub enum WorkspaceKind {
     Directory,
 }
 
+/// Privacy-safe identity evidence class for workspace and title explanation.
+///
+/// This class intentionally excludes the opaque canonical identity and every
+/// filesystem path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceIdentityClass {
+    /// A normalized Git remote established the workspace identity.
+    GitRemote,
+    /// Local Git root history established the workspace identity.
+    GitRootHistory,
+    /// An ordinary directory fingerprint established the workspace identity.
+    DirectoryFallback,
+}
+
+impl WorkspaceIdentityClass {
+    /// Stable machine-readable evidence-class spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GitRemote => "git_remote",
+            Self::GitRootHistory => "git_root_history",
+            Self::DirectoryFallback => "directory_fallback",
+        }
+    }
+}
+
 /// Presentation-facing workspace identity resolved in the shared alias namespace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedWorkspaceIdentity {
@@ -60,6 +86,7 @@ pub struct ResolvedWorkspaceIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceAliasInspection {
     workspace: RepositoryDisplayName,
+    identity_class: WorkspaceIdentityClass,
     automatic_alias: RepositoryAlias,
     custom_alias: Option<RepositoryAlias>,
     effective_alias: RepositoryAlias,
@@ -74,6 +101,12 @@ impl WorkspaceAliasInspection {
     #[must_use]
     pub fn workspace(&self) -> &RepositoryDisplayName {
         &self.workspace
+    }
+
+    /// Safe evidence class behind the resolved workspace identity.
+    #[must_use]
+    pub const fn identity_class(&self) -> WorkspaceIdentityClass {
+        self.identity_class
     }
 
     /// Stable generated alias or an unpersisted prospective Adaptive v2 alias.
@@ -117,6 +150,15 @@ impl WorkspaceAliasInspection {
     pub fn candidates(&self) -> &[AliasCandidate] {
         &self.candidates
     }
+
+    /// The generated candidate actually accepted by the stable registry, when
+    /// it remains present in the current read-only candidate projection.
+    #[must_use]
+    pub fn selected_candidate(&self) -> Option<&AliasCandidate> {
+        self.candidates
+            .iter()
+            .find(|candidate| candidate.alias() == &self.automatic_alias)
+    }
 }
 
 /// Public, privacy-safe result category for alias commands.
@@ -149,6 +191,7 @@ impl std::error::Error for WorkspaceAliasError {}
 struct WorkspaceFacts {
     identity: CanonicalRepositoryIdentity,
     display_name: RepositoryDisplayName,
+    identity_class: WorkspaceIdentityClass,
     workspace_root: PathBuf,
     git_common_dir: Option<PathBuf>,
     kind: WorkspaceKind,
@@ -425,6 +468,11 @@ impl WorkspaceIdentityResolver {
             Ok(discovered) => {
                 let canonical = canonicalize_repository(&discovered)?;
                 Ok(WorkspaceFacts {
+                    identity_class: if canonical.identity.as_str().starts_with("remote:") {
+                        WorkspaceIdentityClass::GitRemote
+                    } else {
+                        WorkspaceIdentityClass::GitRootHistory
+                    },
                     identity: canonical.identity,
                     display_name: canonical.display_name,
                     workspace_root: discovered.worktree_root,
@@ -450,6 +498,7 @@ impl WorkspaceIdentityResolver {
         Ok(WorkspaceFacts {
             identity,
             display_name,
+            identity_class: WorkspaceIdentityClass::DirectoryFallback,
             workspace_root,
             git_common_dir: None,
             kind: WorkspaceKind::Directory,
@@ -505,6 +554,7 @@ impl WorkspaceIdentityResolver {
             .unwrap_or_else(|| automatic_alias.clone());
         Ok(WorkspaceAliasInspection {
             workspace: facts.display_name.clone(),
+            identity_class: facts.identity_class,
             automatic_alias,
             custom_alias,
             effective_alias,
