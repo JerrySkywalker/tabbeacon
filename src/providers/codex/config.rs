@@ -222,6 +222,8 @@ impl CodexDoctorReport {
 pub enum CodexIntegrationError {
     /// A required per-user path could not be derived.
     StateRootUnavailable,
+    /// The detected Codex version has no source-audited Hook profile.
+    UnsupportedCodexVersion,
     /// A managed or external file I/O operation failed.
     Io(io::Error),
     /// The existing hooks JSON is not compatible with the current Codex shape.
@@ -248,6 +250,9 @@ impl fmt::Display for CodexIntegrationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::StateRootUnavailable => "a safe per-user integration path is unavailable",
+            Self::UnsupportedCodexVersion => {
+                "the detected Codex version has no source-audited Hook profile"
+            }
             Self::Io(_) => "an integration file operation failed",
             Self::HooksShape => "the Codex hooks file has an unsupported shape",
             Self::ConfigShape => "the Codex config file has an unsupported shape",
@@ -363,7 +368,8 @@ impl CodexIntegration {
         &self,
         tabbeacon_owns_title: bool,
     ) -> Result<SetupOutcome, CodexIntegrationError> {
-        self.with_lock(|| self.setup_locked(tabbeacon_owns_title))
+        let profile = self.require_supported_profile()?;
+        self.with_lock(|| self.setup_locked(tabbeacon_owns_title, profile))
     }
 
     /// Removes only exact owned declarations and restores the prior title value.
@@ -390,6 +396,7 @@ impl CodexIntegration {
         &self,
         tabbeacon_owns_title: bool,
     ) -> Result<TitleOwnershipOutcome, CodexIntegrationError> {
+        self.require_supported_profile()?;
         self.with_lock(|| self.reconcile_title_ownership_locked(tabbeacon_owns_title))
     }
 
@@ -438,18 +445,24 @@ impl CodexIntegration {
                     "DECLARATION_MODIFIED: owned hooks are missing or modified",
                 ),
             });
-            checks.push(match desired_hooks(&self.tabbeacon_executable) {
-                Ok(desired) if desired == manifest.hooks => pass(
+            checks.push(match hook_profile.map(|profile| {
+                desired_hooks(&self.tabbeacon_executable, profile)
+            }) {
+                Some(Ok(desired)) if desired == manifest.hooks => pass(
                     "hooks.currentness",
                     "CURRENTNESS_CURRENT: owned hook declarations match the current TabBeacon integration",
                 ),
-                Ok(_) => fail(
+                Some(Ok(_)) => fail(
                     "hooks.currentness",
                     "CURRENTNESS_STALE: owned hook declarations require a TabBeacon upgrade",
                 ),
-                Err(_) => fail(
+                Some(Err(_)) => fail(
                     "hooks.currentness",
                     "CURRENTNESS_UNPROVEN: current TabBeacon hook declarations cannot be generated safely",
+                ),
+                None => fail(
+                    "hooks.currentness",
+                    "CURRENTNESS_UNPROVEN: Codex hook profile is not source-audited",
                 ),
             });
             checks.push(match (&version, &config) {
@@ -465,6 +478,14 @@ impl CodexIntegration {
             checks.push(fail(
                 "hooks.declarations",
                 "HOOK_UNOWNED_OR_AMBIGUOUS: hooks file is missing or incompatible",
+            ));
+            checks.push(fail(
+                "hooks.currentness",
+                if hook_profile.is_some() {
+                    "CURRENTNESS_UNPROVEN: ownership manifest is missing or hooks are incompatible"
+                } else {
+                    "CURRENTNESS_UNPROVEN: Codex hook profile is not source-audited"
+                },
             ));
             checks.push(fail(
                 "hooks.trust",
@@ -532,7 +553,10 @@ impl CodexIntegration {
         let profile_is_supported = self
             .probe_codex_version()
             .is_some_and(|(_, state)| state.is_supported());
-        let desired = desired_hooks(&self.tabbeacon_executable).ok();
+        let desired = self
+            .probe_codex_version()
+            .and_then(|(_, state)| state.supported_profile())
+            .and_then(|profile| desired_hooks(&self.tabbeacon_executable, profile).ok());
         let Ok(events) = hooks_events(&hooks) else {
             return HookInventory::unavailable();
         };
@@ -657,11 +681,12 @@ impl CodexIntegration {
     fn setup_locked(
         &self,
         tabbeacon_owns_title: bool,
+        profile: CodexHookProfile,
     ) -> Result<SetupOutcome, CodexIntegrationError> {
         fs::create_dir_all(&self.codex_home)?;
         reject_symbolic_link(&self.hooks_path())?;
         reject_symbolic_link(&self.config_path())?;
-        let desired_hooks = desired_hooks(&self.tabbeacon_executable)?;
+        let desired_hooks = desired_hooks(&self.tabbeacon_executable, profile)?;
         if let Some(mut manifest) = self.load_manifest()? {
             self.validate_manifest_scope(&manifest)?;
             let mut hooks = read_hooks_document(&self.hooks_path())?;
@@ -724,6 +749,12 @@ impl CodexIntegration {
         manifest.phase = ManifestPhase::Active;
         self.write_manifest(&manifest)?;
         Ok(SetupOutcome::InstalledTrustReviewRequired)
+    }
+
+    fn require_supported_profile(&self) -> Result<CodexHookProfile, CodexIntegrationError> {
+        self.probe_codex_version()
+            .and_then(|(_, state)| state.supported_profile())
+            .ok_or(CodexIntegrationError::UnsupportedCodexVersion)
     }
 
     fn reconcile_title_ownership_locked(
@@ -873,7 +904,7 @@ impl CodexIntegration {
         // declarations. It must be shell-safe, but it is intentionally not
         // required to equal this process: setup is the ownership-proven path
         // that migrates hooks during a same-user binary relocation.
-        desired_hooks(&manifest.executable)
+        owned_command_hooks(&manifest.executable, 1, false)
             .map_err(|_| CodexIntegrationError::OwnershipManifest)?;
         Ok(())
     }
@@ -984,7 +1015,22 @@ struct IntegrationManifest {
     hooks: Vec<OwnedHook>,
 }
 
-fn desired_hooks(executable: &Path) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
+fn desired_hooks(
+    executable: &Path,
+    profile: CodexHookProfile,
+) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
+    owned_command_hooks(
+        executable,
+        profile.timeout().declaration_timeout_seconds(),
+        !profile.timeout().synchronous_required(),
+    )
+}
+
+fn owned_command_hooks(
+    executable: &Path,
+    timeout_seconds: u8,
+    asynchronous: bool,
+) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
     if !executable.is_absolute() {
         return Err(CodexIntegrationError::UnsafeExecutablePath);
     }
@@ -1007,8 +1053,8 @@ fn desired_hooks(executable: &Path) -> Result<Vec<OwnedHook>, CodexIntegrationEr
                     "type": "command",
                     "command": windows_command.clone(),
                     "commandWindows": windows_command,
-                    "timeout": 1,
-                    "async": false
+                    "timeout": timeout_seconds,
+                    "async": asynchronous
                 }]
             }),
         })
@@ -1411,27 +1457,26 @@ fn hook_trust_check(
 
 fn codex_version_check(version: Option<&ProbedCodexProfile>) -> DoctorCheck {
     match version {
-        Some((version, CodexCompatibilityState::Supported(_))) => pass(
+        Some((_, CodexCompatibilityState::Supported(_))) => {
+            pass("codex.version", "Codex version is source-audited")
+        }
+        Some((version, CodexCompatibilityState::Experimental(_))) => fail(
             "codex.version",
-            format!("Codex {version} is source-audited"),
+            format!("Codex {version} is tracked but hook-profile review is experimental"),
         ),
-        Some((version, CodexCompatibilityState::KnownUnadmitted(_))) => fail(
+        Some((version, CodexCompatibilityState::Unknown)) => {
+            fail("codex.version", unknown_profile_summary(version))
+        }
+        Some((version, CodexCompatibilityState::Unsupported(_))) => fail(
             "codex.version",
-            format!("Codex {version} is known but deliberately unadmitted"),
-        ),
-        Some((version, CodexCompatibilityState::UnknownOrUnavailable)) => fail(
-            "codex.version",
-            format!("Codex {version} is outside the bounded hook registry"),
+            format!("Codex {version} is source-audited as unsupported"),
         ),
         None => fail("codex.version", "Codex executable/version is unavailable"),
     }
 }
 
 fn compatibility_state(version: Option<&ProbedCodexProfile>) -> CodexCompatibilityState {
-    version.map_or(
-        CodexCompatibilityState::UnknownOrUnavailable,
-        |(_, state)| *state,
-    )
+    version.map_or(CodexCompatibilityState::Unknown, |(_, state)| *state)
 }
 
 fn codex_profile_check(version: Option<&ProbedCodexProfile>) -> DoctorCheck {
@@ -1439,7 +1484,7 @@ fn codex_profile_check(version: Option<&ProbedCodexProfile>) -> DoctorCheck {
         Some((_, CodexCompatibilityState::Supported(profile))) => pass(
             "codex.hook-profile",
             format!(
-                "{}: events={}; turn-aware={}; agent-aware={}; compact-aware={}; synchronous={}; timeout={}s; title={}; unknown=ignore-fail-open",
+                "{}: events={}; turn-aware={}; agent-aware={}; compact-aware={}; synchronous={}; timeout={}s; title={}; unknown=ignore-fail-open; reconcile={}",
                 profile.id(),
                 profile.lifecycle_events().len(),
                 profile.turn_aware(),
@@ -1449,22 +1494,32 @@ fn codex_profile_check(version: Option<&ProbedCodexProfile>) -> DoctorCheck {
                 profile.timeout().declaration_timeout_seconds(),
                 profile
                     .terminal_title_ownership()
-                    .tabbeacon_delegation_key()
+                    .tabbeacon_delegation_key(),
+                profile.reconciliation_note()
             ),
         ),
-        Some((version, CodexCompatibilityState::KnownUnadmitted(_))) => fail(
+        Some((version, CodexCompatibilityState::Experimental(_))) => fail(
             "codex.hook-profile",
-            format!("Codex {version} is known but has no source-audited Hook profile"),
+            format!("Codex {version} has an experimental Hook profile"),
         ),
-        Some((version, CodexCompatibilityState::UnknownOrUnavailable)) => fail(
+        Some((version, CodexCompatibilityState::Unknown)) => {
+            fail("codex.hook-profile", unknown_profile_summary(version))
+        }
+        Some((version, CodexCompatibilityState::Unsupported(_))) => fail(
             "codex.hook-profile",
-            format!("no registry entry classifies Codex {version}"),
+            format!("Codex {version} is source-audited as unsupported"),
         ),
         None => fail(
             "codex.hook-profile",
             "Hook profile cannot be classified without a Codex version",
         ),
     }
+}
+
+fn unknown_profile_summary(version: &str) -> String {
+    format!(
+        "Detected: Codex {version}; Registry: unknown; Hook profile: unclassified; Risk: manual review required"
+    )
 }
 
 fn hook_is_enabled(config: &DocumentMut, key: &str) -> bool {

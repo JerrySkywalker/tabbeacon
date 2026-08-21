@@ -175,6 +175,10 @@ fn init_repo(path: &Path, remote: &str) {
 }
 
 fn test_integration(root: &TestRoot) -> CodexIntegration {
+    test_integration_with_codex_fixture(root, "codex_version_probe.rs")
+}
+
+fn test_integration_with_codex_fixture(root: &TestRoot, fixture: &str) -> CodexIntegration {
     let executable = root.child(if cfg!(windows) {
         "bin/tabbeacon.exe"
     } else {
@@ -183,16 +187,20 @@ fn test_integration(root: &TestRoot) -> CodexIntegration {
     fs::create_dir_all(executable.parent().expect("binary parent"))
         .expect("binary parent is created");
     fs::write(&executable, b"test executable placeholder").expect("binary placeholder is written");
-    let codex_probe = compile_codex_probe(root);
+    let codex_probe = compile_codex_probe_fixture(root, fixture);
     CodexIntegration::new(root.child("codex-home"), root.child("state"), executable)
         .with_codex_program(codex_probe)
 }
 
 fn compile_codex_probe(root: &TestRoot) -> PathBuf {
+    compile_codex_probe_fixture(root, "codex_version_probe.rs")
+}
+
+fn compile_codex_probe_fixture(root: &TestRoot, fixture: &str) -> PathBuf {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
-        .join("codex_version_probe.rs");
+        .join(fixture);
     let executable = root.child(if cfg!(windows) {
         "codex-version-probe.exe"
     } else {
@@ -212,6 +220,16 @@ fn compile_codex_probe(root: &TestRoot) -> PathBuf {
         String::from_utf8_lossy(&output.stderr)
     );
     executable
+}
+
+fn write_hooks_fixture(codex_home: &Path, name: &str) {
+    fs::create_dir_all(codex_home).expect("Codex fixture home is created");
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("codex-hook-shapes")
+        .join(name);
+    fs::copy(fixture, codex_home.join("hooks.json")).expect("hook shape fixture is copied");
 }
 
 #[cfg(windows)]
@@ -483,8 +501,31 @@ fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
 
     let mut keys = Vec::new();
     for event in ADMITTED_HOOK_EVENTS {
-        let group = &hooks["hooks"][event][0];
-        let key = format!("{}:{}:0:0", hooks_path.display(), codex_event_key(event));
+        let groups = hooks["hooks"][event]
+            .as_array()
+            .expect("hook event groups are an array");
+        let group_index = groups
+            .iter()
+            .position(|group| {
+                group["hooks"].as_array().is_some_and(|handlers| {
+                    handlers.iter().any(|handler| {
+                        handler["type"] == "command"
+                            && handler["command"] == handler["commandWindows"]
+                            && handler["commandWindows"].as_str().is_some_and(|command| {
+                                command.starts_with(
+                                    "powershell.exe -NoProfile -NonInteractive -EncodedCommand ",
+                                )
+                            })
+                    })
+                })
+            })
+            .expect("owned command hook group is present exactly once");
+        let group = &groups[group_index];
+        let key = format!(
+            "{}:{}:{group_index}:0",
+            hooks_path.display(),
+            codex_event_key(event)
+        );
         let mut trusted = Table::new();
         trusted.insert("trusted_hash", value(normalized_codex_hash(event, group)));
         config["hooks"]["state"]
@@ -704,7 +745,7 @@ fn capabilities_are_lifecycle_only_and_provider_neutral() {
 }
 
 #[test]
-fn exact_release_profile_is_explicit_and_future_versions_are_not_assumed() {
+fn source_audited_profiles_are_explicit_and_future_versions_are_not_assumed() {
     let profile = CodexHookNormalizer::profile();
     assert_eq!(profile.id(), "codex-hooks-rust-v0.147.0");
     assert_eq!(profile.version(), (0, 147, 0));
@@ -749,19 +790,206 @@ fn exact_release_profile_is_explicit_and_future_versions_are_not_assumed() {
         UnknownEventPolicy::IgnoreFailOpen
     );
     assert_eq!(CodexHookProfile::for_version((0, 147, 0)), Some(profile));
-    assert_eq!(CodexHookProfile::for_version((0, 148, 0)), None);
-    assert_eq!(CodexCompatibilityRegistry::admitted_profiles(), &[profile]);
+    let profile_149 = CodexHookProfile::for_version((0, 149, 0))
+        .expect("source-audited 0.149 fixture has an admitted profile");
+    assert_eq!(profile_149.id(), "codex-hooks-rust-v0.149.0");
+    assert_eq!(profile_149.version(), (0, 149, 0));
+    assert_eq!(profile_149.lifecycle_events(), profile.lifecycle_events());
+    assert_eq!(profile_149.identity(), profile.identity());
+    assert_eq!(profile_149.timeout(), profile.timeout());
+    assert_eq!(
+        profile_149.reconciliation_note(),
+        "owned-command-hooks;external-mcp-tool-preserved"
+    );
+    assert_eq!(
+        CodexCompatibilityRegistry::admitted_profiles(),
+        &[profile, profile_149]
+    );
     assert!(matches!(
         CodexCompatibilityRegistry::classify(Some((0, 147, 0))),
         CodexCompatibilityState::Supported(supported) if supported == profile
     ));
     assert!(matches!(
         CodexCompatibilityRegistry::classify(Some((0, 148, 0))),
-        CodexCompatibilityState::KnownUnadmitted(entry) if entry.version() == (0, 148, 0)
+        CodexCompatibilityState::Experimental(entry) if entry.version() == (0, 148, 0)
     ));
     assert_eq!(
         CodexCompatibilityRegistry::classify(Some((0, 149, 0))).label(),
-        "unknown_or_unavailable"
+        "supported"
+    );
+    assert_eq!(
+        CodexCompatibilityRegistry::classify(Some((0, 150, 0))).label(),
+        "unknown"
+    );
+}
+
+#[test]
+fn observed_codex_0149_shape_reconciles_only_exact_owned_declarations() {
+    let root = TestRoot::new("codex-0149-observed-shape");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+
+    assert_eq!(
+        integration
+            .setup()
+            .expect("0.149 setup is safe for an audited shape"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    let trusted_keys = install_current_codex_trust_state(&codex_home);
+    assert_eq!(trusted_keys.len(), ADMITTED_HOOK_EVENTS.len());
+
+    let report = integration.doctor();
+    assert_eq!(report.compatibility_state().label(), "supported");
+    assert_eq!(
+        report.hook_profile().map(CodexHookProfile::id),
+        Some("codex-hooks-rust-v0.149.0")
+    );
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "codex.version"
+            && check.status() == DoctorStatus::Pass
+            && check.summary() == "Codex version is source-audited"
+    }));
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.declarations" && check.status() == DoctorStatus::Pass
+    }));
+    assert!(
+        report
+            .checks()
+            .iter()
+            .any(|check| { check.id() == "hooks.trust" && check.status() == DoctorStatus::Pass })
+    );
+
+    let hooks: Value = serde_json::from_slice(
+        &fs::read(codex_home.join("hooks.json")).expect("reconciled hooks read"),
+    )
+    .expect("reconciled hooks parse");
+    assert_eq!(hooks["hooks"]["Stop"].as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        hooks["hooks"]["Stop"][0]["hooks"][0]["statusMessage"],
+        "fixture external stop hook"
+    );
+}
+
+#[test]
+fn codex_0149_mcp_extension_is_preserved_during_owned_command_reconciliation() {
+    let root = TestRoot::new("codex-0149-mcp-extension");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-mcp-extension.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+
+    let hooks_path = codex_home.join("hooks.json");
+    let before: Value = serde_json::from_slice(&fs::read(&hooks_path).expect("MCP fixture reads"))
+        .expect("MCP fixture parses");
+    let external_mcp_group = before["hooks"]["PostToolUse"][0].clone();
+
+    assert_eq!(
+        integration
+            .setup()
+            .expect("0.149 MCP extension does not block command reconciliation"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    install_current_codex_trust_state(&codex_home);
+
+    let after: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("reconciled hooks read"))
+            .expect("reconciled hooks parse");
+    assert_eq!(after["hooks"]["PostToolUse"][0], external_mcp_group);
+    assert_eq!(
+        after["hooks"]["PostToolUse"][1]["hooks"][0]["type"],
+        "command"
+    );
+    let report = integration.doctor();
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.declarations" && check.status() == DoctorStatus::Pass
+    }));
+    assert!(
+        report
+            .checks()
+            .iter()
+            .any(|check| { check.id() == "hooks.trust" && check.status() == DoctorStatus::Pass })
+    );
+}
+
+#[test]
+fn unknown_future_codex_versions_are_read_only_and_not_adopted() {
+    let root = TestRoot::new("codex-unknown-future");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let hooks_before = fs::read(codex_home.join("hooks.json")).expect("fixture hooks read");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_future.rs");
+
+    assert!(matches!(
+        integration.setup(),
+        Err(CodexIntegrationError::UnsupportedCodexVersion)
+    ));
+    assert_eq!(
+        fs::read(codex_home.join("hooks.json")).expect("unknown-version hooks reread"),
+        hooks_before
+    );
+    assert!(!root.child("state").exists());
+
+    let report = integration.doctor();
+    assert_eq!(report.compatibility_state().label(), "unknown");
+    assert_eq!(report.hook_profile(), None);
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "codex.version"
+            && check.status() == DoctorStatus::Fail
+            && check.summary()
+                == "Detected: Codex 0.150.0; Registry: unknown; Hook profile: unclassified; Risk: manual review required"
+    }));
+    assert!(
+        report
+            .checks()
+            .iter()
+            .any(|check| { check.id() == "hooks.trust" && check.status() == DoctorStatus::Fail })
+    );
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.currentness" && check.status() == DoctorStatus::Fail
+    }));
+}
+
+#[test]
+fn observed_codex_0149_command_drift_is_never_reconciled_or_trusted() {
+    let root = TestRoot::new("codex-0149-command-drift");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.147.0-known-good.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration
+        .setup()
+        .expect("0.149 setup succeeds before drift");
+    install_current_codex_trust_state(&codex_home);
+
+    let hooks_path = codex_home.join("hooks.json");
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("owned hooks read"))
+            .expect("owned hooks parse");
+    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["command"] = json!("external replacement");
+    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["commandWindows"] = json!("external replacement");
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("drifted hooks serialize"),
+    )
+    .expect("drifted hooks write");
+    let drifted_bytes = fs::read(&hooks_path).expect("drifted hooks reread");
+
+    let report = integration.doctor();
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.declarations" && check.status() == DoctorStatus::Fail
+    }));
+    assert!(
+        report
+            .checks()
+            .iter()
+            .any(|check| { check.id() == "hooks.trust" && check.status() == DoctorStatus::Fail })
+    );
+    assert!(matches!(
+        integration.setup(),
+        Err(CodexIntegrationError::ModifiedOwnedHook)
+    ));
+    assert_eq!(
+        fs::read(&hooks_path).expect("drifted hooks remain untouched"),
+        drifted_bytes
     );
 }
 

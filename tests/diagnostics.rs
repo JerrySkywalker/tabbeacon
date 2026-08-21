@@ -269,7 +269,7 @@ fn explicit_title_policy_repair_is_fixture_scoped_and_passive_inspection_is_read
 }
 
 #[test]
-fn status_distinguishes_missing_and_unsupported_codex_without_failing() {
+fn status_distinguishes_missing_and_experimental_codex_without_failing() {
     let missing_root = TestRoot::new("missing-codex");
     let missing_shell = missing_root.child("missing-cmd.exe");
     let missing = run_cli(
@@ -282,22 +282,25 @@ fn status_distinguishes_missing_and_unsupported_codex_without_failing() {
     let missing = json_output(&missing);
     assert!(missing["codex"]["version"].is_null());
     assert_eq!(missing["codex"]["profile_supported"], false);
-    assert_eq!(missing["codex"]["profile_state"], "unknown_or_unavailable");
+    assert_eq!(missing["codex"]["profile_state"], "unknown");
 
-    let unsupported_root = TestRoot::new("unsupported-codex");
-    let fake_codex = fake_codex_directory(&unsupported_root, "0.148.0");
-    let unsupported = run_cli(
-        &unsupported_root,
+    let experimental_root = TestRoot::new("experimental-codex");
+    let fake_codex = fake_codex_directory(&experimental_root, "0.148.0");
+    let experimental = run_cli(
+        &experimental_root,
         &["status", "--json"],
         Some(&fake_codex),
         None,
     );
-    assert!(unsupported.status.success(), "status remains observational");
-    let unsupported = json_output(&unsupported);
-    assert_eq!(unsupported["codex"]["version"], "0.148.0");
-    assert!(unsupported["codex"]["hook_profile"].is_null());
-    assert_eq!(unsupported["codex"]["profile_supported"], false);
-    assert_eq!(unsupported["codex"]["profile_state"], "known_unadmitted");
+    assert!(
+        experimental.status.success(),
+        "status remains observational"
+    );
+    let experimental = json_output(&experimental);
+    assert_eq!(experimental["codex"]["version"], "0.148.0");
+    assert!(experimental["codex"]["hook_profile"].is_null());
+    assert_eq!(experimental["codex"]["profile_supported"], false);
+    assert_eq!(experimental["codex"]["profile_state"], "experimental");
 }
 
 #[test]

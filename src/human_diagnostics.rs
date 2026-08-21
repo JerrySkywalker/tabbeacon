@@ -653,7 +653,7 @@ mod tests {
     fn shared_status_actions_remain_present_for_existing_issue_families() {
         let mut report = report();
         report.codex.profile_supported = false;
-        report.codex.profile_state = "known_unadmitted".to_owned();
+        report.codex.profile_state = "experimental".to_owned();
         report.title = title(TitleRemediationState::Available);
         report.activity.worker_state_health = "warning".to_owned();
         let snapshot = ManagementSnapshot::from_diagnostics(&report);

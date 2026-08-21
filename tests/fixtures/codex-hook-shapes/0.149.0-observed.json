@@ -1,0 +1,16 @@
+{
+  "description": "observed Codex 0.149 hook shape fixture",
+  "hooks": {
+    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "fixture-pre-tool", "commandWindows": "fixture-pre-tool", "timeout": 1, "async": false }] }],
+    "PermissionRequest": [{ "hooks": [{ "type": "command", "command": "fixture-permission", "commandWindows": "fixture-permission", "timeout": 1, "async": false }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "fixture-post-tool", "commandWindows": "fixture-post-tool", "timeout": 1, "async": false }] }],
+    "PreCompact": [{ "hooks": [{ "type": "command", "command": "fixture-pre-compact", "commandWindows": "fixture-pre-compact", "timeout": 1, "async": false }] }],
+    "PostCompact": [{ "hooks": [{ "type": "command", "command": "fixture-post-compact", "commandWindows": "fixture-post-compact", "timeout": 1, "async": false }] }],
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "fixture-session-start", "commandWindows": "fixture-session-start", "timeout": 1, "async": false }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "fixture-session-end", "commandWindows": "fixture-session-end", "timeout": 1, "async": false }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "fixture-user-prompt", "commandWindows": "fixture-user-prompt", "timeout": 1, "async": false }] }],
+    "SubagentStart": [{ "hooks": [{ "type": "command", "command": "fixture-subagent-start", "commandWindows": "fixture-subagent-start", "timeout": 1, "async": false }] }],
+    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "fixture-subagent-stop", "commandWindows": "fixture-subagent-stop", "timeout": 1, "async": false }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "fixture-external-stop", "commandWindows": "fixture-external-stop", "timeout": 1, "statusMessage": "fixture external stop hook" }] }]
+  }
+}

@@ -188,6 +188,7 @@ pub struct CodexHookProfile {
     timeout: HookTimeoutSemantics,
     terminal_title_ownership: TerminalTitleOwnershipSemantics,
     unknown_event_policy: UnknownEventPolicy,
+    reconciliation_note: &'static str,
 }
 
 impl CodexHookProfile {
@@ -256,6 +257,12 @@ impl CodexHookProfile {
     pub const fn unknown_event_policy(self) -> UnknownEventPolicy {
         self.unknown_event_policy
     }
+
+    /// Bounded note for reconciling exact owned declarations on this release.
+    #[must_use]
+    pub const fn reconciliation_note(self) -> &'static str {
+        self.reconciliation_note
+    }
 }
 
 /// A bounded diagnostic record for a version intentionally not admitted.
@@ -277,10 +284,12 @@ impl KnownUnadmittedCodexVersion {
 pub enum CodexCompatibilityState {
     /// The detected version has an exact source-audited production profile.
     Supported(CodexHookProfile),
-    /// The detected version is tracked but remains deliberately unadmitted.
-    KnownUnadmitted(KnownUnadmittedCodexVersion),
-    /// No version was available, or it is outside the bounded registry.
-    UnknownOrUnavailable,
+    /// The detected version is tracked, but its Hook profile is not audited.
+    Experimental(KnownUnadmittedCodexVersion),
+    /// The detected version is not represented in the bounded registry.
+    Unknown,
+    /// The detected version is source-audited but incompatible with this contract.
+    Unsupported(KnownUnadmittedCodexVersion),
 }
 
 impl CodexCompatibilityState {
@@ -289,8 +298,9 @@ impl CodexCompatibilityState {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Supported(_) => "supported",
-            Self::KnownUnadmitted(_) => "known_unadmitted",
-            Self::UnknownOrUnavailable => "unknown_or_unavailable",
+            Self::Experimental(_) => "experimental",
+            Self::Unknown => "unknown",
+            Self::Unsupported(_) => "unsupported",
         }
     }
 
@@ -299,7 +309,7 @@ impl CodexCompatibilityState {
     pub const fn supported_profile(self) -> Option<CodexHookProfile> {
         match self {
             Self::Supported(profile) => Some(profile),
-            Self::KnownUnadmitted(_) | Self::UnknownOrUnavailable => None,
+            Self::Experimental(_) | Self::Unknown | Self::Unsupported(_) => None,
         }
     }
 
@@ -324,7 +334,7 @@ const RUST_V0_147_0_EVENTS: [CodexHookEvent; 11] = [
     CodexHookEvent::Stop,
 ];
 
-const ADMITTED_PROFILES: [CodexHookProfile; 1] = [CodexHookProfile {
+const RUST_V0_147_0_PROFILE: CodexHookProfile = CodexHookProfile {
     id: "codex-hooks-rust-v0.147.0",
     version: (0, 147, 0),
     lifecycle_events: &RUST_V0_147_0_EVENTS,
@@ -345,7 +355,38 @@ const ADMITTED_PROFILES: [CodexHookProfile; 1] = [CodexHookProfile {
     terminal_title_ownership:
         TerminalTitleOwnershipSemantics::CodexDefaultWithExplicitTabBeaconDelegation,
     unknown_event_policy: UnknownEventPolicy::IgnoreFailOpen,
-}];
+    reconciliation_note: "owned-command-hooks-only",
+};
+
+// The source audit found an added `mcp_tool` handler family and runtime
+// refactoring in 0.149. The existing command-hook declaration fields and
+// eleven-event configuration surface remain compatible. TabBeacon therefore
+// reconciles only its exact command groups and preserves external MCP groups.
+const RUST_V0_149_0_PROFILE: CodexHookProfile = CodexHookProfile {
+    id: "codex-hooks-rust-v0.149.0",
+    version: (0, 149, 0),
+    lifecycle_events: &RUST_V0_147_0_EVENTS,
+    identity: HookIdentitySemantics {
+        session_id_required: true,
+        turn_id_required_outside_session_lifecycle: true,
+        subagent_identity_required_for_subagent_lifecycle: true,
+    },
+    turn_aware: true,
+    agent_aware: true,
+    compact_aware: true,
+    timeout: HookTimeoutSemantics {
+        synchronous_required: true,
+        declaration_timeout_seconds: 1,
+        maximum_timeout_seconds: 3,
+        timeout_blocks_operation: false,
+    },
+    terminal_title_ownership:
+        TerminalTitleOwnershipSemantics::CodexDefaultWithExplicitTabBeaconDelegation,
+    unknown_event_policy: UnknownEventPolicy::IgnoreFailOpen,
+    reconciliation_note: "owned-command-hooks;external-mcp-tool-preserved",
+};
+
+const ADMITTED_PROFILES: [CodexHookProfile; 2] = [RUST_V0_147_0_PROFILE, RUST_V0_149_0_PROFILE];
 
 // This is a bounded diagnostic marker, not a profile admission or a claim of
 // wire compatibility. It keeps an observed fixture version distinguishable from
@@ -353,6 +394,10 @@ const ADMITTED_PROFILES: [CodexHookProfile; 1] = [CodexHookProfile {
 const KNOWN_UNADMITTED: [KnownUnadmittedCodexVersion; 1] = [KnownUnadmittedCodexVersion {
     version: (0, 148, 0),
 }];
+
+// Reserve a distinct disposition for a version whose incompatible Hook
+// contract is source-audited. Do not add entries here without that evidence.
+const KNOWN_UNSUPPORTED: [KnownUnadmittedCodexVersion; 0] = [];
 
 /// The one authoritative offline registry for Codex Hook compatibility.
 #[derive(Debug, Clone, Copy, Default)]
@@ -369,7 +414,7 @@ impl CodexCompatibilityRegistry {
     #[must_use]
     pub fn classify(version: Option<(u64, u64, u64)>) -> CodexCompatibilityState {
         let Some(version) = version else {
-            return CodexCompatibilityState::UnknownOrUnavailable;
+            return CodexCompatibilityState::Unknown;
         };
         let mut index = 0;
         while index < ADMITTED_PROFILES.len() {
@@ -383,10 +428,18 @@ impl CodexCompatibilityRegistry {
         while index < KNOWN_UNADMITTED.len() {
             let entry = KNOWN_UNADMITTED[index];
             if entry.version == version {
-                return CodexCompatibilityState::KnownUnadmitted(entry);
+                return CodexCompatibilityState::Experimental(entry);
             }
             index += 1;
         }
-        CodexCompatibilityState::UnknownOrUnavailable
+        let mut index = 0;
+        while index < KNOWN_UNSUPPORTED.len() {
+            let entry = KNOWN_UNSUPPORTED[index];
+            if entry.version == version {
+                return CodexCompatibilityState::Unsupported(entry);
+            }
+            index += 1;
+        }
+        CodexCompatibilityState::Unknown
     }
 }

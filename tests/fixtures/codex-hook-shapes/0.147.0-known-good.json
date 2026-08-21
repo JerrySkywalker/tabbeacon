@@ -1,0 +1,18 @@
+{
+  "description": "known-good Codex 0.147 hook shape fixture",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "fixture-external-pre-tool",
+            "commandWindows": "fixture-external-pre-tool",
+            "timeout": 1,
+            "async": false
+          }
+        ]
+      }
+    ]
+  }
+}
