@@ -22,9 +22,10 @@ use crate::activity::{
     ActiveWorkerLeaseIdentity, ActiveWorkerLeaseInspection, ActivityLeaseHealth,
     inspect_system_active_worker_identities,
 };
+use crate::worker_runtime::WorkerRuntimeStore;
 
 /// Stable JSON schema version for upgrade preflight output.
-pub const UPGRADE_PREFLIGHT_SCHEMA_VERSION: u32 = 1;
+pub const UPGRADE_PREFLIGHT_SCHEMA_VERSION: u32 = 2;
 
 /// Which local executable the preflight inspected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -177,6 +178,43 @@ pub struct UpgradePreflightBoundaries {
     pub raw_native_session_ids: bool,
 }
 
+/// Read-only runtime-image status used to explain post-G63 package upgrades.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpgradeRuntimeImageInspection {
+    /// Image directories and all bounded hash-addressed images were verified.
+    Available,
+    /// Runtime image state could not be safely inspected.
+    Unavailable,
+}
+
+impl UpgradeRuntimeImageInspection {
+    /// Stable machine-oriented spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Available => "available",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Runtime images related to a package-replacement decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UpgradeRuntimeImageState {
+    /// Whether the bounded image inventory was safely inspected.
+    pub inspection: UpgradeRuntimeImageInspection,
+    /// Content hashes named by active worker leases. These identify only local
+    /// executable bytes, not native sessions or Hook content.
+    pub active_image_hashes: Vec<String>,
+    /// Verified images not named by any active lease, when the inventory is
+    /// available. `None` means a safe stale count could not be established.
+    pub stale_image_count: Option<usize>,
+    /// True only when lease and image inspection proves that opportunistic GC
+    /// may delete a hash-verified image not named above.
+    pub cleanup_safe: bool,
+}
+
 /// Stable read-only report for a local package upgrade decision.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UpgradePreflight {
@@ -194,6 +232,8 @@ pub struct UpgradePreflight {
     pub process_inspection: UpgradeProcessInspection,
     /// Whether lease state was sufficiently healthy to prove a worker target.
     pub worker_lease_health: String,
+    /// Content-minimal runtime-image ownership state.
+    pub runtime_images: UpgradeRuntimeImageState,
     /// Current replacement disposition after an optional explicit drain.
     pub replaceability: UpgradeReplaceability,
     /// One non-self matching process per observation, without command content.
@@ -245,6 +285,8 @@ pub fn inspect_system_upgrade_preflight(drain_requested: bool) -> UpgradePreflig
     let current_executable = env::current_exe().ok();
     let (target, target_source) = select_upgrade_target(current_executable.as_deref());
     let leases = inspect_system_active_worker_identities();
+    let state_root = crate::repo::StableAliasRegistry::default_state_root().ok();
+    let runtime_images = runtime_image_state(state_root.as_deref(), &leases);
     let mut inspector = SystemUpgradeProcessInspector;
     inspect_with_inspector(
         &mut inspector,
@@ -252,6 +294,7 @@ pub fn inspect_system_upgrade_preflight(drain_requested: bool) -> UpgradePreflig
         target.as_deref(),
         target_source,
         &leases,
+        runtime_images,
         drain_requested,
     )
 }
@@ -263,6 +306,7 @@ fn inspect_with_inspector(
     target: Option<&Path>,
     target_source: UpgradeTargetSource,
     leases: &ActiveWorkerLeaseInspection,
+    runtime_images: UpgradeRuntimeImageState,
     drain_requested: bool,
 ) -> UpgradePreflight {
     let boundaries = UpgradePreflightBoundaries {
@@ -280,6 +324,7 @@ fn inspect_with_inspector(
             target_source,
             process_inspection: UpgradeProcessInspection::Unavailable,
             worker_lease_health: leases.health.as_str().to_owned(),
+            runtime_images,
             replaceability: UpgradeReplaceability::Unavailable,
             workers: Vec::new(),
             drain_requested,
@@ -299,6 +344,7 @@ fn inspect_with_inspector(
             target_source,
             process_inspection: UpgradeProcessInspection::Unavailable,
             worker_lease_health: leases.health.as_str().to_owned(),
+            runtime_images,
             replaceability: UpgradeReplaceability::Unavailable,
             workers: Vec::new(),
             drain_requested,
@@ -394,11 +440,56 @@ fn inspect_with_inspector(
         target_source,
         process_inspection,
         worker_lease_health: leases.health.as_str().to_owned(),
+        runtime_images,
         replaceability,
         workers: final_workers,
         drain_requested,
         drained_owned_workers,
         boundaries,
+    }
+}
+
+fn runtime_image_state(
+    state_root: Option<&Path>,
+    leases: &ActiveWorkerLeaseInspection,
+) -> UpgradeRuntimeImageState {
+    let active_image_hashes = leases
+        .runtime_image_hashes
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let Some(state_root) = state_root else {
+        return UpgradeRuntimeImageState {
+            inspection: UpgradeRuntimeImageInspection::Unavailable,
+            active_image_hashes,
+            stale_image_count: None,
+            cleanup_safe: false,
+        };
+    };
+    let inventory = WorkerRuntimeStore::new(state_root).inspect_read_only();
+    let inspection = if inventory.healthy {
+        UpgradeRuntimeImageInspection::Available
+    } else {
+        UpgradeRuntimeImageInspection::Unavailable
+    };
+    let cleanup_safe = inventory.healthy
+        && leases.health == ActivityLeaseHealth::Healthy
+        && leases.active_legacy_lease_count == 0
+        && leases
+            .runtime_image_hashes
+            .iter()
+            .all(|hash| inventory.image_hashes.contains(hash));
+    let stale_image_count = inventory.healthy.then(|| {
+        inventory
+            .image_hashes
+            .difference(&leases.runtime_image_hashes)
+            .count()
+    });
+    UpgradeRuntimeImageState {
+        inspection,
+        active_image_hashes,
+        stale_image_count,
+        cleanup_safe,
     }
 }
 
@@ -671,6 +762,17 @@ mod tests {
                 generation: 7,
                 revision: 3,
             }],
+            runtime_image_hashes: std::collections::BTreeSet::new(),
+            active_legacy_lease_count: 0,
+        }
+    }
+
+    fn runtime_images() -> UpgradeRuntimeImageState {
+        UpgradeRuntimeImageState {
+            inspection: UpgradeRuntimeImageInspection::Available,
+            active_image_hashes: Vec::new(),
+            stale_image_count: Some(0),
+            cleanup_safe: true,
         }
     }
 
@@ -700,6 +802,7 @@ mod tests {
             Some(&target),
             UpgradeTargetSource::InstalledCargoBinary,
             &identities(),
+            runtime_images(),
             false,
         );
 
@@ -742,6 +845,7 @@ mod tests {
             Some(&target),
             UpgradeTargetSource::InstalledCargoBinary,
             &identities(),
+            runtime_images(),
             true,
         );
 
@@ -769,6 +873,7 @@ mod tests {
             Some(&target),
             UpgradeTargetSource::InstalledCargoBinary,
             &identities(),
+            runtime_images(),
             true,
         );
 
@@ -788,6 +893,7 @@ mod tests {
             Some(&target),
             UpgradeTargetSource::InstalledCargoBinary,
             &identities(),
+            runtime_images(),
             false,
         );
 
@@ -807,5 +913,40 @@ mod tests {
             parse_processes(" ").expect("empty output is valid"),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn runtime_image_state_reports_cleanup_only_after_lease_and_image_proof() {
+        let root = std::env::temp_dir().join(format!(
+            "tabbeacon-upgrade-preflight-runtime-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("test clock is after epoch")
+                .as_nanos()
+        ));
+        let source = root.join("installed.exe");
+        std::fs::create_dir_all(&root).expect("isolated state root creates");
+        std::fs::write(&source, b"runtime-preflight-test-image").expect("source writes");
+        let store = WorkerRuntimeStore::new(root.join("state"));
+        let image = store.publish(&source).expect("runtime image publishes");
+        let leases = ActiveWorkerLeaseInspection {
+            health: ActivityLeaseHealth::Healthy,
+            identities: Vec::new(),
+            runtime_image_hashes: std::collections::BTreeSet::from([image.content_sha256.clone()]),
+            active_legacy_lease_count: 0,
+        };
+        let report = runtime_image_state(Some(&root.join("state")), &leases);
+        assert_eq!(report.inspection, UpgradeRuntimeImageInspection::Available);
+        assert_eq!(report.active_image_hashes, vec![image.content_sha256]);
+        assert_eq!(report.stale_image_count, Some(0));
+        assert!(report.cleanup_safe);
+
+        let legacy = ActiveWorkerLeaseInspection {
+            active_legacy_lease_count: 1,
+            ..leases
+        };
+        assert!(!runtime_image_state(Some(&root.join("state")), &legacy).cleanup_safe);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

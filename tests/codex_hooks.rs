@@ -2779,7 +2779,11 @@ fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
 #[cfg(windows)]
 #[test]
 fn generated_windows_command_runs_the_real_binary_in_the_codex_0_147_shell_model() {
-    let root = TestRoot::new("real-command-windows");
+    // Keep a fixture component between `windows` and the generated process id.
+    // The bare `...-windows-<pid>` shape can leave the nested PowerShell
+    // command host open on this Windows runner, obscuring the command-shape
+    // behavior this test is intended to prove.
+    let root = TestRoot::new("real-command-windows-shell");
     let (executable, command) = real_windows_hook_command(&root);
 
     let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "real-shell", &root.path))

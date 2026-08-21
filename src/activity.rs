@@ -4,6 +4,7 @@
 //! and a bounded lease. The worker never receives or persists raw Hook bodies.
 
 use std::{
+    collections::BTreeSet,
     env,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
@@ -31,6 +32,7 @@ use crate::{
         ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
         TitleMode,
     },
+    worker_runtime::{WorkerRuntimeImage, WorkerRuntimeStore},
 };
 
 const LEASE_SCHEMA: &str = "tabbeacon-activity-worker-lease-v1";
@@ -302,6 +304,12 @@ pub(crate) struct ActiveWorkerLeaseIdentity {
 pub(crate) struct ActiveWorkerLeaseInspection {
     pub(crate) health: ActivityLeaseHealth,
     pub(crate) identities: Vec<ActiveWorkerLeaseIdentity>,
+    /// Content-addressed runtime images retained by any active lease,
+    /// including an expired lease whose worker could still be winding down.
+    pub(crate) runtime_image_hashes: BTreeSet<String>,
+    /// A pre-G63 active lease has no image binding; that uncertainty blocks
+    /// all runtime-image cleanup but does not invalidate the lease itself.
+    pub(crate) active_legacy_lease_count: usize,
 }
 
 /// Reads active worker identities without creating state, taking a lock, or
@@ -312,6 +320,8 @@ pub(crate) fn inspect_system_active_worker_identities() -> ActiveWorkerLeaseInsp
         return ActiveWorkerLeaseInspection {
             health: ActivityLeaseHealth::Unavailable,
             identities: Vec::new(),
+            runtime_image_hashes: BTreeSet::new(),
+            active_legacy_lease_count: 0,
         };
     };
     inspect_active_worker_identities_read_only(&state_root, unix_ms())
@@ -637,10 +647,20 @@ impl ActivityCoordinator {
         };
         let now = unix_ms();
         if let Some(presentation) = worker_presentation {
-            let Ok(transition) =
-                self.store
-                    .publish_active(&key, event_sequence, owner_sha256, &presentation, now)
-            else {
+            // A long-lived worker must never map the package-installed CLI.
+            // Publishing is deliberately completed before its lease becomes
+            // active, so an interrupted copy cannot authorize an ambiguous
+            // process. A publication failure is decoration-only fail-open.
+            let runtime_store = WorkerRuntimeStore::new(self.store.state_root());
+            let Ok((runtime_image, transition)) = self.store.publish_runtime_backed_active(
+                &runtime_store,
+                executable,
+                &key,
+                event_sequence,
+                owner_sha256,
+                &presentation,
+                now,
+            ) else {
                 return ActivityRender::UncoordinatedFull;
             };
             match transition {
@@ -653,8 +673,11 @@ impl ActivityCoordinator {
                         let _ = self.store.deactivate_if_owned(&lease, unix_ms());
                         return ActivityRender::Suppress;
                     }
-                    if let Ok(worker_pid) = spawn_worker(executable, &lease) {
-                        if spawn_cleanup_observer(executable, &lease, worker_pid).is_ok() {
+                    if let Ok(worker_pid) = spawn_worker(&runtime_image.executable, &lease) {
+                        if spawn_cleanup_observer(&runtime_image.executable, &lease, worker_pid)
+                            .is_ok()
+                        {
+                            self.store.collect_unused_runtime_images(&runtime_store);
                             ActivityRender::WithoutTitle
                         } else {
                             // A console-attached worker can be terminated with its
@@ -873,6 +896,11 @@ struct WorkerLease {
     event_sequence: u64,
     revision: u64,
     owner_sha256: String,
+    /// Absent only for a pre-G63 lease. Such a lease stays valid for its
+    /// original worker, but it blocks runtime-image garbage collection and is
+    /// deliberately superseded by a new runtime-backed publication.
+    #[serde(default)]
+    runtime_image_sha256: Option<String>,
     active: bool,
     presentation: Option<WorkerPresentation>,
     updated_unix_ms: u64,
@@ -979,6 +1007,7 @@ impl ActivityLeaseStore {
         }
     }
 
+    #[cfg(test)]
     fn publish_active(
         &self,
         key: &WorkerKey,
@@ -987,55 +1016,129 @@ impl ActivityLeaseStore {
         presentation: &WorkerPresentation,
         now: u64,
     ) -> io::Result<LeaseTransition> {
+        self.publish_active_with_runtime_image(
+            key,
+            event_sequence,
+            owner_sha256,
+            None,
+            presentation,
+            now,
+        )
+    }
+
+    #[cfg(test)]
+    fn publish_active_with_runtime_image(
+        &self,
+        key: &WorkerKey,
+        event_sequence: u64,
+        owner_sha256: &str,
+        runtime_image_sha256: Option<&str>,
+        presentation: &WorkerPresentation,
+        now: u64,
+    ) -> io::Result<LeaseTransition> {
         let expires_unix_ms = now.saturating_add(presentation.lease_ttl_ms());
         self.with_lock(|| {
-            let current = self.load(key.digest())?;
-            if current
-                .as_ref()
-                .is_some_and(|lease| is_stale(key.generation, event_sequence, lease))
-            {
-                return Ok(LeaseTransition::Stale);
-            }
-            if let Some(mut current) = current.clone()
-                && current.active
-                && current.generation == key.generation
-                && current.owner_sha256 == owner_sha256
-                && current.presentation.as_ref() == Some(presentation)
-            {
-                current.event_sequence = current.event_sequence.max(event_sequence);
-                current.updated_unix_ms = now;
-                current.expires_unix_ms = expires_unix_ms;
-                self.write(&current)?;
-                return Ok(LeaseTransition::AlreadyActive);
-            }
-            let predecessor = current
-                .as_ref()
-                .filter(|lease| lease.active)
-                .map(WorkerLease::ownership);
-            let revision = current
-                .as_ref()
-                .map_or(1, |lease| lease.revision.saturating_add(1));
-            let lease = WorkerLease {
-                schema: LEASE_SCHEMA.to_owned(),
-                key_sha256: key.digest.clone(),
-                session_sha256: key.session_sha256.clone(),
-                turn_sha256: key.turn_sha256.clone(),
-                terminal_binding_sha256: key.terminal_binding_sha256.clone(),
-                generation: key.generation,
+            self.publish_active_locked(
+                key,
                 event_sequence,
-                revision,
-                owner_sha256: owner_sha256.to_owned(),
-                active: true,
-                presentation: Some(presentation.clone()),
-                updated_unix_ms: now,
+                owner_sha256,
+                runtime_image_sha256,
+                presentation,
+                now,
                 expires_unix_ms,
-            };
-            validate_lease(&lease)?;
-            self.write(&lease)?;
-            Ok(LeaseTransition::Published {
-                lease: Box::new(lease),
-                predecessor,
-            })
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)] // Keeps the image, lease identity, and presentation atomic at one visible boundary.
+    fn publish_runtime_backed_active(
+        &self,
+        runtime_store: &WorkerRuntimeStore,
+        executable: &Path,
+        key: &WorkerKey,
+        event_sequence: u64,
+        owner_sha256: &str,
+        presentation: &WorkerPresentation,
+        now: u64,
+    ) -> io::Result<(WorkerRuntimeImage, LeaseTransition)> {
+        let expires_unix_ms = now.saturating_add(presentation.lease_ttl_ms());
+        // This lock is the atomic ownership boundary for a runtime image:
+        // another Hook cannot publish an active lease between collection's
+        // proven lease scan and a stale image deletion.
+        self.with_lock(|| {
+            let runtime_image = runtime_store.publish(executable)?;
+            let transition = self.publish_active_locked(
+                key,
+                event_sequence,
+                owner_sha256,
+                Some(&runtime_image.content_sha256),
+                presentation,
+                now,
+                expires_unix_ms,
+            )?;
+            Ok((runtime_image, transition))
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn publish_active_locked(
+        &self,
+        key: &WorkerKey,
+        event_sequence: u64,
+        owner_sha256: &str,
+        runtime_image_sha256: Option<&str>,
+        presentation: &WorkerPresentation,
+        now: u64,
+        expires_unix_ms: u64,
+    ) -> io::Result<LeaseTransition> {
+        let current = self.load(key.digest())?;
+        if current
+            .as_ref()
+            .is_some_and(|lease| is_stale(key.generation, event_sequence, lease))
+        {
+            return Ok(LeaseTransition::Stale);
+        }
+        if let Some(mut current) = current.clone()
+            && current.active
+            && current.generation == key.generation
+            && current.owner_sha256 == owner_sha256
+            && current.runtime_image_sha256.as_deref() == runtime_image_sha256
+            && current.presentation.as_ref() == Some(presentation)
+        {
+            current.event_sequence = current.event_sequence.max(event_sequence);
+            current.updated_unix_ms = now;
+            current.expires_unix_ms = expires_unix_ms;
+            self.write(&current)?;
+            return Ok(LeaseTransition::AlreadyActive);
+        }
+        let predecessor = current
+            .as_ref()
+            .filter(|lease| lease.active)
+            .map(WorkerLease::ownership);
+        let revision = current
+            .as_ref()
+            .map_or(1, |lease| lease.revision.saturating_add(1));
+        let lease = WorkerLease {
+            schema: LEASE_SCHEMA.to_owned(),
+            key_sha256: key.digest.clone(),
+            session_sha256: key.session_sha256.clone(),
+            turn_sha256: key.turn_sha256.clone(),
+            terminal_binding_sha256: key.terminal_binding_sha256.clone(),
+            generation: key.generation,
+            event_sequence,
+            revision,
+            owner_sha256: owner_sha256.to_owned(),
+            runtime_image_sha256: runtime_image_sha256.map(str::to_owned),
+            active: true,
+            presentation: Some(presentation.clone()),
+            updated_unix_ms: now,
+            expires_unix_ms,
+        };
+        validate_lease(&lease)?;
+        self.write(&lease)?;
+        Ok(LeaseTransition::Published {
+            lease: Box::new(lease),
+            predecessor,
         })
     }
 
@@ -1075,6 +1178,7 @@ impl ActivityLeaseStore {
                 event_sequence,
                 revision,
                 owner_sha256: owner_sha256.to_owned(),
+                runtime_image_sha256: None,
                 active: false,
                 presentation: None,
                 updated_unix_ms: now,
@@ -1350,6 +1454,70 @@ impl ActivityLeaseStore {
         atomic_write(&self.lease_path(&lease.key_sha256), &bytes)
     }
 
+    fn state_root(&self) -> PathBuf {
+        self.directory
+            .parent()
+            .map_or_else(PathBuf::new, Path::to_path_buf)
+    }
+
+    /// Returns the active runtime images only when every relevant lease can
+    /// be validated while holding the lease lock. Unknown or legacy active
+    /// leases deliberately retain every image.
+    #[cfg(test)]
+    fn active_runtime_images_for_gc(&self) -> (BTreeSet<String>, bool) {
+        self.with_lock(|| self.active_runtime_images_for_gc_locked())
+            .map_or_else(|_| (BTreeSet::new(), false), |images| (images, true))
+    }
+
+    fn active_runtime_images_for_gc_locked(&self) -> io::Result<BTreeSet<String>> {
+        let mut active_images = BTreeSet::new();
+        let mut lease_files = 0_usize;
+        for entry in fs::read_dir(&self.directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(key_digest) = name
+                .to_str()
+                .and_then(|name| name.strip_prefix("lease-"))
+                .and_then(|value| value.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            lease_files = lease_files.saturating_add(1);
+            if lease_files > MAX_DIAGNOSTIC_LEASE_FILES {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "too many activity leases to prove runtime-image ownership",
+                ));
+            }
+            let Some(lease) = self.load(key_digest)? else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "activity lease disappeared during runtime-image inspection",
+                ));
+            };
+            if lease.active {
+                let Some(image_hash) = lease.runtime_image_sha256 else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "legacy active activity lease has no runtime-image ownership",
+                    ));
+                };
+                active_images.insert(image_hash);
+            }
+        }
+        Ok(active_images)
+    }
+
+    fn collect_unused_runtime_images(&self, runtime_store: &WorkerRuntimeStore) {
+        let _ = self.with_lock(|| {
+            let (active_images, ownership_proven) = self
+                .active_runtime_images_for_gc_locked()
+                .map_or_else(|_| (BTreeSet::new(), false), |images| (images, true));
+            let _ = runtime_store.collect_unused(&active_images, ownership_proven);
+            Ok(())
+        });
+    }
+
     fn lease_path(&self, key_digest: &str) -> PathBuf {
         self.directory.join(format!("lease-{key_digest}.json"))
     }
@@ -1369,6 +1537,7 @@ fn inspect_activity_leases_read_only(state_root: &Path, now: u64) -> ActivityLea
     inspect_sessions_read_only(state_root, now).diagnostics()
 }
 
+#[allow(clippy::too_many_lines)] // Lease validation and opaque drain identity stay in one fail-closed read path.
 fn inspect_active_worker_identities_read_only(
     state_root: &Path,
     now: u64,
@@ -1379,6 +1548,8 @@ fn inspect_active_worker_identities_read_only(
             return ActiveWorkerLeaseInspection {
                 health: ActivityLeaseHealth::Unavailable,
                 identities: Vec::new(),
+                runtime_image_hashes: BTreeSet::new(),
+                active_legacy_lease_count: 0,
             };
         }
         Ok(metadata) => metadata,
@@ -1386,12 +1557,16 @@ fn inspect_active_worker_identities_read_only(
             return ActiveWorkerLeaseInspection {
                 health: ActivityLeaseHealth::Healthy,
                 identities: Vec::new(),
+                runtime_image_hashes: BTreeSet::new(),
+                active_legacy_lease_count: 0,
             };
         }
         Err(_) => {
             return ActiveWorkerLeaseInspection {
                 health: ActivityLeaseHealth::Unavailable,
                 identities: Vec::new(),
+                runtime_image_hashes: BTreeSet::new(),
+                active_legacy_lease_count: 0,
             };
         }
     };
@@ -1399,18 +1574,24 @@ fn inspect_active_worker_identities_read_only(
         return ActiveWorkerLeaseInspection {
             health: ActivityLeaseHealth::Unavailable,
             identities: Vec::new(),
+            runtime_image_hashes: BTreeSet::new(),
+            active_legacy_lease_count: 0,
         };
     }
     let Ok(entries) = fs::read_dir(&directory) else {
         return ActiveWorkerLeaseInspection {
             health: ActivityLeaseHealth::Unavailable,
             identities: Vec::new(),
+            runtime_image_hashes: BTreeSet::new(),
+            active_legacy_lease_count: 0,
         };
     };
 
     let mut inspection = ActiveWorkerLeaseInspection {
         health: ActivityLeaseHealth::Healthy,
         identities: Vec::new(),
+        runtime_image_hashes: BTreeSet::new(),
+        active_legacy_lease_count: 0,
     };
     for (index, entry) in entries.enumerate() {
         if index >= MAX_DIAGNOSTIC_LEASE_FILES {
@@ -1452,6 +1633,14 @@ fn inspect_active_worker_identities_read_only(
         if lease.updated_unix_ms > now {
             inspection.health = ActivityLeaseHealth::Warning;
             continue;
+        }
+        if lease.active {
+            if let Some(runtime_image_sha256) = lease.runtime_image_sha256 {
+                inspection.runtime_image_hashes.insert(runtime_image_sha256);
+            } else {
+                inspection.active_legacy_lease_count =
+                    inspection.active_legacy_lease_count.saturating_add(1);
+            }
         }
         if lease.active && lease.presentation.is_some() && now <= lease.expires_unix_ms {
             inspection.identities.push(ActiveWorkerLeaseIdentity {
@@ -1601,6 +1790,10 @@ fn validate_lease(lease: &WorkerLease) -> io::Result<()> {
             .is_some_and(|value| !is_sha256(value))
         || !is_sha256(&lease.terminal_binding_sha256)
         || !is_sha256(&lease.owner_sha256)
+        || lease
+            .runtime_image_sha256
+            .as_deref()
+            .is_some_and(|value| !is_sha256(value))
         || lease.active != lease.presentation.is_some()
         || lease.updated_unix_ms > lease.expires_unix_ms
         || lease.expires_unix_ms.saturating_sub(lease.updated_unix_ms) > LEASE_TTL_MS
@@ -1856,15 +2049,12 @@ fn reap_owned_child_until(child: &mut std::process::Child, deadline: Instant) ->
     }
 }
 
+/// Stable executable-content identity shared by the one-shot package CLI and
+/// the immutable runtime image copied from it. The runtime publisher rejects
+/// redirected paths and verifies that exact content before it can be leased.
 fn executable_owner_sha256(path: &Path) -> io::Result<String> {
     let canonical = fs::canonicalize(path)?;
-    let normalized = canonical
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_lowercase();
     let mut digest = Sha256::new();
-    digest.update(normalized.len().to_le_bytes());
-    digest.update(normalized.as_bytes());
     let mut file = File::open(canonical)?;
     let mut buffer = vec![0_u8; 64 * 1_024].into_boxed_slice();
     loop {
@@ -1969,6 +2159,7 @@ mod tests {
             ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
             TitleMode,
         },
+        worker_runtime::WorkerRuntimeStore,
     };
 
     struct TestRoot(PathBuf);
@@ -2599,6 +2790,91 @@ mod tests {
     }
 
     #[test]
+    fn runtime_backed_lease_binds_the_image_and_supersedes_a_legacy_worker() {
+        let root = TestRoot::new("runtime-image-binding");
+        let store = ActivityLeaseStore::new(&root.0);
+        let key = key(4, 'a', 'c');
+        let owner = digest('d');
+        let image = digest('e');
+        store
+            .publish_active(&key, 20, &owner, &presentation(), 1_000)
+            .expect("legacy lease publishes for migration coverage");
+        let LeaseTransition::Published {
+            lease,
+            predecessor: Some(_),
+        } = store
+            .publish_active_with_runtime_image(
+                &key,
+                21,
+                &owner,
+                Some(&image),
+                &presentation(),
+                1_100,
+            )
+            .expect("runtime-backed worker supersedes the legacy worker")
+        else {
+            panic!("runtime image binding must replace a legacy active lease");
+        };
+        assert_eq!(lease.runtime_image_sha256.as_deref(), Some(image.as_str()));
+        let (active_images, ownership_proven) = store.active_runtime_images_for_gc();
+        assert!(ownership_proven);
+        assert_eq!(active_images, std::collections::BTreeSet::from([image]));
+    }
+
+    #[test]
+    fn legacy_active_lease_blocks_runtime_image_collection_proof() {
+        let root = TestRoot::new("legacy-runtime-image-retention");
+        let store = ActivityLeaseStore::new(&root.0);
+        let key = key(1, 'a', 'c');
+        store
+            .publish_active(&key, 1, &digest('d'), &presentation(), 1_000)
+            .expect("legacy active lease publishes");
+        let (active_images, ownership_proven) = store.active_runtime_images_for_gc();
+        assert!(active_images.is_empty());
+        assert!(!ownership_proven);
+    }
+
+    #[test]
+    fn runtime_publication_and_collection_share_the_activity_lease_lock() {
+        let root = TestRoot::new("runtime-image-lock");
+        fs::create_dir_all(&root.0).expect("isolated runtime root creates");
+        let source = root.0.join("installed.exe");
+        fs::write(&source, b"runtime-image-lock-test").expect("runtime source writes");
+        let store = ActivityLeaseStore::new(&root.0);
+        let runtime_store = WorkerRuntimeStore::new(&root.0);
+        let key = key(1, 'a', 'c');
+        let owner = digest('d');
+        let (image, transition) = store
+            .publish_runtime_backed_active(
+                &runtime_store,
+                &source,
+                &key,
+                1,
+                &owner,
+                &presentation(),
+                1_000,
+            )
+            .expect("runtime image and active lease publish atomically");
+        assert!(matches!(transition, LeaseTransition::Published { .. }));
+        assert!(image.executable.is_file());
+
+        store.collect_unused_runtime_images(&runtime_store);
+        assert!(
+            image.executable.is_file(),
+            "an image named by an active lease cannot be collected"
+        );
+
+        store
+            .publish_stopped(&key, 2, &owner, 1_001)
+            .expect("owned lease retires before collection");
+        store.collect_unused_runtime_images(&runtime_store);
+        assert!(
+            !image.executable.exists(),
+            "the old image becomes collectible only after lease retirement"
+        );
+    }
+
+    #[test]
     fn expired_and_stopped_leases_cannot_authorize_worker_frames() {
         let root = TestRoot::new("expiry");
         let store = ActivityLeaseStore::new(&root.0);
@@ -2845,7 +3121,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_worker_executable_falls_back_and_deactivates_its_lease() {
+    fn missing_worker_executable_falls_open_without_publishing_a_lease() {
         let root = TestRoot::new("missing-worker");
         let store = ActivityLeaseStore::new(&root.0);
         let coordinator = ActivityCoordinator {
@@ -2875,15 +3151,16 @@ mod tests {
                 &action,
                 settings,
             ),
-            ActivityRender::Full
+            ActivityRender::UncoordinatedFull
         );
         let lease_key = key(1, 'a', 'c');
-        let lease = store
-            .load(lease_key.digest())
-            .expect("fallback lease reads")
-            .expect("fallback lease exists");
-        assert!(!lease.active);
-        assert!(lease.presentation.is_none());
+        assert!(
+            store
+                .load(lease_key.digest())
+                .expect("fallback lease lookup succeeds")
+                .is_none(),
+            "runtime publication must finish before an active lease is written"
+        );
     }
 
     #[test]
