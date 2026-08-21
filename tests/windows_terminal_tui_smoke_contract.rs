@@ -72,3 +72,37 @@ fn terminal_fixture_proves_the_g61_title_explanation_surface() {
         "terminal fixture receipt is missing G61 title-explanation evidence"
     );
 }
+
+#[test]
+fn terminal_fixture_proves_g62_integrations_and_badge_surfaces() {
+    for required in [
+        "integrations_visited",
+        "provider_badge_staged",
+        "fixture did not render the admitted provider capability projection",
+    ] {
+        assert!(
+            CONTROL_CENTER.contains(required),
+            "terminal fixture control path is missing G62 evidence: {required}"
+        );
+    }
+    for required in [
+        "TUI_INTEGRATIONS={}",
+        "TUI_PROVIDER_CAPABILITY_MATRIX={}",
+        "TUI_PROVIDER_BADGE_STAGED={}",
+    ] {
+        assert!(
+            FIXTURE.contains(required),
+            "terminal fixture receipt is missing G62 evidence: {required}"
+        );
+    }
+    for required in [
+        "TUI_INTEGRATIONS=$($integrations.ToString().ToLowerInvariant())",
+        "TUI_PROVIDER_CAPABILITY_MATRIX=$($providerCapabilityMatrix.ToString().ToLowerInvariant())",
+        "TUI_PROVIDER_BADGE_STAGED=$($providerBadgeStaged.ToString().ToLowerInvariant())",
+    ] {
+        assert!(
+            RUNNER.contains(required),
+            "terminal runner is missing G62 receipt verification: {required}"
+        );
+    }
+}

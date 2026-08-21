@@ -8,7 +8,8 @@ use serde::Serialize;
 
 use crate::{
     activity::SessionsOverview, diagnostics::OperationalDiagnostics,
-    repo::WorkspaceAliasInspection, settings::PresentationSettings,
+    providers::registry::ProviderRegistry, repo::WorkspaceAliasInspection,
+    settings::PresentationSettings,
 };
 
 /// Stable schema for the read-only title explanation transport.
@@ -66,10 +67,10 @@ pub struct TitleExplanation {
     pub title_authority: String,
     /// Existing bounded title-conflict classification.
     pub title_conflict: String,
-    /// Provider badge configuration has not been introduced before G62.
-    pub provider_badge_policy: &'static str,
-    /// Provider badge value has not been introduced before G62.
-    pub provider_badge_value: &'static str,
+    /// Persisted provider-badge policy, or `unavailable` when unreadable.
+    pub provider_badge_policy: String,
+    /// Safe deterministic badge outcome for the current Codex-only registry.
+    pub provider_badge_value: String,
 }
 
 impl TitleExplanation {
@@ -80,6 +81,7 @@ impl TitleExplanation {
         presentation: Option<PresentationSettings>,
         workspace: Option<&WorkspaceAliasInspection>,
         sessions: &SessionsOverview,
+        integrations: &ProviderRegistry,
     ) -> Self {
         let workspace = workspace.map(|workspace| TitleWorkspaceExplanation {
             display_hint: workspace.workspace().as_str().to_owned(),
@@ -99,15 +101,37 @@ impl TitleExplanation {
             },
             naming_policy: workspace.policy_version().to_owned(),
         });
-        let (title_owner, activity_channel) = presentation.map_or_else(
-            || ("unavailable".to_owned(), "unavailable".to_owned()),
-            |settings| {
-                (
-                    settings.title().as_str().to_owned(),
-                    settings.activity().as_str().to_owned(),
-                )
-            },
-        );
+        let (title_owner, activity_channel, provider_badge_policy, provider_badge_value) =
+            presentation.map_or_else(
+                || {
+                    (
+                        "unavailable".to_owned(),
+                        "unavailable".to_owned(),
+                        "unavailable".to_owned(),
+                        "unavailable".to_owned(),
+                    )
+                },
+                |settings| {
+                    (
+                        settings.title().as_str().to_owned(),
+                        settings.activity().as_str().to_owned(),
+                        settings.provider_badge().as_str().to_owned(),
+                        integrations
+                            .title_badge_for("codex", settings.provider_badge())
+                            .unwrap_or_else(|| match settings.provider_badge() {
+                                crate::settings::ProviderBadgePolicy::Off => {
+                                    "not_emitted".to_owned()
+                                }
+                                crate::settings::ProviderBadgePolicy::Auto => {
+                                    "not_emitted_single_provider".to_owned()
+                                }
+                                crate::settings::ProviderBadgePolicy::Always => {
+                                    "unavailable_unadmitted_provider".to_owned()
+                                }
+                            }),
+                    )
+                },
+            );
         Self {
             schema: TITLE_EXPLANATION_SCHEMA,
             provider: "codex",
@@ -125,8 +149,8 @@ impl TitleExplanation {
             codex_writer_state: diagnostics.title.codex_writer_state.clone(),
             title_authority: diagnostics.title.authority.as_str().to_owned(),
             title_conflict: diagnostics.title.conflict_class.as_str().to_owned(),
-            provider_badge_policy: "not_applicable",
-            provider_badge_value: "not_applicable",
+            provider_badge_policy,
+            provider_badge_value,
         }
     }
 }
@@ -146,8 +170,8 @@ impl Default for TitleExplanation {
             codex_writer_state: "unavailable".to_owned(),
             title_authority: "unavailable".to_owned(),
             title_conflict: "unavailable".to_owned(),
-            provider_badge_policy: "not_applicable",
-            provider_badge_value: "not_applicable",
+            provider_badge_policy: "unavailable".to_owned(),
+            provider_badge_value: "unavailable".to_owned(),
         }
     }
 }

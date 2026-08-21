@@ -30,15 +30,17 @@ use crate::{
         pad_display_width, render_human_text,
     },
     interface_preferences::{HumanColor, InterfaceLanguage, InterfacePreferences},
-    management::{
-        ActionSafety, ChangePlan, ManagementHealth, ManagementOverview, ManagementSnapshot,
-    },
+    management::{ActionSafety, ChangePlan, ManagementOverview, ManagementSnapshot},
     presentation::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput,
         WindowsTerminalCapabilities, WindowsTerminalRenderer,
     },
+    providers::registry::ProviderRegistry,
     repo::WorkspaceAliasInspection,
-    settings::{ActivityMode, PresentationSettings, SpinnerPreset, TabColorMode, TitleMode},
+    settings::{
+        ActivityMode, PresentationSettings, ProviderBadgePolicy, SpinnerPreset, TabColorMode,
+        TitleMode,
+    },
     title_explanation::TitleExplanation,
 };
 
@@ -79,7 +81,7 @@ impl Screen {
             Self::Appearance => "Appearance",
             Self::Workspace => "Workspace",
             Self::Sessions => "Sessions",
-            Self::Integration => "Codex Integration",
+            Self::Integration => "Integrations",
             Self::Hooks => "Hooks",
             Self::Diagnostics => "Diagnostics",
             Self::Interface => "Interface",
@@ -93,7 +95,7 @@ impl Screen {
             Self::Appearance => HumanMessageKey::Appearance,
             Self::Workspace => HumanMessageKey::Workspace,
             Self::Sessions => HumanMessageKey::Sessions,
-            Self::Integration => HumanMessageKey::CodexIntegration,
+            Self::Integration => HumanMessageKey::Integrations,
             Self::Hooks => HumanMessageKey::Hooks,
             Self::Diagnostics => HumanMessageKey::Diagnostics,
             Self::Interface => HumanMessageKey::Interface,
@@ -114,15 +116,17 @@ enum AppearanceField {
     Activity,
     Spinner,
     Theme,
+    ProviderBadge,
 }
 
 impl AppearanceField {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Title,
         Self::TabColor,
         Self::Activity,
         Self::Spinner,
         Self::Theme,
+        Self::ProviderBadge,
     ];
 
     const fn message_key(self) -> HumanMessageKey {
@@ -132,6 +136,7 @@ impl AppearanceField {
             Self::Activity => HumanMessageKey::Activity,
             Self::Spinner => HumanMessageKey::Spinner,
             Self::Theme => HumanMessageKey::Theme,
+            Self::ProviderBadge => HumanMessageKey::ProviderBadgePolicy,
         }
     }
 }
@@ -189,6 +194,8 @@ pub struct ControlCenterRefresh {
     pub sessions: SessionsOverview,
     /// Provider-neutral, command-redacted Hook inventory.
     pub hooks: HookInventory,
+    /// Registered provider capability and admission projections.
+    pub integrations: ProviderRegistry,
     /// Read-only safe provenance behind a potential title.
     pub title_explanation: TitleExplanation,
 }
@@ -262,6 +269,7 @@ pub struct ControlCenterApp {
     workspace: Option<WorkspaceAliasInspection>,
     sessions: Option<SessionsOverview>,
     hooks: HookInventory,
+    integrations: ProviderRegistry,
     title_explanation: TitleExplanation,
     current_workspace_override: Option<String>,
     workspace_draft: Option<String>,
@@ -297,6 +305,7 @@ impl ControlCenterApp {
             workspace: None,
             sessions: None,
             hooks: HookInventory::default(),
+            integrations: ProviderRegistry::default(),
             title_explanation: TitleExplanation::default(),
             current_workspace_override: None,
             workspace_draft: None,
@@ -332,6 +341,13 @@ impl ControlCenterApp {
     #[must_use]
     pub fn with_hook_inventory(mut self, hooks: HookInventory) -> Self {
         self.hooks = hooks;
+        self
+    }
+
+    /// Supplies the registered, read-only provider integration projection.
+    #[must_use]
+    pub fn with_integrations(mut self, integrations: ProviderRegistry) -> Self {
+        self.integrations = integrations;
         self
     }
 
@@ -434,6 +450,7 @@ impl ControlCenterApp {
         self.snapshot = refresh.snapshot;
         self.overview = refresh.overview;
         self.hooks = refresh.hooks;
+        self.integrations = refresh.integrations;
         self.title_explanation = refresh.title_explanation;
         if let Some(workspace) = refresh.workspace {
             let override_alias = workspace
@@ -745,6 +762,9 @@ impl ControlCenterApp {
             AppearanceField::Theme => self
                 .draft
                 .with_theme(cycle_theme(self.draft.theme(), offset)),
+            AppearanceField::ProviderBadge => self
+                .draft
+                .with_provider_badge(cycle_provider_badge(self.draft.provider_badge(), offset)),
         };
         self.update_dirty();
     }
@@ -878,6 +898,18 @@ fn cycle_theme(
     )
 }
 
+fn cycle_provider_badge(value: ProviderBadgePolicy, offset: isize) -> ProviderBadgePolicy {
+    cycle(
+        [
+            ProviderBadgePolicy::Auto,
+            ProviderBadgePolicy::Always,
+            ProviderBadgePolicy::Off,
+        ],
+        value,
+        offset,
+    )
+}
+
 fn cycle_interface_language(value: InterfaceLanguage, offset: isize) -> InterfaceLanguage {
     cycle(
         [
@@ -974,6 +1006,8 @@ pub struct TerminalSmokeReport {
     pub workspace_and_sessions_visited: bool,
     /// The command-redacted Hook inventory screen reached its production renderer.
     pub hook_inventory_visited: bool,
+    /// The registered provider integration and its capability matrix rendered.
+    pub integrations_visited: bool,
     /// `?` opened and `Esc` dismissed the event-isolating help overlay.
     pub help_overlay_exercised: bool,
     /// `t` opened and `Esc` dismissed the read-only title provenance overlay.
@@ -982,6 +1016,8 @@ pub struct TerminalSmokeReport {
     pub draft_changed: bool,
     /// Revert restored the draft to the original settings without Apply.
     pub draft_reverted: bool,
+    /// The provider badge control changed only the in-memory draft, then reverted.
+    pub provider_badge_staged: bool,
     /// A concrete Interface language changed the following rendered frame.
     pub interface_locale_switched: bool,
     /// Revert restored the Interface language draft before any persistence request.
@@ -1030,6 +1066,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         workspace: None,
         sessions: SessionsOverview::default(),
         hooks: app.hooks.clone(),
+        integrations: app.integrations.clone(),
         title_explanation: TitleExplanation::default(),
     };
     app.merge_refresh(refresh);
@@ -1063,6 +1100,25 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         let draft_reverted = !app.dirty() && app.draft() == original && app.current() == original;
         invariant(draft_reverted, "fixture did not revert its in-memory draft")?;
 
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        for _ in 0..5 {
+            let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        }
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        let provider_badge_staged = app.dirty()
+            && app.draft.provider_badge() == ProviderBadgePolicy::Always
+            && app.current().provider_badge() == ProviderBadgePolicy::Auto;
+        invariant(
+            provider_badge_staged,
+            "fixture did not stage the provider badge policy",
+        )?;
+        draw(&mut session, &app)?;
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+        invariant(
+            !app.dirty() && app.draft() == original && app.current() == original,
+            "fixture did not revert the provider badge draft",
+        )?;
+
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(
             app.screen() == Screen::Workspace,
@@ -1088,6 +1144,22 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
             "fixture did not reach Integration",
         )?;
         draw(&mut session, &app)?;
+        let integrations_visited = app.integrations.providers.len() == 1
+            && app.integrations.providers[0].id.as_str() == "codex"
+            && app.integrations.providers[0].label == "Codex"
+            && app.integrations.providers[0]
+                .capability_profile
+                .capabilities
+                .iter()
+                .any(|status| {
+                    status.capability == crate::providers::registry::ProviderCapability::Phase
+                        && status.availability
+                            == crate::providers::registry::CapabilityAvailability::Proven
+                });
+        invariant(
+            integrations_visited,
+            "fixture did not render the admitted provider capability projection",
+        )?;
 
         let _ = app.handle_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         let help_overlay_exercised = app.overlay_open();
@@ -1185,10 +1257,12 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
             live_refresh_merged,
             workspace_and_sessions_visited,
             hook_inventory_visited,
+            integrations_visited,
             help_overlay_exercised,
             title_explanation_exercised,
             draft_changed,
             draft_reverted,
+            provider_badge_staged,
             interface_locale_switched,
             interface_draft_reverted,
             interface_apply_staged,
@@ -1692,7 +1766,7 @@ fn appearance_lines(app: &ControlCenterApp) -> String {
         )
     };
     format!(
-        "{}\n\n{}\n{}\n{}\n{}\n{}\n\n{}",
+        "{}\n\n{}\n{}\n{}\n{}\n{}\n{}\n\n{}",
         catalog(app.locale(), HumanMessageKey::DraftAppearance),
         field_line(
             AppearanceField::Title,
@@ -1713,6 +1787,10 @@ fn appearance_lines(app: &ControlCenterApp) -> String {
         field_line(
             AppearanceField::Theme,
             human_theme(app.locale(), app.draft.theme()).to_owned()
+        ),
+        field_line(
+            AppearanceField::ProviderBadge,
+            human_provider_badge(app.locale(), app.draft.provider_badge()).to_owned()
         ),
         if app.editing() {
             catalog(app.locale(), HumanMessageKey::UseArrowsToChange)
@@ -1819,8 +1897,9 @@ fn sessions_lines(app: &ControlCenterApp) -> String {
             .take(12)
             .map(|session| {
                 format!(
-                    "{} — {} — {}s — {}",
+                    "{} — {} — {} — {}s — {}",
                     session.workspace_alias,
+                    app.integrations.label_for(&session.provider),
                     session.semantic_state,
                     session.age_seconds,
                     session.worker_health.as_str().replace('_', " "),
@@ -1878,62 +1957,58 @@ fn interface_lines(app: &ControlCenterApp) -> String {
 }
 
 fn integration_lines(app: &ControlCenterApp) -> String {
-    let actions = if app.snapshot.recommended_actions.is_empty() {
-        catalog(app.locale(), HumanMessageKey::NoAutomatedAction).to_owned()
-    } else {
-        app.snapshot
-            .recommended_actions
-            .iter()
-            .map(|action| {
-                let instruction = app
-                    .snapshot
-                    .issues
+    app.integrations
+        .providers
+        .iter()
+        .map(|provider| {
+            let version = provider
+                .version
+                .as_deref()
+                .unwrap_or_else(|| catalog(app.locale(), HumanMessageKey::Unavailable));
+            let capabilities = provider
+                .capability_profile
+                .capabilities
+                .iter()
+                .map(|capability| {
+                    format!(
+                        "{} {} [{}]",
+                        capability.capability.as_str(),
+                        capability.availability.as_str(),
+                        capability.authority
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let actions = if provider.manual_actions.is_empty() {
+                catalog(app.locale(), HumanMessageKey::NoAutomatedAction).to_owned()
+            } else {
+                provider
+                    .manual_actions
                     .iter()
-                    .find_map(|issue| {
-                        issue
-                            .remediation
-                            .as_ref()
-                            .filter(|remediation| remediation.id == action.id)
-                            .map(|_| {
-                                render_human_text(
-                                    app.locale(),
-                                    &management_action_text(
-                                        &issue.id,
-                                        &action.id,
-                                        action.instruction.clone(),
-                                    ),
-                                )
-                            })
-                    })
-                    .unwrap_or_else(|| action.instruction.clone());
-                format!(
-                    "• {} [{}]\n  {}",
-                    action.title,
-                    safety_label(app.locale(), action.safety),
-                    instruction
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    format!(
-        "{}       {} · {} {}\n{}       {}\n{} {}\n{}       {} ({})\n{}       {}\n\n{}\n{}",
-        catalog(app.locale(), HumanMessageKey::Codex),
-        app.overview.codex_version,
-        catalog(app.locale(), HumanMessageKey::Profile),
-        app.overview.codex_profile,
-        catalog(app.locale(), HumanMessageKey::Hooks),
-        app.overview.hooks,
-        catalog(app.locale(), HumanMessageKey::Currentness),
-        health_label(app.locale(), app.snapshot.health),
-        catalog(app.locale(), HumanMessageKey::Trust),
-        app.overview.hook_trust,
-        catalog(app.locale(), HumanMessageKey::ManualOnly),
-        catalog(app.locale(), HumanMessageKey::Title),
-        app.overview.title_ownership,
-        catalog(app.locale(), HumanMessageKey::RecommendedActions),
-        actions
-    )
+                    .map(|action| action.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            };
+            format!(
+                "{} · {}\n{}: {} · {}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}",
+                provider.label,
+                provider.id,
+                catalog(app.locale(), HumanMessageKey::Version),
+                version,
+                catalog(app.locale(), HumanMessageKey::Admission),
+                provider.admission.as_str(),
+                catalog(app.locale(), HumanMessageKey::ObservationBackend),
+                provider.observation_backend,
+                catalog(app.locale(), HumanMessageKey::Hooks),
+                provider.hooks.as_str(),
+                catalog(app.locale(), HumanMessageKey::Capabilities),
+                capabilities,
+                catalog(app.locale(), HumanMessageKey::ManualActions),
+                actions,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn hooks_lines(app: &ControlCenterApp) -> String {
@@ -2053,14 +2128,6 @@ fn preview_lines(app: &ControlCenterApp) -> String {
     .join("\n")
 }
 
-fn health_label(locale: ResolvedLocale, health: ManagementHealth) -> &'static str {
-    match health {
-        ManagementHealth::Healthy => catalog(locale, HumanMessageKey::Healthy),
-        ManagementHealth::Warning => catalog(locale, HumanMessageKey::Attention),
-        ManagementHealth::Error => catalog(locale, HumanMessageKey::Failure),
-    }
-}
-
 fn severity_label(
     locale: ResolvedLocale,
     severity: crate::management::HealthSeverity,
@@ -2129,6 +2196,14 @@ fn human_theme(locale: ResolvedLocale, value: crate::settings::PresentationTheme
     }
 }
 
+fn human_provider_badge(locale: ResolvedLocale, value: ProviderBadgePolicy) -> &'static str {
+    match value {
+        ProviderBadgePolicy::Auto => catalog(locale, HumanMessageKey::Auto),
+        ProviderBadgePolicy::Always => catalog(locale, HumanMessageKey::Always),
+        ProviderBadgePolicy::Off => catalog(locale, HumanMessageKey::Disabled),
+    }
+}
+
 fn human_language(locale: ResolvedLocale, value: InterfaceLanguage) -> &'static str {
     match value {
         InterfaceLanguage::Auto => catalog(locale, HumanMessageKey::Auto),
@@ -2167,6 +2242,7 @@ mod tests {
         ActivityLeaseHealth, SessionOverview, SessionRecency, SessionWorkerHealth,
         SessionsBoundaries,
     };
+    use crate::management::ManagementHealth;
     use ratatui::{Terminal, backend::TestBackend};
 
     #[derive(Clone)]
@@ -2246,6 +2322,7 @@ mod tests {
             workspace: None,
             sessions: SessionsOverview::default(),
             hooks: HookInventory::default(),
+            integrations: ProviderRegistry::default(),
             title_explanation: TitleExplanation::default(),
         }
     }
@@ -2331,7 +2408,7 @@ mod tests {
             overview: ManagementOverview::default(),
             workspace: None,
             sessions: SessionsOverview {
-                schema_version: 1,
+                schema_version: 2,
                 observation: "ephemeral_lease_snapshot",
                 health: ActivityLeaseHealth::Healthy,
                 active_sessions: 1,
@@ -2339,6 +2416,7 @@ mod tests {
                 invalid_leases: 0,
                 sessions: vec![SessionOverview {
                     workspace_alias: "TB".to_owned(),
+                    provider: "codex".to_owned(),
                     semantic_state: "working".to_owned(),
                     age_seconds: 3,
                     recency: SessionRecency::JustNow,
@@ -2353,6 +2431,7 @@ mod tests {
                 },
             },
             hooks: HookInventory::default(),
+            integrations: ProviderRegistry::default(),
             title_explanation: TitleExplanation::default(),
         });
         app.screen = Screen::Sessions;
@@ -2365,6 +2444,30 @@ mod tests {
         assert!(!rendered.contains("native_session"));
         assert!(!rendered.contains("prompt"));
         assert!(!rendered.contains("turn_id"));
+    }
+
+    #[test]
+    fn integrations_screen_is_localized_compact_and_never_invents_an_unregistered_provider() {
+        let mut app = app().with_interface_preferences(
+            InterfacePreferences::default().with_language(InterfaceLanguage::ZhCn),
+        );
+        let mut snapshot = refresh(app.current(), app.current_interface());
+        snapshot.integrations =
+            ProviderRegistry::codex_observation(Some("0.149.0"), true, true, true);
+        app.merge_refresh(snapshot);
+        app.screen = Screen::Integration;
+
+        let mut terminal = Terminal::new(TestBackend::new(28, 20)).expect("narrow terminal starts");
+        terminal
+            .draw(|frame| render(frame, &app))
+            .expect("Integrations render");
+        let rendered = format!("{:?}", terminal.backend().buffer());
+
+        assert!(rendered.contains("集成"));
+        assert!(rendered.contains("Codex"));
+        assert!(rendered.contains("phase"));
+        assert!(!rendered.contains("Agy"));
+        assert!(!rendered.contains("native_session"));
     }
 
     #[test]

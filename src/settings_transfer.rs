@@ -31,7 +31,7 @@ use crate::{
     settings::{
         ActivityMode, ConditionalSaveOutcome, PresentationSettings, PresentationSettingsSnapshot,
         PresentationSettingsStore, PresentationSettingsWriteReceipt, PresentationTheme,
-        SnapshotSaveOutcome, SpinnerPreset, TabColorMode, TitleMode,
+        ProviderBadgePolicy, SnapshotSaveOutcome, SpinnerPreset, TabColorMode, TitleMode,
     },
 };
 
@@ -197,6 +197,12 @@ struct PresentationExport {
     activity: String,
     spinner: String,
     theme: String,
+    #[serde(default = "default_provider_badge")]
+    provider_badge: String,
+}
+
+fn default_provider_badge() -> String {
+    ProviderBadgePolicy::Auto.as_str().to_owned()
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -867,18 +873,21 @@ impl From<PresentationSettings> for PresentationExport {
             activity: value.activity().as_str().to_owned(),
             spinner: value.spinner().as_str().to_owned(),
             theme: value.theme().as_str().to_owned(),
+            provider_badge: value.provider_badge().as_str().to_owned(),
         }
     }
 }
 
 impl PresentationExport {
     fn settings(&self) -> Result<PresentationSettings, SettingsTransferError> {
-        Ok(PresentationSettings::new(
+        Ok(PresentationSettings::new_with_provider_badge(
             TitleMode::parse(&self.title).ok_or(SettingsTransferError::InvalidDocument)?,
             TabColorMode::parse(&self.tab_color).ok_or(SettingsTransferError::InvalidDocument)?,
             ActivityMode::parse(&self.activity).ok_or(SettingsTransferError::InvalidDocument)?,
             SpinnerPreset::parse(&self.spinner).ok_or(SettingsTransferError::InvalidDocument)?,
             PresentationTheme::parse(&self.theme).ok_or(SettingsTransferError::InvalidDocument)?,
+            ProviderBadgePolicy::parse(&self.provider_badge)
+                .ok_or(SettingsTransferError::InvalidDocument)?,
         ))
     }
 }
@@ -928,7 +937,7 @@ mod tests {
         },
         settings::{
             ActivityMode, PresentationSettings, PresentationSettingsStore, PresentationTheme,
-            SpinnerPreset, TabColorMode, TitleMode,
+            ProviderBadgePolicy, SpinnerPreset, TabColorMode, TitleMode,
         },
     };
 
@@ -952,12 +961,13 @@ mod tests {
         let preferences = WorkspacePreferences::default()
             .with_override(git.clone(), RepositoryAlias::new("TB").unwrap())
             .with_override(directory, RepositoryAlias::new("LOCAL").unwrap());
-        let settings = PresentationSettings::new(
+        let settings = PresentationSettings::new_with_provider_badge(
             TitleMode::Native,
             TabColorMode::Off,
             ActivityMode::Both,
             SpinnerPreset::Braille,
             PresentationTheme::Classic,
+            ProviderBadgePolicy::Always,
         );
         let interface = InterfacePreferences::new(InterfaceLanguage::ZhCn, HumanColor::Never, true);
         let document = SettingsExportV1::new(Some(settings), Some(interface), &preferences);
@@ -976,8 +986,35 @@ mod tests {
         assert_eq!(parsed.omitted_device_local_workspace_aliases(), 1);
         let text = String::from_utf8(first).unwrap();
         assert!(text.contains(EXPORT_SCHEMA_V1));
+        assert!(text.contains("provider_badge"));
         assert!(!text.contains(git.as_str()));
         assert!(!text.contains("dir-v1:"));
+    }
+
+    #[test]
+    fn older_export_without_provider_badge_imports_as_compact_auto() {
+        let settings =
+            PresentationSettings::default().with_provider_badge(ProviderBadgePolicy::Always);
+        let bytes = SettingsExportV1::new(Some(settings), None, &WorkspacePreferences::default())
+            .to_canonical_json()
+            .expect("new export serializes");
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("new export is valid JSON");
+        legacy["presentation"]
+            .as_object_mut()
+            .expect("presentation object exists")
+            .remove("provider_badge");
+        let legacy = serde_json::to_vec(&legacy).expect("legacy fixture serializes");
+
+        let parsed = SettingsExportV1::parse(&legacy).expect("older export remains supported");
+        assert_eq!(
+            parsed
+                .presentation()
+                .expect("presentation remains valid")
+                .expect("presentation remains present")
+                .provider_badge(),
+            ProviderBadgePolicy::Auto
+        );
     }
 
     #[test]

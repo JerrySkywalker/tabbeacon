@@ -275,6 +275,51 @@ impl fmt::Display for PresentationTheme {
     }
 }
 
+/// Provider label policy for the visible terminal title.
+///
+/// The policy is provider-neutral: individual admitted providers contribute a
+/// short, validated badge only when the policy selects one.  `Auto` preserves
+/// the compact single-provider title and is therefore the compatibility
+/// default for existing users.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderBadgePolicy {
+    /// Add a badge only when multiple admitted providers need disambiguation.
+    Auto,
+    /// Always add the admitted provider's bounded badge.
+    Always,
+    /// Never add a provider badge to a terminal title.
+    Off,
+}
+
+impl ProviderBadgePolicy {
+    /// Stable configuration spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "always",
+            Self::Off => "off",
+        }
+    }
+
+    /// Parses one supported configuration spelling.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "always" => Some(Self::Always),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for ProviderBadgePolicy {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Typed, provider-neutral user presentation choices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PresentationSettings {
@@ -283,6 +328,7 @@ pub struct PresentationSettings {
     activity: ActivityMode,
     spinner: SpinnerPreset,
     theme: PresentationTheme,
+    provider_badge: ProviderBadgePolicy,
 }
 
 impl PresentationSettings {
@@ -295,12 +341,33 @@ impl PresentationSettings {
         spinner: SpinnerPreset,
         theme: PresentationTheme,
     ) -> Self {
+        Self::new_with_provider_badge(
+            title,
+            tab_color,
+            activity,
+            spinner,
+            theme,
+            ProviderBadgePolicy::Auto,
+        )
+    }
+
+    /// Constructs fully typed settings with an explicit provider-badge policy.
+    #[must_use]
+    pub const fn new_with_provider_badge(
+        title: TitleMode,
+        tab_color: TabColorMode,
+        activity: ActivityMode,
+        spinner: SpinnerPreset,
+        theme: PresentationTheme,
+        provider_badge: ProviderBadgePolicy,
+    ) -> Self {
         Self {
             title,
             tab_color,
             activity,
             spinner,
             theme,
+            provider_badge,
         }
     }
 
@@ -332,6 +399,12 @@ impl PresentationSettings {
     #[must_use]
     pub const fn theme(self) -> PresentationTheme {
         self.theme
+    }
+
+    /// Provider badge behavior for the title channel.
+    #[must_use]
+    pub const fn provider_badge(self) -> ProviderBadgePolicy {
+        self.provider_badge
     }
 
     /// Returns a copy with one title mode.
@@ -366,6 +439,13 @@ impl PresentationSettings {
     #[must_use]
     pub const fn with_theme(mut self, theme: PresentationTheme) -> Self {
         self.theme = theme;
+        self
+    }
+
+    /// Returns a copy with one provider-badge policy.
+    #[must_use]
+    pub const fn with_provider_badge(mut self, provider_badge: ProviderBadgePolicy) -> Self {
+        self.provider_badge = provider_badge;
         self
     }
 
@@ -828,7 +908,7 @@ fn settings_from_document(document: &DocumentMut) -> Result<PresentationSettings
         .as_table_like()
         .ok_or(SettingsError::Malformed)?;
     let defaults = PresentationSettings::default();
-    Ok(PresentationSettings::new(
+    Ok(PresentationSettings::new_with_provider_badge(
         parse_value(table.get("title"), TitleMode::parse, defaults.title())?,
         parse_value(
             table.get("tab_color"),
@@ -849,6 +929,11 @@ fn settings_from_document(document: &DocumentMut) -> Result<PresentationSettings
             table.get("theme"),
             PresentationTheme::parse,
             defaults.theme(),
+        )?,
+        parse_value(
+            table.get("provider_badge"),
+            ProviderBadgePolicy::parse,
+            defaults.provider_badge(),
         )?,
     ))
 }
@@ -882,6 +967,7 @@ fn write_settings(
     table.insert("activity", value(settings.activity().as_str()));
     table.insert("spinner", value(settings.spinner().as_str()));
     table.insert("theme", value(settings.theme().as_str()));
+    table.insert("provider_badge", value(settings.provider_badge().as_str()));
     Ok(())
 }
 
@@ -918,7 +1004,7 @@ mod tests {
 
     use super::{
         ActivityMode, ConditionalSaveOutcome, PresentationSettings, PresentationSettingsStore,
-        PresentationTheme, SpinnerPreset, TabColorMode, TitleMode,
+        PresentationTheme, ProviderBadgePolicy, SpinnerPreset, TabColorMode, TitleMode,
     };
 
     fn temporary_config(name: &str) -> std::path::PathBuf {
@@ -957,6 +1043,7 @@ mod tests {
         assert_eq!(defaults.activity(), ActivityMode::TitleSpinner);
         assert_eq!(defaults.spinner(), SpinnerPreset::Braille);
         assert_eq!(defaults.theme(), PresentationTheme::MutedDark);
+        assert_eq!(defaults.provider_badge(), ProviderBadgePolicy::Auto);
         assert!(
             !path.exists(),
             "reading absent defaults must not write config"
@@ -1015,6 +1102,43 @@ mod tests {
         assert!(text.contains("future_flag = true"));
         assert!(text.contains("[future]"));
         assert!(text.contains("key = \"kept\""));
+        fs::remove_file(path).expect("fixture config removes");
+    }
+
+    #[test]
+    fn provider_badge_migrates_absent_settings_without_rewrite_and_round_trips_explicit_choice() {
+        let path = temporary_config("provider-badge");
+        let legacy = "[presentation]\ntitle = \"tabbeacon\"\n";
+        fs::write(&path, legacy).expect("legacy fixture writes");
+        let store = PresentationSettingsStore::new(&path);
+
+        assert_eq!(
+            store
+                .load_read_only()
+                .expect("legacy settings read")
+                .provider_badge(),
+            ProviderBadgePolicy::Auto
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("legacy settings reread"),
+            legacy,
+            "read-only migration never rewrites existing user configuration"
+        );
+
+        let selected = store
+            .load_read_only()
+            .expect("legacy settings reread")
+            .with_provider_badge(ProviderBadgePolicy::Always);
+        store.save(selected).expect("explicit selection saves");
+        assert_eq!(
+            store.load_read_only().expect("saved selection rereads"),
+            selected
+        );
+        assert!(
+            fs::read_to_string(&path)
+                .expect("selected document reads")
+                .contains("provider_badge = \"always\"")
+        );
         fs::remove_file(path).expect("fixture config removes");
     }
 

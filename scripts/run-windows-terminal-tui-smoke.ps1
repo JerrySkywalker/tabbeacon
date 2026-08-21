@@ -249,6 +249,9 @@ $liveRefresh = $false
 $workspaceSessions = $false
 $hookInventory = $false
 $hookProviderAdapter = $false
+$integrations = $false
+$providerCapabilityMatrix = $false
+$providerBadgeStaged = $false
 $helpOverlay = $false
 $titleExplanation = $false
 $localeSwitched = $false
@@ -260,6 +263,9 @@ if (Test-Path -LiteralPath $fixtureResultPath) {
     $workspaceSessions = $fixtureResult -contains 'TUI_WORKSPACE_SESSIONS=true'
     $hookInventory = $fixtureResult -contains 'TUI_HOOK_INVENTORY=true'
     $hookProviderAdapter = $fixtureResult -contains 'TUI_HOOK_PROVIDER_ADAPTER=true'
+    $integrations = $fixtureResult -contains 'TUI_INTEGRATIONS=true'
+    $providerCapabilityMatrix = $fixtureResult -contains 'TUI_PROVIDER_CAPABILITY_MATRIX=true'
+    $providerBadgeStaged = $fixtureResult -contains 'TUI_PROVIDER_BADGE_STAGED=true'
     $helpOverlay = $fixtureResult -contains 'TUI_HELP_OVERLAY=true'
     $titleExplanation = $fixtureResult -contains 'TUI_TITLE_EXPLANATION=true'
     $localeSwitched = $fixtureResult -contains 'TUI_LANGUAGE_LIVE_SWITCH=true'
@@ -269,7 +275,8 @@ if (Test-Path -LiteralPath $fixtureResultPath) {
 
 $passed = $durableCompletionProven -and $sentinelObserved -and $shellUsable -and
     $fixtureExitCode -eq 0 -and $liveRefresh -and $workspaceSessions -and $hookInventory -and
-    $hookProviderAdapter -and $helpOverlay -and $titleExplanation -and $localeSwitched -and
+    $hookProviderAdapter -and $integrations -and $providerCapabilityMatrix -and $providerBadgeStaged -and
+    $helpOverlay -and $titleExplanation -and $localeSwitched -and
     $interfaceReverted -and $interfaceApplyStaged
 $visualDisposition = if ($passed) {
     'PASS'
@@ -317,6 +324,9 @@ $receipt = @(
     "TUI_WORKSPACE_SESSIONS=$($workspaceSessions.ToString().ToLowerInvariant())"
     "TUI_HOOK_INVENTORY=$($hookInventory.ToString().ToLowerInvariant())"
     "TUI_HOOK_PROVIDER_ADAPTER=$($hookProviderAdapter.ToString().ToLowerInvariant())"
+    "TUI_INTEGRATIONS=$($integrations.ToString().ToLowerInvariant())"
+    "TUI_PROVIDER_CAPABILITY_MATRIX=$($providerCapabilityMatrix.ToString().ToLowerInvariant())"
+    "TUI_PROVIDER_BADGE_STAGED=$($providerBadgeStaged.ToString().ToLowerInvariant())"
     "TUI_HELP_OVERLAY=$($helpOverlay.ToString().ToLowerInvariant())"
     "TUI_TITLE_EXPLANATION=$($titleExplanation.ToString().ToLowerInvariant())"
     "TUI_LANGUAGE_LIVE_SWITCH=$($localeSwitched.ToString().ToLowerInvariant())"

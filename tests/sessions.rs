@@ -158,7 +158,7 @@ fn command(root: &TestRoot) -> Command {
 }
 
 fn assert_private_sessions_report(report: &serde_json::Value) {
-    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["schema_version"], 2);
     assert_eq!(report["observation"], "ephemeral_lease_snapshot");
     assert_eq!(report["health"], "warning");
     assert_eq!(report["active_sessions"], 1);

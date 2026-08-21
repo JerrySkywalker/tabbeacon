@@ -33,6 +33,7 @@ pub struct SemanticPresentationInput<'a> {
     attention: Attention,
     health: Health,
     workspace_alias: &'a str,
+    provider_badge: Option<&'a str>,
 }
 
 impl<'a> SemanticPresentationInput<'a> {
@@ -49,6 +50,28 @@ impl<'a> SemanticPresentationInput<'a> {
             attention,
             health,
             workspace_alias,
+            provider_badge: None,
+        }
+    }
+
+    /// Creates semantic input with a caller-validated provider title badge.
+    ///
+    /// Invalid badges are ignored by the policy; this preserves title safety
+    /// even if a future adapter passes malformed presentation metadata.
+    #[must_use]
+    pub const fn new_with_provider_badge(
+        phase: Phase,
+        attention: Attention,
+        health: Health,
+        workspace_alias: &'a str,
+        provider_badge: Option<&'a str>,
+    ) -> Self {
+        Self {
+            phase,
+            attention,
+            health,
+            workspace_alias,
+            provider_badge,
         }
     }
 
@@ -60,6 +83,22 @@ impl<'a> SemanticPresentationInput<'a> {
             snapshot.attention(),
             snapshot.health(),
             workspace_alias,
+        )
+    }
+
+    /// Extracts a session snapshot with an optional provider badge.
+    #[must_use]
+    pub fn from_snapshot_with_provider_badge(
+        snapshot: &SessionSnapshot,
+        workspace_alias: &'a str,
+        provider_badge: Option<&'a str>,
+    ) -> Self {
+        Self::new_with_provider_badge(
+            snapshot.phase(),
+            snapshot.attention(),
+            snapshot.health(),
+            workspace_alias,
+            provider_badge,
         )
     }
 
@@ -91,6 +130,12 @@ impl<'a> SemanticPresentationInput<'a> {
     #[must_use]
     pub const fn repository_alias(self) -> &'a str {
         self.workspace_alias()
+    }
+
+    /// Optional bounded provider badge requested for the title identity.
+    #[must_use]
+    pub const fn provider_badge(self) -> Option<&'a str> {
+        self.provider_badge
     }
 }
 
@@ -371,7 +416,13 @@ impl PresentationPolicy {
     /// Resolves semantic input according to the normative G02 precedence order.
     #[must_use]
     pub fn resolve(input: SemanticPresentationInput<'_>) -> PresentationAction {
-        let workspace_alias = TitleIdentity::new(input.workspace_alias());
+        let provider_badge = input.provider_badge().filter(|badge| {
+            badge.len() == 1 && badge.bytes().all(|byte| byte.is_ascii_uppercase())
+        });
+        let workspace_alias = provider_badge.map_or_else(
+            || TitleIdentity::new(input.workspace_alias()),
+            |badge| TitleIdentity::new(&format!("{}·{badge}", input.workspace_alias())),
+        );
 
         if input.health() == Health::Failed {
             return PresentationAction::Apply(VisualState::new(
