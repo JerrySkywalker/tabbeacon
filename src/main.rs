@@ -11,9 +11,9 @@ use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use dialoguer::{Confirm, Select};
 use tabbeacon::cli::{
-    AliasCommand, Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, HumanOutputArgs,
-    InterfaceCommand, InterfacePreferenceKey, OutputMode, PreviewArgs, Provider, SetupCommand,
-    TitlePolicyCommand, UpgradePreflightArgs,
+    AliasCommand, Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, ExplainCommand,
+    HumanOutputArgs, InterfaceCommand, InterfacePreferenceKey, OutputMode, PreviewArgs, Provider,
+    SetupCommand, TitlePolicyCommand, UpgradePreflightArgs,
 };
 use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_title_probe,
@@ -62,6 +62,7 @@ use tabbeacon::{
         ImportApplyOutcome, ImportPlan, MAX_EXPORT_BYTES, SettingsExportV1, apply_import_plan,
         write_export_file,
     },
+    title_explanation::TitleExplanation,
     upgrade_preflight::{
         UpgradePreflight, UpgradeProcessInspection, UpgradeReplaceability,
         inspect_system_upgrade_preflight,
@@ -182,6 +183,10 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Alias { command, output }) => {
             alias_command(command, output.mode(), output.language.preference())
         }
+        Some(Command::Explain {
+            command: ExplainCommand::Title,
+            output,
+        }) => explain_title(output.mode(), output.language.preference()),
         Some(Command::Export {
             destination,
             force,
@@ -404,9 +409,9 @@ fn alias_preview_document(
             document.with_section(HumanSection::new(None).with_message(HumanMessage::marked(
                 format!("{}", index + 1),
                 HumanText::literal(format!(
-                    "{} · {:?} · {}",
+                    "{} · {} · {}",
                     candidate.alias(),
-                    candidate.strategy(),
+                    candidate.strategy().as_str(),
                     candidate.score()
                 )),
                 HumanTone::Plain,
@@ -419,51 +424,116 @@ fn alias_explain_document(
     document: HumanDocument,
     inspection: &WorkspaceAliasInspection,
 ) -> HumanDocument {
-    let top = inspection.candidates().first();
-    document.with_section(
-        HumanSection::new(Some(HumanText::message(HumanMessageKey::AliasExplanation)))
-            .with_field(HumanField::new(
-                None::<String>,
-                HumanText::message(HumanMessageKey::ProjectDisplayHint),
-                HumanText::literal(inspection.analysis().normalized_name()),
-                HumanTone::Plain,
-            ))
-            .with_field(HumanField::new(
-                None::<String>,
-                HumanText::message(HumanMessageKey::Tokens),
-                HumanText::literal(inspection.analysis().tokens().join(" · ")),
-                HumanTone::Plain,
-            ))
-            .with_field(HumanField::new(
-                None::<String>,
-                HumanText::message(HumanMessageKey::CandidateStrategy),
-                HumanText::literal(top.map_or_else(
-                    || "none".to_owned(),
-                    |candidate| format!("{:?}", candidate.strategy()),
-                )),
-                HumanTone::Plain,
-            ))
-            .with_field(HumanField::new(
-                None::<String>,
-                HumanText::message(HumanMessageKey::CandidateScore),
-                HumanText::literal(
-                    top.map_or_else(|| "0".to_owned(), |candidate| candidate.score().to_string()),
-                ),
-                HumanTone::Plain,
-            ))
-            .with_field(HumanField::new(
-                None::<String>,
-                HumanText::message(HumanMessageKey::CandidateComponents),
-                HumanText::literal(top.map_or_else(String::new, AliasCandidate::rationale)),
-                HumanTone::Dim,
+    let selected = inspection.selected_candidate();
+    let detail = HumanSection::new(Some(HumanText::message(HumanMessageKey::AliasExplanation)))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::ProjectDisplayHint),
+            HumanText::literal(inspection.analysis().normalized_name()),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Tokens),
+            HumanText::literal(inspection.analysis().tokens().join(" · ")),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::CandidateStrategy),
+            HumanText::literal(
+                selected.map_or("unavailable", |candidate| candidate.strategy().as_str()),
+            ),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::CandidateScore),
+            HumanText::literal(selected.map_or_else(
+                || "unavailable".to_owned(),
+                |candidate| candidate.score().to_string(),
             )),
+            HumanTone::Plain,
+        ));
+    document.with_section(score_components_section(
+        detail,
+        selected.map(AliasCandidate::components),
+    ))
+}
+
+fn score_components_section(
+    section: HumanSection,
+    components: Option<tabbeacon::repo::ScoreComponents>,
+) -> HumanSection {
+    let Some(components) = components else {
+        return section.with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::CandidateComponents),
+            HumanText::literal("unavailable"),
+            HumanTone::Dim,
+        ));
+    };
+    section
+        .with_field(score_component_field(
+            HumanMessageKey::TokenCoverage,
+            components.token_coverage,
+        ))
+        .with_field(score_component_field(
+            HumanMessageKey::AcronymPreservation,
+            components.acronym_preservation,
+        ))
+        .with_field(score_component_field(
+            HumanMessageKey::RecognizablePrefix,
+            components.recognizable_prefix,
+        ))
+        .with_field(score_component_field(
+            HumanMessageKey::BalancedRepresentation,
+            components.balanced_representation,
+        ))
+        .with_field(score_component_field(
+            HumanMessageKey::DisplayWidth,
+            components.display_width,
+        ))
+        .with_field(score_component_field(
+            HumanMessageKey::InformationLoss,
+            components.information_loss,
+        ))
+        .with_field(score_component_field(
+            HumanMessageKey::TrivialAliasPenalty,
+            components.trivial_alias,
+        ))
+        .with_field(score_component_field(
+            HumanMessageKey::RedundancyPenalty,
+            components.redundancy,
+        ))
+        .with_field(score_component_field(
+            HumanMessageKey::CollisionPressure,
+            components.collision_pressure,
+        ))
+        .with_field(score_component_field(
+            HumanMessageKey::StrategyAdjustment,
+            components.strategy_adjustment,
+        ))
+        .with_field(score_component_field(
+            HumanMessageKey::Total,
+            components.total(),
+        ))
+}
+
+fn score_component_field(key: HumanMessageKey, value: i32) -> HumanField {
+    HumanField::new(
+        None::<String>,
+        HumanText::message(key),
+        HumanText::literal(value.to_string()),
+        HumanTone::Plain,
     )
 }
 
 fn print_alias_plain(operation: &str, inspection: &WorkspaceAliasInspection) {
-    println!("ALIAS_SCHEMA_VERSION=1");
+    println!("ALIAS_SCHEMA_VERSION=2");
     println!("ALIAS_OPERATION={}", operation.to_ascii_uppercase());
     println!("WORKSPACE={}", inspection.workspace().as_str());
+    println!("IDENTITY_CLASS={}", inspection.identity_class().as_str());
     println!("AUTOMATIC_ALIAS={}", inspection.automatic_alias());
     println!(
         "CUSTOM_ALIAS={}",
@@ -481,22 +551,67 @@ fn print_alias_plain(operation: &str, inspection: &WorkspaceAliasInspection) {
             "PROSPECTIVE"
         }
     );
-    if operation == "preview" {
+    if matches!(operation, "preview" | "explain") {
         for (index, candidate) in inspection.candidates().iter().take(5).enumerate() {
             let ordinal = index + 1;
             println!("CANDIDATE_{ordinal}_ALIAS={}", candidate.alias());
-            println!("CANDIDATE_{ordinal}_STRATEGY={:?}", candidate.strategy());
+            println!(
+                "CANDIDATE_{ordinal}_STRATEGY={}",
+                candidate.strategy().as_str()
+            );
             println!("CANDIDATE_{ordinal}_SCORE={}", candidate.score());
+            println!(
+                "CANDIDATE_{ordinal}_DISPLAY_WIDTH={}",
+                candidate.display_width()
+            );
         }
     }
     if operation == "explain" {
         println!("TOKENS={}", inspection.analysis().tokens().join(","));
-        if let Some(candidate) = inspection.candidates().first() {
-            println!("CANDIDATE_STRATEGY={:?}", candidate.strategy());
-            println!("CANDIDATE_SCORE={}", candidate.score());
-            println!("CANDIDATE_COMPONENTS={}", candidate.rationale());
+        if let Some(candidate) = inspection.selected_candidate() {
+            println!("SELECTED_CANDIDATE_ALIAS={}", candidate.alias());
+            println!(
+                "SELECTED_CANDIDATE_STRATEGY={}",
+                candidate.strategy().as_str()
+            );
+            println!("SELECTED_CANDIDATE_SCORE={}", candidate.score());
+            print_score_components_plain("SELECTED_CANDIDATE", candidate.components());
+        } else {
+            println!("SELECTED_CANDIDATE=UNAVAILABLE");
         }
     }
+}
+
+fn print_score_components_plain(prefix: &str, components: tabbeacon::repo::ScoreComponents) {
+    println!("{prefix}_TOKEN_COVERAGE={}", components.token_coverage);
+    println!(
+        "{prefix}_ACRONYM_PRESERVATION={}",
+        components.acronym_preservation
+    );
+    println!(
+        "{prefix}_RECOGNIZABLE_PREFIX={}",
+        components.recognizable_prefix
+    );
+    println!(
+        "{prefix}_BALANCED_REPRESENTATION={}",
+        components.balanced_representation
+    );
+    println!("{prefix}_DISPLAY_WIDTH={}", components.display_width);
+    println!("{prefix}_INFORMATION_LOSS={}", components.information_loss);
+    println!(
+        "{prefix}_TRIVIAL_ALIAS_PENALTY={}",
+        components.trivial_alias
+    );
+    println!("{prefix}_REDUNDANCY_PENALTY={}", components.redundancy);
+    println!(
+        "{prefix}_COLLISION_PRESSURE={}",
+        components.collision_pressure
+    );
+    println!(
+        "{prefix}_STRATEGY_ADJUSTMENT={}",
+        components.strategy_adjustment
+    );
+    println!("{prefix}_TOTAL={}", components.total());
 }
 
 fn alias_json(operation: &str, inspection: &WorkspaceAliasInspection) -> serde_json::Value {
@@ -504,33 +619,229 @@ fn alias_json(operation: &str, inspection: &WorkspaceAliasInspection) -> serde_j
         .candidates()
         .iter()
         .take(5)
-        .map(|candidate| {
-            serde_json::json!({
-                "alias": candidate.alias().as_str(),
-                "strategy": format!("{:?}", candidate.strategy()),
-                "score": candidate.score(),
-                "display_width": candidate.display_width(),
-                "rationale": candidate.rationale(),
-            })
-        })
+        .map(candidate_json)
         .collect::<Vec<_>>();
     serde_json::json!({
-        "schema": "tabbeacon-alias-v1",
+        "schema": "tabbeacon-alias-v2",
         "operation": operation,
         "result": "success",
         "workspace": inspection.workspace().as_str(),
+        "identity_class": inspection.identity_class().as_str(),
         "automatic_alias": inspection.automatic_alias().as_str(),
         "custom_alias": inspection.custom_alias().map(RepositoryAlias::as_str),
         "effective_alias": inspection.effective_alias().as_str(),
+        "alias_source": if inspection.custom_alias().is_some() { "override" } else { "automatic" },
         "naming_policy": inspection.policy_version(),
         "assignment_state": if inspection.is_assigned() { "assigned" } else { "prospective" },
         "analysis": {
             "normalized_name": inspection.analysis().normalized_name(),
             "tokens": inspection.analysis().tokens(),
-            "style_hints": inspection.analysis().style_hints().iter().map(|hint| format!("{hint:?}")).collect::<Vec<_>>(),
+            "style_hints": inspection.analysis().style_hints().iter().map(|hint| hint.as_str()).collect::<Vec<_>>(),
         },
+        "selected_candidate": inspection.selected_candidate().map(candidate_json),
         "candidates": candidates,
     })
+}
+
+fn candidate_json(candidate: &AliasCandidate) -> serde_json::Value {
+    let components = candidate.components();
+    serde_json::json!({
+        "alias": candidate.alias().as_str(),
+        "strategy": candidate.strategy().as_str(),
+        "score": candidate.score(),
+        "display_width": candidate.display_width(),
+        "score_components": {
+            "token_coverage": components.token_coverage,
+            "acronym_preservation": components.acronym_preservation,
+            "recognizable_prefix": components.recognizable_prefix,
+            "balanced_representation": components.balanced_representation,
+            "display_width": components.display_width,
+            "information_loss": components.information_loss,
+            "trivial_alias_penalty": components.trivial_alias,
+            "redundancy_penalty": components.redundancy,
+            "collision_pressure": components.collision_pressure,
+            "strategy_adjustment": components.strategy_adjustment,
+            "total": components.total(),
+        },
+    })
+}
+
+fn explain_title(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
+    let diagnostics = collect_operational_diagnostics();
+    let presentation = settings_store().ok().and_then(|store| {
+        store
+            .snapshot_read_only()
+            .ok()
+            .map(|snapshot| snapshot.settings())
+    });
+    let workspace = std::env::current_dir().ok().and_then(|cwd| {
+        WorkspaceIdentityResolver::with_default_state_root()
+            .ok()
+            .and_then(|resolver| resolver.inspect_alias(cwd).ok())
+    });
+    let sessions = inspect_system_sessions();
+    let explanation = TitleExplanation::from_observation(
+        &diagnostics,
+        presentation,
+        workspace.as_ref(),
+        &sessions,
+    );
+    match output_mode {
+        OutputMode::Human => {
+            print_human_document(&title_explanation_document(&explanation), language)
+        }
+        OutputMode::Plain => print_title_explanation_plain(&explanation),
+        OutputMode::Json => match serde_json::to_string(&explanation) {
+            Ok(value) => println!("{value}"),
+            Err(error) => return management_error("TITLE_EXPLANATION", &error),
+        },
+    }
+    ExitCode::SUCCESS
+}
+
+fn title_explanation_document(explanation: &TitleExplanation) -> HumanDocument {
+    let mut section = HumanSection::new(None)
+        .with_field(title_explanation_field(
+            HumanMessageKey::Provider,
+            explanation.provider,
+        ))
+        .with_field(title_explanation_field(
+            HumanMessageKey::SemanticPhase,
+            explanation.semantic_phase,
+        ))
+        .with_field(title_explanation_field(
+            HumanMessageKey::Attention,
+            explanation.attention,
+        ))
+        .with_field(title_explanation_field(
+            HumanMessageKey::ActivityHealth,
+            &explanation.activity_health,
+        ))
+        .with_field(title_explanation_field(
+            HumanMessageKey::ActivityChannel,
+            &explanation.activity_channel,
+        ))
+        .with_field(title_explanation_field(
+            HumanMessageKey::SessionCorrelation,
+            explanation.session_correlation,
+        ))
+        .with_field(title_explanation_field(
+            HumanMessageKey::TitleOwner,
+            &explanation.title_owner,
+        ))
+        .with_field(title_explanation_field(
+            HumanMessageKey::CodexWriterState,
+            &explanation.codex_writer_state,
+        ))
+        .with_field(title_explanation_field(
+            HumanMessageKey::TitleAuthority,
+            &explanation.title_authority,
+        ))
+        .with_field(title_explanation_field(
+            HumanMessageKey::TitleConflict,
+            &explanation.title_conflict,
+        ))
+        .with_field(title_explanation_field(
+            HumanMessageKey::ProviderBadgePolicy,
+            explanation.provider_badge_policy,
+        ))
+        .with_field(title_explanation_field(
+            HumanMessageKey::ProviderBadgeValue,
+            explanation.provider_badge_value,
+        ));
+    if let Some(workspace) = &explanation.workspace {
+        section = section
+            .with_field(title_explanation_field(
+                HumanMessageKey::ProjectDisplayHint,
+                &workspace.display_hint,
+            ))
+            .with_field(title_explanation_field(
+                HumanMessageKey::IdentityClass,
+                workspace.identity_class,
+            ))
+            .with_field(title_explanation_field(
+                HumanMessageKey::RootBindingSource,
+                workspace.root_binding_source,
+            ))
+            .with_field(title_explanation_field(
+                HumanMessageKey::RootBindingStatus,
+                workspace.root_binding_status,
+            ))
+            .with_field(title_explanation_field(
+                HumanMessageKey::WorkspaceMismatch,
+                workspace.workspace_mismatch_observation,
+            ))
+            .with_field(title_explanation_field(
+                HumanMessageKey::AutomaticAlias,
+                &workspace.automatic_alias,
+            ))
+            .with_field(title_explanation_field(
+                HumanMessageKey::CustomAlias,
+                workspace.override_alias.as_deref().unwrap_or("—"),
+            ))
+            .with_field(title_explanation_field(
+                HumanMessageKey::EffectiveAlias,
+                &workspace.effective_alias,
+            ))
+            .with_field(title_explanation_field(
+                HumanMessageKey::AliasSource,
+                workspace.alias_source,
+            ))
+            .with_field(title_explanation_field(
+                HumanMessageKey::NamingPolicy,
+                &workspace.naming_policy,
+            ));
+    }
+    HumanDocument::new(HumanText::message(HumanMessageKey::WhyThisTitle), None)
+        .with_section(section)
+}
+
+fn title_explanation_field(key: HumanMessageKey, value: impl Into<String>) -> HumanField {
+    HumanField::new(
+        None::<String>,
+        HumanText::message(key),
+        HumanText::literal(value.into()),
+        HumanTone::Plain,
+    )
+}
+
+fn print_title_explanation_plain(explanation: &TitleExplanation) {
+    println!("TITLE_EXPLANATION_SCHEMA_VERSION=1");
+    println!("PROVIDER={}", explanation.provider);
+    println!("SEMANTIC_PHASE={}", explanation.semantic_phase);
+    println!("ATTENTION={}", explanation.attention);
+    println!("ACTIVITY_HEALTH={}", explanation.activity_health);
+    println!("ACTIVITY_CHANNEL={}", explanation.activity_channel);
+    println!("SESSION_CORRELATION={}", explanation.session_correlation);
+    println!("TITLE_OWNER={}", explanation.title_owner);
+    println!("CODEX_WRITER_STATE={}", explanation.codex_writer_state);
+    println!("TITLE_AUTHORITY={}", explanation.title_authority);
+    println!("TITLE_CONFLICT={}", explanation.title_conflict);
+    println!(
+        "PROVIDER_BADGE_POLICY={}",
+        explanation.provider_badge_policy
+    );
+    println!("PROVIDER_BADGE_VALUE={}", explanation.provider_badge_value);
+    if let Some(workspace) = &explanation.workspace {
+        println!("PROJECT_DISPLAY_HINT={}", workspace.display_hint);
+        println!("IDENTITY_CLASS={}", workspace.identity_class);
+        println!("ROOT_BINDING_SOURCE={}", workspace.root_binding_source);
+        println!("ROOT_BINDING_STATUS={}", workspace.root_binding_status);
+        println!(
+            "WORKSPACE_MISMATCH_OBSERVATION={}",
+            workspace.workspace_mismatch_observation
+        );
+        println!("AUTOMATIC_ALIAS={}", workspace.automatic_alias);
+        println!(
+            "CUSTOM_ALIAS={}",
+            workspace.override_alias.as_deref().unwrap_or("NONE")
+        );
+        println!("EFFECTIVE_ALIAS={}", workspace.effective_alias);
+        println!("ALIAS_SOURCE={}", workspace.alias_source);
+        println!("NAMING_POLICY={}", workspace.naming_policy);
+    } else {
+        println!("WORKSPACE=UNAVAILABLE");
+    }
 }
 
 const fn alias_error_message_key(error: WorkspaceAliasError) -> HumanMessageKey {
@@ -3243,14 +3554,22 @@ fn collect_control_center_refresh(
     let hooks = CodexIntegration::from_environment()
         .map(|integration| integration.hook_inventory())
         .unwrap_or_default();
+    let sessions = inspect_system_sessions();
+    let title_explanation = TitleExplanation::from_observation(
+        &report,
+        Some(presentation),
+        workspace.as_ref(),
+        &sessions,
+    );
     Ok(tabbeacon::control_center::ControlCenterRefresh {
         presentation,
         interface,
         snapshot: ManagementSnapshot::from_diagnostics(&report),
         overview: tabbeacon::management::ManagementOverview::from_diagnostics(&report),
         workspace,
-        sessions: inspect_system_sessions(),
+        sessions,
         hooks,
+        title_explanation,
     })
 }
 

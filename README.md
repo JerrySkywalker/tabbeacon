@@ -95,6 +95,16 @@ For daily interactive management, run `tabbeacon ui` in a terminal. The
 Control Center keeps appearance edits in memory until Apply, supports Revert,
 and never enters full-screen mode when stdin or stdout is redirected.
 
+### Naming and title explanation
+
+`tabbeacon alias explain` shows the ordered Adaptive Naming candidates and the
+exact integer components behind the generated alias. `tabbeacon explain title`
+shows the read-only provider, workspace, alias, presentation, and title
+authority facts available to the current CLI invocation. JSON and `--plain`
+use stable named fields; Human output is localized. Neither command writes
+configuration, binds a workspace, exposes a canonical identity or path, nor
+guesses that an activity lease belongs to the invoking terminal.
+
 ### Operational diagnostics
 
 Use the read-only status commands to inspect the current installation without

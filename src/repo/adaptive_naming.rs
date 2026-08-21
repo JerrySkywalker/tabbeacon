@@ -70,6 +70,26 @@ pub enum NameStyleHint {
     NfcNormalized,
 }
 
+impl NameStyleHint {
+    /// Stable machine-readable spelling for an observed naming fact.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::KebabCase => "kebab_case",
+            Self::SnakeCase => "snake_case",
+            Self::DotSeparated => "dot_separated",
+            Self::SpaceSeparated => "space_separated",
+            Self::CamelCase => "camel_case",
+            Self::PascalCase => "pascal_case",
+            Self::AcronymBoundary => "acronym_boundary",
+            Self::LetterDigitBoundary => "letter_digit_boundary",
+            Self::CjkRun => "cjk_run",
+            Self::MixedCjkLatin => "mixed_cjk_latin",
+            Self::NfcNormalized => "nfc_normalized",
+        }
+    }
+}
+
 /// Deterministic candidate family, ordered by policy preference on score ties.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum AliasStrategy {
@@ -92,6 +112,12 @@ pub enum AliasStrategy {
 }
 
 impl AliasStrategy {
+    /// Stable machine-readable candidate-family spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        self.label()
+    }
+
     #[must_use]
     const fn priority(self) -> u8 {
         match self {

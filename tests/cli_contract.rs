@@ -333,14 +333,21 @@ fn alias_read_only_surfaces_are_locale_safe_private_and_non_mutating() {
     assert!(json_zh.status.success());
     assert!(json_en.stderr.is_empty());
     assert!(json_zh.stderr.is_empty());
+    let json_en = serde_json::from_slice::<serde_json::Value>(&json_en.stdout)
+        .expect("English alias JSON parses");
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&json_en.stdout)
-            .expect("English alias JSON parses"),
+        json_en,
         serde_json::from_slice::<serde_json::Value>(&json_zh.stdout)
             .expect("Chinese alias JSON parses"),
         "machine alias JSON must not depend on Human locale"
     );
-    let json_text = String::from_utf8(json_en.stdout).expect("alias JSON is UTF-8");
+    assert_eq!(json_en["schema"], "tabbeacon-alias-v2");
+    let selected = &json_en["selected_candidate"];
+    assert_eq!(
+        selected["score_components"]["total"], selected["score"],
+        "selected total must be the engine total"
+    );
+    let json_text = serde_json::to_string(&json_en).expect("alias JSON reserializes");
     assert!(!json_text.contains("remote:"));
     assert!(!json_text.contains("dir-v1:"));
     assert!(!json_text.contains("repository-identity"));
@@ -365,6 +372,52 @@ fn alias_read_only_surfaces_are_locale_safe_private_and_non_mutating() {
     assert!(!chinese.contains("repository-identity"));
     assert!(!registry_root.exists(), "explain remains read only");
     assert!(!preference_root.exists(), "explain remains read only");
+
+    let title_json_en = isolated_command(&root)
+        .args(["explain", "title", "--json", "--lang", "en-US"])
+        .output()
+        .expect("English title explanation starts");
+    let title_json_zh = isolated_command(&root)
+        .args(["explain", "title", "--json", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese title explanation starts");
+    assert!(title_json_en.status.success());
+    assert!(title_json_zh.status.success());
+    let title_json_en = serde_json::from_slice::<serde_json::Value>(&title_json_en.stdout)
+        .expect("English title explanation JSON parses");
+    assert_eq!(
+        title_json_en,
+        serde_json::from_slice::<serde_json::Value>(&title_json_zh.stdout)
+            .expect("Chinese title explanation JSON parses"),
+        "machine title explanation must not depend on Human locale"
+    );
+    assert_eq!(title_json_en["schema"], "tabbeacon-title-explanation-v1");
+    assert_eq!(title_json_en["provider"], "codex");
+    assert_eq!(
+        title_json_en["workspace"]["root_binding_status"], "not_session_correlated",
+        "read-only CLI must not claim a native-session correlation"
+    );
+    let title_text = serde_json::to_string(&title_json_en).expect("title explanation reserializes");
+    assert!(!title_text.contains(root.path.to_string_lossy().as_ref()));
+    assert!(!title_text.contains("repository-identity"));
+
+    let title_human = isolated_command(&root)
+        .args(["explain", "title", "--lang", "zh-CN"])
+        .output()
+        .expect("Chinese title explanation starts");
+    assert!(title_human.status.success());
+    let title_human = String::from_utf8(title_human.stdout).expect("title explanation is UTF-8");
+    assert!(title_human.contains("为何使用此标题"));
+    assert!(!title_human.contains("TITLE_EXPLANATION_SCHEMA_VERSION="));
+    assert!(!title_human.contains("repository-identity"));
+    assert!(
+        !registry_root.exists(),
+        "title explanation remains read only"
+    );
+    assert!(
+        !preference_root.exists(),
+        "title explanation remains read only"
+    );
 }
 
 #[test]

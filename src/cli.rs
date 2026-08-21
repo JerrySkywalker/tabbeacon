@@ -91,6 +91,13 @@ pub enum Command {
         #[command(flatten)]
         output: OutputArgs,
     },
+    /// Explain a bounded, read-only presentation decision.
+    Explain {
+        #[command(subcommand)]
+        command: ExplainCommand,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
     /// Export portable user configuration as canonical tabbeacon-export-v1 JSON.
     Export {
         /// Write the canonical document to a new file instead of stdout.
@@ -380,6 +387,13 @@ pub enum AliasCommand {
     Set { alias: String },
     /// Remove only this workspace's explicit device-local alias override.
     Reset,
+}
+
+/// Read-only explainability surfaces.
+#[derive(Debug, Subcommand)]
+pub enum ExplainCommand {
+    /// Explain the safe workspace, presentation, and title-provenance facts.
+    Title,
 }
 
 /// One typed Interface preference key.

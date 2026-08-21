@@ -34,7 +34,7 @@ pub use registry::{
 };
 pub use workspace::{
     ResolvedWorkspaceIdentity, WorkspaceAliasError, WorkspaceAliasInspection,
-    WorkspaceIdentityResolver, WorkspaceKind,
+    WorkspaceIdentityClass, WorkspaceIdentityResolver, WorkspaceKind,
 };
 
 use std::path::Path;

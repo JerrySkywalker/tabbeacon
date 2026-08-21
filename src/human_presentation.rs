@@ -252,6 +252,34 @@ pub enum HumanMessageKey {
     CandidateStrategy,
     CandidateScore,
     CandidateComponents,
+    TokenCoverage,
+    AcronymPreservation,
+    RecognizablePrefix,
+    BalancedRepresentation,
+    DisplayWidth,
+    InformationLoss,
+    TrivialAliasPenalty,
+    RedundancyPenalty,
+    CollisionPressure,
+    StrategyAdjustment,
+    Total,
+    WhyThisTitle,
+    Provider,
+    SemanticPhase,
+    ActivityHealth,
+    ActivityChannel,
+    SessionCorrelation,
+    RootBindingSource,
+    RootBindingStatus,
+    WorkspaceMismatch,
+    IdentityClass,
+    AliasSource,
+    TitleOwner,
+    CodexWriterState,
+    TitleAuthority,
+    TitleConflict,
+    ProviderBadgePolicy,
+    ProviderBadgeValue,
     RefreshConflict,
     AliasProspective,
     AliasOverrideSaved,
@@ -1126,7 +1154,7 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
             "Stored locally only. Project files are never modified."
         }
         (ResolvedLocale::EnUs, HumanMessageKey::WorkspaceActions) => {
-            "d default · 1–4 suggestion · c custom · ? explain · a apply"
+            "d default · 1–4 suggestion · c custom · e explain · t why title · a apply"
         }
         (ResolvedLocale::EnUs, HumanMessageKey::WorkspaceCustomAliasInput) => {
             "Type a custom alias, then press Enter to stage it."
@@ -1146,6 +1174,36 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::EnUs, HumanMessageKey::CandidateStrategy) => "Candidate strategy",
         (ResolvedLocale::EnUs, HumanMessageKey::CandidateScore) => "Candidate score",
         (ResolvedLocale::EnUs, HumanMessageKey::CandidateComponents) => "Score components",
+        (ResolvedLocale::EnUs, HumanMessageKey::TokenCoverage) => "Token coverage",
+        (ResolvedLocale::EnUs, HumanMessageKey::AcronymPreservation) => "Acronym preservation",
+        (ResolvedLocale::EnUs, HumanMessageKey::RecognizablePrefix) => "Recognizable prefix",
+        (ResolvedLocale::EnUs, HumanMessageKey::BalancedRepresentation) => {
+            "Balanced representation"
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::DisplayWidth) => "Display width",
+        (ResolvedLocale::EnUs, HumanMessageKey::InformationLoss) => "Information loss",
+        (ResolvedLocale::EnUs, HumanMessageKey::TrivialAliasPenalty) => "Trivial alias penalty",
+        (ResolvedLocale::EnUs, HumanMessageKey::RedundancyPenalty) => "Redundancy penalty",
+        (ResolvedLocale::EnUs, HumanMessageKey::CollisionPressure) => "Collision pressure",
+        (ResolvedLocale::EnUs, HumanMessageKey::StrategyAdjustment) => "Strategy adjustment",
+        (ResolvedLocale::EnUs, HumanMessageKey::Total) => "Total",
+        (ResolvedLocale::EnUs, HumanMessageKey::WhyThisTitle) => "Why this title?",
+        (ResolvedLocale::EnUs, HumanMessageKey::Provider) => "Provider",
+        (ResolvedLocale::EnUs, HumanMessageKey::SemanticPhase) => "Semantic phase",
+        (ResolvedLocale::EnUs, HumanMessageKey::ActivityHealth) => "Activity health",
+        (ResolvedLocale::EnUs, HumanMessageKey::ActivityChannel) => "Activity channel",
+        (ResolvedLocale::EnUs, HumanMessageKey::SessionCorrelation) => "Session correlation",
+        (ResolvedLocale::EnUs, HumanMessageKey::RootBindingSource) => "Root binding source",
+        (ResolvedLocale::EnUs, HumanMessageKey::RootBindingStatus) => "Root binding status",
+        (ResolvedLocale::EnUs, HumanMessageKey::WorkspaceMismatch) => "Workspace mismatch",
+        (ResolvedLocale::EnUs, HumanMessageKey::IdentityClass) => "Identity class",
+        (ResolvedLocale::EnUs, HumanMessageKey::AliasSource) => "Alias source",
+        (ResolvedLocale::EnUs, HumanMessageKey::TitleOwner) => "Title owner",
+        (ResolvedLocale::EnUs, HumanMessageKey::CodexWriterState) => "Codex writer state",
+        (ResolvedLocale::EnUs, HumanMessageKey::TitleAuthority) => "Title authority",
+        (ResolvedLocale::EnUs, HumanMessageKey::TitleConflict) => "Title conflict",
+        (ResolvedLocale::EnUs, HumanMessageKey::ProviderBadgePolicy) => "Provider badge policy",
+        (ResolvedLocale::EnUs, HumanMessageKey::ProviderBadgeValue) => "Provider badge value",
         (ResolvedLocale::EnUs, HumanMessageKey::RefreshConflict) => {
             "Settings changed externally. Revert the stale draft before Apply."
         }
@@ -1630,7 +1688,7 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
             "仅存储在本机；绝不修改项目文件。"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::WorkspaceActions) => {
-            "d 使用默认 · 1–4 选择候选 · c 自定义 · ? 说明 · a 应用"
+            "d 使用默认 · 1–4 选择候选 · c 自定义 · e 说明 · t 标题缘由 · a 应用"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::WorkspaceCustomAliasInput) => {
             "输入自定义别名，然后按 Enter 暂存。"
@@ -1650,6 +1708,34 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::ZhCn, HumanMessageKey::CandidateStrategy) => "候选策略",
         (ResolvedLocale::ZhCn, HumanMessageKey::CandidateScore) => "候选评分",
         (ResolvedLocale::ZhCn, HumanMessageKey::CandidateComponents) => "评分组成",
+        (ResolvedLocale::ZhCn, HumanMessageKey::TokenCoverage) => "分词覆盖",
+        (ResolvedLocale::ZhCn, HumanMessageKey::AcronymPreservation) => "首字母缩写保留",
+        (ResolvedLocale::ZhCn, HumanMessageKey::RecognizablePrefix) => "可识别前缀",
+        (ResolvedLocale::ZhCn, HumanMessageKey::BalancedRepresentation) => "均衡表示",
+        (ResolvedLocale::ZhCn, HumanMessageKey::DisplayWidth) => "显示宽度",
+        (ResolvedLocale::ZhCn, HumanMessageKey::InformationLoss) => "信息损失",
+        (ResolvedLocale::ZhCn, HumanMessageKey::TrivialAliasPenalty) => "过短别名惩罚",
+        (ResolvedLocale::ZhCn, HumanMessageKey::RedundancyPenalty) => "冗余惩罚",
+        (ResolvedLocale::ZhCn, HumanMessageKey::CollisionPressure) => "冲突压力",
+        (ResolvedLocale::ZhCn, HumanMessageKey::StrategyAdjustment) => "策略调整",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Total) => "总分",
+        (ResolvedLocale::ZhCn, HumanMessageKey::WhyThisTitle) => "为何使用此标题？",
+        (ResolvedLocale::ZhCn, HumanMessageKey::Provider) => "提供方",
+        (ResolvedLocale::ZhCn, HumanMessageKey::SemanticPhase) => "语义阶段",
+        (ResolvedLocale::ZhCn, HumanMessageKey::ActivityHealth) => "活动健康状态",
+        (ResolvedLocale::ZhCn, HumanMessageKey::ActivityChannel) => "活动通道",
+        (ResolvedLocale::ZhCn, HumanMessageKey::SessionCorrelation) => "会话关联",
+        (ResolvedLocale::ZhCn, HumanMessageKey::RootBindingSource) => "根工作区绑定来源",
+        (ResolvedLocale::ZhCn, HumanMessageKey::RootBindingStatus) => "根工作区绑定状态",
+        (ResolvedLocale::ZhCn, HumanMessageKey::WorkspaceMismatch) => "工作区不匹配",
+        (ResolvedLocale::ZhCn, HumanMessageKey::IdentityClass) => "身份类别",
+        (ResolvedLocale::ZhCn, HumanMessageKey::AliasSource) => "别名来源",
+        (ResolvedLocale::ZhCn, HumanMessageKey::TitleOwner) => "标题所有者",
+        (ResolvedLocale::ZhCn, HumanMessageKey::CodexWriterState) => "Codex 写入状态",
+        (ResolvedLocale::ZhCn, HumanMessageKey::TitleAuthority) => "标题权威状态",
+        (ResolvedLocale::ZhCn, HumanMessageKey::TitleConflict) => "标题冲突",
+        (ResolvedLocale::ZhCn, HumanMessageKey::ProviderBadgePolicy) => "提供方徽标策略",
+        (ResolvedLocale::ZhCn, HumanMessageKey::ProviderBadgeValue) => "提供方徽标值",
         (ResolvedLocale::ZhCn, HumanMessageKey::RefreshConflict) => {
             "设置已在外部变更；请先还原过期草稿再应用。"
         }
