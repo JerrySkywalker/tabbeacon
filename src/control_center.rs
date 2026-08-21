@@ -976,6 +976,8 @@ pub struct TerminalSmokeReport {
     pub hook_inventory_visited: bool,
     /// `?` opened and `Esc` dismissed the event-isolating help overlay.
     pub help_overlay_exercised: bool,
+    /// `t` opened and `Esc` dismissed the read-only title provenance overlay.
+    pub title_explanation_exercised: bool,
     /// An appearance value changed in the in-memory draft.
     pub draft_changed: bool,
     /// Revert restored the draft to the original settings without Apply.
@@ -1094,6 +1096,19 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         let _ = app.handle_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         invariant(!app.overlay_open(), "fixture did not dismiss Help")?;
 
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        let title_explanation_exercised = app.overlay_open();
+        invariant(
+            title_explanation_exercised,
+            "fixture did not open Why this title",
+        )?;
+        draw(&mut session, &app)?;
+        let _ = app.handle_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        invariant(
+            !app.overlay_open(),
+            "fixture did not dismiss Why this title",
+        )?;
+
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(app.screen() == Screen::Hooks, "fixture did not reach Hooks")?;
         draw(&mut session, &app)?;
@@ -1171,6 +1186,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
             workspace_and_sessions_visited,
             hook_inventory_visited,
             help_overlay_exercised,
+            title_explanation_exercised,
             draft_changed,
             draft_reverted,
             interface_locale_switched,

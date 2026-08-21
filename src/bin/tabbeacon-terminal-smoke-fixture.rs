@@ -97,11 +97,12 @@ fn main() -> ExitCode {
         Ok(report) => {
             if let Some(path) = std::env::var_os("TABBEACON_TUI_SMOKE_RESULT_PATH") {
                 let result = format!(
-                    "TUI_LIVE_REFRESH={}\nTUI_WORKSPACE_SESSIONS={}\nTUI_HOOK_INVENTORY={}\nTUI_HOOK_PROVIDER_ADAPTER=true\nTUI_HELP_OVERLAY={}\nTUI_LANGUAGE_LIVE_SWITCH={}\nTUI_INTERFACE_REVERT={}\nTUI_INTERFACE_STAGED_APPLY={}\nOWNER_MUTATIONS=none\n",
+                    "TUI_LIVE_REFRESH={}\nTUI_WORKSPACE_SESSIONS={}\nTUI_HOOK_INVENTORY={}\nTUI_HOOK_PROVIDER_ADAPTER=true\nTUI_HELP_OVERLAY={}\nTUI_TITLE_EXPLANATION={}\nTUI_LANGUAGE_LIVE_SWITCH={}\nTUI_INTERFACE_REVERT={}\nTUI_INTERFACE_STAGED_APPLY={}\nOWNER_MUTATIONS=none\n",
                     report.live_refresh_merged,
                     report.workspace_and_sessions_visited,
                     report.hook_inventory_visited,
                     report.help_overlay_exercised,
+                    report.title_explanation_exercised,
                     report.interface_locale_switched,
                     report.interface_draft_reverted,
                     report.interface_apply_staged,
@@ -122,6 +123,10 @@ fn main() -> ExitCode {
             println!("TUI_HOOK_INVENTORY={}", report.hook_inventory_visited);
             println!("TUI_HOOK_PROVIDER_ADAPTER=true");
             println!("TUI_HELP_OVERLAY={}", report.help_overlay_exercised);
+            println!(
+                "TUI_TITLE_EXPLANATION={}",
+                report.title_explanation_exercised
+            );
             println!("DRAFT_CHANGED={}", report.draft_changed);
             println!("DRAFT_REVERTED={}", report.draft_reverted);
             println!(
