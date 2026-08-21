@@ -2,6 +2,28 @@
 
 All notable changes to TabBeacon will be documented here.
 
+## [0.5.1] - 2026-08-21
+
+### Added
+
+- Added read-only upgrade preflight diagnostics for runtime worker images and
+  bounded owned-worker drain decisions.
+- Added Hook Inspector ownership/currentness/trust diagnostics, Adaptive
+  Naming score explanations, safe title provenance, and the localized
+  `Why this title?` Control Center overlay.
+- Added provider-neutral Integrations and provider-aware Sessions projections.
+  Codex remains the only admitted production provider.
+
+### Changed
+
+- Admitted the source-audited Codex 0.149.0 Hook profile while preserving the
+  manual trust boundary and fail-closed treatment of future unknown versions.
+- Long-lived activity workers now run from hash-verified immutable user-local
+  runtime images, leaving the package-installed CLI replaceable on Windows.
+- Kept provider badges compact by default, retained fail-open one-shot Hooks,
+  and added no Agy provider, wrapper, PATH interception, daemon, self-update,
+  project-local configuration, or remote-control surface.
+
 ## [0.5.0] - 2026-08-20
 
 ### Added
