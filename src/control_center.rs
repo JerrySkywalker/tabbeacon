@@ -1520,39 +1520,7 @@ fn overlay_lines(app: &ControlCenterApp) -> String {
 
 fn title_explanation_lines(app: &ControlCenterApp) -> String {
     let explanation = &app.title_explanation;
-    let workspace = explanation.workspace.as_ref().map_or_else(
-        || {
-            format!(
-                "{}: unavailable",
-                catalog(app.locale(), HumanMessageKey::Workspace)
-            )
-        },
-        |workspace| {
-            format!(
-                "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}",
-                catalog(app.locale(), HumanMessageKey::ProjectDisplayHint),
-                workspace.display_hint,
-                catalog(app.locale(), HumanMessageKey::IdentityClass),
-                workspace.identity_class,
-                catalog(app.locale(), HumanMessageKey::RootBindingSource),
-                workspace.root_binding_source,
-                catalog(app.locale(), HumanMessageKey::RootBindingStatus),
-                workspace.root_binding_status,
-                catalog(app.locale(), HumanMessageKey::WorkspaceMismatch),
-                workspace.workspace_mismatch_observation,
-                catalog(app.locale(), HumanMessageKey::AutomaticAlias),
-                workspace.automatic_alias,
-                catalog(app.locale(), HumanMessageKey::CustomAlias),
-                workspace.override_alias.as_deref().unwrap_or("—"),
-                catalog(app.locale(), HumanMessageKey::EffectiveAlias),
-                workspace.effective_alias,
-                catalog(app.locale(), HumanMessageKey::AliasSource),
-                workspace.alias_source,
-                catalog(app.locale(), HumanMessageKey::NamingPolicy),
-                workspace.naming_policy,
-            )
-        },
-    );
+    let workspace = title_explanation_workspace_lines(app);
     let facts = [
         format!(
             "{}: {}",
@@ -1620,6 +1588,42 @@ fn title_explanation_lines(app: &ControlCenterApp) -> String {
         facts.join("\n"),
         workspace,
         catalog(app.locale(), HumanMessageKey::OverlayDismiss),
+    )
+}
+
+fn title_explanation_workspace_lines(app: &ControlCenterApp) -> String {
+    app.title_explanation.workspace.as_ref().map_or_else(
+        || {
+            format!(
+                "{}: unavailable",
+                catalog(app.locale(), HumanMessageKey::Workspace)
+            )
+        },
+        |workspace| {
+            format!(
+                "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}",
+                catalog(app.locale(), HumanMessageKey::ProjectDisplayHint),
+                workspace.display_hint,
+                catalog(app.locale(), HumanMessageKey::IdentityClass),
+                workspace.identity_class,
+                catalog(app.locale(), HumanMessageKey::RootBindingSource),
+                workspace.root_binding_source,
+                catalog(app.locale(), HumanMessageKey::RootBindingStatus),
+                workspace.root_binding_status,
+                catalog(app.locale(), HumanMessageKey::WorkspaceMismatch),
+                workspace.workspace_mismatch_observation,
+                catalog(app.locale(), HumanMessageKey::AutomaticAlias),
+                workspace.automatic_alias,
+                catalog(app.locale(), HumanMessageKey::CustomAlias),
+                workspace.override_alias.as_deref().unwrap_or("—"),
+                catalog(app.locale(), HumanMessageKey::EffectiveAlias),
+                workspace.effective_alias,
+                catalog(app.locale(), HumanMessageKey::AliasSource),
+                workspace.alias_source,
+                catalog(app.locale(), HumanMessageKey::NamingPolicy),
+                workspace.naming_policy,
+            )
+        },
     )
 }
 
