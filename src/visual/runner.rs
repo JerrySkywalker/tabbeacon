@@ -600,17 +600,18 @@ fn consume_worker_authorization(
 
 fn worker_parent_process_id() -> VisualResult<u32> {
     let process_id = process::id().to_string();
-    let output = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!(
-                "(Get-CimInstance Win32_Process -Filter 'ProcessId = {process_id}').ParentProcessId"
-            ),
-        ])
-        .output()
-        .map_err(VisualError::Io)?;
+    let script = format!(
+        "(Get-CimInstance Win32_Process -Filter 'ProcessId = {process_id}').ParentProcessId"
+    );
+    let output =
+        bounded_powershell_output(&script, WORKER_PROCESS_QUERY_BUDGET)?.ok_or_else(|| {
+            VisualError::Platform("visual worker parent process query timed out".to_owned())
+        })?;
+    if !output.status.success() {
+        return Err(VisualError::Platform(
+            "visual worker parent process query did not complete".to_owned(),
+        ));
+    }
     String::from_utf8_lossy(&output.stdout)
         .trim()
         .parse::<u32>()
@@ -620,17 +621,18 @@ fn worker_parent_process_id() -> VisualResult<u32> {
 }
 
 fn parent_is_fixture_executable(parent_process_id: u32) -> VisualResult<bool> {
-    let output = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!(
-                "(Get-CimInstance Win32_Process -Filter 'ProcessId = {parent_process_id}').ExecutablePath"
-            ),
-        ])
-        .output()
-        .map_err(VisualError::Io)?;
+    let script = format!(
+        "(Get-CimInstance Win32_Process -Filter 'ProcessId = {parent_process_id}').ExecutablePath"
+    );
+    let output =
+        bounded_powershell_output(&script, WORKER_PROCESS_QUERY_BUDGET)?.ok_or_else(|| {
+            VisualError::Platform("visual worker parent identity query timed out".to_owned())
+        })?;
+    if !output.status.success() {
+        return Err(VisualError::Platform(
+            "visual worker parent identity query did not complete".to_owned(),
+        ));
+    }
     let observed = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     let expected = env::current_exe().map_err(VisualError::Io)?;
     Ok(observed.eq_ignore_ascii_case(&expected.to_string_lossy()))

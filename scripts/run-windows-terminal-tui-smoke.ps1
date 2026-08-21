@@ -114,6 +114,99 @@ if ([TabBeaconSmokeWindows]::FindExactTitle($windowTitle).Count -ne 0) {
     throw 'The unique disposable Windows Terminal title already exists before launch'
 }
 
+ $script:ProcessObservationFailureClass = 'NONE'
+ $script:ProcessQuerySequence = 0
+ $script:CleanupFailureClass = 'NONE'
+
+function Invoke-BoundedProcessQuery {
+    param(
+        [ValidateSet('identity', 'parent', 'children')]
+        [string]$Operation,
+        [int]$ProcessId,
+        [ValidateRange(250, 5000)]
+        [int]$TimeoutMilliseconds = 1500
+    )
+    # CIM and process APIs can block in an otherwise healthy interactive
+    # session. Keep them in one disposable helper and open the circuit after a
+    # failed observation: a timeout is unproven evidence, never permission to
+    # continue cleanup or launch another unbounded query worker.
+    if ($script:ProcessObservationFailureClass -ne 'NONE') {
+        return $null
+    }
+    $script:ProcessQuerySequence++
+    $queryToken = "$token-$($script:ProcessQuerySequence)"
+    $resultPath = Join-Path $resolvedEvidence "process-query-$queryToken.json"
+    $errorPath = Join-Path $resolvedEvidence "process-query-$queryToken.stderr.txt"
+    $request = @{ operation = $Operation; process_id = $ProcessId } | ConvertTo-Json -Compress
+    $requestBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($request))
+    $helperTemplate = @'
+$ErrorActionPreference = 'Stop'
+$request = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__REQUEST_BASE64__')) | ConvertFrom-Json
+$result = switch ($request.operation) {
+    'identity' {
+        try {
+            $process = Get-Process -Id ([int]$request.process_id) -ErrorAction Stop
+            [pscustomobject]@{
+                state = 'live'
+                start_time_utc_ticks = $process.StartTime.ToUniversalTime().Ticks
+                process_name = $process.ProcessName
+            }
+        } catch {
+            if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
+                [pscustomobject]@{ state = 'exited'; start_time_utc_ticks = $null; process_name = $null }
+            } else {
+                [pscustomobject]@{ state = 'unknown'; start_time_utc_ticks = $null; process_name = $null }
+            }
+        }
+    }
+    'parent' {
+        $record = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$request.process_id)" -Property ParentProcessId -ErrorAction Stop
+        if ($null -eq $record) {
+            [pscustomobject]@{ state = 'missing'; parent_process_id = $null }
+        } else {
+            [pscustomobject]@{ state = 'found'; parent_process_id = [int]$record.ParentProcessId }
+        }
+    }
+    'children' {
+        $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $([int]$request.process_id)" -Property ProcessId -ErrorAction Stop | ForEach-Object { [int]$_.ProcessId })
+        [pscustomobject]@{ state = 'found'; child_process_ids = $children }
+    }
+    default { throw 'Unsupported bounded process query operation' }
+}
+$result | ConvertTo-Json -Compress
+'@
+    $helperCode = $helperTemplate.Replace('__REQUEST_BASE64__', $requestBase64)
+    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($helperCode))
+    try {
+        $helper = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
+            '-NoProfile', '-NonInteractive', '-EncodedCommand', $encodedCommand
+        ) -WindowStyle Hidden -PassThru -RedirectStandardOutput $resultPath -RedirectStandardError $errorPath
+    } catch {
+        $script:ProcessObservationFailureClass = 'PROCESS_QUERY_HELPER_START_FAILED'
+        return $null
+    }
+    if (-not $helper.WaitForExit($TimeoutMilliseconds)) {
+        # Deliberately do not terminate a possibly blocked query worker. It is
+        # isolated, has no product mutation authority, and this smoke proceeds
+        # only to a truthful unproven receipt.
+        $script:ProcessObservationFailureClass = 'PROCESS_QUERY_TIMEOUT'
+        return $null
+    }
+    try {
+        if ($helper.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $resultPath)) {
+            $script:ProcessObservationFailureClass = 'PROCESS_QUERY_HELPER_FAILED'
+            return $null
+        }
+        return Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
+    } catch {
+        $script:ProcessObservationFailureClass = 'PROCESS_QUERY_RESULT_INVALID'
+        return $null
+    } finally {
+        Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $errorPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Test-ProcessAncestor {
     param(
         [int]$ProcessId,
@@ -121,48 +214,38 @@ function Test-ProcessAncestor {
     )
     $currentId = $ProcessId
     for ($depth = 0; $depth -lt 8 -and $currentId -gt 0; $depth++) {
-        $record = Get-CimInstance Win32_Process -Filter "ProcessId = $currentId" -ErrorAction SilentlyContinue
+        $record = Invoke-BoundedProcessQuery -Operation 'parent' -ProcessId $currentId
         if ($null -eq $record) {
-            return $false
+            return 'unknown'
         }
-        $parentId = [int]$record.ParentProcessId
+        if ($record.state -ne 'found') {
+            return 'not_found'
+        }
+        $parentId = [int]$record.parent_process_id
         if ($parentId -eq $ExpectedAncestorId) {
-            return $true
+            return 'found'
         }
         $currentId = $parentId
     }
-    return $false
+    return 'not_found'
 }
 
 function Get-ProcessObservation {
     param(
         [int]$ProcessId
     )
-    try {
-        $process = Get-Process -Id $ProcessId -ErrorAction Stop
-    } catch {
-        if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
-            return [pscustomobject]@{ State = 'exited'; StartTimeUtcTicks = $null }
-        }
-        return [pscustomobject]@{ State = 'unknown'; StartTimeUtcTicks = $null }
-    }
-    try {
+    $result = Invoke-BoundedProcessQuery -Operation 'identity' -ProcessId $ProcessId
+    if ($null -eq $result) {
         return [pscustomobject]@{
-            State = 'live'
-            StartTimeUtcTicks = $process.StartTime.ToUniversalTime().Ticks
+            State = 'unknown'
+            StartTimeUtcTicks = $null
+            ProcessName = $null
         }
-    } catch {
-        # A process can exit between Get-Process and StartTime. Re-read only
-        # to distinguish that ordinary completion race from an inaccessible
-        # or otherwise unknown process; unknown never counts as completion.
-        try {
-            Get-Process -Id $ProcessId -ErrorAction Stop | Out-Null
-        } catch {
-            if ($_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound) {
-                return [pscustomobject]@{ State = 'exited'; StartTimeUtcTicks = $null }
-            }
-        }
-        return [pscustomobject]@{ State = 'unknown'; StartTimeUtcTicks = $null }
+    }
+    return [pscustomobject]@{
+        State = [string]$result.state
+        StartTimeUtcTicks = $result.start_time_utc_ticks
+        ProcessName = $result.process_name
     }
 }
 
@@ -208,13 +291,12 @@ function Add-OwnedProcessTreeSnapshot {
             continue
         }
         $TrackedProcesses[[string]$current.ProcessId] = [long]$current.StartTimeUtcTicks
-        try {
-            $children = @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $($current.ProcessId)" -ErrorAction Stop)
-        } catch {
+        $childrenResult = Invoke-BoundedProcessQuery -Operation 'children' -ProcessId $current.ProcessId
+        if ($null -eq $childrenResult -or $childrenResult.state -ne 'found') {
             return 'unknown'
         }
-        foreach ($child in $children) {
-            $childProcessId = [int]$child.ProcessId
+        foreach ($childProcessId in @($childrenResult.child_process_ids)) {
+            $childProcessId = [int]$childProcessId
             if ($TrackedProcesses.ContainsKey([string]$childProcessId)) {
                 continue
             }
@@ -306,9 +388,7 @@ function Stop-OwnedProcessTree {
         }
         Start-Sleep -Milliseconds 100
     }
-    if (-not $taskkill.HasExited) {
-        Stop-Process -Id $taskkill.Id -Force -ErrorAction SilentlyContinue
-    }
+    $script:CleanupFailureClass = 'OWNED_TASKKILL_TIMEOUT'
     return $false
 }
 
@@ -362,7 +442,6 @@ $launcherCompleted = $false
 while ([DateTimeOffset]::UtcNow -lt $deadline) {
     $windows = [TabBeaconSmokeWindows]::FindExactTitle($windowTitle)
     if (-not $windowObserved -and $windows.Count -eq 1) {
-        $candidateOwner = Get-Process -Id $windows[0].ProcessId -ErrorAction SilentlyContinue
         $candidateOwnerObservation = Get-ProcessObservation -ProcessId $windows[0].ProcessId
         if ($candidateOwnerObservation.State -eq 'unknown') {
             $identityQueriesProven = $false
@@ -372,7 +451,7 @@ while ([DateTimeOffset]::UtcNow -lt $deadline) {
         } else {
             $null
         }
-        if ($null -ne $candidateOwner -and $candidateOwner.ProcessName -eq 'WindowsTerminal' -and
+        if ($candidateOwnerObservation.ProcessName -eq 'WindowsTerminal' -and
             $null -ne $candidateOwnerStartTimeUtcTicks) {
             $windowObserved = $true
             $windowOwnerBound = $true
@@ -399,7 +478,11 @@ while ([DateTimeOffset]::UtcNow -lt $deadline) {
     }
     if (-not $windowChildLineageBound -and $windowOwnerBound -and $null -ne $childProcessId -and
         $null -ne $windowProcessStartTimeUtcTicks -and $null -ne $childProcessStartTimeUtcTicks) {
-        $windowChildLineageBound = Test-ProcessAncestor -ProcessId $childProcessId -ExpectedAncestorId $windowProcessId
+        $ancestorState = Test-ProcessAncestor -ProcessId $childProcessId -ExpectedAncestorId $windowProcessId
+        if ($ancestorState -eq 'unknown') {
+            $treeEnumerationProven = $false
+        }
+        $windowChildLineageBound = $ancestorState -eq 'found'
     }
     if ($windowChildLineageBound -and $null -ne $childProcessId) {
         $treeSnapshotState = Add-OwnedProcessTreeSnapshot -RootProcessId $childProcessId -RootStartTimeUtcTicks $childProcessStartTimeUtcTicks -TrackedProcesses $ownedProcessTree
@@ -606,7 +689,9 @@ if ($launcherIdentityState -eq 'live') {
     # Revalidate the exact short-lived launcher identity immediately before
     # terminating this train-owned process.
     if ((Get-ProcessIdentityState -ProcessId $wtLauncher.Id -ExpectedStartTimeUtcTicks $wtLauncherStartTimeUtcTicks) -eq 'live') {
-        Stop-Process -Id $wtLauncher.Id -Force -ErrorAction SilentlyContinue
+        if (-not (Stop-OwnedProcessTree -ProcessId $wtLauncher.Id -ExpectedStartTimeUtcTicks $wtLauncherStartTimeUtcTicks)) {
+            $script:CleanupFailureClass = 'OWNED_LAUNCHER_TERMINATION_FAILED'
+        }
     } else {
         $identityQueriesProven = $false
     }
@@ -719,6 +804,8 @@ $receipt = @(
     "WINDOWS_TERMINAL_SMOKE=$(if ($passed) { 'PASS' } else { 'FAIL' })"
     "TUI_EXIT_RESTORES_TERMINAL=$($passed.ToString().ToLowerInvariant())"
     "SHELL_USABLE_AFTER_TUI=$($shellUsable.ToString().ToLowerInvariant())"
+    "PROCESS_OBSERVATION_FAILURE_CLASS=$($script:ProcessObservationFailureClass)"
+    "CLEANUP_FAILURE_CLASS=$($script:CleanupFailureClass)"
     'OWNER_MUTATIONS=none'
 )
 [System.IO.File]::WriteAllLines($receiptPath, $receipt)

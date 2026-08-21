@@ -56,14 +56,19 @@ fn smoke_launch_and_cleanup_are_watchdog_bounded_and_owner_correlated() {
         script.contains("function Get-TrackedProcessTreeState")
             && script.contains("function Get-ProcessIdentityState")
             && script.contains("State = 'unknown'")
-            && script.contains("Get-Process -Id $ProcessId -ErrorAction Stop | Out-Null"),
+            && script.contains("function Invoke-BoundedProcessQuery")
+            && script.contains("-EncodedCommand")
+            && script.contains("$helper.WaitForExit($TimeoutMilliseconds)"),
         "cleanup must distinguish unknown process state from proven completion"
     );
     assert!(
-        script.contains("Get-CimInstance Win32_Process")
+        script.contains("Invoke-BoundedProcessQuery -Operation 'children'")
+            && script.contains("PROCESS_QUERY_TIMEOUT")
+            && script.contains("PROCESS_OBSERVATION_FAILURE_CLASS=")
+            && !script.contains("Stop-Process -Id $taskkill.Id")
             && script.contains("return 'unknown'")
             && script.contains("TREE_ENUMERATION_PROVEN="),
-        "descendant enumeration failures must be durable unproven evidence"
+        "process observation must be isolated, bounded, and durable unproven evidence"
     );
     assert!(
         script.contains("FindHandlesForProcess")
@@ -95,5 +100,16 @@ fn fixture_profile_probe_uses_the_same_version_contract_as_the_codex_adapter() {
     assert!(
         adapter.contains(".arg(\"--version\")"),
         "the checked Codex adapter contract must remain explicit"
+    );
+}
+
+#[test]
+fn visual_worker_process_queries_share_the_bounded_helper_contract() {
+    let runner = repository_source("src/visual/runner.rs");
+    assert!(
+        runner.contains("visual worker parent process query timed out")
+            && runner.contains("visual worker parent identity query timed out")
+            && runner.contains("bounded_powershell_output(&script, WORKER_PROCESS_QUERY_BUDGET)"),
+        "worker parent and identity probes must not use synchronous unbounded PowerShell output"
     );
 }
