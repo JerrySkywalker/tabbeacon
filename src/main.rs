@@ -31,6 +31,7 @@ use tabbeacon::management::ManagementSnapshot;
 use tabbeacon::providers::codex::{
     CodexHookRuntime, CodexIntegration, SetupOutcome, TitleOwnershipOutcome, UninstallOutcome,
 };
+use tabbeacon::providers::registry::ProviderRegistry;
 use tabbeacon::setup::{
     GuidedSetupApplyResult, GuidedSetupPlan, SetupDecision, SetupDiscovery, WindowsTerminalState,
     detect_windows_terminal,
@@ -55,8 +56,8 @@ use tabbeacon::{
     },
     settings::{
         ActivityMode, ConditionalSaveOutcome, PresentationSettings, PresentationSettingsSnapshot,
-        PresentationSettingsStore, PresentationTheme, SnapshotSaveOutcome, SpinnerPreset,
-        TabColorMode, TitleMode,
+        PresentationSettingsStore, PresentationTheme, ProviderBadgePolicy, SnapshotSaveOutcome,
+        SpinnerPreset, TabColorMode, TitleMode,
     },
     settings_transfer::{
         ImportApplyOutcome, ImportPlan, MAX_EXPORT_BYTES, SettingsExportV1, apply_import_plan,
@@ -680,11 +681,16 @@ fn explain_title(output_mode: OutputMode, language: Option<InterfaceLanguage>) -
             .and_then(|resolver| resolver.inspect_alias(cwd).ok())
     });
     let sessions = inspect_system_sessions();
+    let integrations = ProviderRegistry::from_diagnostics(
+        &diagnostics,
+        &tabbeacon::hook_inventory::HookInventory::default(),
+    );
     let explanation = TitleExplanation::from_observation(
         &diagnostics,
         presentation,
         workspace.as_ref(),
         &sessions,
+        &integrations,
     );
     match output_mode {
         OutputMode::Human => {
@@ -743,11 +749,11 @@ fn title_explanation_document(explanation: &TitleExplanation) -> HumanDocument {
         ))
         .with_field(title_explanation_field(
             HumanMessageKey::ProviderBadgePolicy,
-            explanation.provider_badge_policy,
+            &explanation.provider_badge_policy,
         ))
         .with_field(title_explanation_field(
             HumanMessageKey::ProviderBadgeValue,
-            explanation.provider_badge_value,
+            &explanation.provider_badge_value,
         ));
     if let Some(workspace) = &explanation.workspace {
         section = section
@@ -1746,6 +1752,9 @@ fn config_set(
         "activity" => ActivityMode::parse(value).map(|mode| current.with_activity(mode)),
         "spinner" => SpinnerPreset::parse(value).map(|preset| current.with_spinner(preset)),
         "theme" => PresentationTheme::parse(value).map(|theme| current.with_theme(theme)),
+        "provider-badge" => {
+            ProviderBadgePolicy::parse(value).map(|policy| current.with_provider_badge(policy))
+        }
         _ => None,
     };
     let Some(updated) = updated else {
@@ -1876,10 +1885,25 @@ fn config_wizard(output_mode: OutputMode, language: Option<InterfaceLanguage>) -
         Ok(value) => value,
         Err(error) => return wizard_error(&error, output_mode, language),
     };
+    let provider_badge = match prompt_choice(
+        "provider-badge",
+        current.provider_badge().as_str(),
+        ProviderBadgePolicy::parse,
+    ) {
+        Ok(value) => value,
+        Err(error) => return wizard_error(&error, output_mode, language),
+    };
     persist_settings_change(
         &store,
         current,
-        PresentationSettings::new(title, tab_color, activity, spinner, theme),
+        PresentationSettings::new_with_provider_badge(
+            title,
+            tab_color,
+            activity,
+            spinner,
+            theme,
+            provider_badge,
+        ),
         output_mode,
         language,
     )
@@ -1909,6 +1933,12 @@ fn print_setup_discovery(
             None::<String>,
             HumanText::message(HumanMessageKey::WindowsTerminal),
             HumanText::message(terminal_state),
+            HumanTone::Plain,
+        ))
+        .with_field(HumanField::new(
+            None::<String>,
+            HumanText::message(HumanMessageKey::Integrations),
+            HumanText::literal(discovery.registered_provider_ids().join(", ")),
             HumanTone::Plain,
         ))
         .with_field(HumanField::new(
@@ -2311,6 +2341,7 @@ fn print_settings(
     println!("ACTIVITY_MODE={}", settings.activity());
     println!("SPINNER_PRESET={}", settings.spinner());
     println!("THEME={}", settings.theme());
+    println!("PROVIDER_BADGE={}", settings.provider_badge());
     println!("TITLE_SPINNER_FEASIBILITY=PRODUCTION");
 }
 
@@ -2349,6 +2380,12 @@ fn presentation_settings_document(settings: PresentationSettings) -> HumanDocume
                 None::<String>,
                 HumanText::message(HumanMessageKey::Theme),
                 human_theme_text(settings.theme()),
+                HumanTone::Plain,
+            ))
+            .with_field(HumanField::new(
+                None::<String>,
+                HumanText::message(HumanMessageKey::ProviderBadgePolicy),
+                human_provider_badge_text(settings.provider_badge()),
                 HumanTone::Plain,
             ))
             .with_message(HumanMessage::plain(
@@ -2402,6 +2439,14 @@ fn human_theme_text(value: PresentationTheme) -> HumanText {
     })
 }
 
+fn human_provider_badge_text(value: ProviderBadgePolicy) -> HumanText {
+    HumanText::message(match value {
+        ProviderBadgePolicy::Auto => HumanMessageKey::Auto,
+        ProviderBadgePolicy::Always => HumanMessageKey::Always,
+        ProviderBadgePolicy::Off => HumanMessageKey::Disabled,
+    })
+}
+
 fn human_interface_language_text(value: InterfaceLanguage) -> HumanText {
     HumanText::message(match value {
         InterfaceLanguage::Auto => HumanMessageKey::Auto,
@@ -2445,6 +2490,7 @@ fn print_config_choices(key: &str, output_mode: OutputMode, language: Option<Int
         }
         "spinner" => eprintln!("SPINNER_CHOICES=codex|braille|quadrant|line|pulse"),
         "theme" => eprintln!("THEME_CHOICES=muted-dark|classic"),
+        "provider-badge" => eprintln!("PROVIDER_BADGE_CHOICES=auto|always|off"),
         _ => {}
     }
 }
@@ -3554,12 +3600,14 @@ fn collect_control_center_refresh(
     let hooks = CodexIntegration::from_environment()
         .map(|integration| integration.hook_inventory())
         .unwrap_or_default();
+    let integrations = ProviderRegistry::from_diagnostics(&report, &hooks);
     let sessions = inspect_system_sessions();
     let title_explanation = TitleExplanation::from_observation(
         &report,
         Some(presentation),
         workspace.as_ref(),
         &sessions,
+        &integrations,
     );
     Ok(tabbeacon::control_center::ControlCenterRefresh {
         presentation,
@@ -3569,6 +3617,7 @@ fn collect_control_center_refresh(
         workspace,
         sessions,
         hooks,
+        integrations,
         title_explanation,
     })
 }

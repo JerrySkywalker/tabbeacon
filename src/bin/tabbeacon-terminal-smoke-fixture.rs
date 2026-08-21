@@ -12,6 +12,7 @@ use tabbeacon::{
     hook_inventory::{HookInventory, HookInventoryAvailability},
     management::{ManagementHealth, ManagementOverview, ManagementSnapshot},
     providers::codex::CodexIntegration,
+    providers::registry::ProviderRegistry,
     settings::PresentationSettings,
 };
 
@@ -58,6 +59,7 @@ fn fixture_hook_inventory() -> Result<HookInventory, String> {
     result
 }
 
+#[allow(clippy::too_many_lines)] // The durable smoke receipt stays in one auditable fixture entry point.
 fn main() -> ExitCode {
     if env::args().nth(1).as_deref() == Some(FIXTURE_CODEX_VERSION_PROBE_ARGUMENT) {
         // Keep the adapter proof on the exact admitted Codex profile without
@@ -92,15 +94,24 @@ fn main() -> ExitCode {
         },
         ManagementOverview::default(),
     )
-    .with_hook_inventory(hook_inventory);
+    .with_hook_inventory(hook_inventory)
+    .with_integrations(ProviderRegistry::codex_observation(
+        Some("0.149.0"),
+        true,
+        true,
+        true,
+    ));
     match run_terminal_smoke_fixture(app) {
         Ok(report) => {
             if let Some(path) = std::env::var_os("TABBEACON_TUI_SMOKE_RESULT_PATH") {
                 let result = format!(
-                    "TUI_LIVE_REFRESH={}\nTUI_WORKSPACE_SESSIONS={}\nTUI_HOOK_INVENTORY={}\nTUI_HOOK_PROVIDER_ADAPTER=true\nTUI_HELP_OVERLAY={}\nTUI_TITLE_EXPLANATION={}\nTUI_LANGUAGE_LIVE_SWITCH={}\nTUI_INTERFACE_REVERT={}\nTUI_INTERFACE_STAGED_APPLY={}\nOWNER_MUTATIONS=none\n",
+                    "TUI_LIVE_REFRESH={}\nTUI_WORKSPACE_SESSIONS={}\nTUI_HOOK_INVENTORY={}\nTUI_HOOK_PROVIDER_ADAPTER=true\nTUI_INTEGRATIONS={}\nTUI_PROVIDER_CAPABILITY_MATRIX={}\nTUI_PROVIDER_BADGE_STAGED={}\nTUI_HELP_OVERLAY={}\nTUI_TITLE_EXPLANATION={}\nTUI_LANGUAGE_LIVE_SWITCH={}\nTUI_INTERFACE_REVERT={}\nTUI_INTERFACE_STAGED_APPLY={}\nOWNER_MUTATIONS=none\n",
                     report.live_refresh_merged,
                     report.workspace_and_sessions_visited,
                     report.hook_inventory_visited,
+                    report.integrations_visited,
+                    report.integrations_visited,
+                    report.provider_badge_staged,
                     report.help_overlay_exercised,
                     report.title_explanation_exercised,
                     report.interface_locale_switched,
@@ -122,6 +133,12 @@ fn main() -> ExitCode {
             );
             println!("TUI_HOOK_INVENTORY={}", report.hook_inventory_visited);
             println!("TUI_HOOK_PROVIDER_ADAPTER=true");
+            println!("TUI_INTEGRATIONS={}", report.integrations_visited);
+            println!(
+                "TUI_PROVIDER_CAPABILITY_MATRIX={}",
+                report.integrations_visited
+            );
+            println!("TUI_PROVIDER_BADGE_STAGED={}", report.provider_badge_staged);
             println!("TUI_HELP_OVERLAY={}", report.help_overlay_exercised);
             println!(
                 "TUI_TITLE_EXPLANATION={}",

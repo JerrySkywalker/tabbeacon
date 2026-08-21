@@ -26,8 +26,8 @@ use tabbeacon::{
     },
     repo::WorkspaceIdentityResolver,
     settings::{
-        ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
-        TitleMode,
+        ActivityMode, PresentationSettings, PresentationTheme, ProviderBadgePolicy, SpinnerPreset,
+        TabColorMode, TitleMode,
     },
 };
 use toml_edit::{Array, DocumentMut, Item, Table, value};
@@ -1717,6 +1717,34 @@ fn production_hook_path_applies_each_required_v0_1_channel_combination() {
     for (name, settings, expected, absent) in cases {
         assert_runtime_settings_case(&root, &raw, name, settings, expected, absent);
     }
+}
+
+#[test]
+fn runtime_withholds_always_badge_without_current_provider_admission() {
+    let root = TestRoot::new("runtime-provider-admission");
+    let repo = root.child("workstation-manager");
+    init_repo(
+        &repo,
+        "https://github.com/JerrySkywalker/workstation-manager.git",
+    );
+    let raw = serde_json::to_vec(&hook_payload("UserPromptSubmit", "session-a", &repo))
+        .expect("prompt serializes");
+    let settings = PresentationSettings::default()
+        .with_activity(ActivityMode::WindowsTerminalRing)
+        .with_provider_badge(ProviderBadgePolicy::Always);
+    let runtime = CodexHookRuntime::with_settings(root.child("state"), true, settings);
+    let mut output = Vec::new();
+
+    assert_eq!(
+        runtime.dispatch_to(&raw, UNIX_EPOCH, &mut output),
+        HookDispatchOutcome::Applied
+    );
+    let rendered = String::from_utf8(output).expect("terminal bytes are UTF-8");
+    assert!(rendered.contains("○ WORKMANA"));
+    assert!(
+        !rendered.contains("·C"),
+        "runtime must not infer current provider admission from stale setup evidence"
+    );
 }
 
 fn assert_runtime_settings_case(

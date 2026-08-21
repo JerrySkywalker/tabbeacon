@@ -10,9 +10,10 @@ use tabbeacon::{
         WindowsTerminalCapabilities, WindowsTerminalRenderer, presentation_fixture,
         replay_presentation_fixture,
     },
+    providers::registry::ProviderRegistry,
     settings::{
-        ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
-        TitleMode,
+        ActivityMode, PresentationSettings, PresentationTheme, ProviderBadgePolicy, SpinnerPreset,
+        TabColorMode, TitleMode,
     },
 };
 
@@ -577,6 +578,56 @@ fn title_and_activity_ownership_modes_preserve_their_existing_boundaries() {
         );
         assert!(renderer.title_for(state).is_none());
     }
+}
+
+#[test]
+fn provider_badge_policy_keeps_single_codex_auto_compact_and_bounds_always() {
+    let renderer = WindowsTerminalRenderer::with_settings(
+        WindowsTerminalCapabilities::new(false),
+        PresentationSettings::default(),
+    );
+    let registry = ProviderRegistry::codex_observation(Some("0.149.0"), true, true, true);
+    for (policy, expected) in [
+        (ProviderBadgePolicy::Auto, "⠋ TB"),
+        (ProviderBadgePolicy::Always, "⠋ TB·C"),
+        (ProviderBadgePolicy::Off, "⠋ TB"),
+    ] {
+        let badge = registry.title_badge_for("codex", policy);
+        let action =
+            PresentationPolicy::resolve(SemanticPresentationInput::new_with_provider_badge(
+                Phase::Working,
+                Attention::None,
+                Health::Normal,
+                "TB",
+                badge.as_deref(),
+            ));
+        let PresentationAction::Apply(state) = action else {
+            panic!("working state applies a title");
+        };
+        assert_eq!(
+            renderer
+                .title_for(&state)
+                .expect("TabBeacon owns title")
+                .as_str(),
+            expected
+        );
+    }
+
+    let invalid = PresentationPolicy::resolve(SemanticPresentationInput::new_with_provider_badge(
+        Phase::Working,
+        Attention::None,
+        Health::Normal,
+        "TB",
+        Some("bad badge"),
+    ));
+    let PresentationAction::Apply(state) = invalid else {
+        panic!("working state applies a title");
+    };
+    assert_eq!(
+        renderer.title_for(&state).unwrap().as_str(),
+        "⠋ TB",
+        "unvalidated provider badges cannot alter a title"
+    );
 }
 
 #[test]

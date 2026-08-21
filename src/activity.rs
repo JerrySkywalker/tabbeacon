@@ -91,7 +91,7 @@ pub struct ActivityLeaseDiagnostics {
 }
 
 /// Stable JSON schema version for the read-only sessions view.
-pub const SESSIONS_SCHEMA_VERSION: u32 = 1;
+pub const SESSIONS_SCHEMA_VERSION: u32 = 2;
 
 /// Bounded recency classification derived from a lease update timestamp.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -159,6 +159,8 @@ pub struct SessionWorkspaceObservability {
 pub struct SessionOverview {
     /// Safe repository alias; never the canonical workspace path or identity.
     pub workspace_alias: String,
+    /// Safe checked provider ID; never a native provider session ID.
+    pub provider: String,
     /// Provider-neutral presentation state already admitted to the worker.
     pub semantic_state: String,
     /// Whole seconds since the lease was last updated.
@@ -358,6 +360,9 @@ impl WorkerKey {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkerPresentation {
     workspace_alias: String,
+    /// Stable provider ID, defaulted for leases produced before G62.
+    #[serde(default = "default_worker_provider")]
+    provider: String,
     semantic_state: String,
     spinner_preset: String,
     #[serde(default)]
@@ -369,6 +374,7 @@ impl WorkerPresentation {
     #[must_use]
     pub fn working(workspace_alias: &str, spinner: SpinnerPreset) -> Self {
         Self::working_with_workspace_observability(
+            "codex",
             workspace_alias,
             spinner,
             SessionWorkspaceObservability::default(),
@@ -376,12 +382,14 @@ impl WorkerPresentation {
     }
 
     fn working_with_workspace_observability(
+        provider: &str,
         workspace_alias: &str,
         spinner: SpinnerPreset,
         workspace_observability: SessionWorkspaceObservability,
     ) -> Self {
         Self {
             workspace_alias: workspace_alias.to_owned(),
+            provider: provider.to_owned(),
             semantic_state: "working".to_owned(),
             spinner_preset: spinner.as_str().to_owned(),
             workspace_observability,
@@ -394,6 +402,7 @@ impl WorkerPresentation {
     #[allow(dead_code)]
     fn result_ready(workspace_alias: &str, spinner: SpinnerPreset) -> Self {
         Self::result_ready_with_workspace_observability(
+            "codex",
             workspace_alias,
             spinner,
             SessionWorkspaceObservability::default(),
@@ -401,12 +410,14 @@ impl WorkerPresentation {
     }
 
     fn result_ready_with_workspace_observability(
+        provider: &str,
         workspace_alias: &str,
         spinner: SpinnerPreset,
         workspace_observability: SessionWorkspaceObservability,
     ) -> Self {
         Self {
             workspace_alias: workspace_alias.to_owned(),
+            provider: provider.to_owned(),
             semantic_state: "result-ready".to_owned(),
             spinner_preset: spinner.as_str().to_owned(),
             workspace_observability,
@@ -419,6 +430,7 @@ impl WorkerPresentation {
     #[allow(dead_code)]
     fn approval(workspace_alias: &str, spinner: SpinnerPreset) -> Self {
         Self::approval_with_workspace_observability(
+            "codex",
             workspace_alias,
             spinner,
             SessionWorkspaceObservability::default(),
@@ -426,12 +438,14 @@ impl WorkerPresentation {
     }
 
     fn approval_with_workspace_observability(
+        provider: &str,
         workspace_alias: &str,
         spinner: SpinnerPreset,
         workspace_observability: SessionWorkspaceObservability,
     ) -> Self {
         Self {
             workspace_alias: workspace_alias.to_owned(),
+            provider: provider.to_owned(),
             semantic_state: "approval".to_owned(),
             spinner_preset: spinner.as_str().to_owned(),
             workspace_observability,
@@ -457,6 +471,22 @@ impl WorkerPresentation {
             _ => LEASE_TTL_MS,
         }
     }
+}
+
+fn default_worker_provider() -> String {
+    "codex".to_owned()
+}
+
+fn is_safe_worker_provider(provider: &str) -> bool {
+    (1..=48).contains(&provider.len())
+        && provider
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_lowercase())
+        && provider
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !provider.ends_with('-')
 }
 
 /// Rendering decision returned to the one-shot Hook runtime.
@@ -531,6 +561,7 @@ impl ActivityCoordinator {
             turn_sha256,
             generation,
             event_sequence,
+            "codex",
             workspace_alias,
             action,
             settings,
@@ -545,6 +576,7 @@ impl ActivityCoordinator {
         turn_sha256: Option<&str>,
         generation: u64,
         event_sequence: u64,
+        provider: &str,
         workspace_alias: &str,
         action: &PresentationAction,
         settings: PresentationSettings,
@@ -558,6 +590,9 @@ impl ActivityCoordinator {
         else {
             return ActivityRender::UncoordinatedFull;
         };
+        if !is_safe_worker_provider(provider) {
+            return ActivityRender::UncoordinatedFull;
+        }
         let key = WorkerKey::new(
             session_sha256,
             turn_sha256,
@@ -573,6 +608,7 @@ impl ActivityCoordinator {
             match title_status {
                 TitleStatus::Working if settings.activity().uses_worker_animation() => {
                     Some(WorkerPresentation::working_with_workspace_observability(
+                        provider,
                         workspace_alias,
                         settings.spinner(),
                         workspace_observability.clone(),
@@ -580,6 +616,7 @@ impl ActivityCoordinator {
                 }
                 TitleStatus::ResultReady => Some(
                     WorkerPresentation::result_ready_with_workspace_observability(
+                        provider,
                         workspace_alias,
                         settings.spinner(),
                         workspace_observability.clone(),
@@ -587,6 +624,7 @@ impl ActivityCoordinator {
                 ),
                 TitleStatus::Approval => {
                     Some(WorkerPresentation::approval_with_workspace_observability(
+                        provider,
                         workspace_alias,
                         settings.spinner(),
                         workspace_observability,
@@ -1403,11 +1441,10 @@ fn inspect_active_worker_identities_read_only(
             inspection.health = ActivityLeaseHealth::Warning;
             continue;
         }
-        let lease = fs::read(&path)
+        let Some(lease) = fs::read(&path)
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<WorkerLease>(&bytes).ok());
-        let Some(lease) =
-            lease.filter(|lease| lease.key_sha256 == key_digest && validate_lease(lease).is_ok())
+            .and_then(|bytes| serde_json::from_slice::<WorkerLease>(&bytes).ok())
+            .filter(|lease| lease.key_sha256 == key_digest && validate_lease(lease).is_ok())
         else {
             inspection.health = ActivityLeaseHealth::Warning;
             continue;
@@ -1500,13 +1537,7 @@ fn inspect_sessions_read_only(state_root: &Path, now: u64) -> SessionsOverview {
             continue;
         };
         let age_seconds = now.saturating_sub(lease.updated_unix_ms) / 1_000;
-        let recency = if age_seconds <= 10 {
-            SessionRecency::JustNow
-        } else if age_seconds <= 5 * 60 {
-            SessionRecency::Recent
-        } else {
-            SessionRecency::Aging
-        };
+        let recency = session_recency(age_seconds);
         let worker_health = if now > lease.expires_unix_ms {
             overview.stale_sessions = overview.stale_sessions.saturating_add(1);
             SessionWorkerHealth::StaleLease
@@ -1516,6 +1547,7 @@ fn inspect_sessions_read_only(state_root: &Path, now: u64) -> SessionsOverview {
         };
         overview.sessions.push(SessionOverview {
             workspace_alias: presentation.workspace_alias,
+            provider: presentation.provider,
             semantic_state: presentation.semantic_state,
             age_seconds,
             recency,
@@ -1526,6 +1558,7 @@ fn inspect_sessions_read_only(state_root: &Path, now: u64) -> SessionsOverview {
     overview.sessions.sort_by(|left, right| {
         left.workspace_alias
             .cmp(&right.workspace_alias)
+            .then(left.provider.cmp(&right.provider))
             .then(left.semantic_state.cmp(&right.semantic_state))
             .then(left.age_seconds.cmp(&right.age_seconds))
     });
@@ -1533,6 +1566,16 @@ fn inspect_sessions_read_only(state_root: &Path, now: u64) -> SessionsOverview {
         overview.health = ActivityLeaseHealth::Warning;
     }
     overview
+}
+
+fn session_recency(age_seconds: u64) -> SessionRecency {
+    if age_seconds <= 10 {
+        SessionRecency::JustNow
+    } else if age_seconds <= 5 * 60 {
+        SessionRecency::Recent
+    } else {
+        SessionRecency::Aging
+    }
 }
 
 fn is_stale(generation: u64, event_sequence: u64, current: &WorkerLease) -> bool {
@@ -1546,6 +1589,7 @@ fn validate_lease(lease: &WorkerLease) -> io::Result<()> {
             presentation.semantic_state.as_str(),
             "working" | "result-ready" | "approval"
         ) && presentation.spinner().is_some()
+            && presentation.provider == "codex"
             && RepositoryAlias::new(presentation.workspace_alias.clone()).is_ok()
     });
     if lease.schema != LEASE_SCHEMA
@@ -1912,11 +1956,11 @@ mod tests {
 
     use super::{
         ActivityCoordinator, ActivityExecution, ActivityLeaseHealth, ActivityLeaseStore,
-        ActivityRender, CleanupObserverAction, LeaseTransition, STATIC_ATTENTION_LEASE_TTL_MS,
-        TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation, WorkerProcessLiveness,
-        cleanup_observer_action, command_output_with_timeout, inspect_activity_leases_read_only,
-        inspect_sessions_read_only, next_animation_frame_deadline, normalized_windows_path,
-        system_powershell_path,
+        ActivityRender, CleanupObserverAction, LeaseTransition, SESSIONS_SCHEMA_VERSION,
+        STATIC_ATTENTION_LEASE_TTL_MS, TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation,
+        WorkerProcessLiveness, cleanup_observer_action, command_output_with_timeout,
+        inspect_activity_leases_read_only, inspect_sessions_read_only,
+        next_animation_frame_deadline, normalized_windows_path, system_powershell_path,
     };
     use crate::{
         core::{Attention, Health, Phase},
@@ -2103,7 +2147,9 @@ mod tests {
         assert_eq!(overview.stale_sessions, 1);
         assert_eq!(overview.invalid_leases, 1);
         assert_eq!(overview.sessions.len(), 2, "concurrent rows stay isolated");
+        assert_eq!(SESSIONS_SCHEMA_VERSION, 2);
         assert_eq!(overview.sessions[0].workspace_alias, "OWH");
+        assert_eq!(overview.sessions[0].provider, "codex");
         assert_ne!(
             overview.sessions[0].semantic_state,
             overview.sessions[1].semantic_state

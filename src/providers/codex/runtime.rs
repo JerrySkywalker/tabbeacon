@@ -13,6 +13,7 @@ use crate::{
         PresentationPolicy, SemanticPresentationInput, WindowsTerminalCapabilities,
         WindowsTerminalRenderer,
     },
+    providers::registry::ProviderRegistry,
     repo::{StableAliasRegistry, WorkspaceIdentityResolver},
     settings::{PresentationSettings, PresentationSettingsStore},
 };
@@ -206,16 +207,35 @@ impl CodexHookRuntime {
         };
         let mut reconciler = SessionReconciler::default();
         let snapshot = reconciler.apply(normalized.evidence());
-        let action = PresentationPolicy::resolve(SemanticPresentationInput::from_snapshot(
-            &snapshot,
-            selection.effective_alias().as_str(),
-        ));
+        // Hook input contains no current Codex release/profile evidence. Do
+        // not infer admission from an older setup, an owned declaration, or
+        // the normalizer's source profile: a newer CLI can keep delivering
+        // shaped input after it has become unadmitted. The hook path therefore
+        // uses an explicitly unknown registry and withholds an `always` badge
+        // until a future runtime can carry a current, bounded probe result.
+        let runtime_registry = ProviderRegistry::default();
+        let provider_badge =
+            runtime_registry.title_badge_for("codex", self.renderer.settings().provider_badge());
+        let action = PresentationPolicy::resolve(
+            SemanticPresentationInput::from_snapshot_with_provider_badge(
+                &snapshot,
+                selection.effective_alias().as_str(),
+                provider_badge.as_deref(),
+            ),
+        );
+        let title_workspace_alias = match &action {
+            crate::presentation::PresentationAction::Apply(state)
+            | crate::presentation::PresentationAction::Reset(state) => {
+                state.workspace_alias().as_str()
+            }
+        };
         let render = self.activity.reconcile_with_workspace_observability(
             admitted.session_sha256(),
             admitted.turn_sha256(),
             admitted.generation(),
             admitted.event_sequence(),
-            selection.effective_alias().as_str(),
+            "codex",
+            title_workspace_alias,
             &action,
             self.renderer.settings(),
             selection.workspace_observability(),

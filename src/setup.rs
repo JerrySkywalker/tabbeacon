@@ -14,6 +14,7 @@ use crate::{
         InterfacePreferencesStore,
     },
     providers::codex::{CodexDoctorReport, CodexHookProfile, DoctorStatus, SetupOutcome},
+    providers::registry::ProviderRegistry,
     settings::{
         ConditionalSaveOutcome, PresentationSettings, PresentationSettingsSnapshot,
         PresentationSettingsStore, SettingsError, SnapshotSaveOutcome,
@@ -102,6 +103,7 @@ pub struct SetupDiscovery {
     profile_supported: bool,
     hooks: HookSetupState,
     doctor_status: DoctorStatus,
+    providers: ProviderRegistry,
 }
 
 impl SetupDiscovery {
@@ -128,6 +130,12 @@ impl SetupDiscovery {
                 report.overall(),
             ),
             doctor_status: report.overall(),
+            providers: ProviderRegistry::codex_observation(
+                report.codex_version(),
+                report.profile_supported(),
+                report.check_status("ownership.manifest") == Some(DoctorStatus::Pass),
+                report.check_status("hooks.declarations") == Some(DoctorStatus::Pass),
+            ),
         }
     }
 
@@ -177,6 +185,12 @@ impl SetupDiscovery {
     #[must_use]
     pub const fn doctor_status(&self) -> DoctorStatus {
         self.doctor_status
+    }
+
+    /// Deterministic registered provider IDs from typed read-only probes.
+    #[must_use]
+    pub fn registered_provider_ids(&self) -> Vec<&str> {
+        self.providers.registered_ids()
     }
 }
 
@@ -597,6 +611,7 @@ mod tests {
             profile_supported: true,
             hooks: HookSetupState::ReviewRequired,
             doctor_status: DoctorStatus::Warning,
+            providers: ProviderRegistry::codex_observation(Some("0.147.0"), true, true, true),
         }
     }
 
