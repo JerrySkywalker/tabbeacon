@@ -44,10 +44,10 @@ fn fixture_hook_inventory() -> Result<HookInventory, String> {
             root.join("state"),
             executable.clone(),
         )
-        // The fixture's profile probe is its own short-lived executable,
-        // which the owned Windows Terminal child tree can terminate if the
-        // real-terminal watchdog expires. It never probes an Owner Codex
-        // installation during visual acceptance.
+        // The fixture's profile probe is its own short-lived executable. It
+        // never probes an Owner Codex installation during visual acceptance;
+        // a missing durable fixture receipt remains unproven rather than
+        // authorizing external process termination.
         .with_codex_program(executable)
         .hook_inventory();
         (inventory.availability == HookInventoryAvailability::Available)
