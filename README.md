@@ -68,7 +68,7 @@ TabBeacon has two first-class installation channels:
   To install this release exactly:
 
   ```powershell
-  cargo install tabbeacon --version 0.5.0 --locked
+  cargo install tabbeacon --version 0.5.1 --locked
   ```
 
 TabBeacon requires Rust 1.97.1. If your default Rust toolchain is older, use a
@@ -129,7 +129,9 @@ to stdout and keeps the normal doctor exit contract: a failure is nonzero while
 warning and pass are successful. `status --json` remains observational and
 successful even when its nested doctor verdict is a failure.
 
-TabBeacon 0.5.0 publishes `sessions`, a read-only projection of
+TabBeacon 0.5.1 adds provider-aware Integrations and `sessions` projections,
+Hook Inspector diagnostics, title/naming explainability, and runtime-worker
+upgrade diagnostics. `sessions` remains a read-only projection of
 ephemeral activity leases. Each row contains only a safe workspace alias,
 semantic state, age/recency, and lease-backed worker health. A current lease is
 reported as `recently_authorized`, not as proof that an operating-system process
