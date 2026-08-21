@@ -688,7 +688,7 @@ fn explain_title(output_mode: OutputMode, language: Option<InterfaceLanguage>) -
     );
     match output_mode {
         OutputMode::Human => {
-            print_human_document(&title_explanation_document(&explanation), language)
+            print_human_document(&title_explanation_document(&explanation), language);
         }
         OutputMode::Plain => print_title_explanation_plain(&explanation),
         OutputMode::Json => match serde_json::to_string(&explanation) {
