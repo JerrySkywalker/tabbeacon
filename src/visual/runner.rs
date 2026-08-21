@@ -352,7 +352,12 @@ struct WorkerAuthorizationLease {
 
 /// Waits for one directly spawned helper. At the deadline, it runs `taskkill`
 /// only for the helper's direct PID and its descendants, then confirms bounded
-/// reaping without draining worker-owned output handles.
+/// direct-handle reaping without draining worker-owned output handles.
+///
+/// The directly spawned PID is sufficient ownership evidence for `taskkill
+/// /T`. Process-tree inspection is deliberately not a completion precondition:
+/// a stalled CIM query must not extend the worker deadline or turn an owned
+/// timeout into an unbounded harness wait.
 fn wait_for_bounded_worker(
     mut worker: Child,
     budget: Duration,
@@ -385,7 +390,6 @@ fn wait_for_child_exit(
 
 fn terminate_owned_worker_tree(worker: &mut Child) -> VisualResult<bool> {
     let worker_pid = worker.id();
-    let process_tree = owned_worker_process_tree(worker_pid).ok();
     let Ok(mut terminator) = Command::new("taskkill.exe")
         .args(["/PID", &worker_pid.to_string(), "/T", "/F"])
         .stdout(Stdio::null())
@@ -406,10 +410,7 @@ fn terminate_owned_worker_tree(worker: &mut Child) -> VisualResult<bool> {
     if !terminate_direct_worker(worker)? {
         return Ok(false);
     }
-    let Some(process_tree) = process_tree else {
-        return Ok(false);
-    };
-    owned_worker_process_tree_is_reaped(&process_tree)
+    Ok(true)
 }
 
 fn terminate_direct_worker(worker: &mut Child) -> VisualResult<bool> {
@@ -418,65 +419,6 @@ fn terminate_direct_worker(worker: &mut Child) -> VisualResult<bool> {
     }
     let _ = worker.kill();
     Ok(wait_for_child_exit(worker, WORKER_TERMINATION_BUDGET)?.is_some())
-}
-
-/// Returns the directly spawned helper and descendants visible immediately
-/// before `taskkill /T` executes. The PID list is transient: it is used only
-/// to confirm cleanup and is never placed in visual evidence.
-fn owned_worker_process_tree(worker_pid: u32) -> VisualResult<Vec<u32>> {
-    let script = format!(
-        "$seen = [System.Collections.Generic.HashSet[int]]::new(); \
-         $pending = [System.Collections.Generic.Queue[int]]::new(); \
-         $pending.Enqueue({worker_pid}); \
-         while ($pending.Count -gt 0) {{ \
-             $parent = $pending.Dequeue(); \
-             if (-not $seen.Add($parent)) {{ continue }}; \
-             @(Get-CimInstance Win32_Process -Filter \"ParentProcessId = $parent\") | \
-                 ForEach-Object {{ $pending.Enqueue([int]$_.ProcessId) }} \
-         }}; \
-         $seen | Sort-Object | ForEach-Object {{ $_ }}"
-    );
-    let output = bounded_powershell_output(&script, WORKER_PROCESS_QUERY_BUDGET)?
-        .ok_or_else(|| VisualError::Platform("owned worker process query timed out".to_owned()))?;
-    if !output.status.success() {
-        return Err(VisualError::Platform(
-            "owned worker process query did not complete".to_owned(),
-        ));
-    }
-    let process_ids = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            line.parse::<u32>().map_err(|_| {
-                VisualError::Platform("owned worker process query was invalid".to_owned())
-            })
-        })
-        .collect::<VisualResult<Vec<_>>>()?;
-    if process_ids.is_empty() || !process_ids.contains(&worker_pid) {
-        return Err(VisualError::Platform(
-            "owned worker process query did not include the helper".to_owned(),
-        ));
-    }
-    Ok(process_ids)
-}
-
-fn owned_worker_process_tree_is_reaped(process_ids: &[u32]) -> VisualResult<bool> {
-    if process_ids.is_empty() {
-        return Ok(false);
-    }
-    let filter = process_ids
-        .iter()
-        .map(|process_id| format!("ProcessId = {process_id}"))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    let script = format!("@(Get-CimInstance Win32_Process -Filter \"{filter}\").Count");
-    let output = bounded_powershell_output(&script, WORKER_PROCESS_QUERY_BUDGET)?
-        .ok_or_else(|| VisualError::Platform("owned worker cleanup query timed out".to_owned()))?;
-    if !output.status.success() {
-        return Ok(false);
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim() == "0")
 }
 
 fn bounded_powershell_output(
