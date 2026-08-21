@@ -344,7 +344,7 @@ fn project_profile(
         return;
     }
     let (id, title, explanation) = match report.codex.profile_state.as_str() {
-        "known_unadmitted" => (
+        "experimental" => (
             "codex.profile_unadmitted",
             "Codex profile is not admitted",
             "This detected Codex version has no admitted TabBeacon hook profile.",
@@ -812,7 +812,7 @@ mod tests {
         let mut report = report();
         add_check(&mut report, "hooks.currentness", DiagnosticStatus::Fail);
         report.codex.profile_supported = false;
-        report.codex.profile_state = "known_unadmitted".to_owned();
+        report.codex.profile_state = "experimental".to_owned();
         report.title = title(TitleRemediationState::Available);
 
         let snapshot = ManagementSnapshot::from_diagnostics(&report);

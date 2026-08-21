@@ -11,9 +11,11 @@ TabBeacon's first provider must preserve literal daily `codex` launch, remain
 fail open, and feed the existing provider-neutral evidence model without
 scraping the Codex TUI.
 
-Codex `0.147.0` supports user-global command hooks in
-`~/.codex/hooks.json`, hash-based hook review/trust, and supported terminal
-title configuration. It accepts Windows-specific commands through
+Codex `0.147.0` and source-audited `0.149.0` support TabBeacon's user-global
+command hooks in `~/.codex/hooks.json`, hash-based hook review/trust, and
+supported terminal-title configuration. Codex 0.149 additionally supports
+external MCP hook handlers; TabBeacon preserves those groups and never adopts
+or rewrites them. It accepts Windows-specific commands through
 `commandWindows`. Although current upstream source implements asynchronous
 command hooks, the admitted installed release parses but skips non-end hooks
 configured with `async = true`.
@@ -64,10 +66,10 @@ only exact owned fields and refuses drift.
   no write.
 - Windows Terminal presentation is written through the owned console handle,
   because hook stdout is captured and interpreted by Codex.
-- `doctor` reimplements the admitted `0.147.0` normalized hook hash only for
-  read-only active/inactive diagnosis. A Codex version outside the admitted
+- `doctor` reimplements the admitted command-profile normalized hook hash only
+  for read-only active/inactive diagnosis. A Codex version outside the admitted
   compatibility contract fails that proof rather than guessing. ADR 0008
-  replaces the version floor with an exact release profile and expands the
-  owned surface to eleven events for turn, subagent, and compact awareness.
+  replaces the version floor with exact release profiles and expands the owned
+  surface to eleven events for turn, subagent, and compact awareness.
 - TB-G06X remains the separate experimental higher-fidelity app-server track;
   TB-G07 remains responsible for autonomous provider-to-terminal E2E.

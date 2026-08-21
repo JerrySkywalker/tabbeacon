@@ -2,13 +2,17 @@
 
 use std::{
     env, fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+static ORIGINAL_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 struct TestRoot {
     path: PathBuf,
@@ -40,6 +44,25 @@ impl Drop for TestRoot {
     }
 }
 
+fn inherited_path() -> &'static Path {
+    ORIGINAL_PATH.get_or_init(|| {
+        PathBuf::from(
+            env::var_os("PATH").expect("test process has a PATH for cmd.exe and Cargo binaries"),
+        )
+    })
+}
+
+fn fake_codex_directory(root: &TestRoot, version: &str) -> PathBuf {
+    let directory = root.child("fake-codex");
+    fs::create_dir_all(&directory).expect("fake Codex directory creates");
+    fs::write(
+        directory.join("codex.cmd"),
+        format!("@echo off\r\necho codex-cli {version}\r\n"),
+    )
+    .expect("fake Codex version probe writes");
+    directory
+}
+
 fn isolated_command(root: &TestRoot) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tabbeacon"));
     command
@@ -49,6 +72,14 @@ fn isolated_command(root: &TestRoot) -> Command {
         .env("XDG_STATE_HOME", root.child("xdg-state"))
         .env_remove("WT_SESSION")
         .env_remove("WT_PROFILE_ID");
+    command
+}
+
+fn isolated_command_with_codex(root: &TestRoot, codex_directory: &Path) -> Command {
+    let mut command = isolated_command(root);
+    let path = env::join_paths([codex_directory, inherited_path()])
+        .expect("isolated Codex version-probe PATH joins safely");
+    command.env("PATH", path);
     command
 }
 
@@ -100,6 +131,10 @@ fn output_modes_preserve_machine_json_and_admit_legacy_plain_output() {
     let value: serde_json::Value =
         serde_json::from_slice(&json.stdout).expect("JSON status remains a document");
     assert_eq!(value["schema_version"], 1);
+    if value["codex"]["version"] == "0.149.0" {
+        assert_eq!(value["codex"]["profile_state"], "supported");
+        assert_eq!(value["codex"]["hook_profile"], "codex-hooks-rust-v0.149.0");
+    }
 
     let plain = isolated_command(&root)
         .args(["status", "--plain"])
@@ -764,8 +799,9 @@ fn uninstall_defaults_to_human_output_and_preserves_plain_receipts() {
 #[test]
 fn setup_codex_defaults_to_human_output_and_plain_retains_receipts() {
     let root = TestRoot::new("human-setup-output");
+    let codex = fake_codex_directory(&root, "0.149.0");
 
-    let human = isolated_command(&root)
+    let human = isolated_command_with_codex(&root, &codex)
         .args(["setup", "codex", "--lang", "en-US"])
         .output()
         .expect("human setup codex starts");
@@ -780,7 +816,7 @@ fn setup_codex_defaults_to_human_output_and_plain_retains_receipts() {
         "redirected human output must not contain ANSI color"
     );
 
-    let plain = isolated_command(&root)
+    let plain = isolated_command_with_codex(&root, &codex)
         .args(["setup", "codex", "--plain"])
         .output()
         .expect("plain setup codex starts");

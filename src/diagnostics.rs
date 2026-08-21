@@ -410,7 +410,7 @@ fn collect_codex_diagnostics() -> (CodexDiagnostics, IntegrationDiagnostics, Doc
             CodexDiagnostics {
                 version: None,
                 hook_profile: None,
-                profile_state: "unknown_or_unavailable".to_owned(),
+                profile_state: "unknown".to_owned(),
                 profile_supported: false,
             },
             IntegrationDiagnostics {

@@ -25,10 +25,13 @@ evidence for this profile.
 
 ## Decision
 
-Freeze production normalization to the exact profile
-`codex-hooks-rust-v0.147.0`. An unstudied Codex version has no admitted profile;
-doctor reports failure rather than inheriting the contract from a version
-floor.
+Freeze production normalization to the exact profiles
+`codex-hooks-rust-v0.147.0` and `codex-hooks-rust-v0.149.0`. The 0.149 source
+audit found a new MCP handler family while retaining the bounded command Hook
+contract. TabBeacon reconciles only its exact owned command declarations and
+preserves external MCP groups unchanged. An unstudied Codex version has no
+admitted profile; doctor reports failure rather than inheriting the contract
+from a version floor.
 
 The owned user Hook surface is the exact eleven-event release surface:
 

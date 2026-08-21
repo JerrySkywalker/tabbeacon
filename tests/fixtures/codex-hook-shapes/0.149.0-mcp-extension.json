@@ -1,0 +1,19 @@
+{
+  "description": "Codex 0.149 external MCP handler fixture",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "fixture-security",
+            "tool": "scan",
+            "input": { "mode": "safe" },
+            "timeout": 1,
+            "statusMessage": "fixture external MCP hook"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -241,10 +241,15 @@ Windows Terminal, PowerShell, Cargo, or another `tabbeacon` executable path.
 After a requested drain leaves no matching process, it performs the final
 replacement-access probe without writing bytes to the target.
 
-The admitted production profile is `codex-hooks-rust-v0.147.0`, audited from
-the official `rust-v0.147.0` source tag. It is turn-aware, thread-spawn
-subagent-aware, and compact-aware. A newer version does not inherit that
-profile merely because its version number is higher.
+The admitted production profiles are `codex-hooks-rust-v0.147.0` and
+`codex-hooks-rust-v0.149.0`, audited from the matching official source tags.
+Both are turn-aware, thread-spawn subagent-aware, and compact-aware. The 0.149
+audit adds `mcp_tool` as an external handler type and refactors Hook runtime
+internals, while retaining TabBeacon's command Hook event set, declaration
+fields, trust-state keys, timeout semantics, and terminal-title ownership.
+TabBeacon reconciles only exact owned command groups and preserves external
+MCP groups unchanged. A newer version never inherits either profile merely
+because its version number is higher.
 
 ## Operational diagnostics
 
@@ -315,18 +320,29 @@ become authoritative failed/warning/interrupted states.
 
 ## Fail-open behavior
 
-The installed Codex `0.147.0` release requires these hooks to be synchronous,
-so TabBeacon uses the minimum one-second Codex timeout. The Windows command
+The admitted command Hook profiles require these hooks to be synchronous, so
+TabBeacon uses the minimum one-second Codex timeout. The Windows command
 neutralizes a missing or nonzero TabBeacon executable, and the internal hook
-ingress is silent and always successful. Generation, repository, state, or terminal output
-failure loses decoration only; it does not return a Codex block decision.
+ingress is silent and always successful. Generation, repository, state, or
+terminal output failure loses decoration only; it does not return a Codex
+block decision.
 
 ## Exact compatibility registry
 
-TabBeacon classifies Codex versions through one offline typed registry. v0.3 admits
-only `codex-hooks-rust-v0.147.0`; a numerically newer version never inherits that
-support. Read-only `status` and `doctor` expose `supported`, `known_unadmitted`, or
-`unknown_or_unavailable` alongside the admitted profile identifier when one exists.
+TabBeacon classifies Codex versions through one offline typed registry. The
+registry currently admits `codex-hooks-rust-v0.147.0` and
+`codex-hooks-rust-v0.149.0`; a numerically newer version never inherits that
+support. Read-only `status` and `doctor` expose `supported`, `experimental`,
+`unknown`, or `unsupported` alongside the admitted profile identifier when one
+exists. `supported` reports `Codex version is source-audited`; an `unknown`
+detected version reports its detected version, `Registry: unknown`, `Hook
+profile: unclassified`, and `Risk: manual review required`.
+
+Unknown, experimental, and unsupported versions are fail-closed for `setup`
+and title reconciliation: no hooks, trust state, title setting, manifest, or
+backup is created or changed. Safe uninstall remains available only for exact
+manifest-owned declarations, so an owner can remove a previously installed
+integration without adopting an unproven version or Hook shape.
 
 `scripts/compare-codex-compatibility.ps1` compares two local source checkouts or two
 Git references over the bounded Hook, identity, lifecycle, timeout, and title-ownership
