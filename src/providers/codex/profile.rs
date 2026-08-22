@@ -191,7 +191,7 @@ impl CodexHookWireShape {
         self.root_key
     }
 
-    /// Exact handler type owned by TabBeacon.
+    /// Exact handler type owned by `TabBeacon`.
     #[must_use]
     pub const fn handler_type(self) -> &'static str {
         self.handler_type
