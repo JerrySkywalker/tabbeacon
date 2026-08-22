@@ -11,7 +11,15 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use jerry_terminal_ui::{
+use ratatui::{
+    Frame,
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
+};
+use terminal_ui_contract::{
     footer::{FooterAction, FooterState, format_footer},
     input::{InputKind, admits_input},
     interaction::{
@@ -20,14 +28,6 @@ use jerry_terminal_ui::{
     },
     layout::HUMAN_SHELL,
     navigation::TopLevelNavigation,
-};
-use ratatui::{
-    Frame,
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
 };
 
 use crate::{

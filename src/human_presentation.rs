@@ -7,7 +7,7 @@
 
 use std::env;
 
-use jerry_terminal_ui::{
+use terminal_ui_contract::{
     chrome::{ColorPolicy as SharedColorPolicy, color_enabled as shared_color_enabled},
     locale::{
         Locale as SharedLocale, LocaleInputs as SharedLocaleInputs,
