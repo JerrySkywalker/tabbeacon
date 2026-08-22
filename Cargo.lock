@@ -594,16 +594,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "jerry-terminal-ui"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32a68f687e10bedc69baa19f01310b955de1e7cc9c6af435570636036c016a47"
-dependencies = [
- "unicode-segmentation",
- "unicode-width 0.2.0",
-]
-
-[[package]]
 name = "js-sys"
 version = "0.3.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1061,12 +1051,12 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "dialoguer",
- "jerry-terminal-ui",
  "png",
  "ratatui",
  "serde",
  "serde_json",
  "sha2",
+ "terminal-ui-contract",
  "toml_edit",
  "uiautomation",
  "unicode-normalization",
@@ -1087,6 +1077,16 @@ dependencies = [
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "terminal-ui-contract"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4f5acd23829502346d2eeaddebb964ad5bb2ea146964eedc264b246ed6707ec"
+dependencies = [
+ "unicode-segmentation",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]
