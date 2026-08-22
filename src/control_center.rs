@@ -11,6 +11,16 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use jerry_terminal_ui::{
+    footer::{FooterAction, FooterState, format_footer},
+    input::{InputKind, admits_input},
+    interaction::{
+        DiscardDecision, OverlayDismissKey, OverlayState as SharedOverlayState, QuitDisposition,
+        SettingsEditor,
+    },
+    layout::HUMAN_SHELL,
+    navigation::TopLevelNavigation,
+};
 use ratatui::{
     Frame,
     backend::CrosstermBackend,
@@ -281,8 +291,11 @@ pub struct ControlCenterApp {
     interface_conflict: bool,
     workspace_conflict: bool,
     confirm_discard: bool,
+    discard_editor: SettingsEditor<()>,
     appearance_field: Option<AppearanceField>,
+    appearance_editor: SettingsEditor<AppearanceField>,
     interface_field: Option<InterfaceField>,
+    interface_editor: SettingsEditor<InterfaceField>,
 }
 
 impl ControlCenterApp {
@@ -317,8 +330,11 @@ impl ControlCenterApp {
             interface_conflict: false,
             workspace_conflict: false,
             confirm_discard: false,
+            discard_editor: SettingsEditor::new(()),
             appearance_field: None,
+            appearance_editor: SettingsEditor::new(AppearanceField::Title),
             interface_field: None,
+            interface_editor: SettingsEditor::new(InterfaceField::Language),
         }
     }
 
@@ -559,7 +575,12 @@ impl ControlCenterApp {
             {
                 self.open_previewable_repair();
             }
-            KeyCode::Char('q') if self.dirty => self.confirm_discard = true,
+            KeyCode::Char('q') if self.dirty => {
+                self.confirm_discard = matches!(
+                    self.discard_editor.request_quit(true),
+                    QuitDisposition::ConfirmDiscard
+                );
+            }
             _ => {}
         }
         ControlCenterCommand::None
@@ -567,12 +588,20 @@ impl ControlCenterApp {
 
     /// Applies a terminal key event, including the interrupt key path.
     pub fn handle_event(&mut self, key: KeyEvent) -> ControlCenterCommand {
-        if key.kind != KeyEventKind::Press {
+        let input_kind = match key.kind {
+            KeyEventKind::Press => InputKind::Press,
+            KeyEventKind::Repeat => InputKind::Repeat,
+            KeyEventKind::Release => InputKind::Release,
+        };
+        if !admits_input(input_kind) {
             return ControlCenterCommand::None;
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if self.dirty {
-                self.confirm_discard = true;
+                self.confirm_discard = matches!(
+                    self.discard_editor.request_quit(true),
+                    QuitDisposition::ConfirmDiscard
+                );
                 return ControlCenterCommand::None;
             }
             return ControlCenterCommand::Quit;
@@ -615,10 +644,18 @@ impl ControlCenterApp {
     fn handle_discard_key(&mut self, key: KeyCode) -> ControlCenterCommand {
         match key {
             KeyCode::Char('d') => {
-                self.revert();
-                self.confirm_discard = false;
+                if self
+                    .discard_editor
+                    .resolve_discard(DiscardDecision::Discard)
+                {
+                    self.revert();
+                }
+                self.confirm_discard = self.discard_editor.awaiting_discard_confirmation();
             }
-            KeyCode::Char('k' | 'q') | KeyCode::Esc => self.confirm_discard = false,
+            KeyCode::Char('k' | 'q') | KeyCode::Esc => {
+                let _ = self.discard_editor.resolve_discard(DiscardDecision::Cancel);
+                self.confirm_discard = self.discard_editor.awaiting_discard_confirmation();
+            }
             _ => {}
         }
         ControlCenterCommand::None
@@ -627,8 +664,11 @@ impl ControlCenterApp {
     fn handle_overlay_key(&mut self, key: KeyCode) -> ControlCenterCommand {
         match &self.overlay {
             ControlCenterOverlay::Help => {
-                if matches!(key, KeyCode::Esc | KeyCode::Char('?' | 'q')) {
-                    self.overlay = ControlCenterOverlay::None;
+                if let Some(dismiss_key) = help_dismiss_key(key) {
+                    let mut overlay = SharedOverlayState::Help;
+                    if overlay.dismiss_with(dismiss_key) {
+                        self.overlay = ControlCenterOverlay::None;
+                    }
                 }
             }
             ControlCenterOverlay::RepairPreview(plan) => match key {
@@ -694,13 +734,22 @@ impl ControlCenterApp {
         self.workspace_conflict = false;
         self.appearance_field = None;
         self.interface_field = None;
+        if self.appearance_editor.is_editing() {
+            self.appearance_editor.enter_or_finish();
+        }
+        if self.interface_editor.is_editing() {
+            self.interface_editor.enter_or_finish();
+        }
         self.update_dirty();
     }
 
     fn toggle_appearance_focus(&mut self) {
-        self.appearance_field = self
-            .appearance_field
-            .map_or(Some(AppearanceField::Title), |_| None);
+        self.appearance_editor.enter_or_finish();
+        self.appearance_field = if self.appearance_editor.is_editing() {
+            Some(self.appearance_editor.selected_field())
+        } else {
+            None
+        };
     }
 
     fn step(&mut self, offset: isize) {
@@ -712,30 +761,28 @@ impl ControlCenterApp {
             self.step_interface_field(offset);
             return;
         }
-        let index = Screen::ALL
-            .iter()
-            .position(|screen| *screen == self.screen)
-            .unwrap_or(0);
-        let next = shifted_index(index, Screen::ALL.len(), offset);
-        self.screen = Screen::ALL[next];
+        let mut navigation = TopLevelNavigation::new(self.screen);
+        if navigation.move_by(&Screen::ALL, offset) {
+            self.screen = navigation.current();
+        }
     }
 
     fn step_appearance_field(&mut self, offset: isize) {
-        let index = AppearanceField::ALL
-            .iter()
-            .position(|field| Some(*field) == self.appearance_field)
-            .unwrap_or(0);
-        self.appearance_field =
-            Some(AppearanceField::ALL[shifted_index(index, AppearanceField::ALL.len(), offset)]);
+        if self
+            .appearance_editor
+            .move_field(&AppearanceField::ALL, offset)
+        {
+            self.appearance_field = Some(self.appearance_editor.selected_field());
+        }
     }
 
     fn step_interface_field(&mut self, offset: isize) {
-        let index = InterfaceField::ALL
-            .iter()
-            .position(|field| Some(*field) == self.interface_field)
-            .unwrap_or(0);
-        self.interface_field =
-            Some(InterfaceField::ALL[shifted_index(index, InterfaceField::ALL.len(), offset)]);
+        if self
+            .interface_editor
+            .move_field(&InterfaceField::ALL, offset)
+        {
+            self.interface_field = Some(self.interface_editor.selected_field());
+        }
     }
 
     fn change_focused(&mut self, offset: isize) {
@@ -770,9 +817,12 @@ impl ControlCenterApp {
     }
 
     fn toggle_interface_focus(&mut self) {
-        self.interface_field = self
-            .interface_field
-            .map_or(Some(InterfaceField::Language), |_| None);
+        self.interface_editor.enter_or_finish();
+        self.interface_field = if self.interface_editor.is_editing() {
+            Some(self.interface_editor.selected_field())
+        } else {
+            None
+        };
     }
 
     fn change_focused_interface(&mut self, offset: isize) {
@@ -1393,8 +1443,8 @@ impl<L: TerminalLifecycle> Drop for TerminalGuard<L> {
     }
 }
 
-const MIN_TERMINAL_WIDTH: u16 = 24;
-const MIN_TERMINAL_HEIGHT: u16 = 10;
+const MIN_TERMINAL_WIDTH: u16 = HUMAN_SHELL.minimum_width;
+const MIN_TERMINAL_HEIGHT: u16 = HUMAN_SHELL.minimum_height;
 
 /// Renders all Control Center screens into the active Ratatui frame.
 pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
@@ -1407,7 +1457,7 @@ pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
 fn render_with_no_color(frame: &mut Frame, app: &ControlCenterApp, no_color_is_set: bool) {
     let style = tui_human_style(app.interface_draft.color(), no_color_is_set);
     let area = frame.area();
-    if area.width < MIN_TERMINAL_WIDTH || area.height < MIN_TERMINAL_HEIGHT {
+    if !HUMAN_SHELL.supports(area.width, area.height) {
         frame.render_widget(
             Paragraph::new(format!(
                 "{}\n{}: {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}\n{}",
@@ -1429,9 +1479,9 @@ fn render_with_no_color(frame: &mut Frame, app: &ControlCenterApp, no_color_is_s
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
+            Constraint::Length(HUMAN_SHELL.header_rows),
             Constraint::Min(3),
-            Constraint::Length(2),
+            Constraint::Length(HUMAN_SHELL.footer_rows),
         ])
         .split(frame.area());
     frame.render_widget(
@@ -1450,7 +1500,10 @@ fn render_with_no_color(frame: &mut Frame, app: &ControlCenterApp, no_color_is_s
     );
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(21), Constraint::Min(20)])
+        .constraints([
+            Constraint::Length(HUMAN_SHELL.sidebar_columns),
+            Constraint::Min(20),
+        ])
         .split(areas[1]);
     let nav = Screen::ALL
         .iter()
@@ -1492,9 +1545,9 @@ fn render_with_no_color(frame: &mut Frame, app: &ControlCenterApp, no_color_is_s
     } else if app.has_concurrent_conflict() {
         catalog(app.locale(), HumanMessageKey::RefreshConflict).to_owned()
     } else if app.editing() {
-        catalog(app.locale(), HumanMessageKey::FooterEditing).to_owned()
+        shared_footer(app.locale(), FooterState::SettingsEdit)
     } else {
-        let footer = catalog(app.locale(), HumanMessageKey::FooterNavigation);
+        let footer = shared_footer(app.locale(), FooterState::NormalNavigation);
         format!(
             "{footer}{}",
             if app.dirty {
@@ -1508,6 +1561,37 @@ fn render_with_no_color(frame: &mut Frame, app: &ControlCenterApp, no_color_is_s
         )
     };
     frame.render_widget(Paragraph::new(footer).style(style), areas[2]);
+}
+
+fn help_dismiss_key(key: KeyCode) -> Option<OverlayDismissKey> {
+    match key {
+        KeyCode::Esc => Some(OverlayDismissKey::Escape),
+        KeyCode::Char('?') => Some(OverlayDismissKey::Help),
+        KeyCode::Char('q') => Some(OverlayDismissKey::Quit),
+        _ => None,
+    }
+}
+
+fn shared_footer(locale: ResolvedLocale, state: FooterState) -> String {
+    format_footer(state, |action| match (locale, action) {
+        (ResolvedLocale::EnUs, FooterAction::Navigate) => "navigate",
+        (ResolvedLocale::EnUs, FooterAction::Open) => "edit selected screen",
+        (ResolvedLocale::EnUs, FooterAction::Apply) => "Apply",
+        (ResolvedLocale::EnUs, FooterAction::Revert) => "Revert",
+        (ResolvedLocale::EnUs, FooterAction::Quit) => "Quit",
+        (ResolvedLocale::EnUs, FooterAction::Select) => "select setting",
+        (ResolvedLocale::EnUs, FooterAction::Change) => "change draft",
+        (ResolvedLocale::EnUs, FooterAction::Edit) => "done",
+        (ResolvedLocale::ZhCn, FooterAction::Navigate) => "导航",
+        (ResolvedLocale::ZhCn, FooterAction::Open) => "编辑当前分区",
+        (ResolvedLocale::ZhCn, FooterAction::Apply) => "应用",
+        (ResolvedLocale::ZhCn, FooterAction::Revert) => "还原",
+        (ResolvedLocale::ZhCn, FooterAction::Quit) => "退出",
+        (ResolvedLocale::ZhCn, FooterAction::Select) => "选择设置",
+        (ResolvedLocale::ZhCn, FooterAction::Change) => "调整草稿",
+        (ResolvedLocale::ZhCn, FooterAction::Edit) => "完成",
+        _ => "",
+    })
 }
 
 fn tui_human_style(color: HumanColor, no_color_is_set: bool) -> Style {
