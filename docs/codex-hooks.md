@@ -57,6 +57,9 @@ Pwsh7, Windows PowerShell, explicit cmd, and empty-shell COMSPEC runners. The
 Hook ingress is itself silent and fail-open for malformed input and runtime
 handling errors. The generic command—and paths outside that narrow path
 grammar—retain the encoded PowerShell compatibility envelope in both fields.
+As with every direct native command, a later missing or unstartable executable
+cannot be converted to exit zero before the process starts; static Doctor marks
+that state unhealthy rather than claiming that a Hook is usable.
 
 Static `tabbeacon doctor` deliberately reports the Hook runtime as unproven:
 matching declarations and trust state do not prove that Codex can execute the
@@ -395,10 +398,11 @@ become authoritative failed/warning/interrupted states.
 
 The admitted command Hook profiles require these hooks to be synchronous, so
 TabBeacon uses the minimum one-second Codex timeout. The Windows command
-neutralizes a missing or nonzero TabBeacon executable, and the internal hook
-ingress is silent and always successful. Generation, repository, state, or
-terminal output failure loses decoration only; it does not return a Codex
-block decision.
+uses the encoded compatibility envelope to neutralize a missing or nonzero
+executable for non-fast paths. For the direct fast path, Doctor detects a
+missing executable before it can be invoked. Once the hook ingress starts it
+is silent and always successful: generation, repository, state, or terminal
+output failure loses decoration only; it does not return a Codex block decision.
 
 ## Exact compatibility registry
 

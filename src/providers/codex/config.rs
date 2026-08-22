@@ -1791,8 +1791,13 @@ fn run_windows_hook_runtime_probe(command_line: &str) -> RuntimeProbeOutcome {
             Ok(Some(status)) => break Some(status.success()),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
-                terminate_runtime_probe_tree(child.id());
-                let _ = child.wait();
+                if !terminate_runtime_probe_tree(child.id()) {
+                    // Do not wait here: the probe's deadline must remain a real
+                    // bound even if Windows cannot start the tree terminator.
+                    // This only addresses the directly-owned command root; the
+                    // normal path uses taskkill /T to include its descendants.
+                    let _ = child.kill();
+                }
                 break None;
             }
             Err(_) => break Some(false),
@@ -1811,17 +1816,34 @@ fn run_windows_hook_runtime_probe(command_line: &str) -> RuntimeProbeOutcome {
 }
 
 #[cfg(windows)]
-fn terminate_runtime_probe_tree(process_id: u32) {
+fn terminate_runtime_probe_tree(process_id: u32) -> bool {
     let taskkill = env::var_os("SystemRoot").map_or_else(
         || PathBuf::from("taskkill.exe"),
         |root| PathBuf::from(root).join("System32").join("taskkill.exe"),
     );
-    let _ = Command::new(taskkill)
+    let Ok(mut terminator) = Command::new(taskkill)
         .args(["/PID", &process_id.to_string(), "/T", "/F"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .spawn()
+    else {
+        return false;
+    };
+
+    let deadline = Instant::now() + Duration::from_millis(100);
+    loop {
+        match terminator.try_wait() {
+            Ok(Some(_)) | Err(_) => return true,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            Ok(None) => {
+                // A hung taskkill process must not extend the probe beyond its
+                // published bound. Dropping the owned handles never waits.
+                let _ = terminator.kill();
+                return true;
+            }
+        }
+    }
 }
 
 #[cfg(windows)]

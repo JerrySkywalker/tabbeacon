@@ -3668,7 +3668,7 @@ fn title_drift_and_unowned_matching_hooks_are_refused_without_overwrite() {
 }
 
 #[test]
-fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
+fn missing_managed_binary_is_diagnosed_without_claiming_direct_command_fail_open() {
     let root = TestRoot::new("missing-binary");
     let integration = test_integration(&root);
     integration.setup().expect("setup succeeds");
@@ -3686,6 +3686,7 @@ fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
     assert!(report.checks().iter().any(|check| {
         check.id() == "tabbeacon.executable" && check.status() == DoctorStatus::Fail
     }));
+    assert_eq!(report.overall(), DoctorStatus::Fail);
     let hooks: Value =
         serde_json::from_slice(&fs::read(root.child("codex-home/hooks.json")).expect("hooks read"))
             .expect("hooks parse");
