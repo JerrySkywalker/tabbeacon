@@ -52,7 +52,7 @@ atomic-write-file = "0.3.1"
 clap = { version = "4.5.60", features = ["derive"] }
 clap_complete = "4.5.66"
 crossterm = "0.28.1"
-jerry-terminal-ui = { git = "https://github.com/JerrySkywalker/jerry-terminal-ui", rev = "5bf1db60ba911c5ea7a01c7f7ef3924f730a0054" }
+jerry-terminal-ui = "=0.1.0"
 dialoguer = "0.12.0"
 png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
