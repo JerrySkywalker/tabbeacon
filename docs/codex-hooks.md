@@ -63,25 +63,34 @@ tabbeacon repair codex
 The default is a read-only preview. It is eligible to restore only groups that
 are all of the following: manifest-owned, exact to the current source-audited
 profile, and proven entirely absent from a safe known Hook wire shape. It also
-requires an exact manifest target and title-ownership baseline. Every retained
-non-owned group must also exactly match the verified pre-install Hook backup;
-an added or altered group in a missing owned event is intentionally ambiguous
-and blocks repair. No external Hook group, MCP group, configuration setting,
-backup, manifest, or trust state is changed by the preview.
+requires an exact manifest target and title-ownership baseline. A retained
+non-owned group may be from the verified pre-install backup or may have been
+added later by a third party: it is preserved when it has the admitted Hook
+envelope and affirmative external provenance: a non-TabBeacon plugin identity
+or an MCP server/tool identity. An arbitrary post-install command does not
+prove third-party ownership and is a baseline-drift hard stop. TabBeacon-like
+or ambiguous groups, malformed/unknown Hook envelopes, and a tampered
+pre-install backup remain hard stops. No external Hook group, MCP group,
+configuration setting, backup, manifest, or trust state is changed by the
+preview.
 
-After reviewing the result, apply the same preflight again under the ownership
-lock:
+The preview emits `TARGET_DIGEST`. After reviewing the result, apply that exact
+target digest under the ownership lock:
 
 ```powershell
-tabbeacon repair codex --apply
+tabbeacon repair codex --apply --expected-target-digest <TARGET_DIGEST>
 ```
 
-Apply appends only the missing exact command groups to `hooks.json`. It never
-adopts, replaces, disables, or removes a TabBeacon-like lookalike, and it
-preserves unrelated command and MCP groups. It also preserves the manifest's
-original terminal-title restoration baseline. Any duplicate, altered, symbolic,
-redirected, concurrently changed, or ambiguous Hook group fails closed without
-a write. Every successful repair still requires the Owner to launch `codex`, review the definitions in
+Apply repeats the ownership preflight and refuses a target digest that changed
+since preview. It appends only the missing exact command groups to `hooks.json`.
+It never adopts, deletes, rewrites, trusts, disables, or reorders external
+groups; it inserts only new owned JSON fragments, preserving existing
+third-party command and MCP group bytes where the valid known envelope is
+representable. The manifest and original terminal-title restoration baseline
+are also untouched. Plain and JSON repair diagnostics distinguish
+`POSTINSTALL_THIRD_PARTY_PRESERVED`, `TABBEACON_LIKE_AMBIGUITY_BLOCKED`,
+`BASELINE_DRIFT_BLOCKED`, and `CONCURRENT_DRIFT_REFUSAL`. Every successful
+repair still requires the Owner to launch `codex`, review the definitions in
 `/hooks`, and then run `tabbeacon doctor`; TabBeacon never auto-trusts Hooks.
 
 When upgrading to a binary at a new path, run `tabbeacon setup codex` from

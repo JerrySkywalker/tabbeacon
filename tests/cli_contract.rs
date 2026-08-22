@@ -1149,6 +1149,104 @@ fn setup_codex_defaults_to_human_output_and_plain_retains_receipts() {
 }
 
 #[test]
+fn codex_repair_v2_plain_and_json_diagnostics_bind_apply_to_preview_digest() {
+    let root = TestRoot::new("codex-repair-v2-output");
+    let codex = fake_codex_directory(&root, "0.149.0");
+    let setup = isolated_command_with_codex(&root, &codex)
+        .args(["setup", "codex", "--plain"])
+        .output()
+        .expect("setup codex starts");
+    assert!(setup.status.success());
+
+    let hooks_path = root.child("codex-home/hooks.json");
+    let manifest_path = root.child("local-appdata/TabBeacon/codex-integration/integration-v1.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("repair manifest reads"))
+            .expect("repair manifest parses");
+    let mut hooks: serde_json::Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("installed hooks read"))
+            .expect("installed hooks parse");
+    for declaration in manifest["hooks"]
+        .as_array()
+        .expect("manifest hooks are an array")
+    {
+        let event = declaration["event"].as_str().expect("manifest Hook event");
+        let group = &declaration["group"];
+        let groups = hooks["hooks"][event]
+            .as_array_mut()
+            .expect("installed event groups are arrays");
+        groups.retain(|candidate| candidate != group);
+        if groups.is_empty() {
+            hooks["hooks"]
+                .as_object_mut()
+                .expect("hooks root is an object")
+                .remove(event);
+        }
+    }
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("orphaned hooks serialize"),
+    )
+    .expect("orphaned hooks write");
+
+    let preview = isolated_command_with_codex(&root, &codex)
+        .args(["repair", "codex", "--plain"])
+        .output()
+        .expect("repair preview starts");
+    assert!(preview.status.success());
+    let preview = String::from_utf8(preview.stdout).expect("repair preview is UTF-8");
+    assert!(preview.contains("REPAIR_SCHEMA_VERSION=2"));
+    assert!(preview.contains("REPAIR_DISPOSITION=READY_TO_APPLY"));
+    assert!(preview.contains("POSTINSTALL_THIRD_PARTY_PRESERVED=false"));
+    let digest = preview
+        .lines()
+        .find_map(|line| line.strip_prefix("TARGET_DIGEST="))
+        .expect("preview target digest is emitted")
+        .to_owned();
+    assert!(digest.starts_with("sha256:"));
+
+    let missing_digest = isolated_command_with_codex(&root, &codex)
+        .args(["repair", "codex", "--apply", "--plain"])
+        .output()
+        .expect("repair apply without digest starts");
+    assert!(!missing_digest.status.success());
+    let missing_digest = String::from_utf8(missing_digest.stderr).expect("plain error is UTF-8");
+    assert!(missing_digest.contains("REPAIR_FAILURE_CLASS=PREVIEW_TARGET_DIGEST_REQUIRED"));
+    assert!(missing_digest.contains("MANUAL_TRUST_BOUNDARY=/hooks"));
+
+    let missing_digest_json = isolated_command_with_codex(&root, &codex)
+        .args(["repair", "codex", "--apply", "--json"])
+        .output()
+        .expect("repair JSON error starts");
+    assert!(!missing_digest_json.status.success());
+    let error_json: serde_json::Value = serde_json::from_slice(&missing_digest_json.stderr)
+        .expect("repair JSON error is machine-readable");
+    assert_eq!(error_json["repair_disposition"], "blocked");
+    assert_eq!(
+        error_json["failure_class"],
+        "PREVIEW_TARGET_DIGEST_REQUIRED"
+    );
+    assert_eq!(error_json["auto_hook_trust"], false);
+
+    let applied = isolated_command_with_codex(&root, &codex)
+        .args([
+            "repair",
+            "codex",
+            "--apply",
+            "--expected-target-digest",
+            &digest,
+            "--plain",
+        ])
+        .output()
+        .expect("digest-bound repair apply starts");
+    assert!(applied.status.success());
+    let applied = String::from_utf8(applied.stdout).expect("repair apply is UTF-8");
+    assert!(applied.contains("REPAIR_DISPOSITION=REPAIRED_TRUST_REVIEW_REQUIRED"));
+    assert!(applied.contains("AUTO_HOOK_TRUST=false"));
+    assert!(applied.contains("OWNER_ACTION=launch codex, review TabBeacon hooks in /hooks"));
+}
+
+#[test]
 fn human_setup_and_config_failures_do_not_emit_machine_receipts() {
     let root = TestRoot::new("human-setup-failure-output");
 

@@ -1,0 +1,14 @@
+{
+  "description": "malformed Hook envelope that must block repair",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": ""
+          }
+        ]
+      }
+    ]
+  }
+}
