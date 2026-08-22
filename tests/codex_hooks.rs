@@ -62,6 +62,8 @@ const WINDOWS_HOOK_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(windows)]
 const WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT: Duration = Duration::from_millis(900);
 const WINDOWS_HOOK_COMMAND_SUFFIX: &str = " hook codex";
+const WINDOWS_POWERSHELL_ENVELOPE_PREFIX: &str =
+    "powershell.exe -NoProfile -NonInteractive -EncodedCommand ";
 
 struct TestRoot {
     path: PathBuf,
@@ -516,6 +518,11 @@ fn normalized_codex_hash(event: &str, group: &Value) -> String {
     format!("sha256:{:x}", Sha256::digest(bytes))
 }
 
+fn is_current_windows_hook_command(command: &str) -> bool {
+    (command.ends_with(WINDOWS_HOOK_COMMAND_SUFFIX) && !command.contains(['\r', '\n']))
+        || command.starts_with(WINDOWS_POWERSHELL_ENVELOPE_PREFIX)
+}
+
 fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
     let hooks_path = codex_home.join("hooks.json");
     let hooks: Value =
@@ -548,14 +555,11 @@ fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
                     handlers.iter().any(|handler| {
                         handler["type"] == "command"
                             && handler["command"].as_str().is_some_and(|command| {
-                                command.starts_with(
-                                    "powershell.exe -NoProfile -NonInteractive -EncodedCommand ",
-                                )
+                                command.starts_with(WINDOWS_POWERSHELL_ENVELOPE_PREFIX)
                             })
-                            && handler["commandWindows"].as_str().is_some_and(|command| {
-                                command.ends_with(WINDOWS_HOOK_COMMAND_SUFFIX)
-                                    && !command.contains(['\r', '\n'])
-                            })
+                            && handler["commandWindows"]
+                                .as_str()
+                                .is_some_and(|command| is_current_windows_hook_command(command))
                     })
                 })
             })
@@ -633,7 +637,7 @@ fn remove_exact_manifest_owned_declarations(hooks: &mut Value, manifest: &Value)
     }
 }
 
-fn owned_fast_windows_handler_count(hooks: &Value) -> usize {
+fn owned_current_windows_handler_count(hooks: &Value) -> usize {
     hooks["hooks"]
         .as_object()
         .expect("hooks object")
@@ -641,11 +645,12 @@ fn owned_fast_windows_handler_count(hooks: &Value) -> usize {
         .flat_map(|groups| groups.as_array().into_iter().flatten())
         .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
         .filter(|handler| {
-            handler["command"].as_str().is_some_and(|command| {
-                command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
-            }) && handler["commandWindows"].as_str().is_some_and(|command| {
-                command.ends_with(WINDOWS_HOOK_COMMAND_SUFFIX) && !command.contains(['\r', '\n'])
-            })
+            handler["command"]
+                .as_str()
+                .is_some_and(|command| command.starts_with(WINDOWS_POWERSHELL_ENVELOPE_PREFIX))
+                && handler["commandWindows"]
+                    .as_str()
+                    .is_some_and(|command| is_current_windows_hook_command(command))
         })
         .count()
 }
@@ -3146,7 +3151,7 @@ fn repeated_setup_ten_times_keeps_exactly_eleven_owned_hook_definitions() {
         &fs::read(root.child("codex-home/hooks.json")).expect("installed hooks read"),
     )
     .expect("installed hooks parse");
-    assert_eq!(owned_fast_windows_handler_count(&hooks), 11);
+    assert_eq!(owned_current_windows_handler_count(&hooks), 11);
     for event in ADMITTED_HOOK_EVENTS {
         assert_eq!(hooks["hooks"][event].as_array().map(Vec::len), Some(1));
     }
@@ -3202,7 +3207,7 @@ fn relocated_executable_migrates_exact_owned_hooks_without_duplicates() {
         &fs::read(root.child("codex-home/hooks.json")).expect("migrated hooks read"),
     )
     .expect("migrated hooks parse");
-    assert_eq!(owned_fast_windows_handler_count(&hooks), 11);
+    assert_eq!(owned_current_windows_handler_count(&hooks), 11);
     let after_migration = relocated.doctor();
     assert!(after_migration.checks().iter().any(|check| {
         check.id() == "hooks.currentness" && check.status() == DoctorStatus::Pass
@@ -3331,7 +3336,7 @@ fn setup_upgrades_exact_owned_declarations_without_duplicates_or_baseline_loss()
         &fs::read(codex_home.join("hooks.json")).expect("upgraded hooks read"),
     )
     .expect("upgraded hooks parse");
-    let owned_handler_count = owned_fast_windows_handler_count(&upgraded_hooks);
+    let owned_handler_count = owned_current_windows_handler_count(&upgraded_hooks);
     assert_eq!(
         owned_handler_count, 11,
         "upgrade must never append another eleven hooks"
@@ -3690,7 +3695,7 @@ fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
         let command = hooks["hooks"][event][0]["hooks"][0]["commandWindows"]
             .as_str()
             .expect("Windows command is a string");
-        assert!(command.ends_with(WINDOWS_HOOK_COMMAND_SUFFIX));
+        assert!(is_current_windows_hook_command(command));
         assert!(
             !command.contains(['\r', '\n']),
             "the direct fast declaration is exactly one command line"
