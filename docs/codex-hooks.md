@@ -50,6 +50,40 @@ changes, exact backups and an ownership manifest are written below:
 Setup is idempotent. It refuses a TabBeacon-like declaration that it cannot
 prove it owns.
 
+## Orphaned owned-Hook repair
+
+An interrupted Codex upgrade can leave a valid TabBeacon ownership manifest and
+title baseline behind while its exact command Hook groups are absent. Inspect
+that narrow state first:
+
+```powershell
+tabbeacon repair codex
+```
+
+The default is a read-only preview. It is eligible to restore only groups that
+are all of the following: manifest-owned, exact to the current source-audited
+profile, and proven entirely absent from a safe known Hook wire shape. It also
+requires an exact manifest target and title-ownership baseline. Every retained
+non-owned group must also exactly match the verified pre-install Hook backup;
+an added or altered group in a missing owned event is intentionally ambiguous
+and blocks repair. No external Hook group, MCP group, configuration setting,
+backup, manifest, or trust state is changed by the preview.
+
+After reviewing the result, apply the same preflight again under the ownership
+lock:
+
+```powershell
+tabbeacon repair codex --apply
+```
+
+Apply appends only the missing exact command groups to `hooks.json`. It never
+adopts, replaces, disables, or removes a TabBeacon-like lookalike, and it
+preserves unrelated command and MCP groups. It also preserves the manifest's
+original terminal-title restoration baseline. Any duplicate, altered, symbolic,
+redirected, concurrently changed, or ambiguous Hook group fails closed without
+a write. Every successful repair still requires the Owner to launch `codex`, review the definitions in
+`/hooks`, and then run `tabbeacon doctor`; TabBeacon never auto-trusts Hooks.
+
 When upgrading to a binary at a new path, run `tabbeacon setup codex` from
 that new binary. TabBeacon migrates exactly the eleven manifest-proven command
 groups and updates its manifest atomically; it never adopts a lookalike hook,
@@ -279,6 +313,16 @@ are `pass`, `warning`, or `fail`; Hook trust is `active`, `review_required`,
 `unavailable`; and registry health is `absent`, `healthy`, `corrupt`, or
 `unavailable`.
 
+`status --json` and `doctor --json` also expose stable
+`mutation_authority` (`admitted` or `blocked`) and `runtime_continuity`
+(`admitted`, `preserved_unadmitted`, or `unproven`). An unadmitted version is
+always blocked from setup, repair, rewrite, and title reconciliation. Its
+already-installed runtime may nevertheless remain
+`preserved_unadmitted` only when the ownership manifest, exact declarations,
+trusted hashes, known parseable Hook wire shape, managed executable, and title
+ownership are independently exact. This is a runtime-continuity warning, not a
+new profile admission.
+
 Activity counts are leases, not claims that an operating-system worker process
 is alive. Registry reporting is health and count only. Neither human nor JSON
 diagnostics expose prompt or assistant content, tool input/output, credentials,
@@ -340,14 +384,19 @@ profile: unclassified`, and `Risk: manual review required`.
 
 Unknown, experimental, and unsupported versions are fail-closed for `setup`
 and title reconciliation: no hooks, trust state, title setting, manifest, or
-backup is created or changed. Safe uninstall remains available only for exact
-manifest-owned declarations, so an owner can remove a previously installed
-integration without adopting an unproven version or Hook shape.
+backup is created or changed. They are also fail-closed for `repair --apply`.
+Safe uninstall remains available only for exact manifest-owned declarations, so
+an owner can remove a previously installed integration without adopting an
+unproven version or Hook shape.
 
 `scripts/compare-codex-compatibility.ps1` compares two local source checkouts or two
 Git references over the bounded Hook, identity, lifecycle, timeout, and title-ownership
-surface. Its `SAFE_COMPATIBLE`, `REQUIRES_REVIEW`, and `BREAKING_OR_UNPROVEN` result
-informs a later admission review; it does not update runtime profiles or access a network.
+surface. Its machine-readable `tabbeacon-codex-hook-delta-v1` receipt reports
+the source mode, relevant-file count, bounded protocol-signal count, and
+`NONE_RELEVANT`, `REQUIRES_SOURCE_REVIEW`, or `BREAKING_OR_UNPROVEN` protocol
+delta. The receipt intentionally says `EXACT_PRODUCTION_ADMISSION=NOT_GRANTED`:
+it narrows a future source/protocol audit, but never updates a runtime profile
+or infers compatibility from a version range.
 
 ## Uninstall
 

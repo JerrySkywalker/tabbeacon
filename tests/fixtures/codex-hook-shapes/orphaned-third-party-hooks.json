@@ -1,0 +1,30 @@
+{
+  "description": "orphaned ownership recovery fixture with external hooks",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "fixture-security",
+            "tool": "scan",
+            "input": { "mode": "safe" },
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "plugin": "third.party.fixture",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "third-party stop hook",
+            "timeout": 1
+          }
+        ]
+      }
+    ]
+  }
+}

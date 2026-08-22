@@ -1,0 +1,18 @@
+{
+  "description": "unowned TabBeacon-like conflict fixture",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "C:\\external\\tabbeacon.exe hook codex",
+            "commandWindows": "C:\\external\\tabbeacon.exe hook codex",
+            "timeout": 1,
+            "async": false
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -161,6 +161,61 @@ pub enum TerminalTitleOwnershipSemantics {
     CodexDefaultWithExplicitTabBeaconDelegation,
 }
 
+/// Source-audited, bounded Hook wire contract shared by exact profiles.
+///
+/// This is intentionally smaller than an upstream source tree: future source
+/// admission compares only the declared Hook root, command-group fields,
+/// trust-state addressing, and title delegation semantics represented here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodexHookWireShape {
+    id: &'static str,
+    root_key: &'static str,
+    handler_type: &'static str,
+    command_field: &'static str,
+    windows_command_field: &'static str,
+    timeout_field: &'static str,
+    async_field: &'static str,
+    trust_state_field: &'static str,
+}
+
+impl CodexHookWireShape {
+    /// Stable bounded protocol identifier for audit evidence and diagnostics.
+    #[must_use]
+    pub const fn id(self) -> &'static str {
+        self.id
+    }
+
+    /// Root field that contains lifecycle-event Hook groups.
+    #[must_use]
+    pub const fn root_key(self) -> &'static str {
+        self.root_key
+    }
+
+    /// Exact handler type owned by `TabBeacon`.
+    #[must_use]
+    pub const fn handler_type(self) -> &'static str {
+        self.handler_type
+    }
+
+    /// Required command binding fields for an owned Windows command Hook.
+    #[must_use]
+    pub const fn command_fields(self) -> (&'static str, &'static str) {
+        (self.command_field, self.windows_command_field)
+    }
+
+    /// Required execution-bound fields for an owned command Hook.
+    #[must_use]
+    pub const fn execution_fields(self) -> (&'static str, &'static str) {
+        (self.timeout_field, self.async_field)
+    }
+
+    /// Trusted normalized-definition field used by the known Codex shape.
+    #[must_use]
+    pub const fn trust_state_field(self) -> &'static str {
+        self.trust_state_field
+    }
+}
+
 impl TerminalTitleOwnershipSemantics {
     /// Whether Codex is the ordinary default title owner.
     #[must_use]
@@ -188,6 +243,7 @@ pub struct CodexHookProfile {
     timeout: HookTimeoutSemantics,
     terminal_title_ownership: TerminalTitleOwnershipSemantics,
     unknown_event_policy: UnknownEventPolicy,
+    wire_shape: CodexHookWireShape,
     reconciliation_note: &'static str,
 }
 
@@ -256,6 +312,12 @@ impl CodexHookProfile {
     #[must_use]
     pub const fn unknown_event_policy(self) -> UnknownEventPolicy {
         self.unknown_event_policy
+    }
+
+    /// Bounded source-audited wire contract used for future delta review.
+    #[must_use]
+    pub const fn wire_shape(self) -> CodexHookWireShape {
+        self.wire_shape
     }
 
     /// Bounded note for reconciling exact owned declarations on this release.
@@ -334,6 +396,17 @@ const RUST_V0_147_0_EVENTS: [CodexHookEvent; 11] = [
     CodexHookEvent::Stop,
 ];
 
+const RUST_COMMAND_HOOK_WIRE_V1: CodexHookWireShape = CodexHookWireShape {
+    id: "codex-command-hooks-wire-v1",
+    root_key: "hooks",
+    handler_type: "command",
+    command_field: "command",
+    windows_command_field: "commandWindows",
+    timeout_field: "timeout",
+    async_field: "async",
+    trust_state_field: "trusted_hash",
+};
+
 const RUST_V0_147_0_PROFILE: CodexHookProfile = CodexHookProfile {
     id: "codex-hooks-rust-v0.147.0",
     version: (0, 147, 0),
@@ -355,6 +428,7 @@ const RUST_V0_147_0_PROFILE: CodexHookProfile = CodexHookProfile {
     terminal_title_ownership:
         TerminalTitleOwnershipSemantics::CodexDefaultWithExplicitTabBeaconDelegation,
     unknown_event_policy: UnknownEventPolicy::IgnoreFailOpen,
+    wire_shape: RUST_COMMAND_HOOK_WIRE_V1,
     reconciliation_note: "owned-command-hooks-only",
 };
 
@@ -383,6 +457,7 @@ const RUST_V0_149_0_PROFILE: CodexHookProfile = CodexHookProfile {
     terminal_title_ownership:
         TerminalTitleOwnershipSemantics::CodexDefaultWithExplicitTabBeaconDelegation,
     unknown_event_policy: UnknownEventPolicy::IgnoreFailOpen,
+    wire_shape: RUST_COMMAND_HOOK_WIRE_V1,
     reconciliation_note: "owned-command-hooks;external-mcp-tool-preserved",
 };
 

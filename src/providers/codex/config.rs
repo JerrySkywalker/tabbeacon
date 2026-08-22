@@ -50,6 +50,84 @@ pub enum SetupOutcome {
     AlreadyInstalled,
 }
 
+/// Whether the observed Codex version authorizes a configuration mutation.
+///
+/// This is deliberately independent from [`CodexRuntimeContinuity`]: a known
+/// installed integration may continue to decorate a future Codex runtime
+/// without granting that future version setup, repair, or reconciliation
+/// authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexMutationAuthority {
+    /// The detected version has an exact source-audited profile.
+    Admitted,
+    /// The detected version has no exact source-admitted profile.
+    Blocked,
+}
+
+impl CodexMutationAuthority {
+    /// Stable machine-readable spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admitted => "admitted",
+            Self::Blocked => "blocked",
+        }
+    }
+}
+
+/// Whether an already-installed Hook integration can continue at runtime.
+///
+/// This describes only the installed, manifest-proven command Hook surface.
+/// It never upgrades an unadmitted version into a source-admitted profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexRuntimeContinuity {
+    /// An admitted version has a fully proven installed integration.
+    Admitted,
+    /// An unadmitted version retains a fully proven known installed wire shape.
+    PreservedUnadmitted,
+    /// Required installation, wire-shape, trust, or title proof is absent.
+    Unproven,
+}
+
+impl CodexRuntimeContinuity {
+    /// Stable machine-readable spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admitted => "admitted",
+            Self::PreservedUnadmitted => "preserved_unadmitted",
+            Self::Unproven => "unproven",
+        }
+    }
+}
+
+/// Stable disposition of a preview-first owned Hook repair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexRepairDisposition {
+    /// The preflight proved which exact manifest-owned groups may be restored.
+    ReadyToApply,
+    /// Exact missing groups were restored without changing Hook trust.
+    RepairedTrustReviewRequired,
+    /// Every exact manifest-owned declaration is already present.
+    AlreadyExact,
+}
+
+/// Content-minimal result of an owned Codex Hook repair preflight or apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct CodexRepairReport {
+    /// Stable repair result schema.
+    pub schema_version: u32,
+    /// Whether this was a preview, an apply, or an idempotent exact result.
+    pub disposition: CodexRepairDisposition,
+    /// Number of exact manifest-owned declarations proven absent.
+    pub missing_declarations: usize,
+    /// Repair never grants Codex Hook trust; the Owner must review `/hooks`.
+    pub manual_hook_trust_review_required: bool,
+}
+
 /// Result of an uninstall invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UninstallOutcome {
@@ -126,6 +204,8 @@ pub struct CodexDoctorReport {
     checks: Vec<DoctorCheck>,
     codex_version: Option<String>,
     compatibility_state: CodexCompatibilityState,
+    mutation_authority: CodexMutationAuthority,
+    runtime_continuity: CodexRuntimeContinuity,
     hook_profile: Option<CodexHookProfile>,
     owned_hook_count: Option<usize>,
     title_owned: Option<bool>,
@@ -136,9 +216,10 @@ impl CodexDoctorReport {
         checks: Vec<DoctorCheck>,
         codex_version: Option<String>,
         compatibility_state: CodexCompatibilityState,
+        mutation_authority: CodexMutationAuthority,
+        runtime_continuity: CodexRuntimeContinuity,
         hook_profile: Option<CodexHookProfile>,
-        owned_hook_count: Option<usize>,
-        title_owned: Option<bool>,
+        ownership: (Option<usize>, Option<bool>),
     ) -> Self {
         let overall = checks
             .iter()
@@ -150,9 +231,11 @@ impl CodexDoctorReport {
             checks,
             codex_version,
             compatibility_state,
+            mutation_authority,
+            runtime_continuity,
             hook_profile,
-            owned_hook_count,
-            title_owned,
+            owned_hook_count: ownership.0,
+            title_owned: ownership.1,
         }
     }
 
@@ -184,6 +267,18 @@ impl CodexDoctorReport {
     #[must_use]
     pub const fn compatibility_state(&self) -> CodexCompatibilityState {
         self.compatibility_state
+    }
+
+    /// Whether this observed version authorizes a setup or reconciliation mutation.
+    #[must_use]
+    pub const fn mutation_authority(&self) -> CodexMutationAuthority {
+        self.mutation_authority
+    }
+
+    /// Whether the independently proven installed Hook surface may continue at runtime.
+    #[must_use]
+    pub const fn runtime_continuity(&self) -> CodexRuntimeContinuity {
+        self.runtime_continuity
     }
 
     /// Whether the detected Codex version maps to an admitted Hook profile.
@@ -234,15 +329,19 @@ pub enum CodexIntegrationError {
     UnownedHookConflict,
     /// A TabBeacon-owned hook declaration no longer matches its manifest.
     ModifiedOwnedHook,
+    /// Manifest-owned declarations are exact but do not match the current admitted source shape.
+    StaleOwnedHook,
     /// The terminal-title value owned by setup was modified afterward.
     ModifiedOwnedTitle,
     /// A title configuration not owned by `TabBeacon` conflicts with integration.
     TerminalTitleConflict,
     /// The ownership manifest is absent, corrupt, or belongs to another target.
     OwnershipManifest,
+    /// A managed target changed after repair preflight and before its write.
+    ConcurrentTargetDrift,
     /// The executable path cannot be represented safely in a Windows command.
     UnsafeExecutablePath,
-    /// A target file is a symbolic link and is not replaced implicitly.
+    /// A target path or ancestor is a symbolic link/reparse point.
     SymbolicLinkTarget,
 }
 
@@ -260,15 +359,23 @@ impl fmt::Display for CodexIntegrationError {
                 "a matching TabBeacon-like hook exists without ownership proof"
             }
             Self::ModifiedOwnedHook => "a TabBeacon-owned hook was modified",
+            Self::StaleOwnedHook => {
+                "manifest-owned hooks are not current for the admitted Codex profile"
+            }
             Self::ModifiedOwnedTitle => "the TabBeacon-owned terminal-title setting was modified",
             Self::TerminalTitleConflict => {
                 "Codex terminal-title ownership conflicts with TabBeacon"
             }
             Self::OwnershipManifest => "the Codex integration ownership manifest is invalid",
+            Self::ConcurrentTargetDrift => {
+                "a Codex integration target changed during repair preflight"
+            }
             Self::UnsafeExecutablePath => {
                 "the TabBeacon executable path is unsafe for a Codex Windows command hook"
             }
-            Self::SymbolicLinkTarget => "a Codex integration target is a symbolic link",
+            Self::SymbolicLinkTarget => {
+                "a Codex integration target is a symbolic link or reparse point"
+            }
         })
     }
 }
@@ -368,8 +475,40 @@ impl CodexIntegration {
         &self,
         tabbeacon_owns_title: bool,
     ) -> Result<SetupOutcome, CodexIntegrationError> {
-        let profile = self.require_supported_profile()?;
-        self.with_lock(|| self.setup_locked(tabbeacon_owns_title, profile))
+        // Do not create even TabBeacon's private lock/state root for an
+        // unadmitted version. The same admission is repeated under the lock
+        // immediately before mutation to prevent a version-swap race.
+        self.require_supported_profile()?;
+        self.with_lock(|| {
+            let profile = self.require_supported_profile()?;
+            self.setup_locked(tabbeacon_owns_title, profile)
+        })
+    }
+
+    /// Previews or applies an ownership-safe restoration of missing exact Hook groups.
+    ///
+    /// A preview is fully read-only. Apply repeats the complete preflight while
+    /// holding the integration lock, writes only the Hook file, and deliberately
+    /// leaves Codex trust state, the ownership manifest, and title configuration
+    /// unchanged. An unadmitted Codex version cannot use this mutation path.
+    ///
+    /// # Errors
+    ///
+    /// Refuses invalid ownership, stale source declarations, symbolic targets,
+    /// malformed wire shapes, and every TabBeacon-like unowned or modified group.
+    pub fn repair(&self, apply: bool) -> Result<CodexRepairReport, CodexIntegrationError> {
+        if apply {
+            // Keep an unadmitted repair fully read-only, including TabBeacon's
+            // own state root; repeat the probe under lock before writing.
+            self.require_supported_profile()?;
+            self.with_lock(|| {
+                let profile = self.require_supported_profile()?;
+                self.repair_locked(profile, true)
+            })
+        } else {
+            let profile = self.require_supported_profile()?;
+            self.repair_locked(profile, false)
+        }
     }
 
     /// Removes only exact owned declarations and restores the prior title value.
@@ -397,7 +536,10 @@ impl CodexIntegration {
         tabbeacon_owns_title: bool,
     ) -> Result<TitleOwnershipOutcome, CodexIntegrationError> {
         self.require_supported_profile()?;
-        self.with_lock(|| self.reconcile_title_ownership_locked(tabbeacon_owns_title))
+        self.with_lock(|| {
+            self.require_supported_profile()?;
+            self.reconcile_title_ownership_locked(tabbeacon_owns_title)
+        })
     }
 
     /// Audits binary, manifest, hook, trust, and terminal-title state read-only.
@@ -409,15 +551,28 @@ impl CodexIntegration {
         let codex_version = version.as_ref().map(|(version, _)| version.clone());
         let compatibility_state = compatibility_state(version.as_ref());
         let hook_profile = compatibility_state.supported_profile();
+        let mutation_authority = if compatibility_state.is_supported() {
+            CodexMutationAuthority::Admitted
+        } else {
+            CodexMutationAuthority::Blocked
+        };
         checks.push(codex_version_check(version.as_ref()));
         checks.push(codex_profile_check(version.as_ref()));
-        checks.push(if self.tabbeacon_executable.is_file() {
+        let executable_present = self.tabbeacon_executable.is_file();
+        checks.push(if executable_present {
             pass("tabbeacon.executable", "managed hook executable exists")
         } else {
             fail("tabbeacon.executable", "managed hook executable is missing")
         });
 
-        let manifest = self.load_manifest().ok().flatten();
+        let manifest = self
+            .load_manifest()
+            .ok()
+            .flatten()
+            .filter(|manifest| self.validate_manifest_scope(manifest).is_ok());
+        let manifest_has_known_owned_declarations = manifest
+            .as_ref()
+            .is_some_and(Self::manifest_has_known_owned_declarations);
         let owned_hook_count = manifest.as_ref().map(|manifest| manifest.hooks.len());
         let title_owned = manifest.as_ref().map(|manifest| manifest.title_owned);
         checks.push(if manifest.is_some() {
@@ -434,73 +589,77 @@ impl CodexIntegration {
 
         let hooks = read_hooks_document(&self.hooks_path());
         let config = read_config_document(&self.config_path());
-        if let (Some(manifest), Ok(hooks)) = (&manifest, &hooks) {
-            checks.push(match locate_owned_hooks(hooks, &manifest.hooks) {
-                Ok(locations) if locations.len() == manifest.hooks.len() => pass(
-                    "hooks.declarations",
-                    "DECLARATION_EXACT: all owned hook declarations are exact",
-                ),
-                _ => fail(
-                    "hooks.declarations",
-                    "DECLARATION_MODIFIED: owned hooks are missing or modified",
-                ),
-            });
-            checks.push(match hook_profile.map(|profile| {
-                desired_hooks(&self.tabbeacon_executable, profile)
-            }) {
-                Some(Ok(desired)) if desired == manifest.hooks => pass(
+        let known_wire_shape = hooks
+            .as_ref()
+            .is_ok_and(|hooks| validate_known_hook_wire_shape(hooks).is_ok());
+        let declarations_exact = match (&manifest, &hooks) {
+            (Some(manifest), Ok(hooks))
+                if manifest_has_known_owned_declarations && known_wire_shape =>
+            {
+                locate_owned_hooks(hooks, &manifest.hooks)
+                    .is_ok_and(|locations| locations.len() == manifest.hooks.len())
+            }
+            _ => false,
+        };
+        checks.push(if declarations_exact {
+            pass(
+                "hooks.declarations",
+                "DECLARATION_EXACT: all owned hook declarations are exact",
+            )
+        } else {
+            fail(
+                "hooks.declarations",
+                "DECLARATION_MODIFIED: owned hooks are missing, modified, or use an incompatible wire shape",
+            )
+        });
+        checks.push(match (&manifest, hook_profile) {
+            (Some(manifest), Some(profile)) => match desired_hooks(&self.tabbeacon_executable, profile) {
+                Ok(desired) if desired == manifest.hooks => pass(
                     "hooks.currentness",
                     "CURRENTNESS_CURRENT: owned hook declarations match the current TabBeacon integration",
                 ),
-                Some(Ok(_)) => fail(
+                Ok(_) => fail(
                     "hooks.currentness",
                     "CURRENTNESS_STALE: owned hook declarations require a TabBeacon upgrade",
                 ),
-                Some(Err(_)) => fail(
+                Err(_) => fail(
                     "hooks.currentness",
                     "CURRENTNESS_UNPROVEN: current TabBeacon hook declarations cannot be generated safely",
                 ),
-                None => fail(
-                    "hooks.currentness",
-                    "CURRENTNESS_UNPROVEN: Codex hook profile is not source-audited",
-                ),
-            });
-            checks.push(match (&version, &config) {
-                (Some((_, state)), Ok(config)) if state.is_supported() => {
-                    hook_trust_check(config, &self.hooks_path(), hooks, &manifest.hooks)
-                }
-                _ => fail(
-                    "hooks.trust",
-                    "hook trust cannot be proven for this Codex/config shape",
-                ),
-            });
-        } else {
-            checks.push(fail(
-                "hooks.declarations",
-                "HOOK_UNOWNED_OR_AMBIGUOUS: hooks file is missing or incompatible",
-            ));
-            checks.push(fail(
+            },
+            (Some(_), None) if declarations_exact && known_wire_shape => warning(
                 "hooks.currentness",
-                if hook_profile.is_some() {
-                    "CURRENTNESS_UNPROVEN: ownership manifest is missing or hooks are incompatible"
-                } else {
-                    "CURRENTNESS_UNPROVEN: Codex hook profile is not source-audited"
-                },
-            ));
-            checks.push(fail(
+                "CURRENTNESS_MUTATION_BLOCKED: an unadmitted Codex version cannot rewrite the installed declarations",
+            ),
+            (Some(_) | None, None) => fail(
+                "hooks.currentness",
+                "CURRENTNESS_UNPROVEN: Codex hook profile is not source-audited",
+            ),
+            (None, Some(_)) => fail(
+                "hooks.currentness",
+                "CURRENTNESS_UNPROVEN: ownership manifest is missing or hooks are incompatible",
+            ),
+        });
+        let trust_check = match (&manifest, &hooks, &config) {
+            (Some(manifest), Ok(hooks), Ok(config)) if known_wire_shape && declarations_exact => {
+                hook_trust_check(config, &self.hooks_path(), hooks, &manifest.hooks)
+            }
+            _ => fail(
                 "hooks.trust",
-                "HOOK_UNOWNED_OR_AMBIGUOUS: hook trust is not proven",
-            ));
-        }
-        checks.push(match (&manifest, config) {
+                "hook trust cannot be proven for this Codex/config shape",
+            ),
+        };
+        let trust_exact = trust_check.status() == DoctorStatus::Pass;
+        checks.push(trust_check);
+        let title_check = match (&manifest, &config) {
             (Some(manifest), Ok(config))
-                if manifest.title_owned && terminal_title_is_disabled(&config).unwrap_or(false) =>
+                if manifest.title_owned && terminal_title_is_disabled(config).unwrap_or(false) =>
             {
                 pass("terminal.title", "TabBeacon owns the Codex terminal title")
             }
             (Some(manifest), Ok(config))
                 if !manifest.title_owned
-                    && !terminal_title_is_disabled(&config).unwrap_or(false) =>
+                    && !terminal_title_is_disabled(config).unwrap_or(false) =>
             {
                 pass(
                     "terminal.title",
@@ -516,15 +675,61 @@ impl CodexIntegration {
                 "TabBeacon title ownership is not installed",
             ),
             (_, Err(_)) => fail("terminal.title", "Codex config is incompatible"),
+        };
+        let title_exact = title_check.status() == DoctorStatus::Pass;
+        checks.push(title_check);
+
+        checks.push(match mutation_authority {
+            CodexMutationAuthority::Admitted => pass(
+                "codex.mutation-authority",
+                "MUTATION_ADMITTED: exact source-audited Codex profile permits setup and repair preflight",
+            ),
+            CodexMutationAuthority::Blocked => fail(
+                "codex.mutation-authority",
+                "MUTATION_BLOCKED: setup, rewrite, repair, and title reconciliation require an exact source admission",
+            ),
+        });
+        let runtime_proven = version.is_some()
+            && executable_present
+            && manifest.is_some()
+            && manifest_has_known_owned_declarations
+            && known_wire_shape
+            && declarations_exact
+            && trust_exact
+            && title_exact;
+        let runtime_continuity = match (runtime_proven, mutation_authority) {
+            (true, CodexMutationAuthority::Admitted) => CodexRuntimeContinuity::Admitted,
+            (true, CodexMutationAuthority::Blocked) => CodexRuntimeContinuity::PreservedUnadmitted,
+            (false, _) => CodexRuntimeContinuity::Unproven,
+        };
+        checks.push(match runtime_continuity {
+            CodexRuntimeContinuity::Admitted => pass(
+                "codex.runtime-continuity",
+                "RUNTIME_CONTINUITY_ADMITTED: exact installed integration is active on a source-audited Codex profile",
+            ),
+            CodexRuntimeContinuity::PreservedUnadmitted => warning(
+                "codex.runtime-continuity",
+                "RUNTIME_CONTINUITY_PRESERVED: exact installed Hook declarations remain usable; mutation stays blocked pending source admission",
+            ),
+            CodexRuntimeContinuity::Unproven
+                if mutation_authority == CodexMutationAuthority::Admitted => warning(
+                    "codex.runtime-continuity",
+                    "RUNTIME_CONTINUITY_PENDING: installed Hook declarations, trust, title ownership, or known wire shape is not exact",
+                ),
+            CodexRuntimeContinuity::Unproven => fail(
+                "codex.runtime-continuity",
+                "RUNTIME_CONTINUITY_UNPROVEN: installed Hook declarations, trust, title ownership, or known wire shape is not exact",
+            ),
         });
 
         CodexDoctorReport::from_diagnosis(
             checks,
             codex_version,
             compatibility_state,
+            mutation_authority,
+            runtime_continuity,
             hook_profile,
-            owned_hook_count,
-            title_owned,
+            (owned_hook_count, title_owned),
         )
     }
 
@@ -550,6 +755,11 @@ impl CodexIntegration {
             .ok()
             .flatten()
             .filter(|manifest| self.validate_manifest_scope(manifest).is_ok());
+        let known_wire_shape = validate_known_hook_wire_shape(&hooks).is_ok();
+        if !known_wire_shape {
+            return HookInventory::unavailable();
+        }
+        let runtime_continuity = self.doctor().runtime_continuity();
         let profile_is_supported = self
             .probe_codex_version()
             .is_some_and(|(_, state)| state.is_supported());
@@ -590,7 +800,7 @@ impl CodexIntegration {
                             );
                             let enabled = hook_is_enabled(&config, &state_key);
                             let trust_state = inventory_trust_state(
-                                profile_is_supported,
+                                known_wire_shape,
                                 enabled,
                                 trusted_hash(&config, &state_key),
                                 declaration,
@@ -599,6 +809,7 @@ impl CodexIntegration {
                                 profile_is_supported,
                                 desired.as_deref(),
                                 declaration,
+                                runtime_continuity,
                             );
                             entries.push(HookInventoryEntry::new(
                                 "codex",
@@ -751,6 +962,55 @@ impl CodexIntegration {
         Ok(SetupOutcome::InstalledTrustReviewRequired)
     }
 
+    fn repair_locked(
+        &self,
+        profile: CodexHookProfile,
+        apply: bool,
+    ) -> Result<CodexRepairReport, CodexIntegrationError> {
+        self.reject_repair_target_paths()?;
+        let manifest = self
+            .load_manifest()?
+            .ok_or(CodexIntegrationError::OwnershipManifest)?;
+        self.validate_manifest_scope(&manifest)?;
+        let desired = desired_hooks(&self.tabbeacon_executable, profile)?;
+        if manifest.hooks != desired || !Self::manifest_has_known_owned_declarations(&manifest) {
+            return Err(CodexIntegrationError::StaleOwnedHook);
+        }
+
+        let original_hooks = read_required_safe_bytes(&self.hooks_path())?;
+        let mut hooks = parse_hooks_bytes(Some(&original_hooks))?;
+        validate_known_hook_wire_shape(&hooks)?;
+        let config = read_config_document(&self.config_path())?;
+        Self::validate_title_ownership(&manifest, &config)?;
+        let missing = self.missing_repairable_owned_hooks(&hooks, &manifest)?;
+        if missing.is_empty() {
+            return Ok(CodexRepairReport {
+                schema_version: 1,
+                disposition: CodexRepairDisposition::AlreadyExact,
+                missing_declarations: 0,
+                manual_hook_trust_review_required: true,
+            });
+        }
+        if !apply {
+            return Ok(CodexRepairReport {
+                schema_version: 1,
+                disposition: CodexRepairDisposition::ReadyToApply,
+                missing_declarations: missing.len(),
+                manual_hook_trust_review_required: true,
+            });
+        }
+
+        append_owned_hooks(&mut hooks, &missing)?;
+        let repaired_hooks = serialize_hooks(&hooks)?;
+        write_if_unchanged(&self.hooks_path(), &original_hooks, &repaired_hooks)?;
+        Ok(CodexRepairReport {
+            schema_version: 1,
+            disposition: CodexRepairDisposition::RepairedTrustReviewRequired,
+            missing_declarations: missing.len(),
+            manual_hook_trust_review_required: true,
+        })
+    }
+
     fn require_supported_profile(&self) -> Result<CodexHookProfile, CodexIntegrationError> {
         self.probe_codex_version()
             .and_then(|(_, state)| state.supported_profile())
@@ -853,13 +1113,21 @@ impl CodexIntegration {
         &self,
         operation: impl FnOnce() -> Result<T, CodexIntegrationError>,
     ) -> Result<T, CodexIntegrationError> {
+        // The lock itself is a write target. Prove its full ancestry before
+        // creating or opening it; otherwise a redirected state root could
+        // escape the owned integration boundary before repair preflight runs.
+        reject_symbolic_link(&self.state_root)?;
         fs::create_dir_all(&self.state_root)?;
+        reject_symbolic_link(&self.state_root)?;
+        let lock_path = self.state_root.join(LOCK_FILE);
+        reject_symbolic_link(&lock_path)?;
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(self.state_root.join(LOCK_FILE))?;
+            .open(&lock_path)?;
+        reject_symbolic_link(&lock_path)?;
         lock.lock()?;
         let result = operation();
         File::unlock(&lock)?;
@@ -879,6 +1147,7 @@ impl CodexIntegration {
     }
 
     fn load_manifest(&self) -> Result<Option<IntegrationManifest>, CodexIntegrationError> {
+        reject_symbolic_link(&self.manifest_path())?;
         let Some(bytes) = read_optional_bytes(&self.manifest_path())? else {
             return Ok(None);
         };
@@ -906,7 +1175,140 @@ impl CodexIntegration {
         // that migrates hooks during a same-user binary relocation.
         owned_command_hooks(&manifest.executable, 1, false)
             .map_err(|_| CodexIntegrationError::OwnershipManifest)?;
+        self.validate_backup_record("hooks", &manifest.hooks_backup)?;
+        self.validate_backup_record("config", &manifest.config_backup)?;
         Ok(())
+    }
+
+    /// The manifest is not merely structurally valid: runtime continuity and
+    /// repair both need proof that its owned declarations are the known command
+    /// Hook contract generated by the installing executable.
+    fn manifest_has_known_owned_declarations(manifest: &IntegrationManifest) -> bool {
+        owned_command_hooks(&manifest.executable, 1, false)
+            .is_ok_and(|expected| expected == manifest.hooks)
+    }
+
+    /// Refuse repair when a target or any existing parent redirects elsewhere.
+    /// A leaf-only symlink check is insufficient on Windows because a junction
+    /// in the `.codex` or state-root ancestry can redirect the eventual write.
+    fn reject_repair_target_paths(&self) -> Result<(), CodexIntegrationError> {
+        let hooks_path = self.hooks_path();
+        let config_path = self.config_path();
+        let manifest_path = self.manifest_path();
+        for path in [
+            self.codex_home.as_path(),
+            self.state_root.as_path(),
+            hooks_path.as_path(),
+            config_path.as_path(),
+            manifest_path.as_path(),
+        ] {
+            reject_symbolic_link(path)?;
+        }
+        Ok(())
+    }
+
+    fn validate_backup_record(
+        &self,
+        kind: &str,
+        backup: &BackupRecord,
+    ) -> Result<(), CodexIntegrationError> {
+        match (
+            backup.existed,
+            backup.digest.as_deref(),
+            backup.path.as_deref(),
+        ) {
+            (false, None, None) => Ok(()),
+            (true, Some(digest), Some(path))
+                if is_sha256_hex(digest)
+                    && path == self.state_root.join(format!("before-{kind}-{digest}")) =>
+            {
+                reject_symbolic_link(path)
+            }
+            _ => Err(CodexIntegrationError::OwnershipManifest),
+        }
+    }
+
+    /// Returns the original pre-install Hook groups only after the backup path,
+    /// digest, and JSON shape have all been re-proven. A retained group that is
+    /// not in this baseline could be a replacement for an owned group, so
+    /// repair must leave it untouched and fail closed.
+    fn original_hook_groups(
+        &self,
+        manifest: &IntegrationManifest,
+    ) -> Result<BTreeMap<String, Vec<Value>>, CodexIntegrationError> {
+        self.validate_backup_record("hooks", &manifest.hooks_backup)?;
+        if !manifest.hooks_backup.existed {
+            return Ok(BTreeMap::new());
+        }
+        let backup_path = manifest
+            .hooks_backup
+            .path
+            .as_deref()
+            .ok_or(CodexIntegrationError::OwnershipManifest)?;
+        let backup_bytes = read_required_safe_bytes(backup_path)?;
+        if manifest.hooks_backup.digest.as_deref() != Some(&hex_sha256(&backup_bytes)) {
+            return Err(CodexIntegrationError::OwnershipManifest);
+        }
+        let backup_hooks = parse_hooks_bytes(Some(&backup_bytes))?;
+        let events = hooks_events(&backup_hooks)?;
+        let mut original = BTreeMap::new();
+        for (event, groups) in events {
+            let groups = groups.as_array().ok_or(CodexIntegrationError::HooksShape)?;
+            original.insert(event.clone(), groups.clone());
+        }
+        Ok(original)
+    }
+
+    /// Finds only declarations absent from a current, target-bound manifest.
+    /// Every retained non-owned group must match the exact original baseline;
+    /// this is what distinguishes a provably unrelated Hook from an arbitrary
+    /// replacement that must remain fail-closed.
+    fn missing_repairable_owned_hooks(
+        &self,
+        hooks: &Value,
+        manifest: &IntegrationManifest,
+    ) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
+        let events = hooks_events(hooks)?;
+        let original = self.original_hook_groups(manifest)?;
+        let mut missing = Vec::new();
+        for declaration in &manifest.hooks {
+            let matches = events
+                .get(&declaration.event)
+                .and_then(Value::as_array)
+                .map_or(0, |groups| {
+                    groups
+                        .iter()
+                        .filter(|group| *group == &declaration.group)
+                        .count()
+                });
+            match matches {
+                0 => missing.push(declaration.clone()),
+                1 => {}
+                _ => return Err(CodexIntegrationError::ModifiedOwnedHook),
+            }
+        }
+
+        for (event, groups) in events {
+            let groups = groups.as_array().ok_or(CodexIntegrationError::HooksShape)?;
+            let baseline = original.get(event).map(Vec::as_slice).unwrap_or_default();
+            for group in groups {
+                let is_exact_manifest_group = manifest
+                    .hooks
+                    .iter()
+                    .any(|declaration| declaration.event == *event && declaration.group == *group);
+                if is_exact_manifest_group {
+                    continue;
+                }
+                if group_looks_like_tabbeacon_hook(group, Some(&manifest.executable))
+                    || !baseline
+                        .iter()
+                        .any(|original_group| original_group == group)
+                {
+                    return Err(CodexIntegrationError::UnownedHookConflict);
+                }
+            }
+        }
+        Ok(missing)
     }
 
     fn write_manifest(&self, manifest: &IntegrationManifest) -> Result<(), CodexIntegrationError> {
@@ -1102,7 +1504,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 }
 
 fn read_hooks_document(path: &Path) -> Result<Value, CodexIntegrationError> {
-    let bytes = fs::read(path)?;
+    let bytes = read_required_safe_bytes(path)?;
     parse_hooks_bytes(Some(&bytes))
 }
 
@@ -1203,6 +1605,32 @@ fn locate_owned_hooks(
     Ok(locations)
 }
 
+/// Checks the bounded outer wire shape shared by the admitted command-Hook
+/// profiles. External Hook handler kinds (including MCP) remain opaque, but
+/// they must still use the known group/handler envelope so that an unknown
+/// future schema cannot be mistaken for an installable runtime.
+fn validate_known_hook_wire_shape(hooks: &Value) -> Result<(), CodexIntegrationError> {
+    for groups in hooks_events(hooks)?.values() {
+        let groups = groups.as_array().ok_or(CodexIntegrationError::HooksShape)?;
+        for group in groups {
+            let handlers = group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .ok_or(CodexIntegrationError::HooksShape)?;
+            if handlers.iter().any(|handler| {
+                !handler.is_object()
+                    || handler
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .is_none_or(|handler_type| handler_type.trim().is_empty())
+            }) {
+                return Err(CodexIntegrationError::HooksShape);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn contains_tabbeacon_like_hook(hooks: &Value) -> bool {
     hooks_events(hooks).is_ok_and(|events| {
         events.values().any(|groups| {
@@ -1214,6 +1642,10 @@ fn contains_tabbeacon_like_hook(hooks: &Value) -> bool {
 }
 
 fn contains_tabbeacon_like_group(group: &Value) -> bool {
+    group_looks_like_tabbeacon_hook(group, None)
+}
+
+fn group_looks_like_tabbeacon_hook(group: &Value, executable: Option<&Path>) -> bool {
     group
         .get("hooks")
         .and_then(Value::as_array)
@@ -1222,9 +1654,90 @@ fn contains_tabbeacon_like_group(group: &Value) -> bool {
                 ["command", "commandWindows"]
                     .into_iter()
                     .filter_map(|key| handler.get(key).and_then(Value::as_str))
-                    .any(|command| command.contains("tabbeacon hook codex"))
+                    .any(|command| command_looks_like_tabbeacon_hook(command, executable))
             })
         })
+}
+
+fn command_looks_like_tabbeacon_hook(command: &str, executable: Option<&Path>) -> bool {
+    let direct = command.to_ascii_lowercase();
+    if direct.contains("tabbeacon") && direct.contains("hook codex") {
+        return true;
+    }
+    let Some(encoded) = command
+        .split_ascii_whitespace()
+        .collect::<Vec<_>>()
+        .windows(2)
+        .find_map(|parts| {
+            parts[0]
+                .eq_ignore_ascii_case("-encodedcommand")
+                .then_some(parts[1])
+        })
+    else {
+        return false;
+    };
+    let Some(bytes) = decode_base64(encoded) else {
+        return false;
+    };
+    let units = bytes
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect::<Vec<_>>();
+    let Ok(script) = String::from_utf16(&units) else {
+        return false;
+    };
+    let script = script.to_ascii_lowercase();
+    if !script.contains("hook codex") {
+        return false;
+    }
+    script.contains("tabbeacon")
+        || executable.is_some_and(|path| {
+            path.to_str()
+                .is_some_and(|path| script.contains(&path.to_ascii_lowercase()))
+        })
+}
+
+fn decode_base64(value: &str) -> Option<Vec<u8>> {
+    if !value.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(value.len() / 4 * 3);
+    for chunk in value.as_bytes().chunks_exact(4) {
+        let first = base64_value(chunk[0])?;
+        let second = base64_value(chunk[1])?;
+        let third = if chunk[2] == b'=' {
+            None
+        } else {
+            Some(base64_value(chunk[2])?)
+        };
+        let fourth = if chunk[3] == b'=' {
+            None
+        } else {
+            Some(base64_value(chunk[3])?)
+        };
+        if third.is_none() && fourth.is_some() {
+            return None;
+        }
+        bytes.push((first << 2) | (second >> 4));
+        if let Some(third) = third {
+            bytes.push(((second & 0b0000_1111) << 4) | (third >> 2));
+            if let Some(fourth) = fourth {
+                bytes.push(((third & 0b0000_0011) << 6) | fourth);
+            }
+        }
+    }
+    Some(bytes)
+}
+
+fn base64_value(byte: u8) -> Option<u8> {
+    Some(match byte {
+        b'A'..=b'Z' => byte - b'A',
+        b'a'..=b'z' => byte - b'a' + 26,
+        b'0'..=b'9' => byte - b'0' + 52,
+        b'+' => 62,
+        b'/' => 63,
+        _ => return None,
+    })
 }
 
 fn inventory_event_id(event: &str) -> &'static str {
@@ -1265,12 +1778,12 @@ fn inventory_fingerprint(value: &Value) -> String {
 }
 
 fn inventory_trust_state(
-    profile_is_supported: bool,
+    known_wire_shape: bool,
     enabled: bool,
     trusted: Option<&str>,
     declaration: &OwnedHook,
 ) -> HookTrustState {
-    if !profile_is_supported {
+    if !known_wire_shape {
         HookTrustState::UnsupportedOrUnavailable
     } else if !enabled {
         HookTrustState::Disabled
@@ -1287,13 +1800,18 @@ fn inventory_currentness(
     profile_is_supported: bool,
     desired: Option<&[OwnedHook]>,
     declaration: &OwnedHook,
+    runtime_continuity: CodexRuntimeContinuity,
 ) -> HookCurrentness {
-    if !profile_is_supported {
-        HookCurrentness::UnsupportedOrUnavailable
-    } else if desired
-        .is_some_and(|desired| desired.iter().any(|candidate| candidate == declaration))
+    if profile_is_supported
+        && desired.is_some_and(|desired| desired.iter().any(|candidate| candidate == declaration))
     {
         HookCurrentness::Current
+    } else if !profile_is_supported
+        && runtime_continuity == CodexRuntimeContinuity::PreservedUnadmitted
+    {
+        HookCurrentness::InstalledExactUnadmitted
+    } else if !profile_is_supported {
+        HookCurrentness::UnsupportedOrUnavailable
     } else {
         HookCurrentness::Stale
     }
@@ -1484,8 +2002,9 @@ fn codex_profile_check(version: Option<&ProbedCodexProfile>) -> DoctorCheck {
         Some((_, CodexCompatibilityState::Supported(profile))) => pass(
             "codex.hook-profile",
             format!(
-                "{}: events={}; turn-aware={}; agent-aware={}; compact-aware={}; synchronous={}; timeout={}s; title={}; unknown=ignore-fail-open; reconcile={}",
+                "{}: wire={}; events={}; turn-aware={}; agent-aware={}; compact-aware={}; synchronous={}; timeout={}s; title={}; unknown=ignore-fail-open; reconcile={}",
                 profile.id(),
+                profile.wire_shape().id(),
                 profile.lifecycle_events().len(),
                 profile.turn_aware(),
                 profile.agent_aware(),
@@ -1608,11 +2127,20 @@ fn parse_semver(value: &str) -> Option<(u64, u64, u64)> {
 }
 
 fn reject_symbolic_link(path: &Path) -> Result<(), CodexIntegrationError> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => ensure_not_symbolic_link(metadata.file_type().is_symlink()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
+    let mut cursor = Some(path);
+    while let Some(candidate) = cursor {
+        match fs::symlink_metadata(candidate) {
+            Ok(metadata) => {
+                ensure_not_symbolic_link(
+                    metadata.file_type().is_symlink() || metadata_is_reparse_point(&metadata),
+                )?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        cursor = candidate.parent();
     }
+    Ok(())
 }
 
 fn ensure_not_symbolic_link(is_symbolic_link: bool) -> Result<(), CodexIntegrationError> {
@@ -1629,6 +2157,45 @@ fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>, io::Error> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+fn read_required_safe_bytes(path: &Path) -> Result<Vec<u8>, CodexIntegrationError> {
+    reject_symbolic_link(path)?;
+    Ok(fs::read(path)?)
+}
+
+/// Writes only when the on-disk target is byte-for-byte the version that was
+/// parsed during repair preflight. This detects an independent Codex or
+/// third-party edit before `TabBeacon` commits a repair and leaves the target
+/// untouched when the ownership proof has gone stale.
+fn write_if_unchanged(
+    path: &Path,
+    expected_before: &[u8],
+    replacement: &[u8],
+) -> Result<(), CodexIntegrationError> {
+    reject_symbolic_link(path)?;
+    let actual_before = fs::read(path)?;
+    if actual_before != expected_before {
+        return Err(CodexIntegrationError::ConcurrentTargetDrift);
+    }
+    atomic_write(path, replacement)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    metadata.file_attributes() & 0x0400 != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -1675,7 +2242,15 @@ fn fail(id: &'static str, summary: impl Into<String>) -> DoctorCheck {
 
 #[cfg(test)]
 mod tests {
-    use super::{CodexIntegrationError, OwnedHook, ensure_not_symbolic_link, normalized_hook_hash};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{
+        CodexIntegrationError, OwnedHook, ensure_not_symbolic_link, normalized_hook_hash,
+        write_if_unchanged,
+    };
     use serde_json::json;
 
     #[test]
@@ -1752,5 +2327,28 @@ mod tests {
             ensure_not_symbolic_link(true),
             Err(CodexIntegrationError::SymbolicLinkTarget)
         ));
+    }
+
+    #[test]
+    fn repair_write_refuses_a_target_that_drifted_after_preflight() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tabbeacon-repair-drift-{nonce}"));
+        fs::create_dir_all(&root).expect("isolated repair test root");
+        let path = root.join("hooks.json");
+        fs::write(&path, b"preflight snapshot").expect("preflight snapshot writes");
+        fs::write(&path, b"external replacement").expect("external replacement writes");
+
+        assert!(matches!(
+            write_if_unchanged(&path, b"preflight snapshot", b"repair output"),
+            Err(CodexIntegrationError::ConcurrentTargetDrift)
+        ));
+        assert_eq!(
+            fs::read(&path).expect("drifted target reads"),
+            b"external replacement"
+        );
+        fs::remove_dir_all(&root).expect("isolated repair test cleanup");
     }
 }

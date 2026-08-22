@@ -95,6 +95,8 @@ impl HookTrustState {
 pub enum HookCurrentness {
     /// The exact declaration matches the currently admitted integration shape.
     Current,
+    /// An unadmitted runtime retains an exact known installed declaration shape.
+    InstalledExactUnadmitted,
     /// The declaration is exact to its manifest but the integration shape is old.
     Stale,
     /// The expected declaration was missing or changed after installation.
@@ -111,6 +113,7 @@ impl HookCurrentness {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Current => "current",
+            Self::InstalledExactUnadmitted => "installed_exact_unadmitted",
             Self::Stale => "stale",
             Self::DeclarationModifiedOrMissing => "declaration_modified_or_missing",
             Self::UnownedOrAmbiguous => "unowned_or_ambiguous",
@@ -428,6 +431,9 @@ fn trust_label(locale: ResolvedLocale, state: HookTrustState) -> &'static str {
 fn currentness_label(locale: ResolvedLocale, state: HookCurrentness) -> &'static str {
     match (locale, state) {
         (ResolvedLocale::EnUs, HookCurrentness::Current) => "current",
+        (ResolvedLocale::EnUs, HookCurrentness::InstalledExactUnadmitted) => {
+            "installed exact (unadmitted runtime)"
+        }
         (ResolvedLocale::EnUs, HookCurrentness::Stale) => "stale",
         (ResolvedLocale::EnUs, HookCurrentness::DeclarationModifiedOrMissing) => {
             "declaration modified/missing"
@@ -435,6 +441,9 @@ fn currentness_label(locale: ResolvedLocale, state: HookCurrentness) -> &'static
         (ResolvedLocale::EnUs, HookCurrentness::UnownedOrAmbiguous) => "unowned/ambiguous",
         (ResolvedLocale::EnUs, HookCurrentness::UnsupportedOrUnavailable) => "unavailable",
         (ResolvedLocale::ZhCn, HookCurrentness::Current) => "当前",
+        (ResolvedLocale::ZhCn, HookCurrentness::InstalledExactUnadmitted) => {
+            "已安装且精确（运行时未准入）"
+        }
         (ResolvedLocale::ZhCn, HookCurrentness::Stale) => "过期",
         (ResolvedLocale::ZhCn, HookCurrentness::DeclarationModifiedOrMissing) => "声明已变更/缺失",
         (ResolvedLocale::ZhCn, HookCurrentness::UnownedOrAmbiguous) => "未拥有/不明确",
