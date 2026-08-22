@@ -559,7 +559,7 @@ fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
                             })
                             && handler["commandWindows"]
                                 .as_str()
-                                .is_some_and(|command| is_current_windows_hook_command(command))
+                                .is_some_and(is_current_windows_hook_command)
                     })
                 })
             })
@@ -650,7 +650,7 @@ fn owned_current_windows_handler_count(hooks: &Value) -> usize {
                 .is_some_and(|command| command.starts_with(WINDOWS_POWERSHELL_ENVELOPE_PREFIX))
                 && handler["commandWindows"]
                     .as_str()
-                    .is_some_and(|command| is_current_windows_hook_command(command))
+                    .is_some_and(is_current_windows_hook_command)
         })
         .count()
 }
