@@ -7,16 +7,23 @@
 
 use std::env;
 
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
+use jerry_terminal_ui::{
+    chrome::{ColorPolicy as SharedColorPolicy, color_enabled as shared_color_enabled},
+    locale::{
+        Locale as SharedLocale, LocaleInputs as SharedLocaleInputs,
+        LocaleSource as SharedLocaleSource, resolve_locale as resolve_shared_locale,
+    },
+    text::{
+        display_width as shared_display_width, fit_display_width as shared_fit_display_width,
+        pad_display_width as shared_pad_display_width,
+    },
+};
 
 use crate::{
     human_output::HumanTone,
     interface_preferences::{HumanColor, InterfaceLanguage},
     management::{ActionSafety, ManagementHealth},
 };
-
-const ELLIPSIS: &str = "...";
 
 /// One concrete locale supported by Human rendering.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,34 +96,25 @@ pub struct LocaleInputs {
 
 /// Resolves a locale through the documented source precedence.
 #[must_use]
-pub const fn resolve_locale(inputs: LocaleInputs) -> LocaleResolution {
-    if let Some(locale) = concrete_locale(inputs.cli) {
-        return LocaleResolution {
-            locale,
-            source: LocaleSource::Cli,
-        };
-    }
-    if let Some(locale) = concrete_locale(inputs.environment) {
-        return LocaleResolution {
-            locale,
-            source: LocaleSource::Environment,
-        };
-    }
-    if let Some(locale) = concrete_locale(Some(inputs.preference)) {
-        return LocaleResolution {
-            locale,
-            source: LocaleSource::Preference,
-        };
-    }
-    if let Some(locale) = concrete_locale(inputs.operating_system) {
-        return LocaleResolution {
-            locale,
-            source: LocaleSource::OperatingSystem,
-        };
-    }
+pub fn resolve_locale(inputs: LocaleInputs) -> LocaleResolution {
+    let shared = resolve_shared_locale(SharedLocaleInputs {
+        cli: concrete_locale(inputs.cli).map(ResolvedLocale::as_str),
+        environment: concrete_locale(inputs.environment).map(ResolvedLocale::as_str),
+        preference: concrete_locale(Some(inputs.preference)).map(ResolvedLocale::as_str),
+        operating_system: concrete_locale(inputs.operating_system).map(ResolvedLocale::as_str),
+    });
     LocaleResolution {
-        locale: ResolvedLocale::EnUs,
-        source: LocaleSource::Default,
+        locale: match shared.locale {
+            SharedLocale::EnUs => ResolvedLocale::EnUs,
+            SharedLocale::ZhCn => ResolvedLocale::ZhCn,
+        },
+        source: match shared.source {
+            SharedLocaleSource::Cli => LocaleSource::Cli,
+            SharedLocaleSource::Environment => LocaleSource::Environment,
+            SharedLocaleSource::Preference => LocaleSource::Preference,
+            SharedLocaleSource::OperatingSystem => LocaleSource::OperatingSystem,
+            SharedLocaleSource::Fallback => LocaleSource::Default,
+        },
     }
 }
 
@@ -1013,52 +1011,33 @@ impl HumanRenderer {
 /// Determines whether this policy may emit ANSI styling to a target.
 #[must_use]
 pub const fn color_enabled(policy: HumanColor, is_terminal: bool, no_color_is_set: bool) -> bool {
-    if no_color_is_set || matches!(policy, HumanColor::Never) {
-        return false;
-    }
-    matches!(policy, HumanColor::Always) || is_terminal
+    shared_color_enabled(
+        match policy {
+            HumanColor::Auto => SharedColorPolicy::Auto,
+            HumanColor::Always => SharedColorPolicy::Always,
+            HumanColor::Never => SharedColorPolicy::Never,
+        },
+        is_terminal,
+        no_color_is_set,
+    )
 }
 
 /// Returns the number of terminal display cells occupied by a string.
 #[must_use]
 pub fn display_width(value: &str) -> usize {
-    UnicodeWidthStr::width(value)
+    shared_display_width(value)
 }
 
 /// Fits text into a display-cell width without splitting a grapheme cluster.
 #[must_use]
 pub fn fit_display_width(value: &str, width: usize) -> String {
-    if display_width(value) <= width {
-        return value.to_owned();
-    }
-    if width < display_width(ELLIPSIS) {
-        return take_display_width(value, width);
-    }
-    let mut shortened = take_display_width(value, width - display_width(ELLIPSIS));
-    shortened.push_str(ELLIPSIS);
-    shortened
+    shared_fit_display_width(value, width)
 }
 
 /// Pads text to a display-cell width without assuming scalar-count width.
 #[must_use]
 pub fn pad_display_width(value: &str, width: usize) -> String {
-    let mut padded = fit_display_width(value, width);
-    padded.push_str(&" ".repeat(width.saturating_sub(display_width(&padded))));
-    padded
-}
-
-fn take_display_width(value: &str, width: usize) -> String {
-    let mut used = 0_usize;
-    let mut result = String::new();
-    for grapheme in UnicodeSegmentation::graphemes(value, true) {
-        let character_width = display_width(grapheme);
-        if used.saturating_add(character_width) > width {
-            break;
-        }
-        result.push_str(grapheme);
-        used += character_width;
-    }
-    result
+    shared_pad_display_width(value, width)
 }
 
 fn push_line(lines: &mut Vec<HumanLine>, width: usize, text: &str, tone: HumanTone) {
