@@ -40,6 +40,11 @@ pub enum Command {
         #[command(flatten)]
         output: HumanOutputArgs,
     },
+    /// Preview or explicitly restore only provably missing owned integration declarations.
+    Repair {
+        #[command(subcommand)]
+        command: RepairCommand,
+    },
     /// Diagnose the current installation.
     Doctor(DoctorArgs),
     /// Show the current operational state.
@@ -157,6 +162,19 @@ pub enum Command {
 pub enum SetupCommand {
     /// Install or reconcile the Codex hook declarations.
     Codex,
+}
+
+/// Explicit ownership-safe repair operations.
+#[derive(Debug, Subcommand)]
+pub enum RepairCommand {
+    /// Preview or restore missing exact Codex Hook declarations.
+    Codex {
+        /// Perform the displayed Hook-only repair after a fresh ownership preflight.
+        #[arg(long)]
+        apply: bool,
+        #[command(flatten)]
+        output: HumanOutputArgs,
+    },
 }
 
 /// Explicitly pre-admission Agy qualification operations.

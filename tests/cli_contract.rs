@@ -397,6 +397,10 @@ fn output_modes_preserve_machine_json_and_admit_legacy_plain_output() {
     if value["codex"]["version"] == "0.149.0" {
         assert_eq!(value["codex"]["profile_state"], "supported");
         assert_eq!(value["codex"]["hook_profile"], "codex-hooks-rust-v0.149.0");
+        assert_eq!(
+            value["codex"]["hook_wire_shape"],
+            "codex-command-hooks-wire-v1"
+        );
     }
 
     let plain = isolated_command(&root)

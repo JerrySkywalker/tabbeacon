@@ -1,0 +1,17 @@
+{
+  "description": "future unadmitted same-wire installation fixture",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "fixture-security",
+            "tool": "scan",
+            "timeout": 1
+          }
+        ]
+      }
+    ]
+  }
+}

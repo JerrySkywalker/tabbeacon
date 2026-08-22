@@ -21,7 +21,8 @@ use tabbeacon::{
     providers::codex::{
         CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookError, CodexHookEvent,
         CodexHookNormalizer, CodexHookProfile, CodexHookRuntime, CodexIntegration,
-        CodexIntegrationError, CodexNormalization, DoctorStatus, HookDispatchOutcome, SetupOutcome,
+        CodexIntegrationError, CodexMutationAuthority, CodexNormalization, CodexRepairDisposition,
+        CodexRuntimeContinuity, DoctorStatus, HookDispatchOutcome, SetupOutcome,
         TitleOwnershipOutcome, UninstallOutcome, UnknownEventPolicy,
     },
     repo::WorkspaceIdentityResolver,
@@ -573,6 +574,26 @@ fn replace_manifest_owned_declarations_with_legacy(hooks: &mut Value, manifest: 
     manifest["hooks"] = Value::Array(legacy_owned);
 }
 
+fn remove_exact_manifest_owned_declarations(hooks: &mut Value, manifest: &Value) {
+    for declaration in manifest["hooks"]
+        .as_array()
+        .expect("manifest owned hooks are an array")
+    {
+        let event = declaration["event"].as_str().expect("owned event name");
+        let expected = &declaration["group"];
+        let groups = hooks["hooks"][event]
+            .as_array_mut()
+            .expect("owned event groups are present");
+        groups.retain(|group| group != expected);
+        if groups.is_empty() {
+            hooks["hooks"]
+                .as_object_mut()
+                .expect("hooks object")
+                .remove(event);
+        }
+    }
+}
+
 fn shell_independent_owned_handler_count(hooks: &Value) -> usize {
     hooks["hooks"]
         .as_object()
@@ -797,6 +818,19 @@ fn source_audited_profiles_are_explicit_and_future_versions_are_not_assumed() {
     assert_eq!(profile_149.lifecycle_events(), profile.lifecycle_events());
     assert_eq!(profile_149.identity(), profile.identity());
     assert_eq!(profile_149.timeout(), profile.timeout());
+    assert_eq!(profile.wire_shape(), profile_149.wire_shape());
+    assert_eq!(profile.wire_shape().id(), "codex-command-hooks-wire-v1");
+    assert_eq!(profile.wire_shape().root_key(), "hooks");
+    assert_eq!(profile.wire_shape().handler_type(), "command");
+    assert_eq!(
+        profile.wire_shape().command_fields(),
+        ("command", "commandWindows")
+    );
+    assert_eq!(
+        profile.wire_shape().execution_fields(),
+        ("timeout", "async")
+    );
+    assert_eq!(profile.wire_shape().trust_state_field(), "trusted_hash");
     assert_eq!(
         profile_149.reconciliation_note(),
         "owned-command-hooks;external-mcp-tool-preserved"
@@ -908,6 +942,357 @@ fn codex_0149_mcp_extension_is_preserved_during_owned_command_reconciliation() {
             .checks()
             .iter()
             .any(|check| { check.id() == "hooks.trust" && check.status() == DoctorStatus::Pass })
+    );
+}
+
+#[test]
+fn orphaned_owned_hooks_repair_only_missing_declarations_and_preserves_third_party_groups() {
+    let root = TestRoot::new("orphaned-owned-hook-repair");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "orphaned-third-party-hooks.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("0.149 setup succeeds");
+    install_current_codex_trust_state(&codex_home);
+
+    let hooks_path = codex_home.join("hooks.json");
+    let config_path = codex_home.join("config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("installed hooks read"))
+            .expect("installed hooks parse");
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest reads"))
+            .expect("manifest parses");
+    let third_party_stop = hooks["hooks"]["Stop"][0].clone();
+    let third_party_mcp = hooks["hooks"]["PostToolUse"][0].clone();
+    let config_before = fs::read(&config_path).expect("config reads");
+    let manifest_before = fs::read(&manifest_path).expect("manifest rereads");
+
+    remove_exact_manifest_owned_declarations(&mut hooks, &manifest);
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("orphaned hooks serialize"),
+    )
+    .expect("orphaned hooks write");
+    let orphaned_bytes = fs::read(&hooks_path).expect("orphaned hooks read");
+
+    let diagnosis = integration.doctor();
+    assert!(diagnosis.checks().iter().any(|check| {
+        check.id() == "ownership.manifest" && check.status() == DoctorStatus::Pass
+    }));
+    assert!(diagnosis.checks().iter().any(|check| {
+        check.id() == "hooks.currentness" && check.status() == DoctorStatus::Pass
+    }));
+    assert!(diagnosis.checks().iter().any(|check| {
+        check.id() == "hooks.declarations" && check.status() == DoctorStatus::Fail
+    }));
+    assert!(
+        diagnosis
+            .checks()
+            .iter()
+            .any(|check| { check.id() == "hooks.trust" && check.status() == DoctorStatus::Fail })
+    );
+
+    let preview = integration.repair(false).expect("repair preview is safe");
+    assert_eq!(preview.disposition, CodexRepairDisposition::ReadyToApply);
+    assert_eq!(preview.missing_declarations, ADMITTED_HOOK_EVENTS.len());
+    assert!(preview.manual_hook_trust_review_required);
+    assert_eq!(
+        fs::read(&hooks_path).expect("preview hooks read"),
+        orphaned_bytes
+    );
+    assert_eq!(
+        fs::read(&config_path).expect("preview config read"),
+        config_before
+    );
+    assert_eq!(
+        fs::read(&manifest_path).expect("preview manifest read"),
+        manifest_before
+    );
+
+    let repaired = integration.repair(true).expect("repair apply succeeds");
+    assert_eq!(
+        repaired.disposition,
+        CodexRepairDisposition::RepairedTrustReviewRequired
+    );
+    assert_eq!(repaired.missing_declarations, ADMITTED_HOOK_EVENTS.len());
+    assert!(repaired.manual_hook_trust_review_required);
+    let repaired_hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("repaired hooks read"))
+            .expect("repaired hooks parse");
+    assert_eq!(repaired_hooks["hooks"]["Stop"][0], third_party_stop);
+    assert_eq!(repaired_hooks["hooks"]["PostToolUse"][0], third_party_mcp);
+    assert_eq!(
+        fs::read(&config_path).expect("repair config read"),
+        config_before
+    );
+    assert_eq!(
+        fs::read(&manifest_path).expect("repair manifest read"),
+        manifest_before
+    );
+
+    let repaired_bytes = fs::read(&hooks_path).expect("idempotent hooks read");
+    let idempotent = integration
+        .repair(false)
+        .expect("exact repair preflight succeeds");
+    assert_eq!(idempotent.disposition, CodexRepairDisposition::AlreadyExact);
+    assert_eq!(idempotent.missing_declarations, 0);
+    assert!(idempotent.manual_hook_trust_review_required);
+    assert_eq!(
+        fs::read(&hooks_path).expect("idempotent hooks reread"),
+        repaired_bytes
+    );
+}
+
+#[test]
+fn repair_refuses_ambiguous_tabbeacon_like_groups_without_writing_any_owner_state() {
+    let root = TestRoot::new("ambiguous-owned-hook-repair");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("0.149 setup succeeds");
+
+    let hooks_path = codex_home.join("hooks.json");
+    let config_path = codex_home.join("config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    write_hooks_fixture(&codex_home, "ambiguous-tabbeacon-like.json");
+    let hooks_before = fs::read(&hooks_path).expect("ambiguous hooks read");
+    let config_before = fs::read(&config_path).expect("config reads");
+    let manifest_before = fs::read(&manifest_path).expect("manifest reads");
+
+    assert!(matches!(
+        integration.repair(false),
+        Err(CodexIntegrationError::UnownedHookConflict)
+    ));
+    assert!(matches!(
+        integration.repair(true),
+        Err(CodexIntegrationError::UnownedHookConflict)
+    ));
+    assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
+    assert_eq!(
+        fs::read(&config_path).expect("config reread"),
+        config_before
+    );
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest reread"),
+        manifest_before
+    );
+}
+
+#[test]
+fn repair_refuses_an_unproven_non_tabbeacon_group_replacing_an_owned_declaration() {
+    let root = TestRoot::new("unproven-owned-hook-replacement");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "orphaned-third-party-hooks.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("0.149 setup succeeds");
+
+    let hooks_path = codex_home.join("hooks.json");
+    let config_path = codex_home.join("config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest reads"))
+            .expect("manifest parses");
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("installed hooks read"))
+            .expect("installed hooks parse");
+    remove_exact_manifest_owned_declarations(&mut hooks, &manifest);
+    hooks["hooks"]["PreToolUse"] = json!([{
+        "hooks": [{
+            "type": "command",
+            "command": "external replacement with no ownership baseline",
+            "timeout": 1
+        }]
+    }]);
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("replacement hooks serialize"),
+    )
+    .expect("replacement hooks write");
+    let hooks_before = fs::read(&hooks_path).expect("replacement hooks read");
+    let config_before = fs::read(&config_path).expect("config reads");
+    let manifest_before = fs::read(&manifest_path).expect("manifest reads");
+
+    assert!(matches!(
+        integration.repair(false),
+        Err(CodexIntegrationError::UnownedHookConflict)
+    ));
+    assert!(matches!(
+        integration.repair(true),
+        Err(CodexIntegrationError::UnownedHookConflict)
+    ));
+    assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
+    assert_eq!(
+        fs::read(&config_path).expect("config reread"),
+        config_before
+    );
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest reread"),
+        manifest_before
+    );
+}
+
+#[test]
+fn repair_and_runtime_continuity_reject_a_manifest_with_incoherent_executable() {
+    let root = TestRoot::new("manifest-executable-coherence");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("0.149 setup succeeds");
+    install_current_codex_trust_state(&codex_home);
+
+    let manifest_path = root.child("state/integration-v1.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest reads"))
+            .expect("manifest parses");
+    manifest["executable"] = json!(r"C:\\tabbeacon-fixture\\stale-tabbeacon.exe");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("manifest serialize"),
+    )
+    .expect("manifest writes");
+
+    assert!(matches!(
+        integration.repair(false),
+        Err(CodexIntegrationError::StaleOwnedHook)
+    ));
+    assert_eq!(
+        integration.doctor().runtime_continuity(),
+        CodexRuntimeContinuity::Unproven
+    );
+}
+
+#[test]
+fn future_unknown_same_wire_preserves_runtime_but_blocks_all_mutation_authority() {
+    let root = TestRoot::new("future-unknown-continuity");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.150.0-same-wire.json");
+    let admitted = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    admitted.setup().expect("admitted setup succeeds");
+    install_current_codex_trust_state(&codex_home);
+
+    let hooks_path = codex_home.join("hooks.json");
+    let config_path = codex_home.join("config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    let hooks_before = fs::read(&hooks_path).expect("hooks read");
+    let config_before = fs::read(&config_path).expect("config read");
+    let manifest_before = fs::read(&manifest_path).expect("manifest read");
+    let future = test_integration_with_codex_fixture(&root, "codex_version_probe_future.rs");
+
+    let report = future.doctor();
+    assert_eq!(report.compatibility_state().label(), "unknown");
+    assert_eq!(report.mutation_authority(), CodexMutationAuthority::Blocked);
+    assert_eq!(
+        report.runtime_continuity(),
+        CodexRuntimeContinuity::PreservedUnadmitted
+    );
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.currentness" && check.status() == DoctorStatus::Warning
+    }));
+    assert!(
+        report
+            .checks()
+            .iter()
+            .any(|check| { check.id() == "hooks.trust" && check.status() == DoctorStatus::Pass })
+    );
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "codex.runtime-continuity" && check.status() == DoctorStatus::Warning
+    }));
+    let inventory = future.hook_inventory();
+    assert!(inventory.entries.iter().any(|entry| {
+        entry.owner == HookOwner::TabBeacon
+            && entry.trust_state == HookTrustState::Trusted
+            && entry.currentness == HookCurrentness::InstalledExactUnadmitted
+    }));
+    assert!(matches!(
+        future.setup(),
+        Err(CodexIntegrationError::UnsupportedCodexVersion)
+    ));
+    assert!(matches!(
+        future.repair(true),
+        Err(CodexIntegrationError::UnsupportedCodexVersion)
+    ));
+    assert!(matches!(
+        future.reconcile_title_ownership(false),
+        Err(CodexIntegrationError::UnsupportedCodexVersion)
+    ));
+    assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
+    assert_eq!(
+        fs::read(&config_path).expect("config reread"),
+        config_before
+    );
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest reread"),
+        manifest_before
+    );
+}
+
+#[test]
+fn future_unknown_declaration_drift_disables_runtime_continuity() {
+    let root = TestRoot::new("future-unknown-continuity-drift");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.150.0-same-wire.json");
+    let admitted = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    admitted.setup().expect("admitted setup succeeds");
+    install_current_codex_trust_state(&codex_home);
+    let future = test_integration_with_codex_fixture(&root, "codex_version_probe_future.rs");
+    let hooks_path = codex_home.join("hooks.json");
+
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("hooks read")).expect("hooks parse");
+    hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = json!("declaration drift");
+    hooks["hooks"]["PreToolUse"][0]["hooks"][0]["commandWindows"] = json!("declaration drift");
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("drifted hooks serialize"),
+    )
+    .expect("drifted hooks write");
+    assert_eq!(
+        future.doctor().runtime_continuity(),
+        CodexRuntimeContinuity::Unproven
+    );
+}
+
+#[test]
+fn future_unknown_trust_drift_disables_runtime_continuity() {
+    let root = TestRoot::new("future-unknown-continuity-trust-drift");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.150.0-same-wire.json");
+    let admitted = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    admitted.setup().expect("admitted setup succeeds");
+    let trusted_keys = install_current_codex_trust_state(&codex_home);
+    let future = test_integration_with_codex_fixture(&root, "codex_version_probe_future.rs");
+    let config_path = codex_home.join("config.toml");
+
+    let mut config = fs::read_to_string(&config_path)
+        .expect("config reads")
+        .parse::<DocumentMut>()
+        .expect("config parses");
+    config["hooks"]["state"][&trusted_keys[0]]["trusted_hash"] = value("sha256:drift");
+    fs::write(&config_path, config.to_string()).expect("trust drift writes");
+    assert_eq!(
+        future.doctor().runtime_continuity(),
+        CodexRuntimeContinuity::Unproven
+    );
+}
+
+#[test]
+fn future_unknown_schema_change_disables_runtime_continuity() {
+    let root = TestRoot::new("future-unknown-continuity-schema-change");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.150.0-same-wire.json");
+    let admitted = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    admitted.setup().expect("admitted setup succeeds");
+    install_current_codex_trust_state(&codex_home);
+    let future = test_integration_with_codex_fixture(&root, "codex_version_probe_future.rs");
+    write_hooks_fixture(&codex_home, "0.150.0-schema-change.json");
+    assert_eq!(
+        future.doctor().runtime_continuity(),
+        CodexRuntimeContinuity::Unproven
+    );
+    assert_eq!(
+        future.hook_inventory().availability,
+        HookInventoryAvailability::Unavailable
     );
 }
 

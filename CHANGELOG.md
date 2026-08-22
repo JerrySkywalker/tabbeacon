@@ -9,6 +9,13 @@ All notable changes to TabBeacon will be documented here.
 - Added content-minimal, no-mutation Agy pre-admission qualification fixtures,
   version-drift diagnostics, and an Owner-present G64 runbook. Agy remains
   explicitly unadmitted and unavailable for production use.
+- Added preview-first, ownership-safe Codex orphaned-Hook repair. It restores
+  only proven-absent exact groups, preserves backup-proven third-party and MCP
+  Hook groups, detects concurrent target drift, leaves trust manual-only, and
+  refuses lookalike, replacement, redirected, or modified declarations.
+- Added separate machine-readable Codex mutation-authority and installed-runtime
+  continuity diagnostics, plus bounded source/protocol delta audit receipts for
+  future exact profile admission.
 
 ## [0.5.1] - 2026-08-21
 

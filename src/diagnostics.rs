@@ -10,7 +10,10 @@ use serde::Serialize;
 
 use crate::{
     activity::inspect_system_activity_leases,
-    providers::codex::{CodexDoctorReport, CodexIntegration, DoctorStatus},
+    providers::codex::{
+        CodexDoctorReport, CodexIntegration, CodexMutationAuthority, CodexRuntimeContinuity,
+        DoctorStatus,
+    },
     repo::StableAliasRegistry,
     settings::{PresentationSettings, PresentationSettingsStore, SettingsError},
     title_authority::TitleAuthorityDiagnostics,
@@ -79,6 +82,10 @@ pub struct DoctorDiagnostics {
     pub schema_version: u32,
     /// Aggregate verdict.
     pub overall: DiagnosticStatus,
+    /// Whether the detected Codex version authorizes integration mutation.
+    pub mutation_authority: CodexMutationAuthority,
+    /// Whether the installed Hook surface can continue at runtime.
+    pub runtime_continuity: CodexRuntimeContinuity,
     /// Complete ordered safe check set.
     pub checks: Vec<DiagnosticCheck>,
     /// Warning checks, represented structurally for automation.
@@ -119,6 +126,8 @@ impl DoctorDiagnostics {
         Self {
             schema_version: DIAGNOSTICS_SCHEMA_VERSION,
             overall,
+            mutation_authority: CodexMutationAuthority::Blocked,
+            runtime_continuity: CodexRuntimeContinuity::Unproven,
             checks,
             warnings,
             failures,
@@ -135,7 +144,7 @@ impl DoctorDiagnostics {
     }
 
     fn from_codex_report(report: &CodexDoctorReport) -> Self {
-        Self::from_checks(
+        let mut diagnostics = Self::from_checks(
             report
                 .checks()
                 .iter()
@@ -145,7 +154,10 @@ impl DoctorDiagnostics {
                     summary: check.summary().to_owned(),
                 })
                 .collect(),
-        )
+        );
+        diagnostics.mutation_authority = report.mutation_authority();
+        diagnostics.runtime_continuity = report.runtime_continuity();
+        diagnostics
     }
 
     fn unavailable() -> Self {
@@ -179,10 +191,16 @@ pub struct CodexDiagnostics {
     pub version: Option<String>,
     /// Exact source-audited Hook profile identifier when known.
     pub hook_profile: Option<String>,
+    /// Bounded command-Hook wire-shape identifier when known.
+    pub hook_wire_shape: Option<String>,
     /// Exact offline registry state; never infers support from a version range.
     pub profile_state: String,
     /// Whether the detected version maps to an admitted Hook profile.
     pub profile_supported: bool,
+    /// Whether the detected version may mutate Codex integration state.
+    pub mutation_authority: CodexMutationAuthority,
+    /// Whether a fully proven installed integration may continue at runtime.
+    pub runtime_continuity: CodexRuntimeContinuity,
 }
 
 /// Trust state derived from the safe doctor report.
@@ -410,8 +428,11 @@ fn collect_codex_diagnostics() -> (CodexDiagnostics, IntegrationDiagnostics, Doc
             CodexDiagnostics {
                 version: None,
                 hook_profile: None,
+                hook_wire_shape: None,
                 profile_state: "unknown".to_owned(),
                 profile_supported: false,
+                mutation_authority: CodexMutationAuthority::Blocked,
+                runtime_continuity: CodexRuntimeContinuity::Unproven,
             },
             IntegrationDiagnostics {
                 installed: false,
@@ -450,8 +471,13 @@ fn collect_codex_diagnostics() -> (CodexDiagnostics, IntegrationDiagnostics, Doc
         CodexDiagnostics {
             version: report.codex_version().map(ToOwned::to_owned),
             hook_profile: report.hook_profile().map(|profile| profile.id().to_owned()),
+            hook_wire_shape: report
+                .hook_profile()
+                .map(|profile| profile.wire_shape().id().to_owned()),
             profile_state: report.compatibility_state().label().to_owned(),
             profile_supported: report.profile_supported(),
+            mutation_authority: report.mutation_authority(),
+            runtime_continuity: report.runtime_continuity(),
         },
         IntegrationDiagnostics {
             installed: manifest_status == Some(DoctorStatus::Pass),
@@ -536,6 +562,14 @@ pub fn human_doctor_lines(report: &DoctorDiagnostics) -> Vec<String> {
             )
         })
         .collect::<Vec<_>>();
+    lines.push(format!(
+        "CODEX_MUTATION_AUTHORITY={}",
+        report.mutation_authority.as_str()
+    ));
+    lines.push(format!(
+        "CODEX_RUNTIME_CONTINUITY={}",
+        report.runtime_continuity.as_str()
+    ));
     lines.extend(human_title_lines(&report.title));
     lines.push(format!("DOCTOR={}", report.overall.as_str()));
     lines
@@ -693,6 +727,8 @@ mod tests {
 
         assert_eq!(parsed["schema_version"], DIAGNOSTICS_SCHEMA_VERSION);
         assert_eq!(parsed["overall"], "fail");
+        assert_eq!(parsed["mutation_authority"], "blocked");
+        assert_eq!(parsed["runtime_continuity"], "unproven");
         assert_eq!(parsed["warnings"].as_array().map(Vec::len), Some(1));
         assert_eq!(parsed["failures"].as_array().map(Vec::len), Some(1));
         assert!(report.is_failure());
@@ -710,6 +746,8 @@ mod tests {
             human_doctor_lines(&report),
             vec![
                 "CHECK=codex.profile STATUS=WARNING SUMMARY=unsupported profile".to_owned(),
+                "CODEX_MUTATION_AUTHORITY=blocked".to_owned(),
+                "CODEX_RUNTIME_CONTINUITY=unproven".to_owned(),
                 "TITLE_DESIRED_OWNER=tabbeacon".to_owned(),
                 "CODEX_TITLE_WRITER_STATE=unavailable".to_owned(),
                 "APPLICATION_TITLE_POLICY=not_inspected".to_owned(),

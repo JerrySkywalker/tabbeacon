@@ -14,7 +14,8 @@ use dialoguer::{Confirm, Select};
 use tabbeacon::cli::{
     AgyPreadmissionCommand, AliasCommand, Cli, Command, ConfigCommand, ConvergenceCommand,
     DoctorArgs, ExplainCommand, HumanOutputArgs, InterfaceCommand, InterfacePreferenceKey,
-    OutputMode, PreviewArgs, Provider, SetupCommand, TitlePolicyCommand, UpgradePreflightArgs,
+    OutputMode, PreviewArgs, Provider, RepairCommand, SetupCommand, TitlePolicyCommand,
+    UpgradePreflightArgs,
 };
 use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_title_probe,
@@ -35,7 +36,8 @@ use tabbeacon::providers::agy::{
     MAX_AGY_QUALIFICATION_INPUT_BYTES,
 };
 use tabbeacon::providers::codex::{
-    CodexHookRuntime, CodexIntegration, SetupOutcome, TitleOwnershipOutcome, UninstallOutcome,
+    CodexHookRuntime, CodexIntegration, CodexRepairDisposition, CodexRepairReport, SetupOutcome,
+    TitleOwnershipOutcome, UninstallOutcome,
 };
 use tabbeacon::providers::registry::ProviderRegistry;
 use tabbeacon::setup::{
@@ -154,6 +156,9 @@ fn dispatch(cli: Cli) -> ExitCode {
             output,
             ..
         }) => setup_codex(output.mode(), output.language.preference()),
+        Some(Command::Repair {
+            command: RepairCommand::Codex { apply, output },
+        }) => repair_codex(apply, output.mode(), output.language.preference()),
         Some(Command::Doctor(DoctorArgs {
             output,
             probe_title,
@@ -935,6 +940,95 @@ fn setup_codex(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> 
         Ok(outcome) => print_setup_outcome(outcome, output_mode, language),
         Err(error) => setup_management_error(&error, output_mode, language),
     }
+}
+
+fn repair_codex(
+    apply: bool,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
+    let integration = match CodexIntegration::from_environment() {
+        Ok(integration) => integration,
+        Err(error) => return management_error_for_output("REPAIR", &error, output_mode, language),
+    };
+    let report = match integration.repair(apply) {
+        Ok(report) => report,
+        Err(error) => return management_error_for_output("REPAIR", &error, output_mode, language),
+    };
+    print_codex_repair_report(report, output_mode)
+}
+
+fn print_codex_repair_report(report: CodexRepairReport, output_mode: OutputMode) -> ExitCode {
+    if output_mode == OutputMode::Json {
+        return match serde_json::to_string(&report) {
+            Ok(json) => {
+                println!("{json}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => management_error("REPAIR", &error),
+        };
+    }
+    if output_mode == OutputMode::Plain {
+        println!("REPAIR_SCHEMA_VERSION={}", report.schema_version);
+        println!(
+            "REPAIR_DISPOSITION={}",
+            match report.disposition {
+                CodexRepairDisposition::ReadyToApply => "READY_TO_APPLY",
+                CodexRepairDisposition::RepairedTrustReviewRequired => {
+                    "REPAIRED_TRUST_REVIEW_REQUIRED"
+                }
+                CodexRepairDisposition::AlreadyExact => "ALREADY_EXACT",
+            }
+        );
+        println!("MISSING_DECLARATIONS={}", report.missing_declarations);
+        println!(
+            "MANUAL_HOOK_TRUST_REVIEW_REQUIRED={}",
+            report.manual_hook_trust_review_required
+        );
+        println!("AUTO_HOOK_TRUST=false");
+        println!(
+            "OWNER_ACTION={}",
+            match report.disposition {
+                CodexRepairDisposition::ReadyToApply => {
+                    "run tabbeacon repair codex --apply after reviewing the preview"
+                }
+                CodexRepairDisposition::RepairedTrustReviewRequired => {
+                    "launch codex, review TabBeacon hooks in /hooks, then run tabbeacon doctor"
+                }
+                CodexRepairDisposition::AlreadyExact => {
+                    "run tabbeacon doctor to verify hook trust and configuration"
+                }
+            }
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    let (tone, summary, next) = match report.disposition {
+        CodexRepairDisposition::ReadyToApply => (
+            HumanTone::Attention,
+            format!(
+                "Repair preview found {} exact missing TabBeacon Hook declarations.",
+                report.missing_declarations
+            ),
+            "Run `tabbeacon repair codex --apply` to restore only those declarations.",
+        ),
+        CodexRepairDisposition::RepairedTrustReviewRequired => (
+            HumanTone::Success,
+            format!(
+                "Restored {} exact TabBeacon Hook declarations.",
+                report.missing_declarations
+            ),
+            "Launch `codex`, review the TabBeacon Hooks in `/hooks`, then run `tabbeacon doctor`.",
+        ),
+        CodexRepairDisposition::AlreadyExact => (
+            HumanTone::Success,
+            "The exact TabBeacon Hook declarations are already present.".to_owned(),
+            "Run `tabbeacon doctor` to verify Hook trust and configuration.",
+        ),
+    };
+    print_human_tone(tone, &summary);
+    print_human_tone(HumanTone::Dim, next);
+    ExitCode::SUCCESS
 }
 
 #[allow(clippy::too_many_lines)] // Coordinates the intentionally linear interactive setup flow.

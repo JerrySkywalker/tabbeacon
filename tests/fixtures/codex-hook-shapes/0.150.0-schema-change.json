@@ -1,0 +1,15 @@
+{
+  "description": "future Codex schema change fixture",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "",
+            "command": "future schema handler"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -10,12 +10,13 @@ mod profile;
 mod runtime;
 
 pub use config::{
-    CodexDoctorReport, CodexIntegration, CodexIntegrationError, DoctorStatus, SetupOutcome,
+    CodexDoctorReport, CodexIntegration, CodexIntegrationError, CodexMutationAuthority,
+    CodexRepairDisposition, CodexRepairReport, CodexRuntimeContinuity, DoctorStatus, SetupOutcome,
     TitleOwnershipOutcome, UninstallOutcome,
 };
 pub use profile::{
     CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookEvent, CodexHookProfile,
-    HookIdentitySemantics, HookTimeoutSemantics, KnownUnadmittedCodexVersion,
+    CodexHookWireShape, HookIdentitySemantics, HookTimeoutSemantics, KnownUnadmittedCodexVersion,
     TerminalTitleOwnershipSemantics, UnknownEventPolicy,
 };
 pub use runtime::{CodexHookRuntime, HookDispatchOutcome};

@@ -30,7 +30,21 @@ fn classify(candidate: &str) -> String {
 
 #[test]
 fn source_diff_classifies_safe_review_and_breaking_fixtures() {
-    assert!(classify("candidate-safe").contains("CLASSIFICATION=SAFE_COMPATIBLE"));
-    assert!(classify("candidate-review").contains("CLASSIFICATION=REQUIRES_REVIEW"));
-    assert!(classify("candidate-breaking").contains("CLASSIFICATION=BREAKING_OR_UNPROVEN"));
+    let safe = classify("candidate-safe");
+    assert!(safe.contains("DELTA_AUDIT_SCHEMA=tabbeacon-codex-hook-delta-v1"));
+    assert!(safe.contains("CLASSIFICATION=SAFE_COMPATIBLE"));
+    assert!(safe.contains("PROTOCOL_DELTA=NONE_RELEVANT"));
+    assert!(safe.contains("EXACT_PRODUCTION_ADMISSION=NOT_GRANTED"));
+
+    let review = classify("candidate-review");
+    assert!(review.contains("CLASSIFICATION=REQUIRES_REVIEW"));
+    assert!(review.contains("PROTOCOL_DELTA=REQUIRES_SOURCE_REVIEW"));
+
+    let breaking = classify("candidate-breaking");
+    assert!(breaking.contains("CLASSIFICATION=BREAKING_OR_UNPROVEN"));
+    assert!(breaking.contains("PROTOCOL_DELTA=BREAKING_OR_UNPROVEN"));
+
+    let schema = classify("candidate-schema");
+    assert!(schema.contains("CLASSIFICATION=BREAKING_OR_UNPROVEN"));
+    assert!(schema.contains("PROTOCOL_DELTA=BREAKING_OR_UNPROVEN"));
 }

@@ -709,8 +709,11 @@ mod tests {
             codex: CodexDiagnostics {
                 version: Some("0.147.0".to_owned()),
                 hook_profile: Some("codex-hooks-rust-v0.147.0".to_owned()),
+                hook_wire_shape: Some("codex-command-hooks-wire-v1".to_owned()),
                 profile_state: "supported".to_owned(),
                 profile_supported: true,
+                mutation_authority: crate::providers::codex::CodexMutationAuthority::Admitted,
+                runtime_continuity: crate::providers::codex::CodexRuntimeContinuity::Admitted,
             },
             integration: IntegrationDiagnostics {
                 installed: true,
@@ -742,6 +745,8 @@ mod tests {
             doctor: DoctorDiagnostics {
                 schema_version: 1,
                 overall: DiagnosticStatus::Pass,
+                mutation_authority: crate::providers::codex::CodexMutationAuthority::Admitted,
+                runtime_continuity: crate::providers::codex::CodexRuntimeContinuity::Admitted,
                 checks: Vec::new(),
                 warnings: Vec::new(),
                 failures: Vec::new(),
