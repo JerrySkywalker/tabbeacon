@@ -1,0 +1,19 @@
+{
+  "description": "post-install external MCP Hook group",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "plugin": "third.party.mcp",
+        "hooks": [
+          {
+            "type": "mcp_tool",
+            "server": "postinstall-security",
+            "tool": "scan",
+            "input": { "mode": "safe" },
+            "timeout": 1
+          }
+        ]
+      }
+    ]
+  }
+}

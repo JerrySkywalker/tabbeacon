@@ -157,8 +157,18 @@ fn dispatch(cli: Cli) -> ExitCode {
             ..
         }) => setup_codex(output.mode(), output.language.preference()),
         Some(Command::Repair {
-            command: RepairCommand::Codex { apply, output },
-        }) => repair_codex(apply, output.mode(), output.language.preference()),
+            command:
+                RepairCommand::Codex {
+                    apply,
+                    expected_target_digest,
+                    output,
+                },
+        }) => repair_codex(
+            apply,
+            expected_target_digest.as_deref(),
+            output.mode(),
+            output.language.preference(),
+        ),
         Some(Command::Doctor(DoctorArgs {
             output,
             probe_title,
@@ -944,21 +954,22 @@ fn setup_codex(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> 
 
 fn repair_codex(
     apply: bool,
+    expected_target_digest: Option<&str>,
     output_mode: OutputMode,
     language: Option<InterfaceLanguage>,
 ) -> ExitCode {
     let integration = match CodexIntegration::from_environment() {
         Ok(integration) => integration,
-        Err(error) => return management_error_for_output("REPAIR", &error, output_mode, language),
+        Err(error) => return repair_management_error(&error, output_mode, language),
     };
-    let report = match integration.repair(apply) {
+    let report = match integration.repair(apply, expected_target_digest) {
         Ok(report) => report,
-        Err(error) => return management_error_for_output("REPAIR", &error, output_mode, language),
+        Err(error) => return repair_management_error(&error, output_mode, language),
     };
-    print_codex_repair_report(report, output_mode)
+    print_codex_repair_report(&report, output_mode)
 }
 
-fn print_codex_repair_report(report: CodexRepairReport, output_mode: OutputMode) -> ExitCode {
+fn print_codex_repair_report(report: &CodexRepairReport, output_mode: OutputMode) -> ExitCode {
     if output_mode == OutputMode::Json {
         return match serde_json::to_string(&report) {
             Ok(json) => {
@@ -981,6 +992,19 @@ fn print_codex_repair_report(report: CodexRepairReport, output_mode: OutputMode)
             }
         );
         println!("MISSING_DECLARATIONS={}", report.missing_declarations);
+        println!("TARGET_DIGEST={}", report.target_digest);
+        println!(
+            "THIRD_PARTY_GROUPS_PRESERVED={}",
+            report.third_party_groups_preserved
+        );
+        println!(
+            "POSTINSTALL_THIRD_PARTY_PRESERVED={}",
+            report.postinstall_third_party_groups_preserved > 0
+        );
+        println!(
+            "POSTINSTALL_THIRD_PARTY_GROUPS_PRESERVED={}",
+            report.postinstall_third_party_groups_preserved
+        );
         println!(
             "MANUAL_HOOK_TRUST_REVIEW_REQUIRED={}",
             report.manual_hook_trust_review_required
@@ -990,7 +1014,7 @@ fn print_codex_repair_report(report: CodexRepairReport, output_mode: OutputMode)
             "OWNER_ACTION={}",
             match report.disposition {
                 CodexRepairDisposition::ReadyToApply => {
-                    "run tabbeacon repair codex --apply after reviewing the preview"
+                    "run tabbeacon repair codex --apply --expected-target-digest <TARGET_DIGEST> after reviewing the preview"
                 }
                 CodexRepairDisposition::RepairedTrustReviewRequired => {
                     "launch codex, review TabBeacon hooks in /hooks, then run tabbeacon doctor"
@@ -1007,10 +1031,10 @@ fn print_codex_repair_report(report: CodexRepairReport, output_mode: OutputMode)
         CodexRepairDisposition::ReadyToApply => (
             HumanTone::Attention,
             format!(
-                "Repair preview found {} exact missing TabBeacon Hook declarations.",
-                report.missing_declarations
+                "Repair preview found {} exact missing TabBeacon Hook declarations and will preserve {} third-party Hook groups.",
+                report.missing_declarations, report.third_party_groups_preserved
             ),
-            "Run `tabbeacon repair codex --apply` to restore only those declarations.",
+            "Run `tabbeacon repair codex --apply --expected-target-digest <TARGET_DIGEST>` to restore only those declarations.",
         ),
         CodexRepairDisposition::RepairedTrustReviewRequired => (
             HumanTone::Success,
@@ -1029,6 +1053,37 @@ fn print_codex_repair_report(report: CodexRepairReport, output_mode: OutputMode)
     print_human_tone(tone, &summary);
     print_human_tone(HumanTone::Dim, next);
     ExitCode::SUCCESS
+}
+
+fn repair_management_error(
+    error: &tabbeacon::providers::codex::CodexIntegrationError,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
+    match output_mode {
+        OutputMode::Json => {
+            let receipt = serde_json::json!({
+                "repair_schema_version": 2,
+                "repair_disposition": "blocked",
+                "failure_class": error.repair_failure_class(),
+                "auto_hook_trust": false,
+                "reason": error.to_string(),
+            });
+            eprintln!("{receipt}");
+            ExitCode::FAILURE
+        }
+        OutputMode::Plain => {
+            eprintln!("REPAIR_SCHEMA_VERSION=2");
+            eprintln!("REPAIR=FAIL");
+            eprintln!("REPAIR_DISPOSITION=BLOCKED");
+            eprintln!("REPAIR_FAILURE_CLASS={}", error.repair_failure_class());
+            eprintln!("AUTO_HOOK_TRUST=false");
+            eprintln!("MANUAL_TRUST_BOUNDARY=/hooks");
+            eprintln!("REASON={error}");
+            ExitCode::FAILURE
+        }
+        OutputMode::Human => management_error_for_output("REPAIR", error, output_mode, language),
+    }
 }
 
 #[allow(clippy::too_many_lines)] // Coordinates the intentionally linear interactive setup flow.

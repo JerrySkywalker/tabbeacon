@@ -1,0 +1,29 @@
+{
+  "description": "multiple post-install third-party command Hook groups",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "plugin": "third.party.audit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "third-party audit hook",
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "plugin": "third.party.notify",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "third-party notification hook",
+            "timeout": 1
+          }
+        ]
+      }
+    ]
+  }
+}

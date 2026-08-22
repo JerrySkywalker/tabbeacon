@@ -225,12 +225,24 @@ fn compile_codex_probe_fixture(root: &TestRoot, fixture: &str) -> PathBuf {
 
 fn write_hooks_fixture(codex_home: &Path, name: &str) {
     fs::create_dir_all(codex_home).expect("Codex fixture home is created");
-    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let fixture = hooks_fixture_path(name);
+    fs::copy(fixture, codex_home.join("hooks.json")).expect("hook shape fixture is copied");
+}
+
+fn hooks_fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")
         .join("fixtures")
         .join("codex-hook-shapes")
-        .join(name);
-    fs::copy(fixture, codex_home.join("hooks.json")).expect("hook shape fixture is copied");
+        .join(name)
+}
+
+fn hook_group_fixture(name: &str, event: &str) -> Value {
+    let fixture: Value = serde_json::from_slice(
+        &fs::read(hooks_fixture_path(name)).expect("hook group fixture reads"),
+    )
+    .expect("hook group fixture parses");
+    fixture["hooks"][event][0].clone()
 }
 
 #[cfg(windows)]
@@ -946,7 +958,8 @@ fn codex_0149_mcp_extension_is_preserved_during_owned_command_reconciliation() {
 }
 
 #[test]
-fn orphaned_owned_hooks_repair_only_missing_declarations_and_preserves_third_party_groups() {
+#[allow(clippy::too_many_lines)] // Covers original third-party retention and full exact-repair idempotence.
+fn repair_v2_preserves_original_baseline_third_party_groups_and_is_idempotent() {
     let root = TestRoot::new("orphaned-owned-hook-repair");
     let codex_home = root.child("codex-home");
     write_hooks_fixture(&codex_home, "orphaned-third-party-hooks.json");
@@ -993,9 +1006,15 @@ fn orphaned_owned_hooks_repair_only_missing_declarations_and_preserves_third_par
             .any(|check| { check.id() == "hooks.trust" && check.status() == DoctorStatus::Fail })
     );
 
-    let preview = integration.repair(false).expect("repair preview is safe");
+    let preview = integration
+        .repair(false, None)
+        .expect("repair preview is safe");
     assert_eq!(preview.disposition, CodexRepairDisposition::ReadyToApply);
     assert_eq!(preview.missing_declarations, ADMITTED_HOOK_EVENTS.len());
+    assert_eq!(preview.schema_version, 2);
+    assert_eq!(preview.third_party_groups_preserved, 2);
+    assert_eq!(preview.postinstall_third_party_groups_preserved, 0);
+    assert!(preview.target_digest.starts_with("sha256:"));
     assert!(preview.manual_hook_trust_review_required);
     assert_eq!(
         fs::read(&hooks_path).expect("preview hooks read"),
@@ -1010,12 +1029,16 @@ fn orphaned_owned_hooks_repair_only_missing_declarations_and_preserves_third_par
         manifest_before
     );
 
-    let repaired = integration.repair(true).expect("repair apply succeeds");
+    let repaired = integration
+        .repair(true, Some(&preview.target_digest))
+        .expect("repair apply succeeds");
     assert_eq!(
         repaired.disposition,
         CodexRepairDisposition::RepairedTrustReviewRequired
     );
     assert_eq!(repaired.missing_declarations, ADMITTED_HOOK_EVENTS.len());
+    assert_eq!(repaired.third_party_groups_preserved, 2);
+    assert_eq!(repaired.postinstall_third_party_groups_preserved, 0);
     assert!(repaired.manual_hook_trust_review_required);
     let repaired_hooks: Value =
         serde_json::from_slice(&fs::read(&hooks_path).expect("repaired hooks read"))
@@ -1033,7 +1056,7 @@ fn orphaned_owned_hooks_repair_only_missing_declarations_and_preserves_third_par
 
     let repaired_bytes = fs::read(&hooks_path).expect("idempotent hooks read");
     let idempotent = integration
-        .repair(false)
+        .repair(false, None)
         .expect("exact repair preflight succeeds");
     assert_eq!(idempotent.disposition, CodexRepairDisposition::AlreadyExact);
     assert_eq!(idempotent.missing_declarations, 0);
@@ -1042,10 +1065,352 @@ fn orphaned_owned_hooks_repair_only_missing_declarations_and_preserves_third_par
         fs::read(&hooks_path).expect("idempotent hooks reread"),
         repaired_bytes
     );
+    assert_eq!(
+        integration
+            .repair(true, Some(&idempotent.target_digest))
+            .expect("exact repair apply is idempotent")
+            .disposition,
+        CodexRepairDisposition::AlreadyExact
+    );
 }
 
 #[test]
-fn repair_refuses_ambiguous_tabbeacon_like_groups_without_writing_any_owner_state() {
+fn repair_v2_preserves_a_postinstall_third_party_group_on_the_codex_0149_real_shape() {
+    let root = TestRoot::new("repair-v2-postinstall-third-party");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("0.149 setup succeeds");
+
+    let hooks_path = codex_home.join("hooks.json");
+    let postinstall = hook_group_fixture("repair-v2-postinstall-third-party.json", "Stop");
+    let postinstall_raw = r#"{
+        "hooks" : [ { "timeout" : 1, "command" : "third-party post-install stop hook", "type" : "command" } ],
+        "plugin" : "third.party.postinstall"
+      }"#;
+    fs::write(
+        &hooks_path,
+        format!(
+            "{{\n  \"description\": \"Codex 0.149-shaped post-install fixture\",\n  \"hooks\": {{\n    \"Stop\": [\n      {postinstall_raw}\n    ]\n  }}\n}}\n"
+        ),
+    )
+    .expect("noncanonical postinstall hooks write");
+    let before = fs::read(&hooks_path).expect("postinstall hooks read");
+
+    let preview = integration
+        .repair(false, None)
+        .expect("postinstall group is safely previewed");
+    assert_eq!(preview.disposition, CodexRepairDisposition::ReadyToApply);
+    assert_eq!(preview.postinstall_third_party_groups_preserved, 1);
+    assert_eq!(
+        fs::read(&hooks_path).expect("preview leaves postinstall group byte-stable"),
+        before
+    );
+
+    integration
+        .repair(true, Some(&preview.target_digest))
+        .expect("postinstall group is safely preserved during apply");
+    let after: Value = serde_json::from_slice(&fs::read(&hooks_path).expect("repaired hooks read"))
+        .expect("repaired hooks parse");
+    assert!(
+        after["hooks"]["Stop"]
+            .as_array()
+            .expect("Stop groups remain an array")
+            .contains(&postinstall)
+    );
+    let after_text = String::from_utf8(fs::read(&hooks_path).expect("repaired hooks reread"))
+        .expect("repaired hooks are UTF-8");
+    assert!(
+        after_text.contains(postinstall_raw),
+        "repair must retain the pre-existing third-party group bytes"
+    );
+}
+
+#[test]
+fn repair_v2_preserves_multiple_postinstall_third_party_groups() {
+    let root = TestRoot::new("repair-v2-multiple-postinstall-third-party");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("0.149 setup succeeds");
+
+    let hooks_path = codex_home.join("hooks.json");
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(root.child("state/integration-v1.json")).expect("manifest reads"),
+    )
+    .expect("manifest parses");
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("installed hooks read"))
+            .expect("installed hooks parse");
+    remove_exact_manifest_owned_declarations(&mut hooks, &manifest);
+    let post_tool = hook_group_fixture(
+        "repair-v2-multiple-postinstall-third-party.json",
+        "PostToolUse",
+    );
+    let stop = hook_group_fixture("repair-v2-multiple-postinstall-third-party.json", "Stop");
+    hooks["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .expect("PostToolUse groups are an array")
+        .push(post_tool.clone());
+    hooks["hooks"]["Stop"]
+        .as_array_mut()
+        .expect("Stop groups are an array")
+        .push(stop.clone());
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("multiple postinstall hooks serialize"),
+    )
+    .expect("multiple postinstall hooks write");
+
+    let preview = integration
+        .repair(false, None)
+        .expect("multiple postinstall groups are safely previewed");
+    assert_eq!(preview.postinstall_third_party_groups_preserved, 2);
+    integration
+        .repair(true, Some(&preview.target_digest))
+        .expect("multiple postinstall groups are safely preserved");
+    let after: Value = serde_json::from_slice(&fs::read(&hooks_path).expect("repaired hooks read"))
+        .expect("repaired hooks parse");
+    assert!(
+        after["hooks"]["PostToolUse"]
+            .as_array()
+            .expect("PostToolUse groups remain an array")
+            .contains(&post_tool)
+    );
+    assert!(
+        after["hooks"]["Stop"]
+            .as_array()
+            .expect("Stop groups remain an array")
+            .contains(&stop)
+    );
+}
+
+#[test]
+fn repair_v2_preserves_a_postinstall_external_mcp_group() {
+    let root = TestRoot::new("repair-v2-postinstall-mcp");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("0.149 setup succeeds");
+
+    let hooks_path = codex_home.join("hooks.json");
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(root.child("state/integration-v1.json")).expect("manifest reads"),
+    )
+    .expect("manifest parses");
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("installed hooks read"))
+            .expect("installed hooks parse");
+    remove_exact_manifest_owned_declarations(&mut hooks, &manifest);
+    let mcp = hook_group_fixture("repair-v2-postinstall-mcp.json", "PostToolUse");
+    hooks["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .expect("PostToolUse groups are an array")
+        .push(mcp.clone());
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("postinstall MCP hooks serialize"),
+    )
+    .expect("postinstall MCP hooks write");
+
+    let preview = integration
+        .repair(false, None)
+        .expect("postinstall MCP group is safely previewed");
+    assert_eq!(preview.postinstall_third_party_groups_preserved, 1);
+    integration
+        .repair(true, Some(&preview.target_digest))
+        .expect("postinstall MCP group is safely preserved");
+    let after: Value = serde_json::from_slice(&fs::read(&hooks_path).expect("repaired hooks read"))
+        .expect("repaired hooks parse");
+    assert!(
+        after["hooks"]["PostToolUse"]
+            .as_array()
+            .expect("PostToolUse groups remain an array")
+            .contains(&mcp)
+    );
+}
+
+#[test]
+fn repair_v2_refuses_concurrent_drift_after_a_valid_preview() {
+    let root = TestRoot::new("repair-v2-concurrent-drift");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("0.149 setup succeeds");
+
+    let hooks_path = codex_home.join("hooks.json");
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(root.child("state/integration-v1.json")).expect("manifest reads"),
+    )
+    .expect("manifest parses");
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("installed hooks read"))
+            .expect("installed hooks parse");
+    remove_exact_manifest_owned_declarations(&mut hooks, &manifest);
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("orphaned hooks serialize"),
+    )
+    .expect("orphaned hooks write");
+    let preview = integration
+        .repair(false, None)
+        .expect("repair preview succeeds before concurrent drift");
+    assert!(matches!(
+        integration.repair(true, None),
+        Err(CodexIntegrationError::RepairPreviewDigestRequired)
+    ));
+    assert!(matches!(
+        integration.repair(true, Some("not-a-sha256-digest")),
+        Err(CodexIntegrationError::RepairPreviewDigestInvalid)
+    ));
+    assert_eq!(
+        CodexIntegrationError::RepairPreviewDigestInvalid.repair_failure_class(),
+        "PREVIEW_TARGET_DIGEST_INVALID"
+    );
+
+    hooks["hooks"]["Stop"]
+        .as_array_mut()
+        .expect("Stop groups are an array")
+        .push(hook_group_fixture(
+            "repair-v2-postinstall-third-party.json",
+            "Stop",
+        ));
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("concurrent drift hooks serialize"),
+    )
+    .expect("concurrent drift hooks write");
+    let drifted = fs::read(&hooks_path).expect("drifted hooks read");
+
+    assert!(matches!(
+        integration.repair(true, Some(&preview.target_digest)),
+        Err(CodexIntegrationError::ConcurrentTargetDrift)
+    ));
+    assert_eq!(
+        CodexIntegrationError::ConcurrentTargetDrift.repair_failure_class(),
+        "CONCURRENT_DRIFT_REFUSAL"
+    );
+    assert_eq!(
+        fs::read(&hooks_path).expect("drifted hooks reread"),
+        drifted
+    );
+    fs::remove_file(&hooks_path).expect("target deletion simulates concurrent drift");
+    assert!(matches!(
+        integration.repair(true, Some(&preview.target_digest)),
+        Err(CodexIntegrationError::ConcurrentTargetDrift)
+    ));
+}
+
+#[test]
+fn repair_v2_blocks_a_modified_partial_owned_group() {
+    let root = TestRoot::new("repair-v2-modified-partial-owned");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("0.149 setup succeeds");
+
+    let hooks_path = codex_home.join("hooks.json");
+    let manifest_path = root.child("state/integration-v1.json");
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("installed hooks read"))
+            .expect("installed hooks parse");
+    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["async"] = json!(true);
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("modified partial group serialize"),
+    )
+    .expect("modified partial group write");
+    let before = fs::read(&hooks_path).expect("modified partial hooks read");
+    let manifest_before = fs::read(&manifest_path).expect("manifest reads");
+
+    assert!(matches!(
+        integration.repair(false, None),
+        Err(CodexIntegrationError::ModifiedOwnedHook)
+    ));
+    assert_eq!(
+        fs::read(&hooks_path).expect("modified hooks reread"),
+        before
+    );
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest reread"),
+        manifest_before
+    );
+}
+
+#[test]
+fn repair_v2_blocks_a_tampered_preinstall_baseline() {
+    let root = TestRoot::new("repair-v2-baseline-drift");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("0.149 setup succeeds");
+
+    let hooks_path = codex_home.join("hooks.json");
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(root.child("state/integration-v1.json")).expect("manifest reads"),
+    )
+    .expect("manifest parses");
+    let backup_path = PathBuf::from(
+        manifest["hooks_backup"]["path"]
+            .as_str()
+            .expect("hooks backup path is recorded"),
+    );
+    fs::write(&backup_path, b"{\"hooks\":{}}").expect("baseline tamper writes");
+
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("installed hooks read"))
+            .expect("installed hooks parse");
+    remove_exact_manifest_owned_declarations(&mut hooks, &manifest);
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("orphaned hooks serialize"),
+    )
+    .expect("orphaned hooks write");
+    let before = fs::read(&hooks_path).expect("orphaned hooks read");
+
+    assert!(matches!(
+        integration.repair(false, None),
+        Err(CodexIntegrationError::BaselineDriftBlocked)
+    ));
+    assert_eq!(
+        CodexIntegrationError::BaselineDriftBlocked.repair_failure_class(),
+        "BASELINE_DRIFT_BLOCKED"
+    );
+    assert_eq!(fs::read(&hooks_path).expect("hooks reread"), before);
+    fs::remove_file(&backup_path).expect("baseline deletion simulates unsafe drift");
+    assert!(matches!(
+        integration.repair(false, None),
+        Err(CodexIntegrationError::BaselineDriftBlocked)
+    ));
+}
+
+#[test]
+fn repair_v2_blocks_a_malformed_or_unknown_hook_envelope() {
+    let root = TestRoot::new("repair-v2-malformed-wire");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("0.149 setup succeeds");
+
+    let hooks_path = codex_home.join("hooks.json");
+    write_hooks_fixture(&codex_home, "repair-v2-malformed-wire.json");
+    let before = fs::read(&hooks_path).expect("malformed hooks read");
+    assert!(matches!(
+        integration.repair(false, None),
+        Err(CodexIntegrationError::HooksShape)
+    ));
+    assert_eq!(
+        CodexIntegrationError::HooksShape.repair_failure_class(),
+        "UNKNOWN_HOOK_WIRE_BLOCKED"
+    );
+    assert_eq!(
+        fs::read(&hooks_path).expect("malformed hooks reread"),
+        before
+    );
+}
+
+#[test]
+fn repair_v2_blocks_tabbeacon_like_unowned_replacements_without_writing_owner_state() {
     let root = TestRoot::new("ambiguous-owned-hook-repair");
     let codex_home = root.child("codex-home");
     write_hooks_fixture(&codex_home, "0.149.0-observed.json");
@@ -1055,18 +1420,25 @@ fn repair_refuses_ambiguous_tabbeacon_like_groups_without_writing_any_owner_stat
     let hooks_path = codex_home.join("hooks.json");
     let config_path = codex_home.join("config.toml");
     let manifest_path = root.child("state/integration-v1.json");
-    write_hooks_fixture(&codex_home, "ambiguous-tabbeacon-like.json");
+    write_hooks_fixture(&codex_home, "repair-v2-tabbeacon-like-unowned.json");
     let hooks_before = fs::read(&hooks_path).expect("ambiguous hooks read");
     let config_before = fs::read(&config_path).expect("config reads");
     let manifest_before = fs::read(&manifest_path).expect("manifest reads");
 
     assert!(matches!(
-        integration.repair(false),
-        Err(CodexIntegrationError::UnownedHookConflict)
+        integration.repair(false, None),
+        Err(CodexIntegrationError::TabBeaconLikeAmbiguityBlocked)
     ));
+    assert_eq!(
+        CodexIntegrationError::TabBeaconLikeAmbiguityBlocked.repair_failure_class(),
+        "TABBEACON_LIKE_AMBIGUITY_BLOCKED"
+    );
     assert!(matches!(
-        integration.repair(true),
-        Err(CodexIntegrationError::UnownedHookConflict)
+        integration.repair(
+            true,
+            Some("sha256:0000000000000000000000000000000000000000000000000000000000000000")
+        ),
+        Err(CodexIntegrationError::TabBeaconLikeAmbiguityBlocked)
     ));
     assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
     assert_eq!(
@@ -1080,7 +1452,7 @@ fn repair_refuses_ambiguous_tabbeacon_like_groups_without_writing_any_owner_stat
 }
 
 #[test]
-fn repair_refuses_an_unproven_non_tabbeacon_group_replacing_an_owned_declaration() {
+fn repair_v2_blocks_an_unproven_postinstall_command_replacement() {
     let root = TestRoot::new("unproven-owned-hook-replacement");
     let codex_home = root.child("codex-home");
     write_hooks_fixture(&codex_home, "orphaned-third-party-hooks.json");
@@ -1114,12 +1486,8 @@ fn repair_refuses_an_unproven_non_tabbeacon_group_replacing_an_owned_declaration
     let manifest_before = fs::read(&manifest_path).expect("manifest reads");
 
     assert!(matches!(
-        integration.repair(false),
-        Err(CodexIntegrationError::UnownedHookConflict)
-    ));
-    assert!(matches!(
-        integration.repair(true),
-        Err(CodexIntegrationError::UnownedHookConflict)
+        integration.repair(false, None),
+        Err(CodexIntegrationError::BaselineDriftBlocked)
     ));
     assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
     assert_eq!(
@@ -1129,6 +1497,32 @@ fn repair_refuses_an_unproven_non_tabbeacon_group_replacing_an_owned_declaration
     assert_eq!(
         fs::read(&manifest_path).expect("manifest reread"),
         manifest_before
+    );
+}
+
+#[test]
+fn repair_v2_never_synthesizes_a_missing_hooks_envelope() {
+    let root = TestRoot::new("repair-v2-missing-hooks-envelope");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("0.149 setup succeeds");
+
+    let hooks_path = codex_home.join("hooks.json");
+    fs::write(
+        &hooks_path,
+        br#"{ "description": "unknown partial document" }"#,
+    )
+    .expect("partial hook document writes");
+    let before = fs::read(&hooks_path).expect("partial hook document reads");
+
+    assert!(matches!(
+        integration.repair(false, None),
+        Err(CodexIntegrationError::HooksShape)
+    ));
+    assert_eq!(
+        fs::read(&hooks_path).expect("partial hook document rereads"),
+        before
     );
 }
 
@@ -1153,7 +1547,7 @@ fn repair_and_runtime_continuity_reject_a_manifest_with_incoherent_executable() 
     .expect("manifest writes");
 
     assert!(matches!(
-        integration.repair(false),
+        integration.repair(false, None),
         Err(CodexIntegrationError::StaleOwnedHook)
     ));
     assert_eq!(
@@ -1209,9 +1603,13 @@ fn future_unknown_same_wire_preserves_runtime_but_blocks_all_mutation_authority(
         Err(CodexIntegrationError::UnsupportedCodexVersion)
     ));
     assert!(matches!(
-        future.repair(true),
+        future.repair(true, None),
         Err(CodexIntegrationError::UnsupportedCodexVersion)
     ));
+    assert_eq!(
+        CodexIntegrationError::UnsupportedCodexVersion.repair_failure_class(),
+        "UNKNOWN_VERSION_MUTATION_BLOCKED"
+    );
     assert!(matches!(
         future.reconcile_title_ownership(false),
         Err(CodexIntegrationError::UnsupportedCodexVersion)
@@ -3114,7 +3512,7 @@ fn title_drift_and_unowned_matching_hooks_are_refused_without_overwrite() {
     let other_integration = test_integration(&other);
     assert!(matches!(
         other_integration.setup(),
-        Err(CodexIntegrationError::UnownedHookConflict)
+        Err(CodexIntegrationError::TabBeaconLikeAmbiguityBlocked)
     ));
 }
 

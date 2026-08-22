@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fmt,
     fs::{self, File, OpenOptions},
-    io::{self, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -116,7 +116,7 @@ pub enum CodexRepairDisposition {
 }
 
 /// Content-minimal result of an owned Codex Hook repair preflight or apply.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CodexRepairReport {
     /// Stable repair result schema.
     pub schema_version: u32,
@@ -124,6 +124,16 @@ pub struct CodexRepairReport {
     pub disposition: CodexRepairDisposition,
     /// Number of exact manifest-owned declarations proven absent.
     pub missing_declarations: usize,
+    /// Digest of the exact Hook target observed during this preflight.
+    ///
+    /// An apply must present this value unchanged, so a preview cannot be
+    /// replayed after a concurrent edit to `hooks.json`.
+    pub target_digest: String,
+    /// Number of non-TabBeacon Hook groups preserved without mutation.
+    pub third_party_groups_preserved: usize,
+    /// Number of preserved groups that were added after the verified
+    /// pre-install Hook backup.
+    pub postinstall_third_party_groups_preserved: usize,
     /// Repair never grants Codex Hook trust; the Owner must review `/hooks`.
     pub manual_hook_trust_review_required: bool,
 }
@@ -325,8 +335,10 @@ pub enum CodexIntegrationError {
     HooksShape,
     /// The existing Codex TOML is not compatible with the current Codex shape.
     ConfigShape,
-    /// A pre-existing `TabBeacon`-like hook has no `TabBeacon` ownership proof.
-    UnownedHookConflict,
+    /// A `TabBeacon`-like Hook group has no exact ownership proof.
+    TabBeaconLikeAmbiguityBlocked,
+    /// The verified pre-install Hook backup no longer matches its recorded digest.
+    BaselineDriftBlocked,
     /// A TabBeacon-owned hook declaration no longer matches its manifest.
     ModifiedOwnedHook,
     /// Manifest-owned declarations are exact but do not match the current admitted source shape.
@@ -339,6 +351,10 @@ pub enum CodexIntegrationError {
     OwnershipManifest,
     /// A managed target changed after repair preflight and before its write.
     ConcurrentTargetDrift,
+    /// An apply was requested without the target digest returned by preview.
+    RepairPreviewDigestRequired,
+    /// The supplied preview digest is not a valid SHA-256 target digest.
+    RepairPreviewDigestInvalid,
     /// The executable path cannot be represented safely in a Windows command.
     UnsafeExecutablePath,
     /// A target path or ancestor is a symbolic link/reparse point.
@@ -355,8 +371,11 @@ impl fmt::Display for CodexIntegrationError {
             Self::Io(_) => "an integration file operation failed",
             Self::HooksShape => "the Codex hooks file has an unsupported shape",
             Self::ConfigShape => "the Codex config file has an unsupported shape",
-            Self::UnownedHookConflict => {
-                "a matching TabBeacon-like hook exists without ownership proof"
+            Self::TabBeaconLikeAmbiguityBlocked => {
+                "a TabBeacon-like Hook group exists without exact ownership proof"
+            }
+            Self::BaselineDriftBlocked => {
+                "the verified pre-install Hook baseline changed after installation"
             }
             Self::ModifiedOwnedHook => "a TabBeacon-owned hook was modified",
             Self::StaleOwnedHook => {
@@ -370,6 +389,12 @@ impl fmt::Display for CodexIntegrationError {
             Self::ConcurrentTargetDrift => {
                 "a Codex integration target changed during repair preflight"
             }
+            Self::RepairPreviewDigestRequired => {
+                "repair apply requires the target digest returned by a fresh preview"
+            }
+            Self::RepairPreviewDigestInvalid => {
+                "the supplied repair preview target digest is invalid"
+            }
             Self::UnsafeExecutablePath => {
                 "the TabBeacon executable path is unsafe for a Codex Windows command hook"
             }
@@ -377,6 +402,29 @@ impl fmt::Display for CodexIntegrationError {
                 "a Codex integration target is a symbolic link or reparse point"
             }
         })
+    }
+}
+
+impl CodexIntegrationError {
+    /// Stable, content-minimal repair diagnostic classification.
+    #[must_use]
+    pub const fn repair_failure_class(&self) -> &'static str {
+        match self {
+            Self::UnsupportedCodexVersion => "UNKNOWN_VERSION_MUTATION_BLOCKED",
+            Self::HooksShape => "UNKNOWN_HOOK_WIRE_BLOCKED",
+            Self::TabBeaconLikeAmbiguityBlocked => "TABBEACON_LIKE_AMBIGUITY_BLOCKED",
+            Self::BaselineDriftBlocked => "BASELINE_DRIFT_BLOCKED",
+            Self::ModifiedOwnedHook => "MODIFIED_OWNED_GROUP_BLOCKED",
+            Self::StaleOwnedHook => "STALE_OWNED_DECLARATION_BLOCKED",
+            Self::ConcurrentTargetDrift => "CONCURRENT_DRIFT_REFUSAL",
+            Self::RepairPreviewDigestRequired => "PREVIEW_TARGET_DIGEST_REQUIRED",
+            Self::RepairPreviewDigestInvalid => "PREVIEW_TARGET_DIGEST_INVALID",
+            Self::OwnershipManifest => "OWNERSHIP_MANIFEST_BLOCKED",
+            Self::ModifiedOwnedTitle | Self::TerminalTitleConflict => "TITLE_OWNERSHIP_BLOCKED",
+            Self::SymbolicLinkTarget => "UNSAFE_TARGET_PATH_BLOCKED",
+            Self::UnsafeExecutablePath => "UNSAFE_EXECUTABLE_PATH_BLOCKED",
+            Self::StateRootUnavailable | Self::ConfigShape | Self::Io(_) => "REPAIR_BLOCKED",
+        }
     }
 }
 
@@ -496,18 +544,22 @@ impl CodexIntegration {
     ///
     /// Refuses invalid ownership, stale source declarations, symbolic targets,
     /// malformed wire shapes, and every TabBeacon-like unowned or modified group.
-    pub fn repair(&self, apply: bool) -> Result<CodexRepairReport, CodexIntegrationError> {
+    pub fn repair(
+        &self,
+        apply: bool,
+        expected_target_digest: Option<&str>,
+    ) -> Result<CodexRepairReport, CodexIntegrationError> {
         if apply {
             // Keep an unadmitted repair fully read-only, including TabBeacon's
             // own state root; repeat the probe under lock before writing.
             self.require_supported_profile()?;
             self.with_lock(|| {
                 let profile = self.require_supported_profile()?;
-                self.repair_locked(profile, true)
+                self.repair_locked(profile, true, expected_target_digest)
             })
         } else {
             let profile = self.require_supported_profile()?;
-            self.repair_locked(profile, false)
+            self.repair_locked(profile, false, expected_target_digest)
         }
     }
 
@@ -924,10 +976,10 @@ impl CodexIntegration {
 
         let original_hooks = read_optional_bytes(&self.hooks_path())?;
         let original_config = read_optional_bytes(&self.config_path())?;
-        let mut hooks = parse_hooks_bytes(original_hooks.as_deref())?;
+        let mut hooks = parse_hooks_bytes_for_setup(original_hooks.as_deref())?;
         let mut config = parse_config_bytes(original_config.as_deref())?;
         if contains_tabbeacon_like_hook(&hooks) {
-            return Err(CodexIntegrationError::UnownedHookConflict);
+            return Err(CodexIntegrationError::TabBeaconLikeAmbiguityBlocked);
         }
         append_owned_hooks(&mut hooks, &desired_hooks)?;
         let prior_title = terminal_title_item(&config)?.map(ToString::to_string);
@@ -966,6 +1018,7 @@ impl CodexIntegration {
         &self,
         profile: CodexHookProfile,
         apply: bool,
+        expected_target_digest: Option<&str>,
     ) -> Result<CodexRepairReport, CodexIntegrationError> {
         self.reject_repair_target_paths()?;
         let manifest = self
@@ -977,36 +1030,71 @@ impl CodexIntegration {
             return Err(CodexIntegrationError::StaleOwnedHook);
         }
 
-        let original_hooks = read_required_safe_bytes(&self.hooks_path())?;
-        let mut hooks = parse_hooks_bytes(Some(&original_hooks))?;
+        let expected_target_digest = if apply {
+            let digest =
+                expected_target_digest.ok_or(CodexIntegrationError::RepairPreviewDigestRequired)?;
+            if !is_sha256_digest(digest) {
+                return Err(CodexIntegrationError::RepairPreviewDigestInvalid);
+            }
+            Some(digest)
+        } else {
+            None
+        };
+        let original_hooks = read_required_safe_bytes(&self.hooks_path()).map_err(|error| {
+            if expected_target_digest.is_some() {
+                CodexIntegrationError::ConcurrentTargetDrift
+            } else {
+                error
+            }
+        })?;
+        let mut hooks = parse_existing_hooks_bytes(&original_hooks)?;
         validate_known_hook_wire_shape(&hooks)?;
         let config = read_config_document(&self.config_path())?;
         Self::validate_title_ownership(&manifest, &config)?;
-        let missing = self.missing_repairable_owned_hooks(&hooks, &manifest)?;
-        if missing.is_empty() {
+        let repairable = self.missing_repairable_owned_hooks(&hooks, &manifest)?;
+        let target_digest = sha256_digest(&original_hooks);
+        if let Some(expected_target_digest) = expected_target_digest
+            && expected_target_digest != target_digest
+        {
+            return Err(CodexIntegrationError::ConcurrentTargetDrift);
+        }
+        if repairable.missing.is_empty() {
             return Ok(CodexRepairReport {
-                schema_version: 1,
+                schema_version: 2,
                 disposition: CodexRepairDisposition::AlreadyExact,
                 missing_declarations: 0,
+                target_digest,
+                third_party_groups_preserved: repairable.third_party_groups,
+                postinstall_third_party_groups_preserved: repairable.postinstall_third_party_groups,
                 manual_hook_trust_review_required: true,
             });
         }
         if !apply {
             return Ok(CodexRepairReport {
-                schema_version: 1,
+                schema_version: 2,
                 disposition: CodexRepairDisposition::ReadyToApply,
-                missing_declarations: missing.len(),
+                missing_declarations: repairable.missing.len(),
+                target_digest,
+                third_party_groups_preserved: repairable.third_party_groups,
+                postinstall_third_party_groups_preserved: repairable.postinstall_third_party_groups,
                 manual_hook_trust_review_required: true,
             });
         }
 
-        append_owned_hooks(&mut hooks, &missing)?;
-        let repaired_hooks = serialize_hooks(&hooks)?;
+        append_owned_hooks(&mut hooks, &repairable.missing)?;
+        let repaired_hooks = append_owned_hooks_preserving_external_bytes(
+            &original_hooks,
+            &hooks,
+            &repairable.missing,
+        )?;
         write_if_unchanged(&self.hooks_path(), &original_hooks, &repaired_hooks)?;
         Ok(CodexRepairReport {
-            schema_version: 1,
+            schema_version: 2,
             disposition: CodexRepairDisposition::RepairedTrustReviewRequired,
-            missing_declarations: missing.len(),
+            missing_declarations: repairable.missing.len(),
+            target_digest,
+            third_party_groups_preserved: repairable.third_party_groups,
+            postinstall_third_party_groups_preserved: repairable.postinstall_third_party_groups,
             manual_hook_trust_review_required: true,
         })
     }
@@ -1229,9 +1317,9 @@ impl CodexIntegration {
     }
 
     /// Returns the original pre-install Hook groups only after the backup path,
-    /// digest, and JSON shape have all been re-proven. A retained group that is
-    /// not in this baseline could be a replacement for an owned group, so
-    /// repair must leave it untouched and fail closed.
+    /// digest, and JSON shape have all been re-proven. The backup distinguishes
+    /// pre-install groups from later third-party groups for diagnostics; both
+    /// are preserved when the current known envelope proves they are non-TabBeacon.
     fn original_hook_groups(
         &self,
         manifest: &IntegrationManifest,
@@ -1245,11 +1333,13 @@ impl CodexIntegration {
             .path
             .as_deref()
             .ok_or(CodexIntegrationError::OwnershipManifest)?;
-        let backup_bytes = read_required_safe_bytes(backup_path)?;
+        let backup_bytes = read_required_safe_bytes(backup_path)
+            .map_err(|_| CodexIntegrationError::BaselineDriftBlocked)?;
         if manifest.hooks_backup.digest.as_deref() != Some(&hex_sha256(&backup_bytes)) {
-            return Err(CodexIntegrationError::OwnershipManifest);
+            return Err(CodexIntegrationError::BaselineDriftBlocked);
         }
-        let backup_hooks = parse_hooks_bytes(Some(&backup_bytes))?;
+        let backup_hooks = parse_existing_hooks_bytes(&backup_bytes)
+            .map_err(|_| CodexIntegrationError::BaselineDriftBlocked)?;
         let events = hooks_events(&backup_hooks)?;
         let mut original = BTreeMap::new();
         for (event, groups) in events {
@@ -1260,17 +1350,19 @@ impl CodexIntegration {
     }
 
     /// Finds only declarations absent from a current, target-bound manifest.
-    /// Every retained non-owned group must match the exact original baseline;
-    /// this is what distinguishes a provably unrelated Hook from an arbitrary
-    /// replacement that must remain fail-closed.
+    /// Each retained non-owned group must have the known Hook envelope and be
+    /// provably non-TabBeacon. Verified baseline and later third-party groups
+    /// are both preserved verbatim at the semantic group level.
     fn missing_repairable_owned_hooks(
         &self,
         hooks: &Value,
         manifest: &IntegrationManifest,
-    ) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
+    ) -> Result<RepairableOwnedHooks, CodexIntegrationError> {
         let events = hooks_events(hooks)?;
         let original = self.original_hook_groups(manifest)?;
         let mut missing = Vec::new();
+        let mut third_party_groups = 0;
+        let mut postinstall_third_party_groups = 0;
         for declaration in &manifest.hooks {
             let matches = events
                 .get(&declaration.event)
@@ -1299,16 +1391,29 @@ impl CodexIntegration {
                 if is_exact_manifest_group {
                     continue;
                 }
-                if group_looks_like_tabbeacon_hook(group, Some(&manifest.executable))
-                    || !baseline
-                        .iter()
-                        .any(|original_group| original_group == group)
-                {
-                    return Err(CodexIntegrationError::UnownedHookConflict);
+                if group_is_partial_manifest_owned(group, event, &manifest.hooks) {
+                    return Err(CodexIntegrationError::ModifiedOwnedHook);
                 }
+                if group_looks_like_tabbeacon_hook(group, Some(&manifest.executable)) {
+                    return Err(CodexIntegrationError::TabBeaconLikeAmbiguityBlocked);
+                }
+                if !baseline
+                    .iter()
+                    .any(|original_group| original_group == group)
+                {
+                    if !has_external_hook_provenance(group) {
+                        return Err(CodexIntegrationError::BaselineDriftBlocked);
+                    }
+                    postinstall_third_party_groups += 1;
+                }
+                third_party_groups += 1;
             }
         }
-        Ok(missing)
+        Ok(RepairableOwnedHooks {
+            missing,
+            third_party_groups,
+            postinstall_third_party_groups,
+        })
     }
 
     fn write_manifest(&self, manifest: &IntegrationManifest) -> Result<(), CodexIntegrationError> {
@@ -1399,6 +1504,15 @@ struct BackupRecord {
 struct OwnedHook {
     event: String,
     group: Value,
+}
+
+/// The exact owned declarations eligible for restoration plus a non-sensitive
+/// accounting of third-party groups retained by the repair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepairableOwnedHooks {
+    missing: Vec<OwnedHook>,
+    third_party_groups: usize,
+    postinstall_third_party_groups: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1505,7 +1619,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 
 fn read_hooks_document(path: &Path) -> Result<Value, CodexIntegrationError> {
     let bytes = read_required_safe_bytes(path)?;
-    parse_hooks_bytes(Some(&bytes))
+    parse_existing_hooks_bytes(&bytes)
 }
 
 fn read_config_document(path: &Path) -> Result<DocumentMut, CodexIntegrationError> {
@@ -1514,7 +1628,9 @@ fn read_config_document(path: &Path) -> Result<DocumentMut, CodexIntegrationErro
     parse_config_bytes(bytes.as_deref())
 }
 
-fn parse_hooks_bytes(bytes: Option<&[u8]>) -> Result<Value, CodexIntegrationError> {
+/// Parses setup input. Only setup may synthesize the empty owned scaffold when
+/// `hooks.json` does not exist yet; repair never normalizes a pre-existing file.
+fn parse_hooks_bytes_for_setup(bytes: Option<&[u8]>) -> Result<Value, CodexIntegrationError> {
     let mut value = match bytes {
         Some(bytes) => {
             serde_json::from_slice(bytes).map_err(|_| CodexIntegrationError::HooksShape)?
@@ -1531,6 +1647,21 @@ fn parse_hooks_bytes(bytes: Option<&[u8]>) -> Result<Value, CodexIntegrationErro
         }
         Some(_) => return Err(CodexIntegrationError::HooksShape),
     }
+    Ok(value)
+}
+
+/// Parses an existing `hooks.json` without synthesizing missing structural
+/// fields. This preserves the repair boundary: an unknown or partial document
+/// cannot be upgraded into a known writable shape by a repair attempt.
+fn parse_existing_hooks_bytes(bytes: &[u8]) -> Result<Value, CodexIntegrationError> {
+    let value: Value =
+        serde_json::from_slice(bytes).map_err(|_| CodexIntegrationError::HooksShape)?;
+    validate_existing_hooks_wire_bytes(bytes)?;
+    value
+        .as_object()
+        .and_then(|root| root.get("hooks"))
+        .and_then(Value::as_object)
+        .ok_or(CodexIntegrationError::HooksShape)?;
     Ok(value)
 }
 
@@ -1617,13 +1748,15 @@ fn validate_known_hook_wire_shape(hooks: &Value) -> Result<(), CodexIntegrationE
                 .get("hooks")
                 .and_then(Value::as_array)
                 .ok_or(CodexIntegrationError::HooksShape)?;
-            if handlers.iter().any(|handler| {
-                !handler.is_object()
-                    || handler
-                        .get("type")
-                        .and_then(Value::as_str)
-                        .is_none_or(|handler_type| handler_type.trim().is_empty())
-            }) {
+            if handlers.is_empty()
+                || handlers.iter().any(|handler| {
+                    !handler.is_object()
+                        || handler
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .is_none_or(|handler_type| handler_type.trim().is_empty())
+                })
+            {
                 return Err(CodexIntegrationError::HooksShape);
             }
         }
@@ -1646,50 +1779,125 @@ fn contains_tabbeacon_like_group(group: &Value) -> bool {
 }
 
 fn group_looks_like_tabbeacon_hook(group: &Value, executable: Option<&Path>) -> bool {
+    value_contains_tabbeacon_marker(group)
+        || group
+            .get("hooks")
+            .and_then(Value::as_array)
+            .is_some_and(|handlers| {
+                handlers.iter().any(|handler| {
+                    ["command", "commandWindows"]
+                        .into_iter()
+                        .filter_map(|key| handler.get(key).and_then(Value::as_str))
+                        .any(|command| command_looks_like_tabbeacon_hook(command, executable))
+                })
+            })
+}
+
+/// A current group that shares a manifest-owned command is a modified owned
+/// declaration, even when a cosmetic or timeout field has changed. It must not
+/// be treated as an unrelated third-party Hook merely because its full JSON
+/// value is no longer exact.
+fn group_is_partial_manifest_owned(group: &Value, event: &str, owned: &[OwnedHook]) -> bool {
     group
         .get("hooks")
         .and_then(Value::as_array)
         .is_some_and(|handlers| {
-            handlers.iter().any(|handler| {
-                ["command", "commandWindows"]
-                    .into_iter()
-                    .filter_map(|key| handler.get(key).and_then(Value::as_str))
-                    .any(|command| command_looks_like_tabbeacon_hook(command, executable))
-            })
+            owned
+                .iter()
+                .filter(|declaration| declaration.event == event)
+                .filter_map(|declaration| declaration.group.get("hooks").and_then(Value::as_array))
+                .any(|owned_handlers| {
+                    handlers.iter().any(|handler| {
+                        owned_handlers.iter().any(|owned_handler| {
+                            ["command", "commandWindows"].into_iter().any(|key| {
+                                handler.get(key).and_then(Value::as_str)
+                                    == owned_handler.get(key).and_then(Value::as_str)
+                                    && handler.get(key).and_then(Value::as_str).is_some()
+                            })
+                        })
+                    })
+                })
         })
+}
+
+/// A group added after the saved baseline needs an affirmative external source
+/// marker. The marker is intentionally narrow: either a non-TabBeacon plugin
+/// identifier, or an MCP server/tool pair. Arbitrary command text is never an
+/// ownership proof and therefore remains a baseline-drift hard stop.
+fn has_external_hook_provenance(group: &Value) -> bool {
+    let plugin_provenance = group
+        .get("plugin")
+        .and_then(Value::as_str)
+        .is_some_and(|plugin| {
+            let plugin = plugin.trim();
+            !plugin.is_empty() && !plugin.to_ascii_lowercase().contains("tabbeacon")
+        });
+    let mcp_provenance = group
+        .get("hooks")
+        .and_then(Value::as_array)
+        .is_some_and(|handlers| {
+            handlers.iter().any(|handler| {
+                handler
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .is_some_and(|kind| kind.eq_ignore_ascii_case("mcp_tool"))
+                    && handler
+                        .get("server")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty())
+                    && handler
+                        .get("tool")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty())
+            })
+        });
+    plugin_provenance || mcp_provenance
+}
+
+fn value_contains_tabbeacon_marker(value: &Value) -> bool {
+    match value {
+        Value::String(text) => text.to_ascii_lowercase().contains("tabbeacon"),
+        Value::Array(values) => values.iter().any(value_contains_tabbeacon_marker),
+        Value::Object(values) => values.iter().any(|(key, value)| {
+            key.to_ascii_lowercase().contains("tabbeacon") || value_contains_tabbeacon_marker(value)
+        }),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
 }
 
 fn command_looks_like_tabbeacon_hook(command: &str, executable: Option<&Path>) -> bool {
     let direct = command.to_ascii_lowercase();
-    if direct.contains("tabbeacon") && direct.contains("hook codex") {
+    if direct.contains("tabbeacon") {
         return true;
     }
-    let Some(encoded) = command
-        .split_ascii_whitespace()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .find_map(|parts| {
-            parts[0]
-                .eq_ignore_ascii_case("-encodedcommand")
-                .then_some(parts[1])
-        })
-    else {
+    let parts = command.split_ascii_whitespace().collect::<Vec<_>>();
+    let Some(encoded) = parts.windows(2).find_map(|parts| {
+        matches!(
+            parts[0].trim_matches(['\'', '"']),
+            value if value.eq_ignore_ascii_case("-encodedcommand")
+                || value.eq_ignore_ascii_case("-enc")
+        )
+        .then_some(parts[1].trim_matches(['\'', '"']))
+    }) else {
         return false;
     };
     let Some(bytes) = decode_base64(encoded) else {
-        return false;
+        // A malformed encoded PowerShell command cannot prove that the group
+        // is external. Fail closed as TabBeacon-like when it advertises the
+        // same invocation channel.
+        return direct.contains("powershell");
     };
+    if !bytes.len().is_multiple_of(2) {
+        return true;
+    }
     let units = bytes
         .chunks_exact(2)
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect::<Vec<_>>();
     let Ok(script) = String::from_utf16(&units) else {
-        return false;
+        return true;
     };
     let script = script.to_ascii_lowercase();
-    if !script.contains("hook codex") {
-        return false;
-    }
     script.contains("tabbeacon")
         || executable.is_some_and(|path| {
             path.to_str()
@@ -1850,6 +2058,280 @@ fn serialize_hooks(hooks: &Value) -> Result<Vec<u8>, CodexIntegrationError> {
         serde_json::to_vec_pretty(hooks).map_err(|_| CodexIntegrationError::HooksShape)?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JsonByteRange {
+    start: usize,
+    end: usize,
+}
+
+/// Adds missing owned groups by inserting only compact new JSON fragments. The
+/// byte ranges representing existing third-party groups are never parsed and
+/// re-emitted, so their whitespace, key order, and handler representation stay
+/// exactly as the user or external tool wrote them.
+fn append_owned_hooks_preserving_external_bytes(
+    original: &[u8],
+    repaired: &Value,
+    missing: &[OwnedHook],
+) -> Result<Vec<u8>, CodexIntegrationError> {
+    let original_value = parse_existing_hooks_bytes(original)?;
+    let original_events = hooks_events(&original_value)?;
+    let repaired_events = hooks_events(repaired)?;
+    let document = json_document_range(original).ok_or(CodexIntegrationError::HooksShape)?;
+    let root = json_object_members(original, document).ok_or(CodexIntegrationError::HooksShape)?;
+    let hooks_range = root
+        .iter()
+        .find_map(|(key, range)| (key == "hooks").then_some(*range))
+        .filter(|range| original.get(range.start) == Some(&b'{'))
+        .ok_or(CodexIntegrationError::HooksShape)?;
+    let hook_members =
+        json_object_members(original, hooks_range).ok_or(CodexIntegrationError::HooksShape)?;
+    let mut raw_events = BTreeMap::new();
+    for (event, range) in &hook_members {
+        if raw_events.insert(event.as_str(), *range).is_some() {
+            return Err(CodexIntegrationError::HooksShape);
+        }
+    }
+
+    let mut insertions = Vec::new();
+    let mut new_event_members = Vec::new();
+    for declaration in missing {
+        let group = serde_json::to_vec(&declaration.group)
+            .map_err(|_| CodexIntegrationError::HooksShape)?;
+        if let Some(range) = raw_events.get(declaration.event.as_str()) {
+            if original.get(range.start) != Some(&b'[') || range.end <= range.start + 1 {
+                return Err(CodexIntegrationError::HooksShape);
+            }
+            let was_empty = original_events
+                .get(&declaration.event)
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty);
+            let mut fragment = Vec::with_capacity(group.len() + usize::from(!was_empty));
+            if !was_empty {
+                fragment.push(b',');
+            }
+            fragment.extend(group);
+            insertions.push((range.end - 1, fragment));
+        } else {
+            let repaired_groups = repaired_events
+                .get(&declaration.event)
+                .and_then(Value::as_array)
+                .ok_or(CodexIntegrationError::HooksShape)?;
+            if repaired_groups.len() != 1 || repaired_groups[0] != declaration.group {
+                return Err(CodexIntegrationError::HooksShape);
+            }
+            let event = serde_json::to_string(&declaration.event)
+                .map_err(|_| CodexIntegrationError::HooksShape)?;
+            let mut member = event.into_bytes();
+            member.push(b':');
+            member.push(b'[');
+            member.extend(group);
+            member.push(b']');
+            new_event_members.push(member);
+        }
+    }
+    if !new_event_members.is_empty() {
+        let mut fragment = Vec::new();
+        if !hook_members.is_empty() {
+            fragment.push(b',');
+        }
+        for (index, member) in new_event_members.into_iter().enumerate() {
+            if index > 0 {
+                fragment.push(b',');
+            }
+            fragment.extend(member);
+        }
+        insertions.push((hooks_range.end - 1, fragment));
+    }
+    insertions.sort_by_key(|(offset, _)| *offset);
+    if insertions.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(CodexIntegrationError::HooksShape);
+    }
+    let mut output = original.to_vec();
+    for (offset, fragment) in insertions.into_iter().rev() {
+        output.splice(offset..offset, fragment);
+    }
+    let output_value = parse_existing_hooks_bytes(&output)?;
+    if output_value != *repaired {
+        return Err(CodexIntegrationError::HooksShape);
+    }
+    Ok(output)
+}
+
+fn validate_existing_hooks_wire_bytes(bytes: &[u8]) -> Result<(), CodexIntegrationError> {
+    let document = json_document_range(bytes).ok_or(CodexIntegrationError::HooksShape)?;
+    if bytes.get(document.start) != Some(&b'{') {
+        return Err(CodexIntegrationError::HooksShape);
+    }
+    validate_json_value_keys(bytes, document)?;
+    let root = json_object_members(bytes, document).ok_or(CodexIntegrationError::HooksShape)?;
+    let hooks = root
+        .iter()
+        .find_map(|(key, range)| (key == "hooks").then_some(*range))
+        .filter(|range| bytes.get(range.start) == Some(&b'{'))
+        .ok_or(CodexIntegrationError::HooksShape)?;
+    let _ = json_object_members(bytes, hooks).ok_or(CodexIntegrationError::HooksShape)?;
+    Ok(())
+}
+
+fn validate_json_value_keys(
+    bytes: &[u8],
+    range: JsonByteRange,
+) -> Result<(), CodexIntegrationError> {
+    match bytes.get(range.start) {
+        Some(b'{') => {
+            let members =
+                json_object_members(bytes, range).ok_or(CodexIntegrationError::HooksShape)?;
+            let mut keys = BTreeSet::new();
+            for (key, value) in members {
+                if !keys.insert(key) {
+                    return Err(CodexIntegrationError::HooksShape);
+                }
+                validate_json_value_keys(bytes, value)?;
+            }
+        }
+        Some(b'[') => {
+            for value in json_array_values(bytes, range).ok_or(CodexIntegrationError::HooksShape)? {
+                validate_json_value_keys(bytes, value)?;
+            }
+        }
+        Some(_) => {}
+        None => return Err(CodexIntegrationError::HooksShape),
+    }
+    Ok(())
+}
+
+fn json_document_range(bytes: &[u8]) -> Option<JsonByteRange> {
+    let start = skip_json_whitespace(bytes, 0);
+    let end = json_value_end(bytes, start)?;
+    (skip_json_whitespace(bytes, end) == bytes.len()).then_some(JsonByteRange { start, end })
+}
+
+fn json_object_members(bytes: &[u8], range: JsonByteRange) -> Option<Vec<(String, JsonByteRange)>> {
+    (bytes.get(range.start) == Some(&b'{') && bytes.get(range.end.checked_sub(1)?) == Some(&b'}'))
+        .then_some(())?;
+    let mut cursor = skip_json_whitespace(bytes, range.start + 1);
+    if cursor == range.end - 1 {
+        return Some(Vec::new());
+    }
+    let mut members = Vec::new();
+    loop {
+        let key_start = cursor;
+        let key_end = json_string_end(bytes, key_start)?;
+        let key = serde_json::from_slice::<String>(&bytes[key_start..key_end]).ok()?;
+        cursor = skip_json_whitespace(bytes, key_end);
+        (bytes.get(cursor) == Some(&b':')).then_some(())?;
+        cursor = skip_json_whitespace(bytes, cursor + 1);
+        let value_start = cursor;
+        let value_end = json_value_end(bytes, value_start)?;
+        members.push((
+            key,
+            JsonByteRange {
+                start: value_start,
+                end: value_end,
+            },
+        ));
+        cursor = skip_json_whitespace(bytes, value_end);
+        match bytes.get(cursor) {
+            Some(b',') => cursor = skip_json_whitespace(bytes, cursor + 1),
+            Some(b'}') if cursor == range.end - 1 => return Some(members),
+            _ => return None,
+        }
+    }
+}
+
+fn json_array_values(bytes: &[u8], range: JsonByteRange) -> Option<Vec<JsonByteRange>> {
+    (bytes.get(range.start) == Some(&b'[') && bytes.get(range.end.checked_sub(1)?) == Some(&b']'))
+        .then_some(())?;
+    let mut cursor = skip_json_whitespace(bytes, range.start + 1);
+    if cursor == range.end - 1 {
+        return Some(Vec::new());
+    }
+    let mut values = Vec::new();
+    loop {
+        let start = cursor;
+        let end = json_value_end(bytes, start)?;
+        values.push(JsonByteRange { start, end });
+        cursor = skip_json_whitespace(bytes, end);
+        match bytes.get(cursor) {
+            Some(b',') => cursor = skip_json_whitespace(bytes, cursor + 1),
+            Some(b']') if cursor == range.end - 1 => return Some(values),
+            _ => return None,
+        }
+    }
+}
+
+fn json_value_end(bytes: &[u8], start: usize) -> Option<usize> {
+    match bytes.get(start) {
+        Some(b'"') => json_string_end(bytes, start),
+        Some(b'{') => json_object_end(bytes, start),
+        Some(b'[') => json_array_end(bytes, start),
+        Some(_) => {
+            let end = bytes[start..]
+                .iter()
+                .position(|byte| byte.is_ascii_whitespace() || matches!(*byte, b',' | b']' | b'}'))
+                .map_or(bytes.len(), |offset| start + offset);
+            (end > start).then_some(end)
+        }
+        None => None,
+    }
+}
+
+fn json_object_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut cursor = skip_json_whitespace(bytes, start + 1);
+    if bytes.get(cursor) == Some(&b'}') {
+        return Some(cursor + 1);
+    }
+    loop {
+        cursor = json_string_end(bytes, cursor)?;
+        cursor = skip_json_whitespace(bytes, cursor);
+        (bytes.get(cursor) == Some(&b':')).then_some(())?;
+        cursor = skip_json_whitespace(bytes, cursor + 1);
+        cursor = json_value_end(bytes, cursor)?;
+        cursor = skip_json_whitespace(bytes, cursor);
+        match bytes.get(cursor) {
+            Some(b',') => cursor = skip_json_whitespace(bytes, cursor + 1),
+            Some(b'}') => return Some(cursor + 1),
+            _ => return None,
+        }
+    }
+}
+
+fn json_array_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut cursor = skip_json_whitespace(bytes, start + 1);
+    if bytes.get(cursor) == Some(&b']') {
+        return Some(cursor + 1);
+    }
+    loop {
+        cursor = json_value_end(bytes, cursor)?;
+        cursor = skip_json_whitespace(bytes, cursor);
+        match bytes.get(cursor) {
+            Some(b',') => cursor = skip_json_whitespace(bytes, cursor + 1),
+            Some(b']') => return Some(cursor + 1),
+            _ => return None,
+        }
+    }
+}
+
+fn json_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    (bytes.get(start) == Some(&b'"')).then_some(())?;
+    let mut cursor = start + 1;
+    while let Some(byte) = bytes.get(cursor) {
+        match byte {
+            b'"' => return Some(cursor + 1),
+            b'\\' => cursor += 2,
+            _ => cursor += 1,
+        }
+    }
+    None
+}
+
+fn skip_json_whitespace(bytes: &[u8], mut cursor: usize) -> usize {
+    while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+        cursor += 1;
+    }
+    cursor
 }
 
 fn terminal_title_item(config: &DocumentMut) -> Result<Option<&Item>, CodexIntegrationError> {
@@ -2165,20 +2647,31 @@ fn read_required_safe_bytes(path: &Path) -> Result<Vec<u8>, CodexIntegrationErro
 }
 
 /// Writes only when the on-disk target is byte-for-byte the version that was
-/// parsed during repair preflight. This detects an independent Codex or
-/// third-party edit before `TabBeacon` commits a repair and leaves the target
-/// untouched when the ownership proof has gone stale.
+/// parsed during repair preflight. A target-file lock spans the second read and
+/// atomic commit, narrowing the compare/commit window for cooperating Codex or
+/// third-party writers; a stale preview digest independently refuses any drift
+/// observed before this bounded commit.
 fn write_if_unchanged(
     path: &Path,
     expected_before: &[u8],
     replacement: &[u8],
 ) -> Result<(), CodexIntegrationError> {
     reject_symbolic_link(path)?;
-    let actual_before = fs::read(path)?;
-    if actual_before != expected_before {
-        return Err(CodexIntegrationError::ConcurrentTargetDrift);
-    }
-    atomic_write(path, replacement)?;
+    let mut target = OpenOptions::new().read(true).write(true).open(path)?;
+    target.lock()?;
+    let write_result = (|| {
+        target.seek(SeekFrom::Start(0))?;
+        let mut actual_before = Vec::new();
+        target.read_to_end(&mut actual_before)?;
+        if actual_before != expected_before {
+            return Err(CodexIntegrationError::ConcurrentTargetDrift);
+        }
+        atomic_write(path, replacement)?;
+        Ok(())
+    })();
+    let unlock_result = File::unlock(&target);
+    write_result?;
+    unlock_result?;
     Ok(())
 }
 
@@ -2214,6 +2707,14 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 fn hex_sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+fn sha256_digest(bytes: &[u8]) -> String {
+    format!("sha256:{}", hex_sha256(bytes))
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value.strip_prefix("sha256:").is_some_and(is_sha256_hex)
 }
 
 fn pass(id: &'static str, summary: impl Into<String>) -> DoctorCheck {

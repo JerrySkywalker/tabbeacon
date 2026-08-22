@@ -1,0 +1,17 @@
+{
+  "description": "post-install third-party command Hook group",
+  "hooks": {
+    "Stop": [
+      {
+        "plugin": "third.party.postinstall",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "third-party post-install stop hook",
+            "timeout": 1
+          }
+        ]
+      }
+    ]
+  }
+}

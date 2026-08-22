@@ -172,8 +172,11 @@ pub enum RepairCommand {
         /// Perform the displayed Hook-only repair after a fresh ownership preflight.
         #[arg(long)]
         apply: bool,
+        /// Exact `TARGET_DIGEST` emitted by the read-only repair preview.
+        #[arg(long, value_name = "SHA256", requires = "apply")]
+        expected_target_digest: Option<String>,
         #[command(flatten)]
-        output: HumanOutputArgs,
+        output: OutputArgs,
     },
 }
 
