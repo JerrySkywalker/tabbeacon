@@ -3788,7 +3788,9 @@ fn static_doctor_requires_a_bounded_explicit_hook_runtime_probe() {
     let probed_report = integration.doctor_with_runtime_probe();
     assert_eq!(
         probed_report.check_status("hooks.runtime-probe"),
-        Some(DoctorStatus::Pass)
+        Some(DoctorStatus::Pass),
+        "runtime probe checks: {:?}",
+        probed_report.checks()
     );
     assert_eq!(probed_report.overall(), DoctorStatus::Pass);
     assert_eq!(

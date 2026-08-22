@@ -1756,9 +1756,6 @@ fn run_windows_hook_runtime_probe(command_line: &str) -> RuntimeProbeOutcome {
         return RuntimeProbeOutcome::Unavailable;
     };
     let marker = probe_root.join("hook-timing.txt");
-    let comspec = env::var_os("COMSPEC")
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "cmd.exe".into());
     let payload = json!({
         "hook_event_name": RUNTIME_PROBE_EVENT,
         "session_id": "00000000-0000-0000-0000-000000000052",
@@ -1766,6 +1763,9 @@ fn run_windows_hook_runtime_probe(command_line: &str) -> RuntimeProbeOutcome {
     })
     .to_string();
 
+    let comspec = env::var_os("COMSPEC")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "cmd.exe".into());
     let mut process = Command::new(comspec);
     process.arg("/C");
     process.raw_arg(format!(r#""{command_line}""#));
@@ -1791,7 +1791,7 @@ fn run_windows_hook_runtime_probe(command_line: &str) -> RuntimeProbeOutcome {
             Ok(Some(status)) => break Some(status.success()),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
             Ok(None) => {
-                let _ = child.kill();
+                terminate_runtime_probe_tree(child.id());
                 let _ = child.wait();
                 break None;
             }
@@ -1808,6 +1808,20 @@ fn run_windows_hook_runtime_probe(command_line: &str) -> RuntimeProbeOutcome {
         (false, _, _) | (_, Some(_), false) => RuntimeProbeOutcome::MissingMarker,
         _ => RuntimeProbeOutcome::NonZero,
     }
+}
+
+#[cfg(windows)]
+fn terminate_runtime_probe_tree(process_id: u32) {
+    let taskkill = env::var_os("SystemRoot").map_or_else(
+        || PathBuf::from("taskkill.exe"),
+        |root| PathBuf::from(root).join("System32").join("taskkill.exe"),
+    );
+    let _ = Command::new(taskkill)
+        .args(["/PID", &process_id.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 #[cfg(windows)]

@@ -62,8 +62,11 @@ Static `tabbeacon doctor` deliberately reports the Hook runtime as unproven:
 matching declarations and trust state do not prove that Codex can execute the
 command. `tabbeacon doctor --probe-hook-runtime` runs one manifest-exact
 representative declaration through the COMSPEC fallback, with isolated temporary
-`LOCALAPPDATA`, no terminal session, a 900 ms bound, and a non-sensitive timing
-marker. The probe never modifies Codex configuration or Hook trust.
+`LOCALAPPDATA`, no terminal session, a 900 ms bound, process-tree cleanup on
+timeout, and a non-sensitive timing marker. The probe never modifies Codex
+configuration or Hook trust. The Codex 0.149 shell-matrix regression separately
+proves the production declaration under configured Pwsh7, Windows PowerShell,
+explicit cmd, and the COMSPEC fallback.
 An Owner upgrading an existing declaration must still review the generated Hook
 in `/hooks` and approve trust there; TabBeacon never changes Hook trust itself.
 
