@@ -1834,13 +1834,17 @@ fn terminate_runtime_probe_tree(process_id: u32) -> bool {
     let deadline = Instant::now() + Duration::from_millis(100);
     loop {
         match terminator.try_wait() {
-            Ok(Some(_)) | Err(_) => return true,
+            Ok(Some(status)) => return status.success(),
+            Err(_) => {
+                let _ = terminator.kill();
+                return false;
+            }
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
             Ok(None) => {
                 // A hung taskkill process must not extend the probe beyond its
                 // published bound. Dropping the owned handles never waits.
                 let _ = terminator.kill();
-                return true;
+                return false;
             }
         }
     }
