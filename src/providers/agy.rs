@@ -6,7 +6,12 @@
 //! at the boundary, and projects only safe observations required to prepare the
 //! later Owner-present `TB-G64` admission spike.
 
-use serde::Serialize;
+use std::{collections::HashSet, fmt};
+
+use serde::{
+    Serialize,
+    de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor},
+};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -16,6 +21,10 @@ pub const AGY_PROVIDER_ID: &str = "agy";
 pub const AGY_PREADMISSION_SCHEMA_VERSION: u32 = 1;
 /// Maximum callback or Hook payload accepted for a disposable observation.
 pub const MAX_AGY_QUALIFICATION_INPUT_BYTES: usize = 64 * 1024;
+/// Maximum JSON nesting accepted before the disposable parser fails closed.
+pub const MAX_AGY_QUALIFICATION_JSON_DEPTH: usize = 32;
+/// Maximum members in any disposable JSON object or array.
+pub const MAX_AGY_QUALIFICATION_COLLECTION_ITEMS: usize = 1_024;
 /// Largest count retained from an Agy status payload.
 pub const MAX_BACKGROUND_TASK_COUNT: u16 = 1_024;
 /// Plain fallback title used only by the disposable title-protocol harness.
@@ -314,6 +323,8 @@ pub enum AgyInputDisposition {
     Observed,
     Malformed,
     Oversized,
+    TimedOut,
+    IoError,
     UnknownEvent,
 }
 
@@ -325,6 +336,8 @@ impl AgyInputDisposition {
             Self::Observed => "observed",
             Self::Malformed => "malformed",
             Self::Oversized => "oversized",
+            Self::TimedOut => "timed_out",
+            Self::IoError => "io_error",
             Self::UnknownEvent => "unknown_event",
         }
     }
@@ -379,7 +392,7 @@ pub enum AgyAttentionObservation {
     Unavailable,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 struct ContentFingerprint([u8; 32]);
 
 impl ContentFingerprint {
@@ -389,7 +402,7 @@ impl ContentFingerprint {
 }
 
 /// Workspace facts stripped of paths before any qualification record is returned.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Eq, PartialEq, Serialize)]
 pub struct AgyWorkspaceObservation {
     pub current_workspace_present: bool,
     pub project_workspace_present: bool,
@@ -398,6 +411,17 @@ pub struct AgyWorkspaceObservation {
     current_fingerprint: Option<ContentFingerprint>,
     #[serde(skip)]
     project_fingerprint: Option<ContentFingerprint>,
+}
+
+impl fmt::Debug for AgyWorkspaceObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgyWorkspaceObservation")
+            .field("current_workspace_present", &self.current_workspace_present)
+            .field("project_workspace_present", &self.project_workspace_present)
+            .field("current_matches_project", &self.current_matches_project)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AgyWorkspaceObservation {
@@ -458,7 +482,7 @@ impl AgyStateRecorder {
                 observation: None,
             };
         }
-        let Ok(Value::Object(root)) = serde_json::from_slice::<Value>(payload) else {
+        let Some(root) = parse_qualification_object(payload) else {
             return AgyStateRecord {
                 disposition: AgyInputDisposition::Malformed,
                 observation: None,
@@ -513,6 +537,146 @@ impl AgyStateRecorder {
     }
 }
 
+/// Parses a bounded JSON object while refusing duplicate keys at every depth.
+///
+/// `serde_json::Value` normally applies last-key-wins semantics. Qualification
+/// records must fail closed instead: a duplicate could otherwise change one of
+/// the small number of facts that cross the privacy boundary.
+fn parse_qualification_object(payload: &[u8]) -> Option<Map<String, Value>> {
+    let mut validator = serde_json::Deserializer::from_slice(payload);
+    DuplicateRejectingValue { depth: 0 }
+        .deserialize(&mut validator)
+        .ok()?;
+    validator.end().ok()?;
+    match serde_json::from_slice(payload).ok()? {
+        Value::Object(root) => Some(root),
+        _ => None,
+    }
+}
+
+struct DuplicateRejectingValue {
+    depth: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for DuplicateRejectingValue {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for DuplicateRejectingValue {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("bounded JSON without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(())
+    }
+
+    fn visit_i64<E>(self, _: i64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(())
+    }
+
+    fn visit_u64<E>(self, _: u64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(())
+    }
+
+    fn visit_f64<E>(self, _: f64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(())
+    }
+
+    fn visit_str<E>(self, _: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(())
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(())
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(())
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        if self.depth >= MAX_AGY_QUALIFICATION_JSON_DEPTH {
+            return Err(de::Error::custom(
+                "qualification JSON nesting exceeds its limit",
+            ));
+        }
+        let mut item_count = 0_usize;
+        while let Some(()) = sequence.next_element_seed(DuplicateRejectingValue {
+            depth: self.depth + 1,
+        })? {
+            item_count += 1;
+            if item_count > MAX_AGY_QUALIFICATION_COLLECTION_ITEMS {
+                return Err(de::Error::custom(
+                    "qualification JSON collection exceeds its limit",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        if self.depth >= MAX_AGY_QUALIFICATION_JSON_DEPTH {
+            return Err(de::Error::custom(
+                "qualification JSON nesting exceeds its limit",
+            ));
+        }
+        let mut keys = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !keys.insert(key) {
+                return Err(de::Error::custom(
+                    "qualification JSON contains duplicate keys",
+                ));
+            }
+            if keys.len() > MAX_AGY_QUALIFICATION_COLLECTION_ITEMS {
+                return Err(de::Error::custom(
+                    "qualification JSON collection exceeds its limit",
+                ));
+            }
+            map.next_value_seed(DuplicateRejectingValue {
+                depth: self.depth + 1,
+            })?;
+        }
+        Ok(())
+    }
+}
+
 fn string_at<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a str> {
     object
         .get(key)
@@ -547,6 +711,9 @@ impl AgyPreAdmissionNormalizer {
     /// Builds a provider-neutral candidate while preserving the unadmitted boundary.
     #[must_use]
     pub fn normalize(record: &AgyStateRecord) -> Option<AgyNormalizationCandidate> {
+        if record.disposition != AgyInputDisposition::Observed {
+            return None;
+        }
         let observation = record.observation.as_ref()?;
         let phase = match observation.phase {
             AgyObservedPhase::Idle => AgyNormalizedPhase::Ready,
@@ -573,7 +740,7 @@ impl AgyPreAdmissionNormalizer {
 }
 
 /// Qualification-only Root Workspace Anchor fixture state.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Eq, PartialEq, Serialize)]
 pub struct AgyRootAnchorQualification {
     pub admission: AgyAdmissionState,
     pub root_candidate_observed: bool,
@@ -582,6 +749,22 @@ pub struct AgyRootAnchorQualification {
     pub observation_count: u16,
     #[serde(skip)]
     first_root_candidate: Option<ContentFingerprint>,
+}
+
+impl fmt::Debug for AgyRootAnchorQualification {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgyRootAnchorQualification")
+            .field("admission", &self.admission)
+            .field("root_candidate_observed", &self.root_candidate_observed)
+            .field("root_candidate_stable", &self.root_candidate_stable)
+            .field(
+                "workspace_mismatch_observed",
+                &self.workspace_mismatch_observed,
+            )
+            .field("observation_count", &self.observation_count)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for AgyRootAnchorQualification {
@@ -600,6 +783,9 @@ impl Default for AgyRootAnchorQualification {
 impl AgyRootAnchorQualification {
     /// Records a disposable sample without binding an actual `TabBeacon` root anchor.
     pub fn observe(&mut self, record: &AgyStateRecord) {
+        if record.disposition != AgyInputDisposition::Observed {
+            return;
+        }
         let Some(observation) = record.observation.as_ref() else {
             return;
         };
@@ -688,7 +874,7 @@ impl AgyHookRecorder {
                 observation: None,
             };
         }
-        let Ok(Value::Object(root)) = serde_json::from_slice::<Value>(payload) else {
+        let Some(root) = parse_qualification_object(payload) else {
             return AgyHookRecord {
                 disposition: AgyInputDisposition::Malformed,
                 observation: None,
@@ -866,10 +1052,19 @@ impl Default for AgyOwnershipPlan {
 }
 
 /// In-memory disposable document fixture; no filesystem path or document text is retained.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct AgyDisposableSetupFixture {
     original_fingerprint: ContentFingerprint,
     plan: AgyOwnershipPlan,
+}
+
+impl fmt::Debug for AgyDisposableSetupFixture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AgyDisposableSetupFixture")
+            .field("plan", &self.plan)
+            .finish_non_exhaustive()
+    }
 }
 
 impl AgyDisposableSetupFixture {
@@ -902,9 +1097,10 @@ mod tests {
         AgyCapabilityAvailability, AgyCapabilityProfile, AgyCountObservation,
         AgyDirectCommandBoundary, AgyDirectCommandQualification, AgyFieldPresence, AgyHookEvent,
         AgyHookRecorder, AgyInputDisposition, AgyNormalizedPhase, AgyPreAdmissionNormalizer,
-        AgyRootAnchorQualification, AgyStateRecorder, AgyTitleCallbackHarness,
+        AgyRootAnchorQualification, AgyStateRecord, AgyStateRecorder, AgyTitleCallbackHarness,
         AgyTitleProtocolSafety, AgyTitleWindowsTerminalQualification, AgyVersionDiagnostic,
-        AgyVersionDrift, MAX_AGY_QUALIFICATION_INPUT_BYTES,
+        AgyVersionDrift, MAX_AGY_QUALIFICATION_COLLECTION_ITEMS, MAX_AGY_QUALIFICATION_INPUT_BYTES,
+        MAX_AGY_QUALIFICATION_JSON_DEPTH,
     };
 
     fn state_payload() -> Vec<u8> {
@@ -988,6 +1184,33 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_or_deep_json_fails_closed_before_projection() {
+        for payload in [
+            br#"{"agent_state":"future","agent_state":"idle"}"#.as_slice(),
+            br#"{"workspace":{"current_dir":"C:/first","current_dir":"C:/second"}}"#.as_slice(),
+        ] {
+            assert_eq!(
+                AgyStateRecorder::record(payload).disposition,
+                AgyInputDisposition::Malformed
+            );
+        }
+
+        let mut deep = String::from("{\"unknown\":");
+        for _ in 0..=MAX_AGY_QUALIFICATION_JSON_DEPTH {
+            deep.push('[');
+        }
+        deep.push('0');
+        for _ in 0..=MAX_AGY_QUALIFICATION_JSON_DEPTH {
+            deep.push(']');
+        }
+        deep.push('}');
+        assert_eq!(
+            AgyStateRecorder::record(deep.as_bytes()).disposition,
+            AgyInputDisposition::Malformed
+        );
+    }
+
+    #[test]
     fn unknown_state_never_becomes_a_core_ready_or_working_claim() {
         let record = AgyStateRecorder::record(
             br#"{"agent_state":"future-private-state","conversation_id":"id"}"#,
@@ -1028,6 +1251,28 @@ mod tests {
     }
 
     #[test]
+    fn hook_duplicate_and_oversized_collections_fail_closed() {
+        assert_eq!(
+            AgyHookRecorder::record(
+                "PostToolUse",
+                br#"{"workspacePaths":[],"workspacePaths":["C:/private"]}"#,
+            )
+            .disposition,
+            AgyInputDisposition::Malformed
+        );
+
+        let paths = (0..=MAX_AGY_QUALIFICATION_COLLECTION_ITEMS)
+            .map(|_| "\"C:/private\"")
+            .collect::<Vec<_>>()
+            .join(",");
+        let payload = format!("{{\"workspacePaths\":[{paths}]}}");
+        assert_eq!(
+            AgyHookRecorder::record("PostToolUse", payload.as_bytes()).disposition,
+            AgyInputDisposition::Malformed
+        );
+    }
+
+    #[test]
     fn unknown_hook_event_is_fail_open_and_does_not_parse_payload() {
         let record = AgyHookRecorder::record("FuturePrivateEvent", br#"{"content":"secret"}"#);
         assert_eq!(record.disposition, AgyInputDisposition::UnknownEvent);
@@ -1052,6 +1297,47 @@ mod tests {
         assert!(qualification.workspace_mismatch_observed);
         assert!(!json.contains("C:/root"));
         assert!(!json.contains("C:/worktree"));
+    }
+
+    #[test]
+    fn forged_non_observed_records_cannot_normalize_or_rebind_root() {
+        let observed = AgyStateRecorder::record(&state_payload());
+        let forged = AgyStateRecord {
+            disposition: AgyInputDisposition::Malformed,
+            observation: observed.observation.clone(),
+        };
+        assert!(AgyPreAdmissionNormalizer::normalize(&forged).is_none());
+
+        let mut qualification = AgyRootAnchorQualification::default();
+        qualification.observe(&forged);
+        assert_eq!(qualification.observation_count, 0);
+        assert!(!qualification.root_candidate_observed);
+    }
+
+    #[test]
+    fn debug_views_do_not_expose_path_or_document_fingerprints() {
+        let state = AgyStateRecorder::record(
+            br#"{"workspace":{"current_dir":"C:/private/root","project_dir":"C:/private/project"}}"#,
+        );
+        let workspace = &state
+            .observation
+            .as_ref()
+            .expect("state is observed")
+            .workspace;
+        let workspace_debug = format!("{workspace:?}");
+        assert!(!workspace_debug.contains("C:/private"));
+        assert!(!workspace_debug.contains("fingerprint"));
+
+        let mut root = AgyRootAnchorQualification::default();
+        root.observe(&state);
+        let root_debug = format!("{root:?}");
+        assert!(!root_debug.contains("C:/private"));
+        assert!(!root_debug.contains("first_root_candidate"));
+
+        let fixture = super::AgyDisposableSetupFixture::new(b"private-document-contents");
+        let fixture_debug = format!("{fixture:?}");
+        assert!(!fixture_debug.contains("private-document-contents"));
+        assert!(!fixture_debug.contains("original_fingerprint"));
     }
 
     #[test]

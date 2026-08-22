@@ -22,7 +22,8 @@ disposable, content-minimal qualification primitives before G64:
 - an immutable `unadmitted` capability profile with no enabled capabilities;
 - version drift diagnostics that never infer support from version ordering;
 - strict title/status and Hook recorders that whitelist safe facts and drop
-  all content-capable fields;
+  all content-capable fields, reject duplicate/deep JSON, and redact internal
+  comparison tokens from debug output;
 - candidate-only normalization that cannot produce core `AgentEvidence`;
 - Root Workspace Anchor, task-count, and title/WT fixtures that record no
   raw paths, native IDs, or title content;
@@ -35,6 +36,11 @@ The ordinary product registry and guided Setup remain Codex-only. No Agy
 configuration, Hook, title command, wrapper, PATH interception, PTY host, or
 daemon is installed. `tabbeacon agy` is an observational qualification CLI,
 not an Agy launcher; normal Agy launch remains literally `agy`.
+
+Any later runner invocation pins direct native executable identities by absolute
+path and SHA-256, rejects reparse/out-of-root disposable captures, and applies
+bounded input, output, and timeout handling. These are qualification safeguards,
+not evidence that a particular Agy binary or profile is admitted.
 
 ## Consequences
 

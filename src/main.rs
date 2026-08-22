@@ -3,6 +3,7 @@ use std::{
     fs,
     io::{self, IsTerminal, Read, Write},
     process::ExitCode,
+    sync::mpsc,
     thread,
     time::Duration,
 };
@@ -29,8 +30,9 @@ use tabbeacon::human_presentation::{
 };
 use tabbeacon::management::ManagementSnapshot;
 use tabbeacon::providers::agy::{
-    AgyHookRecorder, AgyQualificationPlan, AgyStateRecorder, AgyTitleCallbackHarness,
-    AgyVersionDiagnostic, MAX_AGY_QUALIFICATION_INPUT_BYTES,
+    AgyHookRecord, AgyHookRecorder, AgyInputDisposition, AgyQualificationPlan, AgyStateRecord,
+    AgyStateRecorder, AgyTitleCallbackHarness, AgyVersionDiagnostic,
+    MAX_AGY_QUALIFICATION_INPUT_BYTES,
 };
 use tabbeacon::providers::codex::{
     CodexHookRuntime, CodexIntegration, SetupOutcome, TitleOwnershipOutcome, UninstallOutcome,
@@ -1408,8 +1410,8 @@ fn agy_preadmission(command: AgyPreadmissionCommand) -> ExitCode {
             }
         }
         AgyPreadmissionCommand::TitleState(output) => {
-            let payload = read_agy_qualification_stdin();
-            let record = AgyStateRecorder::record(&payload);
+            let input = read_agy_qualification_stdin();
+            let record = input.state_record();
             match output.mode() {
                 OutputMode::Json => print_agy_json(&record),
                 OutputMode::Plain => {
@@ -1428,8 +1430,8 @@ fn agy_preadmission(command: AgyPreadmissionCommand) -> ExitCode {
             }
         }
         AgyPreadmissionCommand::HookState { event, output } => {
-            let payload = read_agy_qualification_stdin();
-            let record = AgyHookRecorder::record(event.wire_name(), &payload);
+            let input = read_agy_qualification_stdin();
+            let record = input.hook_record(event.wire_name());
             match output.mode() {
                 OutputMode::Json => print_agy_json(&record),
                 OutputMode::Plain => {
@@ -1448,21 +1450,86 @@ fn agy_preadmission(command: AgyPreadmissionCommand) -> ExitCode {
             }
         }
         AgyPreadmissionCommand::TitleCallback => {
-            let payload = read_agy_qualification_stdin();
-            let response = AgyTitleCallbackHarness::respond(&payload);
+            let input = read_agy_qualification_stdin();
+            let response = AgyTitleCallbackHarness::respond(&input.payload);
             println!("{}", response.fallback_title);
             ExitCode::SUCCESS
         }
     }
 }
 
-fn read_agy_qualification_stdin() -> Vec<u8> {
-    let mut payload = Vec::new();
+const AGY_QUALIFICATION_STDIN_TIMEOUT: Duration = Duration::from_secs(2);
+
+struct AgyQualificationInput {
+    payload: Vec<u8>,
+    read_disposition: Option<AgyInputDisposition>,
+}
+
+impl AgyQualificationInput {
+    fn state_record(&self) -> AgyStateRecord {
+        self.read_disposition.map_or_else(
+            || AgyStateRecorder::record(&self.payload),
+            |disposition| AgyStateRecord {
+                disposition,
+                observation: None,
+            },
+        )
+    }
+
+    fn hook_record(&self, event_name: &str) -> AgyHookRecord {
+        self.read_disposition.map_or_else(
+            || AgyHookRecorder::record(event_name, &self.payload),
+            |disposition| AgyHookRecord {
+                disposition,
+                observation: None,
+            },
+        )
+    }
+}
+
+fn read_agy_qualification_stdin() -> AgyQualificationInput {
+    read_agy_qualification_reader(io::stdin(), AGY_QUALIFICATION_STDIN_TIMEOUT)
+}
+
+fn read_agy_qualification_reader<R>(reader: R, timeout: Duration) -> AgyQualificationInput
+where
+    R: Read + Send + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
     let limit = u64::try_from(MAX_AGY_QUALIFICATION_INPUT_BYTES)
         .expect("qualification input limit fits in u64")
         .saturating_add(1);
-    let _ = io::stdin().lock().take(limit).read_to_end(&mut payload);
-    payload
+    let started = thread::Builder::new()
+        .name("agy-qualification-stdin".to_owned())
+        .spawn(move || {
+            let mut payload = Vec::new();
+            let outcome = match reader.take(limit).read_to_end(&mut payload) {
+                Ok(_) => AgyQualificationInput {
+                    payload,
+                    read_disposition: None,
+                },
+                Err(_) => AgyQualificationInput {
+                    payload: Vec::new(),
+                    read_disposition: Some(AgyInputDisposition::IoError),
+                },
+            };
+            let _ = sender.send(outcome);
+        });
+    if started.is_err() {
+        return AgyQualificationInput {
+            payload: Vec::new(),
+            read_disposition: Some(AgyInputDisposition::IoError),
+        };
+    }
+    receiver
+        .recv_timeout(timeout)
+        .unwrap_or_else(|error| AgyQualificationInput {
+            payload: Vec::new(),
+            read_disposition: Some(match error {
+                mpsc::RecvTimeoutError::Timeout => AgyInputDisposition::TimedOut,
+                mpsc::RecvTimeoutError::Disconnected => AgyInputDisposition::IoError,
+            }),
+        })
 }
 
 fn print_agy_json(value: &impl serde::Serialize) -> ExitCode {
@@ -3966,6 +4033,8 @@ fn interface_conflict_error() -> io::Error {
 mod tests {
     use std::{
         fs,
+        sync::mpsc,
+        time::Duration,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -4216,5 +4285,41 @@ mod tests {
         assert!(failed.is_err());
         assert_eq!(store.load().unwrap(), concurrent_after_write);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn agy_stdin_reader_times_out_or_fails_without_retaining_input() {
+        struct AwaitingReader(mpsc::Receiver<()>);
+
+        impl std::io::Read for AwaitingReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                let _ = self.0.recv();
+                Ok(0)
+            }
+        }
+
+        struct FailingReader;
+
+        impl std::io::Read for FailingReader {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("private input error"))
+            }
+        }
+
+        let (release, waiting) = mpsc::channel();
+        let timed_out =
+            read_agy_qualification_reader(AwaitingReader(waiting), Duration::from_millis(1));
+        assert_eq!(
+            timed_out.read_disposition,
+            Some(AgyInputDisposition::TimedOut)
+        );
+        assert!(timed_out.payload.is_empty());
+        assert!(timed_out.state_record().observation.is_none());
+        release.send(()).expect("blocked reader releases");
+
+        let failed = read_agy_qualification_reader(FailingReader, Duration::from_secs(1));
+        assert_eq!(failed.read_disposition, Some(AgyInputDisposition::IoError));
+        assert!(failed.payload.is_empty());
+        assert!(failed.hook_record("PostToolUse").observation.is_none());
     }
 }

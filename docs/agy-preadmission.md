@@ -41,7 +41,8 @@ production admission claim.
 - a typed `AgyCapabilityProfile` fixed to `unadmitted` and
   `provider_enabled=false`;
 - direct-command plan for literal `agy --version`, with no wrapper, PATH
-  shadow, PTY host, or daemon;
+  shadow, PTY host, or daemon; the later Owner-present invocation must pin an
+  explicit native executable path and SHA-256 identity before it runs;
 - version drift classifier that does not infer support from a newer version;
 - title/status and Hook recorders that parse one disposable JSON payload and
   discard source content;
@@ -73,8 +74,19 @@ The recorders retain only the following fields:
 They never retain, serialize, render, or write raw conversation IDs, workspace
 or transcript paths, artifact locations, email, model, quota/token data, tool
 names/arguments, error text, prompt/assistant content, or arbitrary unknown
-event names. Unknown states and events stay unknown/ignored; they do not enter
-core reconciliation.
+event names. Duplicate JSON keys, excessive nesting/collection sizes, unknown
+states, and unknown events fail closed; they do not enter core reconciliation.
+In-memory comparison fingerprints are also excluded from `Debug` output.
+
+## Execution and ownership bounds
+
+The qualification CLI accepts at most 64 KiB and gives stdin two seconds to
+close; timeout and I/O failures return a content-free disposition. The
+PowerShell runner requires an absolute, non-reparse `.exe` plus a matching
+SHA-256 for both TabBeacon and the direct Agy version probe. It rejects a
+non-contained/reparse disposable sample path, caps its read at 64 KiB, bounds
+the version process to 10 seconds by default, drops stderr, and kills a timed
+out version process tree. None of these checks reads Agy configuration.
 
 ## G64 runbook
 
@@ -87,15 +99,21 @@ content-minimizing recorder.
 1. Re-admit the exact TabBeacon candidate, then inspect the no-mutation plan:
 
    ```powershell
-   git rev-parse HEAD
-   .\scripts\invoke-agy-g64-qualification.ps1 -Mode Plan
+   $tabbeacon = '<absolute path to the admitted tabbeacon.exe>'
+   $tabbeaconSha256 = '<matching SHA-256>'
+   .\scripts\invoke-agy-g64-qualification.ps1 -Mode Plan `
+     -TabBeaconExecutablePath $tabbeacon -TabBeaconExecutableSha256 $tabbeaconSha256
    ```
 
 2. Before the Owner gate, the only permitted Agy interaction is the direct
    version probe. It must not be interpreted as authentication or admission:
 
    ```powershell
-   .\scripts\invoke-agy-g64-qualification.ps1 -Mode DirectVersion
+   $agy = '<absolute path to the Owner-approved agy.exe>'
+   $agySha256 = '<matching SHA-256>'
+   .\scripts\invoke-agy-g64-qualification.ps1 -Mode DirectVersion `
+     -TabBeaconExecutablePath $tabbeacon -TabBeaconExecutableSha256 $tabbeaconSha256 `
+     -AgyExecutablePath $agy -AgyExecutableSha256 $agySha256
    ```
 
 3. Stop unless all three G64 prerequisites are verified in the Owner-present
@@ -104,12 +122,17 @@ content-minimizing recorder.
    `BLOCKED_OWNER_ENVIRONMENT`; do not use these fixtures as a substitute.
 
 4. If the Owner explicitly supplies a disposable title-state or Hook capture,
-   stream it without retaining raw input. The caller must create a fresh
-   sanitized evidence destination before redirecting output:
+   read it only from a fresh, bounded, non-reparse disposable root without
+   retaining raw input. The caller must create a fresh sanitized evidence
+   destination before redirecting output:
 
    ```powershell
-   .\scripts\invoke-agy-g64-qualification.ps1 -Mode TitleState -OwnerPresent -InputPath <owner-approved-disposable-capture>
-   .\scripts\invoke-agy-g64-qualification.ps1 -Mode HookState -HookEvent post-tool-use -OwnerPresent -InputPath <owner-approved-disposable-capture>
+   .\scripts\invoke-agy-g64-qualification.ps1 -Mode TitleState -OwnerPresent `
+     -TabBeaconExecutablePath $tabbeacon -TabBeaconExecutableSha256 $tabbeaconSha256 `
+     -DisposableRoot <owner-approved-disposable-root> -InputPath <capture-within-root>
+   .\scripts\invoke-agy-g64-qualification.ps1 -Mode HookState -HookEvent post-tool-use -OwnerPresent `
+     -TabBeaconExecutablePath $tabbeacon -TabBeaconExecutableSha256 $tabbeaconSha256 `
+     -DisposableRoot <owner-approved-disposable-root> -InputPath <capture-within-root>
    ```
 
 5. A real settings/title callback experiment is an Owner-approved G64

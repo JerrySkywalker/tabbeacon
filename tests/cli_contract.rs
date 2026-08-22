@@ -255,6 +255,91 @@ fn agy_preadmission_payload_recorders_drop_content_and_fail_open() {
 }
 
 #[test]
+fn agy_adversarial_payloads_cannot_reach_cli_output_or_title_protocol() {
+    let root = TestRoot::new("agy-adversarial");
+    let duplicate_state = br#"{
+      "agent_state":"future-private-state",
+      "agent_state":"idle",
+      "cwd":"C:/private/\u001b[31mworkspace",
+      "conversation_id":"private-id-\u2603",
+      "assistant_content":"private prompt and assistant content"
+    }"#;
+    let state = command_with_stdin(
+        {
+            let mut command = isolated_command(&root);
+            command.args(["agy", "title-state", "--json"]);
+            command
+        },
+        duplicate_state,
+    );
+    assert!(state.status.success());
+    let state_text = String::from_utf8(state.stdout).expect("state output is UTF-8");
+    let state_value: serde_json::Value = serde_json::from_str(&state_text).expect("state JSON");
+    assert_eq!(state_value["disposition"], "malformed");
+
+    let duplicate_hook = br#"{
+      "workspacePaths":["C:/private/first"],
+      "workspacePaths":["C:/private/second"],
+      "toolCall":{"args":{"prompt":"private tool arguments"}},
+      "error":"private failure"
+    }"#;
+    let hook = command_with_stdin(
+        {
+            let mut command = isolated_command(&root);
+            command.args(["agy", "hook-state", "post-tool-use", "--json"]);
+            command
+        },
+        duplicate_hook,
+    );
+    assert!(hook.status.success());
+    let hook_text = String::from_utf8(hook.stdout).expect("Hook output is UTF-8");
+    let hook_value: serde_json::Value = serde_json::from_str(&hook_text).expect("Hook JSON");
+    assert_eq!(hook_value["disposition"], "malformed");
+
+    let oversized = vec![b'x'; 64 * 1024 + 1];
+    let oversized_state = command_with_stdin(
+        {
+            let mut command = isolated_command(&root);
+            command.args(["agy", "title-state", "--plain"]);
+            command
+        },
+        &oversized,
+    );
+    assert!(oversized_state.status.success());
+    assert_eq!(
+        String::from_utf8(oversized_state.stdout)
+            .expect("plain output is UTF-8")
+            .lines()
+            .nth(1),
+        Some("AGY_TITLE_STATE=oversized")
+    );
+
+    let callback = command_with_stdin(
+        {
+            let mut command = isolated_command(&root);
+            command.args(["agy", "__title-callback-v1"]);
+            command
+        },
+        duplicate_state,
+    );
+    assert!(callback.status.success());
+    assert_eq!(callback.stdout, b"Agy\n");
+    assert!(callback.stderr.is_empty());
+
+    for forbidden in [
+        "future-private-state",
+        "C:/private",
+        "private-id",
+        "private prompt",
+        "private tool arguments",
+        "private failure",
+    ] {
+        assert!(!state_text.contains(forbidden), "state leaked {forbidden}");
+        assert!(!hook_text.contains(forbidden), "Hook leaked {forbidden}");
+    }
+}
+
+#[test]
 fn output_modes_preserve_machine_json_and_admit_legacy_plain_output() {
     let root = TestRoot::new("output-modes");
 
