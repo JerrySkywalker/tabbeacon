@@ -340,6 +340,48 @@ fn agy_adversarial_payloads_cannot_reach_cli_output_or_title_protocol() {
 }
 
 #[test]
+fn ordinary_management_and_setup_surfaces_remain_codex_only() {
+    let root = TestRoot::new("agy-isolation");
+
+    let setup_help = isolated_command(&root)
+        .args(["setup", "--help"])
+        .output()
+        .expect("setup help starts");
+    assert!(setup_help.status.success());
+    let setup_help = String::from_utf8(setup_help.stdout).expect("setup help is UTF-8");
+    assert!(setup_help.contains("Codex integration"));
+    assert!(setup_help.contains("codex"));
+    assert!(!setup_help.to_ascii_lowercase().contains("agy"));
+
+    let sessions = isolated_command(&root)
+        .args(["sessions", "--json"])
+        .output()
+        .expect("sessions starts");
+    assert!(sessions.status.success());
+    let sessions = String::from_utf8(sessions.stdout).expect("sessions output is UTF-8");
+    assert!(!sessions.to_ascii_lowercase().contains("agy"));
+
+    let status = isolated_command(&root)
+        .args(["status", "--json"])
+        .output()
+        .expect("status starts");
+    assert!(status.status.success());
+    let status: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status is JSON");
+    assert!(status["codex"].is_object());
+    assert!(status.get("agy").is_none());
+    assert!(status.get("providers").is_none());
+
+    let unsupported_setup = isolated_command(&root)
+        .args(["setup", "agy"])
+        .output()
+        .expect("unsupported setup invocation starts");
+    assert!(
+        !unsupported_setup.status.success(),
+        "unadmitted Agy cannot become a normal setup action"
+    );
+}
+
+#[test]
 fn output_modes_preserve_machine_json_and_admit_legacy_plain_output() {
     let root = TestRoot::new("output-modes");
 
