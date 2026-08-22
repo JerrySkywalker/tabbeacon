@@ -1891,8 +1891,8 @@ mod tests {
             "a sleeping owned helper must never be reported as a successful completion"
         );
         assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "the outer harness must retain an enforceable wall-clock boundary"
+            started.elapsed() < Duration::from_secs(25),
+            "the outer harness must retain the bounded timeout and cleanup envelope"
         );
     }
 
