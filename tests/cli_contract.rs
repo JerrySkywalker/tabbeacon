@@ -2,8 +2,9 @@
 
 use std::{
     env, fs,
+    io::Write,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     sync::{
         OnceLock,
         atomic::{AtomicU64, Ordering},
@@ -83,6 +84,23 @@ fn isolated_command_with_codex(root: &TestRoot, codex_directory: &Path) -> Comma
     command
 }
 
+fn command_with_stdin(mut command: Command, input: &[u8]) -> std::process::Output {
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("qualification command starts");
+    child
+        .stdin
+        .take()
+        .expect("qualification stdin is available")
+        .write_all(input)
+        .expect("qualification input writes");
+    child
+        .wait_with_output()
+        .expect("qualification command exits")
+}
+
 #[test]
 fn help_version_and_powershell_completion_are_available_without_hidden_workers() {
     let root = TestRoot::new("help");
@@ -116,6 +134,209 @@ fn help_version_and_powershell_completion_are_available_without_hidden_workers()
     let completions = String::from_utf8(completions.stdout).expect("completion script is UTF-8");
     assert!(completions.contains("Register-ArgumentCompleter"));
     assert!(!completions.contains("PROFILE"));
+}
+
+#[test]
+fn agy_preadmission_cli_is_content_minimal_and_cannot_enable_a_provider() {
+    let root = TestRoot::new("agy-preadmission");
+
+    let plan = isolated_command(&root)
+        .args(["agy", "plan", "--json"])
+        .output()
+        .expect("Agy plan starts");
+    assert!(plan.status.success());
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).expect("plan is JSON");
+    assert_eq!(plan["admission"], "unadmitted");
+    assert_eq!(plan["provider_enablement"], "disabled");
+    assert_eq!(plan["configuration_mutation"], "none");
+    assert_eq!(plan["direct_command"]["executable"], "agy");
+    assert_eq!(plan["direct_command"]["launch_boundary"], "direct_only");
+
+    let version = isolated_command(&root)
+        .args([
+            "agy",
+            "version",
+            "--observed",
+            "1.1.17",
+            "--documented",
+            "1.1.14",
+            "--json",
+        ])
+        .output()
+        .expect("Agy version diagnostic starts");
+    assert!(version.status.success());
+    let version: serde_json::Value =
+        serde_json::from_slice(&version.stdout).expect("version diagnostic is JSON");
+    assert_eq!(version["admission"], "unadmitted");
+    assert_eq!(version["drift"], "documentation_older");
+}
+
+#[test]
+fn agy_preadmission_payload_recorders_drop_content_and_fail_open() {
+    let root = TestRoot::new("agy-preadmission-payload");
+
+    let title_state = command_with_stdin(
+        {
+            let mut command = isolated_command(&root);
+            command.args(["agy", "title-state", "--json"]);
+            command
+        },
+        br#"{
+          "conversation_id":"private-conversation",
+          "workspace":{"current_dir":"C:/private/worktree","project_dir":"C:/private/project"},
+          "agent_state":"working",
+          "task_count":2,
+          "transcript_path":"C:/private/transcript.jsonl",
+          "email":"owner@example.test",
+          "model":{"id":"private-model"}
+        }"#,
+    );
+    assert!(title_state.status.success());
+    let title_text = String::from_utf8(title_state.stdout).expect("title state is UTF-8");
+    let title_value: serde_json::Value =
+        serde_json::from_str(&title_text).expect("title state is JSON");
+    assert_eq!(title_value["disposition"], "observed");
+    assert_eq!(title_value["observation"]["admission"], "unadmitted");
+    for forbidden in [
+        "private-conversation",
+        "C:/private",
+        "transcript_path",
+        "owner@example.test",
+        "private-model",
+    ] {
+        assert!(
+            !title_text.contains(forbidden),
+            "title output leaked {forbidden}"
+        );
+    }
+
+    let hook_state = command_with_stdin(
+        {
+            let mut command = isolated_command(&root);
+            command.args(["agy", "hook-state", "post-tool-use", "--json"]);
+            command
+        },
+        br#"{
+          "conversationId":"private-hook-id",
+          "workspacePaths":["C:/private/one"],
+          "transcriptPath":"C:/private/transcript.jsonl",
+          "toolCall":{"args":{"CommandLine":"private command"}}
+        }"#,
+    );
+    assert!(hook_state.status.success());
+    let hook_text = String::from_utf8(hook_state.stdout).expect("Hook state is UTF-8");
+    let hook_value: serde_json::Value =
+        serde_json::from_str(&hook_text).expect("Hook state is JSON");
+    assert_eq!(hook_value["disposition"], "observed");
+    assert!(hook_text.contains("content_fields_dropped"));
+    for forbidden in ["private-hook-id", "C:/private", "private command"] {
+        assert!(
+            !hook_text.contains(forbidden),
+            "Hook output leaked {forbidden}"
+        );
+    }
+
+    let callback = command_with_stdin(
+        {
+            let mut command = isolated_command(&root);
+            command.args(["agy", "__title-callback-v1"]);
+            command
+        },
+        br#"{"agent_state":"malformed""#,
+    );
+    assert!(callback.status.success());
+    assert_eq!(
+        String::from_utf8(callback.stdout)
+            .expect("callback output is UTF-8")
+            .trim(),
+        "Agy"
+    );
+    assert!(callback.stderr.is_empty());
+}
+
+#[test]
+fn agy_adversarial_payloads_cannot_reach_cli_output_or_title_protocol() {
+    let root = TestRoot::new("agy-adversarial");
+    let duplicate_state = br#"{
+      "agent_state":"future-private-state",
+      "agent_state":"idle",
+      "cwd":"C:/private/\u001b[31mworkspace",
+      "conversation_id":"private-id-\u2603",
+      "assistant_content":"private prompt and assistant content"
+    }"#;
+    let state = command_with_stdin(
+        {
+            let mut command = isolated_command(&root);
+            command.args(["agy", "title-state", "--json"]);
+            command
+        },
+        duplicate_state,
+    );
+    assert!(state.status.success());
+    let state_text = String::from_utf8(state.stdout).expect("state output is UTF-8");
+    let state_value: serde_json::Value = serde_json::from_str(&state_text).expect("state JSON");
+    assert_eq!(state_value["disposition"], "malformed");
+
+    let duplicate_hook = br#"{
+      "workspacePaths":["C:/private/first"],
+      "workspacePaths":["C:/private/second"],
+      "toolCall":{"args":{"prompt":"private tool arguments"}},
+      "error":"private failure"
+    }"#;
+    let hook = command_with_stdin(
+        {
+            let mut command = isolated_command(&root);
+            command.args(["agy", "hook-state", "post-tool-use", "--json"]);
+            command
+        },
+        duplicate_hook,
+    );
+    assert!(hook.status.success());
+    let hook_text = String::from_utf8(hook.stdout).expect("Hook output is UTF-8");
+    let hook_value: serde_json::Value = serde_json::from_str(&hook_text).expect("Hook JSON");
+    assert_eq!(hook_value["disposition"], "malformed");
+
+    let oversized = vec![b'x'; 64 * 1024 + 1];
+    let oversized_state = command_with_stdin(
+        {
+            let mut command = isolated_command(&root);
+            command.args(["agy", "title-state", "--plain"]);
+            command
+        },
+        &oversized,
+    );
+    assert!(oversized_state.status.success());
+    assert_eq!(
+        String::from_utf8(oversized_state.stdout)
+            .expect("plain output is UTF-8")
+            .lines()
+            .nth(1),
+        Some("AGY_TITLE_STATE=oversized")
+    );
+
+    let callback = command_with_stdin(
+        {
+            let mut command = isolated_command(&root);
+            command.args(["agy", "__title-callback-v1"]);
+            command
+        },
+        duplicate_state,
+    );
+    assert!(callback.status.success());
+    assert_eq!(callback.stdout, b"Agy\n");
+    assert!(callback.stderr.is_empty());
+
+    for forbidden in [
+        "future-private-state",
+        "C:/private",
+        "private-id",
+        "private prompt",
+        "private tool arguments",
+        "private failure",
+    ] {
+        assert!(!state_text.contains(forbidden), "state leaked {forbidden}");
+        assert!(!hook_text.contains(forbidden), "Hook leaked {forbidden}");
+    }
 }
 
 #[test]

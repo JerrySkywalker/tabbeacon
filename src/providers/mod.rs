@@ -1,6 +1,8 @@
 //! Agent-provider adapters live below the provider-neutral core contract.
 //!
-//! The first implementation target is Codex hooks in `TB-G05`.
+//! Codex Hooks are the only production adapter. `agy` contains qualification
+//! primitives only and cannot enable a provider before `TB-G64` admission.
 
+pub mod agy;
 pub mod codex;
 pub mod registry;

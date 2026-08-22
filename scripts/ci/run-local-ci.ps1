@@ -52,5 +52,6 @@ Invoke-Checked 'FORMAT' { cargo fmt --all -- --check }
 Invoke-Checked 'CLIPPY' { cargo clippy --all-targets --all-features -- -D warnings }
 Invoke-Checked 'TEST' { cargo test --all-targets --all-features }
 Invoke-Checked 'LOCKED BUILD' { cargo build --locked --all-targets }
+Invoke-Checked 'AGY PREADMISSION SCRIPT CONTRACT' { pwsh -NoProfile -File ./scripts/ci/test-agy-preadmission-contract.ps1 }
 
 Write-Host "`nLOCAL_CI=PASS"

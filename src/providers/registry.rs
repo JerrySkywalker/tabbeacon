@@ -2,8 +2,9 @@
 //!
 //! A provider identifier alone never grants support.  This registry contains
 //! only adapters registered by the product and projects their admitted
-//! observation evidence into a bounded management model.  v0.5.1 registers
-//! Codex only.
+//! observation evidence into a bounded management model. v0.5.1 registers
+//! Codex for production. Explicit qualification callers may add an unadmitted
+//! Agy candidate without making it part of the ordinary product view.
 
 use std::fmt;
 
@@ -12,6 +13,9 @@ use serde::Serialize;
 use crate::{
     diagnostics::OperationalDiagnostics,
     hook_inventory::{HookInventory, HookInventoryAvailability},
+    providers::agy::{
+        AGY_PROVIDER_ID, AgyCapability, AgyCapabilityAvailability, AgyCapabilityProfile, AgyVersion,
+    },
     settings::ProviderBadgePolicy,
 };
 
@@ -193,6 +197,8 @@ pub enum ProviderAdmissionState {
     Admitted,
     /// The provider is registered but its detected version/profile is unproven.
     Unknown,
+    /// The product knows this candidate but real-provider admission has not occurred.
+    Unadmitted,
 }
 
 impl ProviderAdmissionState {
@@ -202,6 +208,7 @@ impl ProviderAdmissionState {
         match self {
             Self::Admitted => "admitted",
             Self::Unknown => "unknown",
+            Self::Unadmitted => "unadmitted",
         }
     }
 }
@@ -233,6 +240,7 @@ impl ProviderHookState {
 pub enum ProviderManualAction {
     InspectCompatibility,
     ReviewHooks,
+    OwnerPresentQualification,
 }
 
 impl ProviderManualAction {
@@ -242,6 +250,7 @@ impl ProviderManualAction {
         match self {
             Self::InspectCompatibility => "inspect_compatibility",
             Self::ReviewHooks => "review_hooks",
+            Self::OwnerPresentQualification => "owner_present_qualification",
         }
     }
 }
@@ -362,9 +371,65 @@ impl ProviderIntegrationSnapshot {
         }
     }
 
+    fn from_agy_preadmission(profile: AgyCapabilityProfile) -> Self {
+        let version = profile.version.observed_version.map(AgyVersion::as_string);
+        let capabilities = profile
+            .capabilities
+            .into_iter()
+            .filter_map(|entry| {
+                agy_capability(entry.capability).map(|provider_capability| {
+                    capability(
+                        provider_capability,
+                        match entry.availability {
+                            AgyCapabilityAvailability::Unavailable
+                            | AgyCapabilityAvailability::Unknown => {
+                                CapabilityAvailability::Unavailable
+                            }
+                        },
+                        "unadmitted",
+                    )
+                })
+            })
+            .collect();
+        Self {
+            id: ProviderId(AGY_PROVIDER_ID.to_owned()),
+            label: "Agy",
+            available: version.is_some(),
+            installed: false,
+            version,
+            admission: ProviderAdmissionState::Unadmitted,
+            observation_backend: "unadmitted",
+            hooks: ProviderHookState::Unavailable,
+            capability_profile: ProviderCapabilityProfile { capabilities },
+            title_participation: CapabilityAvailability::Unavailable,
+            manual_actions: vec![
+                ProviderManualAction::InspectCompatibility,
+                ProviderManualAction::OwnerPresentQualification,
+            ],
+            title_badge: "A",
+        }
+    }
+
     fn title_badge(&self) -> &str {
         self.title_badge
     }
+}
+
+fn agy_capability(capability: AgyCapability) -> Option<ProviderCapability> {
+    Some(match capability {
+        AgyCapability::Phase => ProviderCapability::Phase,
+        AgyCapability::Attention => ProviderCapability::Attention,
+        AgyCapability::Approval => ProviderCapability::ApprovalQuestion,
+        AgyCapability::SessionIdentity => ProviderCapability::SessionIdentity,
+        AgyCapability::WorkspaceRoot => ProviderCapability::WorkspaceRootBinding,
+        AgyCapability::BackgroundTasks => ProviderCapability::BackgroundTasks,
+        AgyCapability::TitleCallback => ProviderCapability::TitleOutput,
+        AgyCapability::WindowsTerminalPresentation => {
+            ProviderCapability::WindowsTerminalPresentation
+        }
+        AgyCapability::HookObservation => ProviderCapability::HookInspection,
+        AgyCapability::SetupOwnership => return None,
+    })
 }
 
 fn capability(
@@ -420,11 +485,31 @@ impl ProviderRegistry {
         }
     }
 
-    /// Registered production IDs in deterministic order.
+    /// Replaces the unadmitted Agy catalog row with a supplied qualification observation.
+    ///
+    /// The profile type cannot represent an admitted state, so this helper has
+    /// no path to enable an Agy provider or title badge.
+    #[must_use]
+    pub fn with_agy_preadmission(mut self, profile: AgyCapabilityProfile) -> Self {
+        let snapshot = ProviderIntegrationSnapshot::from_agy_preadmission(profile);
+        if let Some(existing) = self
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id.as_str() == AGY_PROVIDER_ID)
+        {
+            *existing = snapshot;
+        } else {
+            self.providers.push(snapshot);
+        }
+        self
+    }
+
+    /// Registered production IDs in deterministic order, excluding unadmitted candidates.
     #[must_use]
     pub fn registered_ids(&self) -> Vec<&str> {
         self.providers
             .iter()
+            .filter(|provider| provider.admission == ProviderAdmissionState::Admitted)
             .map(|provider| provider.id.as_str())
             .collect()
     }
@@ -478,6 +563,7 @@ mod tests {
         CapabilityAvailability, ProviderAdmissionState, ProviderCapability, ProviderId,
         ProviderRegistry,
     };
+    use crate::providers::agy::{AgyCapabilityProfile, AgyVersionDiagnostic};
     use crate::settings::ProviderBadgePolicy;
 
     #[test]
@@ -485,6 +571,7 @@ mod tests {
         let registry = ProviderRegistry::codex_observation(Some("0.149.0"), true, true, true);
 
         assert_eq!(registry.registered_ids(), vec!["codex"]);
+        assert_eq!(registry.providers.len(), 1);
         assert_eq!(registry.providers[0].label, "Codex");
         assert_eq!(
             registry.providers[0].admission,
@@ -526,6 +613,33 @@ mod tests {
             None,
             "unadmitted providers cannot affect ordinary terminal titles"
         );
+    }
+
+    #[test]
+    fn agy_catalog_entry_stays_unadmitted_and_cannot_affect_titles() {
+        let registry =
+            ProviderRegistry::default().with_agy_preadmission(AgyCapabilityProfile::unadmitted(
+                AgyVersionDiagnostic::from_versions(Some("1.1.17"), Some("1.1.14")),
+            ));
+        let agy = registry
+            .providers
+            .iter()
+            .find(|provider| provider.id.as_str() == "agy")
+            .expect("Agy catalog row exists");
+
+        assert!(agy.available);
+        assert_eq!(agy.admission, ProviderAdmissionState::Unadmitted);
+        assert!(
+            agy.capability_profile
+                .capabilities
+                .iter()
+                .all(|capability| capability.availability == CapabilityAvailability::Unavailable)
+        );
+        assert_eq!(
+            registry.title_badge_for("agy", ProviderBadgePolicy::Always),
+            None
+        );
+        assert_eq!(registry.registered_ids(), Vec::<&str>::new());
     }
 
     #[test]
