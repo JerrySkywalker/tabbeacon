@@ -1,6 +1,6 @@
 [package]
 name = "tabbeacon"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 rust-version = "1.97.1"
 license = "MIT"
@@ -77,3 +77,10 @@ unsafe_code = "deny"
 [lints.clippy]
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+
+# Hook invocation is a Windows process-start-sensitive path. Keep release
+# artifacts compact without changing panic semantics or the debug/test profile.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

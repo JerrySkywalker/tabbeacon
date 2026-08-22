@@ -2,7 +2,9 @@
 
 ## Status
 
-PLANNED from public v0.5.0 baseline `eb4e2ec0132ef4fa116d2a44c163a135a7f7e40f`.
+ACTIVE from public v0.5.1. The next admitted maintenance train is v0.5.2
+High-Performance Codex Runtime; it is deliberately bounded before the G64 Agy
+hard stop.
 
 This file is the compact long-train entrypoint for the next production stages. Product intent, invariants, release boundaries, and the Agy hard stop are defined in [`../goals/TB-V06-RELIABILITY-EXPLAINABILITY-MULTI-PROVIDER.md`](../goals/TB-V06-RELIABILITY-EXPLAINABILITY-MULTI-PROVIDER.md). Each numbered Goal below owns its exact implementation and exit gates.
 
@@ -38,6 +40,10 @@ TB-G63R  v0.5.1 Hardening & Release
     ↓
 PUBLIC v0.5.1
     ↓
+TB-V052  v0.5.2 High-Performance Codex Runtime
+    ↓
+PUBLIC v0.5.2 (only after its own release decision)
+    ↓
 HARD STOP: DOGFOOD / OWNER AGY ENVIRONMENT REQUIRED
     ↓
 TB-G64   Agy Admission & Real-Environment Spike
@@ -66,6 +72,7 @@ Default execution is sequential. A long autonomous train may continue only after
 | G63 | version/hash-bound worker runtime images; handoff/GC; remove long-lived lock on install binary | 8–12 h |
 | G63R | v0.5.1 upgrade/dogfood/release closure and public consumers | 4–6 h |
 | **v0.5.1 subtotal** | **Codex-only Reliability & Explainability** | **47–70 h** |
+| V052 | v0.5.2 High-Performance Codex Runtime: phase-attributed sub-second Windows Hook path; Fast Anchor Path; regression gates; Owner dogfood/re-enable packet | 8–12 h |
 | G64 | real Agy environment admission spike; freeze proven capability profile | 3–5 h |
 | G65 | production Agy provider adapter with direct `agy` daily command and fail-open setup | 8–12 h |
 | G66 | Agy title/state/workspace/approval plus proven presentation and management parity | 7–11 h |
@@ -160,6 +167,10 @@ Train B: close G59 + G60
 Train C: G61 + G62
 Train D: G63
 Train E: G63R -> PUBLIC v0.5.1 -> HARD STOP
+
+Maintenance exception: TB-V052 may run after public v0.5.1 and before G64. It
+does not admit Agy and ends at a v0.5.2 release-candidate / Owner dogfood
+transaction unless a separately authorized public-release Goal is accepted.
 
 Owner/Agy environment becomes available
 

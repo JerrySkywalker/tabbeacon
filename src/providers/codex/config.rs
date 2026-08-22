@@ -1559,7 +1559,11 @@ fn owned_command_hooks(
                     .any(|character| matches!(character, '"' | '%' | '\r' | '\n'))
         })
         .ok_or(CodexIntegrationError::UnsafeExecutablePath)?;
-    let windows_command = shell_independent_windows_hook_command(executable);
+    // Keep the generic command on the proven cross-shell PowerShell envelope.
+    // The Windows-specific field is selected by the admitted default-COMSPEC
+    // profile and may use the faster direct shape for a safe executable path.
+    let command = powershell_encoded_windows_hook_command(executable);
+    let windows_command = windows_hook_command_for_default_comspec(executable);
     Ok(HOOK_EVENTS
         .into_iter()
         .map(|event| OwnedHook {
@@ -1567,7 +1571,7 @@ fn owned_command_hooks(
             group: json!({
                 "hooks": [{
                     "type": "command",
-                    "command": windows_command.clone(),
+                    "command": command.clone(),
                     "commandWindows": windows_command,
                     "timeout": timeout_seconds,
                     "async": asynchronous
@@ -1577,7 +1581,44 @@ fn owned_command_hooks(
         .collect())
 }
 
-fn shell_independent_windows_hook_command(executable: &str) -> String {
+fn windows_hook_command_for_default_comspec(executable: &str) -> String {
+    // `commandWindows` is measured only for Codex's admitted default COMSPEC
+    // runner. A quoted direct command avoids layering a second cmd.exe process
+    // onto every synchronous Hook. The generic `command` field deliberately
+    // remains the encoded PowerShell envelope for custom/generic shell
+    // execution. A small set of shell metacharacters cannot be represented in
+    // the compact default-shell shape, so those hostile executable paths retain
+    // the proven encoded PowerShell envelope in both fields.
+    if requires_powershell_command_envelope(executable) {
+        powershell_encoded_windows_hook_command(executable)
+    } else {
+        format!("\"{executable}\" hook codex || exit /b 0")
+    }
+}
+
+fn requires_powershell_command_envelope(executable: &str) -> bool {
+    executable.chars().any(|character| {
+        matches!(
+            character,
+            '!' | '&'
+                | '|'
+                | ';'
+                | '$'
+                | '\''
+                | '`'
+                | '('
+                | ')'
+                | '<'
+                | '>'
+                | '@'
+                | '#'
+                | '{'
+                | '}'
+        )
+    })
+}
+
+fn powershell_encoded_windows_hook_command(executable: &str) -> String {
     let executable = executable.replace('\'', "''");
     let script = format!(
         "$ErrorActionPreference = 'SilentlyContinue'; & '{executable}' hook codex 1>$null 2>$null; exit 0"
@@ -2750,7 +2791,7 @@ mod tests {
 
     use super::{
         CodexIntegrationError, OwnedHook, ensure_not_symbolic_link, normalized_hook_hash,
-        write_if_unchanged,
+        windows_hook_command_for_default_comspec, write_if_unchanged,
     };
     use serde_json::json;
 
@@ -2819,6 +2860,28 @@ mod tests {
             };
             assert_eq!(normalized_hook_hash(&declaration), hash, "event={event}");
         }
+    }
+
+    #[test]
+    fn windows_hook_envelope_uses_default_comspec_fast_path_and_preserves_hostile_path_safety() {
+        let fast =
+            windows_hook_command_for_default_comspec(r"C:\Program Files\TabBeacon\tabbeacon.exe");
+        assert_eq!(
+            fast,
+            r#""C:\Program Files\TabBeacon\tabbeacon.exe" hook codex || exit /b 0"#
+        );
+
+        let hostile =
+            windows_hook_command_for_default_comspec(r"C:\real binary & quote'\tabbeacon.exe");
+        assert!(hostile.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand "));
+        assert!(
+            !hostile.contains(r"C:\real binary & quote'\tabbeacon.exe"),
+            "hostile paths stay inside the encoded PowerShell payload"
+        );
+        assert!(
+            windows_hook_command_for_default_comspec(r"C:\release!candidate\tabbeacon.exe")
+                .starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
+        );
     }
 
     #[test]

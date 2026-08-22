@@ -6,7 +6,12 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\..')).Path
 $qualificationScript = Join-Path $repoRoot 'scripts\invoke-agy-g64-qualification.ps1'
-$tabbeacon = Join-Path $repoRoot 'target\debug\tabbeacon.exe'
+$targetRoot = if ([string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
+    Join-Path $repoRoot 'target'
+} else {
+    $env:CARGO_TARGET_DIR
+}
+$tabbeacon = Join-Path $targetRoot 'debug\tabbeacon.exe'
 if (-not (Test-Path -LiteralPath $tabbeacon -PathType Leaf)) {
     throw 'AGY_PREADMISSION_TEST_BINARY_UNAVAILABLE'
 }

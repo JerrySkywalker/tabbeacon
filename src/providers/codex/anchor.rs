@@ -106,15 +106,23 @@ impl RootWorkspaceAnchorStore {
     }
 
     /// Establishes or replaces the root anchor at an admitted binding boundary.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn bind(
         &self,
         session_sha256: &str,
         generation: u64,
         observed_at_unix_seconds: u64,
         workspace_identity_sha256: &str,
+        workspace_location_sha256: &str,
         effective_alias: &RepositoryAlias,
         binding_source: RootWorkspaceBindingSource,
     ) -> io::Result<RootWorkspaceSelection> {
+        if !is_sha256(workspace_location_sha256) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "root anchor workspace location is invalid",
+            ));
+        }
         self.with_state(session_sha256, observed_at_unix_seconds, |state| {
             if state
                 .retired_through_generation
@@ -137,6 +145,7 @@ impl RootWorkspaceAnchorStore {
             }
             state.anchor = Some(PersistedRootWorkspaceAnchor {
                 workspace_identity_sha256: workspace_identity_sha256.to_owned(),
+                workspace_location_sha256: Some(workspace_location_sha256.to_owned()),
                 effective_alias: effective_alias.as_str().to_owned(),
                 binding_source,
                 bound_at_generation: generation,
@@ -168,14 +177,18 @@ impl RootWorkspaceAnchorStore {
         })
     }
 
-    /// Returns the existing alias while recording only whether this event's
-    /// resolved workspace identity differs from the root anchor.
-    pub(super) fn select_existing_or_observe_mismatch(
+    /// Returns the existing alias while recording only whether the event's
+    /// no-subprocess local worktree location differs from the root anchor.
+    ///
+    /// A legacy anchor may lack a location digest. It stays title-authoritative
+    /// until the next authorized binding boundary upgrades it; no ordinary
+    /// event may fall back to Git discovery merely to fill that field.
+    pub(super) fn select_existing_or_observe_fast_mismatch(
         &self,
         session_sha256: &str,
         generation: u64,
         observed_at_unix_seconds: u64,
-        observed_workspace_identity_sha256: &str,
+        observed_workspace_location_sha256: Option<&str>,
     ) -> io::Result<Option<RootWorkspaceSelection>> {
         self.with_state(session_sha256, observed_at_unix_seconds, |state| {
             let Some(anchor) = state.anchor.as_ref() else {
@@ -187,8 +200,20 @@ impl RootWorkspaceAnchorStore {
                     "root anchor selection is stale relative to a newer binding",
                 ));
             }
-            if anchor.workspace_identity_sha256 != observed_workspace_identity_sha256 {
-                state.workspace_mismatch_observed = true;
+            if let Some(observed) = observed_workspace_location_sha256 {
+                if !is_sha256(observed) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "observed workspace location is invalid",
+                    ));
+                }
+                if anchor
+                    .workspace_location_sha256
+                    .as_deref()
+                    .is_some_and(|root| root != observed)
+                {
+                    state.workspace_mismatch_observed = true;
+                }
             }
             state.last_touched_unix_seconds = observed_at_unix_seconds;
             selection_from_state(state)
@@ -384,6 +409,10 @@ impl AnchorState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct PersistedRootWorkspaceAnchor {
     workspace_identity_sha256: String,
+    /// Added after the original anchor schema. The optional field retains
+    /// active pre-v0.5.2 anchors without an ordinary-event Git fallback.
+    #[serde(default)]
+    workspace_location_sha256: Option<String>,
     effective_alias: String,
     binding_source: RootWorkspaceBindingSource,
     bound_at_generation: u64,
@@ -397,6 +426,16 @@ fn selection_from_state(state: &AnchorState) -> io::Result<Option<RootWorkspaceS
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "root anchor workspace identity is invalid",
+        ));
+    }
+    if anchor
+        .workspace_location_sha256
+        .as_deref()
+        .is_some_and(|value| !is_sha256(value))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "root anchor workspace location is invalid",
         ));
     }
     let effective_alias = RepositoryAlias::new(anchor.effective_alias.clone()).map_err(|_| {
@@ -502,6 +541,10 @@ mod tests {
         "b".repeat(64)
     }
 
+    fn location() -> String {
+        "c".repeat(64)
+    }
+
     #[test]
     fn session_end_tombstone_rejects_an_in_flight_older_binding() {
         let root = test_root("tombstone");
@@ -522,6 +565,7 @@ mod tests {
                     1,
                     10,
                     &identity(),
+                    &location(),
                     &alias,
                     RootWorkspaceBindingSource::SessionStartStartup,
                 )
@@ -534,6 +578,7 @@ mod tests {
                     3,
                     10,
                     &identity(),
+                    &location(),
                     &alias,
                     RootWorkspaceBindingSource::SessionStartStartup,
                 )
@@ -547,6 +592,7 @@ mod tests {
                     2,
                     10,
                     &identity(),
+                    &location(),
                     &older_alias,
                     RootWorkspaceBindingSource::UserPromptFallback,
                 )
@@ -554,7 +600,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .select_existing_or_observe_mismatch(&session, 3, 10, &identity())
+                .select_existing_or_observe_fast_mismatch(&session, 3, 10, Some(&location()))
                 .expect("newer anchor remains readable")
                 .expect("newer anchor remains present")
                 .effective_alias()
@@ -577,6 +623,7 @@ mod tests {
                 1,
                 10,
                 &identity(),
+                &location(),
                 &alias,
                 RootWorkspaceBindingSource::SessionStartStartup,
             )
@@ -592,6 +639,49 @@ mod tests {
                 .state_path(&session)
                 .expect("owned state path is valid")
                 .exists()
+        );
+
+        fs::remove_dir_all(root).expect("owned test root is removed");
+    }
+
+    #[test]
+    fn legacy_anchor_without_location_digest_stays_authoritative_without_mismatch_fill_in() {
+        let root = test_root("legacy-location-digest");
+        let store = RootWorkspaceAnchorStore::new(&root);
+        let session = session();
+        let state_path = store
+            .state_path(&session)
+            .expect("owned state path is valid");
+        fs::create_dir_all(state_path.parent().expect("state path has parent"))
+            .expect("owned state directory creates");
+        let legacy = format!(
+            r#"{{
+  "schema": "tabbeacon-codex-root-workspace-anchor-v1",
+  "session_sha256": "{session}",
+  "anchor": {{
+    "workspace_identity_sha256": "{}",
+    "effective_alias": "ROOT",
+    "binding_source": "session_start_startup",
+    "bound_at_generation": 1
+  }},
+  "active_subagents": 0,
+  "workspace_mismatch_observed": false,
+  "retired_through_generation": null,
+  "last_touched_unix_seconds": 10
+}}"#,
+            identity()
+        );
+        fs::write(&state_path, legacy).expect("legacy anchor fixture writes");
+
+        let selection = store
+            .select_existing_or_observe_fast_mismatch(&session, 1, 11, Some(&location()))
+            .expect("legacy anchor selection stays readable")
+            .expect("legacy anchor remains present");
+        assert_eq!(selection.effective_alias().as_str(), "ROOT");
+        assert!(selection.root_binding_stable());
+        assert!(
+            !selection.workspace_mismatch_observed(),
+            "a missing legacy digest is not invented from an ordinary event"
         );
 
         fs::remove_dir_all(root).expect("owned test root is removed");

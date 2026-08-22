@@ -228,6 +228,20 @@ impl WorkspaceIdentityResolver {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_git_executable(
+        state_root: impl Into<PathBuf>,
+        git_executable: impl Into<PathBuf>,
+    ) -> Self {
+        let state_root = state_root.into();
+        Self {
+            discovery: RepositoryDiscovery::with_git_executable(git_executable),
+            preferences: WorkspacePreferenceStore::for_registry_state_root(&state_root),
+            registry: StableAliasRegistry::new(state_root),
+            home_directory: platform_home_directory(),
+        }
+    }
+
     /// Creates a resolver with an injected preference path for focused tests
     /// and future device-local workspace preference integrations.
     #[must_use]
@@ -320,6 +334,47 @@ impl WorkspaceIdentityResolver {
         Ok(format!(
             "{:x}",
             Sha256::digest(facts.identity.as_str().as_bytes())
+        ))
+    }
+
+    /// Returns a content-free local workspace-location digest without spawning
+    /// Git. It follows only filesystem layout: the nearest ancestor carrying a
+    /// `.git` file or directory is the Git worktree root; an ordinary
+    /// directory remains its own workspace root.
+    ///
+    /// This deliberately cannot establish a canonical repository identity or
+    /// allocate an alias. It is only suitable after an authoritative Root
+    /// Workspace Anchor already exists, where it can safely record that an
+    /// event came from a different local worktree without letting that event
+    /// become title authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the supplied path cannot be made absolute or is
+    /// not an accessible directory.
+    pub fn fast_workspace_location_sha256(
+        cwd: impl AsRef<Path>,
+    ) -> Result<String, RepositoryIdentityError> {
+        let cwd = cwd.as_ref();
+        let absolute_cwd = if cwd.is_absolute() {
+            cwd.to_path_buf()
+        } else {
+            env::current_dir()?.join(cwd)
+        };
+        if !absolute_cwd.is_dir() {
+            return Err(RepositoryIdentityError::InvalidIdentifier {
+                kind: "workspace directory",
+                detail: "cwd is not a directory".to_owned(),
+            });
+        }
+        // Do not canonicalize an ordinary post-anchor event. Symlink/reparse
+        // equivalence is not title authority, so conservatively latching a
+        // mismatch is safe; resolving it is an avoidable Windows filesystem
+        // cost on the one-second Hook path.
+        let root = nearest_git_worktree_root(&absolute_cwd).unwrap_or(absolute_cwd);
+        Ok(format!(
+            "{:x}",
+            Sha256::digest(normalize_absolute_path(&root).as_bytes())
         ))
     }
 
@@ -647,6 +702,18 @@ fn normalize_absolute_path(path: &Path) -> String {
     value
 }
 
+fn nearest_git_worktree_root(cwd: &Path) -> Option<PathBuf> {
+    let mut candidate = cwd.to_path_buf();
+    loop {
+        if fs::symlink_metadata(candidate.join(".git")).is_ok() {
+            return Some(candidate);
+        }
+        if !candidate.pop() {
+            return None;
+        }
+    }
+}
+
 #[cfg(windows)]
 fn root_display_hint(path: &Path) -> String {
     use std::path::{Component, Prefix};
@@ -680,5 +747,48 @@ fn platform_home_directory() -> Option<PathBuf> {
         env::var_os("HOME")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        env, fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::WorkspaceIdentityResolver;
+
+    #[test]
+    fn fast_workspace_location_uses_nearest_git_marker_without_discovery() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock follows Unix epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!(
+            "tabbeacon-fast-workspace-location-{}-{nonce}",
+            std::process::id()
+        ));
+        let git_root = root.join("git-root");
+        let nested = git_root.join("nested");
+        let ordinary = root.join("ordinary");
+        fs::create_dir_all(git_root.join(".git")).expect("Git marker creates");
+        fs::create_dir_all(&nested).expect("nested directory creates");
+        fs::create_dir_all(&ordinary).expect("ordinary directory creates");
+
+        let root_digest = WorkspaceIdentityResolver::fast_workspace_location_sha256(&git_root)
+            .expect("root digest resolves");
+        assert_eq!(
+            root_digest,
+            WorkspaceIdentityResolver::fast_workspace_location_sha256(&nested)
+                .expect("nested Git directory retains root digest")
+        );
+        assert_ne!(
+            root_digest,
+            WorkspaceIdentityResolver::fast_workspace_location_sha256(&ordinary)
+                .expect("ordinary child has its own directory fallback")
+        );
+
+        fs::remove_dir_all(root).expect("owned test root removes");
     }
 }
