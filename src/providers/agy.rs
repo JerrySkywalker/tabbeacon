@@ -749,6 +749,15 @@ pub struct AgyRootAnchorQualification {
     pub observation_count: u16,
     #[serde(skip)]
     first_root_candidate: Option<ContentFingerprint>,
+    #[serde(skip)]
+    root_candidate_consistency: RootCandidateConsistency,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RootCandidateConsistency {
+    NotCompared,
+    Stable,
+    Diverged,
 }
 
 impl fmt::Debug for AgyRootAnchorQualification {
@@ -776,6 +785,7 @@ impl Default for AgyRootAnchorQualification {
             workspace_mismatch_observed: false,
             observation_count: 0,
             first_root_candidate: None,
+            root_candidate_consistency: RootCandidateConsistency::NotCompared,
         }
     }
 }
@@ -799,8 +809,13 @@ impl AgyRootAnchorQualification {
         self.root_candidate_observed = true;
         if let Some(first) = &self.first_root_candidate {
             if first == &candidate {
-                self.root_candidate_stable = true;
+                self.root_candidate_stable =
+                    self.root_candidate_consistency != RootCandidateConsistency::Diverged;
+                if self.root_candidate_stable {
+                    self.root_candidate_consistency = RootCandidateConsistency::Stable;
+                }
             } else {
+                self.root_candidate_consistency = RootCandidateConsistency::Diverged;
                 self.root_candidate_stable = false;
                 self.workspace_mismatch_observed = true;
             }
@@ -1058,6 +1073,26 @@ pub struct AgyDisposableSetupFixture {
     plan: AgyOwnershipPlan,
 }
 
+/// Non-content location facts supplied by a disposable test harness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgyDisposableLocation {
+    ContainedRegularFile,
+    OutsideDisposableRoot,
+    ReparsePoint,
+}
+
+/// No-write outcome from adversarial ownership fixture checks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgyDisposableMutationRefusal {
+    RefusedUnadmitted,
+    RefusedConcurrentDrift,
+    RefusedOutsideDisposableRoot,
+    RefusedReparsePoint,
+    RefusedOversizedInput,
+}
+
 impl fmt::Debug for AgyDisposableSetupFixture {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1088,6 +1123,38 @@ impl AgyDisposableSetupFixture {
     pub fn has_drifted(&self, candidate: &[u8]) -> bool {
         self.original_fingerprint != ContentFingerprint(Sha256::digest(candidate).into())
     }
+
+    /// Classifies a proposed disposable write without retaining a path or writing bytes.
+    ///
+    /// The unadmitted state refuses even an unchanged, contained document. More
+    /// specific containment and drift refusals make unsafe future transactions
+    /// distinguishable without turning this fixture into an apply mechanism.
+    #[must_use]
+    pub fn refuse_mutation(
+        &self,
+        location: AgyDisposableLocation,
+        candidate: &[u8],
+    ) -> AgyDisposableMutationRefusal {
+        match location {
+            AgyDisposableLocation::OutsideDisposableRoot => {
+                AgyDisposableMutationRefusal::RefusedOutsideDisposableRoot
+            }
+            AgyDisposableLocation::ReparsePoint => {
+                AgyDisposableMutationRefusal::RefusedReparsePoint
+            }
+            AgyDisposableLocation::ContainedRegularFile
+                if candidate.len() > MAX_AGY_QUALIFICATION_INPUT_BYTES =>
+            {
+                AgyDisposableMutationRefusal::RefusedOversizedInput
+            }
+            AgyDisposableLocation::ContainedRegularFile if self.has_drifted(candidate) => {
+                AgyDisposableMutationRefusal::RefusedConcurrentDrift
+            }
+            AgyDisposableLocation::ContainedRegularFile => {
+                AgyDisposableMutationRefusal::RefusedUnadmitted
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1095,8 +1162,9 @@ mod tests {
     use super::{
         AGY_SAFE_FALLBACK_TITLE, AgyAdmissionState, AgyAttentionObservation,
         AgyCapabilityAvailability, AgyCapabilityProfile, AgyCountObservation,
-        AgyDirectCommandBoundary, AgyDirectCommandQualification, AgyFieldPresence, AgyHookEvent,
-        AgyHookRecorder, AgyInputDisposition, AgyNormalizedPhase, AgyPreAdmissionNormalizer,
+        AgyDirectCommandBoundary, AgyDirectCommandQualification, AgyDisposableLocation,
+        AgyDisposableMutationRefusal, AgyFieldPresence, AgyHookEvent, AgyHookRecorder,
+        AgyInputDisposition, AgyNormalizedPhase, AgyPreAdmissionNormalizer,
         AgyRootAnchorQualification, AgyStateRecord, AgyStateRecorder, AgyTitleCallbackHarness,
         AgyTitleProtocolSafety, AgyTitleWindowsTerminalQualification, AgyVersionDiagnostic,
         AgyVersionDrift, MAX_AGY_QUALIFICATION_COLLECTION_ITEMS, MAX_AGY_QUALIFICATION_INPUT_BYTES,
@@ -1167,6 +1235,63 @@ mod tests {
             "quota",
         ] {
             assert!(!json.contains(forbidden), "record leaked {forbidden}");
+        }
+    }
+
+    #[test]
+    fn adversarial_content_corpus_never_crosses_the_recorder_boundary() {
+        for index in 0_u8..64 {
+            let marker = format!("private-marker-{index}-\\u001b-\\u202e");
+            let state = format!(
+                concat!(
+                    "{{\"conversation_id\":\"{}\",",
+                    "\"cwd\":\"C:/private/{}\",",
+                    "\"workspace\":{{\"current_dir\":\"C:/private/{}\",",
+                    "\"project_dir\":\"C:/private/project/{}\"}},",
+                    "\"agent_state\":\"future-{}\",",
+                    "\"task_count\":65535,",
+                    "\"email\":\"{}@example.test\",",
+                    "\"model\":{{\"name\":\"{}\"}},",
+                    "\"quota\":{{\"token\":\"{}\"}},",
+                    "\"tool_args\":{{\"prompt\":\"{}\"}},",
+                    "\"error\":\"{}\"}}"
+                ),
+                marker, marker, marker, marker, index, marker, marker, marker, marker, marker
+            );
+            let state_record = AgyStateRecorder::record(state.as_bytes());
+            let state_json = serde_json::to_string(&state_record).expect("state record serializes");
+            assert!(
+                !state_json.contains(&marker),
+                "state leaked corpus marker {index}"
+            );
+            assert!(!state_json.contains("C:/private"));
+            let observation = state_record
+                .observation
+                .expect("valid state remains structural");
+            assert_eq!(
+                observation.background_tasks,
+                AgyCountObservation::Unavailable
+            );
+            assert_eq!(observation.phase, super::AgyObservedPhase::Unknown);
+
+            let hook = format!(
+                concat!(
+                    "{{\"conversationId\":\"{}\",",
+                    "\"workspacePaths\":[\"C:/private/{}\"],",
+                    "\"transcriptPath\":\"C:/private/{}.jsonl\",",
+                    "\"artifactDirectoryPath\":\"C:/private/{}\",",
+                    "\"toolCall\":{{\"args\":{{\"prompt\":\"{}\"}}}},",
+                    "\"error\":\"{}\"}}"
+                ),
+                marker, marker, marker, marker, marker, marker
+            );
+            let hook_record = AgyHookRecorder::record("PostToolUse", hook.as_bytes());
+            let hook_json = serde_json::to_string(&hook_record).expect("Hook record serializes");
+            assert!(
+                !hook_json.contains(&marker),
+                "Hook leaked corpus marker {index}"
+            );
+            assert!(!hook_json.contains("C:/private"));
         }
     }
 
@@ -1300,6 +1425,25 @@ mod tests {
     }
 
     #[test]
+    fn root_anchor_divergence_is_latched_and_never_rebinds_to_a_later_sample() {
+        let original = AgyStateRecorder::record(
+            br#"{"workspace":{"current_dir":"C:/root","project_dir":"C:/root"}}"#,
+        );
+        let divergent = AgyStateRecorder::record(
+            br#"{"workspace":{"current_dir":"C:/dynamic","project_dir":"C:/other-root"}}"#,
+        );
+        let mut qualification = AgyRootAnchorQualification::default();
+        qualification.observe(&original);
+        qualification.observe(&divergent);
+        qualification.observe(&original);
+
+        assert!(qualification.root_candidate_observed);
+        assert!(!qualification.root_candidate_stable);
+        assert!(qualification.workspace_mismatch_observed);
+        assert_eq!(qualification.observation_count, 3);
+    }
+
+    #[test]
     fn forged_non_observed_records_cannot_normalize_or_rebind_root() {
         let observed = AgyStateRecorder::record(&state_payload());
         let forged = AgyStateRecord {
@@ -1394,5 +1538,34 @@ mod tests {
         );
         assert!(fixture.has_drifted(b"{\"unrelated\":\"changed\"}"));
         assert!(!json.contains("foreign-value-379"));
+        assert_eq!(
+            fixture.refuse_mutation(
+                AgyDisposableLocation::ContainedRegularFile,
+                b"{\"unrelated\":\"foreign-value-379\"}",
+            ),
+            AgyDisposableMutationRefusal::RefusedUnadmitted
+        );
+        assert_eq!(
+            fixture.refuse_mutation(
+                AgyDisposableLocation::ContainedRegularFile,
+                b"{\"unrelated\":\"concurrent-change\"}",
+            ),
+            AgyDisposableMutationRefusal::RefusedConcurrentDrift
+        );
+        assert_eq!(
+            fixture.refuse_mutation(AgyDisposableLocation::OutsideDisposableRoot, b"ignored"),
+            AgyDisposableMutationRefusal::RefusedOutsideDisposableRoot
+        );
+        assert_eq!(
+            fixture.refuse_mutation(AgyDisposableLocation::ReparsePoint, b"ignored"),
+            AgyDisposableMutationRefusal::RefusedReparsePoint
+        );
+        assert_eq!(
+            fixture.refuse_mutation(
+                AgyDisposableLocation::ContainedRegularFile,
+                &vec![b'x'; MAX_AGY_QUALIFICATION_INPUT_BYTES + 1],
+            ),
+            AgyDisposableMutationRefusal::RefusedOversizedInput
+        );
     }
 }

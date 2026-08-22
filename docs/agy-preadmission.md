@@ -77,6 +77,8 @@ names/arguments, error text, prompt/assistant content, or arbitrary unknown
 event names. Duplicate JSON keys, excessive nesting/collection sizes, unknown
 states, and unknown events fail closed; they do not enter core reconciliation.
 In-memory comparison fingerprints are also excluded from `Debug` output.
+An observed root-anchor divergence is latched: a later matching sample cannot
+make the candidate stable again or rebind it from dynamic observations.
 
 ## Execution and ownership bounds
 
@@ -87,6 +89,9 @@ SHA-256 for both TabBeacon and the direct Agy version probe. It rejects a
 non-contained/reparse disposable sample path, caps its read at 64 KiB, bounds
 the version process to 10 seconds by default, drops stderr, and kills a timed
 out version process tree. None of these checks reads Agy configuration.
+The disposable ownership fixture classifies contained, drifted, outside-root,
+reparse-point, and oversized candidates as refusals only; it has no write path
+and refuses even an unchanged contained candidate while Agy is unadmitted.
 
 ## G64 runbook
 
