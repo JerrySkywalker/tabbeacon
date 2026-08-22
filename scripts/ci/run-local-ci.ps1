@@ -51,6 +51,9 @@ Invoke-Checked 'CARGO VERSION' { cargo --version }
 Invoke-Checked 'FORMAT' { cargo fmt --all -- --check }
 Invoke-Checked 'CLIPPY' { cargo clippy --all-targets --all-features -- -D warnings }
 Invoke-Checked 'TEST' { cargo test --all-targets --all-features }
+Invoke-Checked 'CODEX PRODUCTION HOOK SLA' {
+    cargo test --release --locked --test codex_hooks anchored_default_windows_hook_declaration_finishes_within_the_one_second_sla -- --exact
+}
 Invoke-Checked 'LOCKED BUILD' { cargo build --locked --all-targets }
 Invoke-Checked 'AGY PREADMISSION SCRIPT CONTRACT' { pwsh -NoProfile -File ./scripts/ci/test-agy-preadmission-contract.ps1 }
 

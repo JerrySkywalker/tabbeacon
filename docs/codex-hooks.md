@@ -50,6 +50,14 @@ changes, exact backups and an ownership manifest are written below:
 Setup is idempotent. It refuses a TabBeacon-like declaration that it cannot
 prove it owns.
 
+For a safe executable path, v0.5.2 emits the compact quoted `commandWindows`
+form used by Codex's default Windows COMSPEC Hook runner. The generic command
+retains the encoded PowerShell compatibility envelope; paths containing shell
+metacharacters use that envelope in both fields. The direct form is therefore
+proven only for the default COMSPEC runner, not an arbitrary custom Hook shell.
+An Owner upgrading an existing declaration must still review the generated Hook
+in `/hooks` and approve trust there; TabBeacon never changes Hook trust itself.
+
 ## Orphaned owned-Hook repair
 
 An interrupted Codex upgrade can leave a valid TabBeacon ownership manifest and

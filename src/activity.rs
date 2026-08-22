@@ -36,7 +36,6 @@ use crate::{
 };
 
 const LEASE_SCHEMA: &str = "tabbeacon-activity-worker-lease-v1";
-const EXIT_SCHEMA: &str = "tabbeacon-activity-worker-exit-v1";
 const STATE_DIRECTORY: &str = "activity-worker-v1";
 const LOCK_FILE: &str = "activity-worker.lock";
 const LEASE_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
@@ -44,12 +43,18 @@ const LEASE_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 /// and drops overdue frames rather than accumulating catch-up work.
 pub const TARGET_FRAME_INTERVAL_MS: u64 = 100;
 const FRAME_INTERVAL: Duration = Duration::from_millis(TARGET_FRAME_INTERVAL_MS);
-const PREDECESSOR_WAIT_MS: u64 = 750;
-const PREDECESSOR_POLL_MS: u64 = 25;
-const CLEANUP_OBSERVER_POLL_MS: u64 = 1_000;
+// The worker renders at 100 ms, but cleanup is a bounded recovery path. A
+// five-second native presence poll avoids turning every active Codex tab into
+// a recurring PowerShell/CIM process under multi-session load.
+const CLEANUP_OBSERVER_POLL_MIN_MS: u64 = 4_000;
+const CLEANUP_OBSERVER_POLL_SPREAD_MS: u64 = 4_000;
 const CLEANUP_OBSERVER_QUERY_TIMEOUT_MS: u64 = 5_000;
+const CLEANUP_OBSERVER_IDENTITY_RECHECK_MS: u64 = 30_000;
 const CLEANUP_OBSERVER_UNKNOWN_MAX_MS: u64 = 30_000;
 const CLEANUP_OBSERVER_REAP_TIMEOUT_MS: u64 = 1_000;
+// Result-ready and approval titles are static. Their worker retains exact
+// ownership but must not wake ten times per second like an animated spinner.
+const STATIC_ATTENTION_WORKER_POLL_MS: u64 = 5_000;
 // A static attention title must outlive the one-shot Hook that set it, but it
 // cannot remain authorized indefinitely if that Hook's host disappears.
 const STATIC_ATTENTION_LEASE_TTL_MS: u64 = CLEANUP_OBSERVER_UNKNOWN_MAX_MS;
@@ -647,6 +652,23 @@ impl ActivityCoordinator {
         };
         let now = unix_ms();
         if let Some(presentation) = worker_presentation {
+            match self.store.refresh_runtime_backed_active_if_current(
+                &key,
+                event_sequence,
+                owner_sha256,
+                &presentation,
+                now,
+            ) {
+                Ok(Some(LeaseTransition::Stale)) => return ActivityRender::Suppress,
+                Ok(Some(LeaseTransition::AlreadyActive)) => {
+                    return ActivityRender::WithoutTitle;
+                }
+                Ok(None) => {}
+                Ok(Some(LeaseTransition::Published { .. } | LeaseTransition::Stopped { .. })) => {
+                    unreachable!("existing runtime refresh only returns stale or active")
+                }
+                Err(_) => return ActivityRender::UncoordinatedFull,
+            }
             // A long-lived worker must never map the package-installed CLI.
             // Publishing is deliberately completed before its lease becomes
             // active, so an interrupted copy cannot authorize an ambiguous
@@ -666,13 +688,12 @@ impl ActivityCoordinator {
             match transition {
                 LeaseTransition::Stale => ActivityRender::Suppress,
                 LeaseTransition::AlreadyActive => ActivityRender::WithoutTitle,
-                LeaseTransition::Published { lease, predecessor } => {
-                    if predecessor.as_ref().is_some_and(|predecessor| {
-                        !self.store.wait_for_exit(predecessor, PREDECESSOR_WAIT_MS)
-                    }) {
-                        let _ = self.store.deactivate_if_owned(&lease, unix_ms());
-                        return ActivityRender::Suppress;
-                    }
+                LeaseTransition::Published { lease, .. } => {
+                    // Publishing this lease atomically revokes the predecessor.
+                    // It is safe to start the successor immediately because
+                    // every worker validates the current lease before writing;
+                    // waiting for the old worker's exit would consume most of
+                    // the synchronous one-second Hook budget.
                     if let Ok(worker_pid) = spawn_worker(&runtime_image.executable, &lease) {
                         if spawn_cleanup_observer(&runtime_image.executable, &lease, worker_pid)
                             .is_ok()
@@ -705,15 +726,9 @@ impl ActivityCoordinator {
             };
             match transition {
                 LeaseTransition::Stale => ActivityRender::Suppress,
-                LeaseTransition::Stopped { predecessor } => {
-                    if predecessor.as_ref().is_some_and(|predecessor| {
-                        !self.store.wait_for_exit(predecessor, PREDECESSOR_WAIT_MS)
-                    }) {
-                        ActivityRender::Suppress
-                    } else {
-                        ActivityRender::Full
-                    }
-                }
+                // A stopped predecessor has already been atomically revoked.
+                // Do not spend the synchronous Hook budget observing its exit.
+                LeaseTransition::Stopped { .. } => ActivityRender::Full,
                 LeaseTransition::AlreadyActive | LeaseTransition::Published { .. } => {
                     unreachable!("stop publication cannot return an active transition")
                 }
@@ -827,6 +842,7 @@ pub fn run_activity_cleanup_observer_system(
         owner_sha256: owner_sha256.to_owned(),
     };
     let mut unknown_observation: Option<(WorkerLease, u64)> = None;
+    let mut last_identity_check_unix_ms: Option<u64> = None;
     loop {
         let now = unix_ms();
         // A read failure is not proof that the worker exited. Preserve the
@@ -837,7 +853,13 @@ pub fn run_activity_cleanup_observer_system(
         let Some(observed) = lease else {
             return;
         };
-        let liveness = worker_process_liveness(worker_pid, &ownership, expected_executable);
+        let liveness = bounded_worker_process_liveness(
+            worker_pid,
+            &ownership,
+            expected_executable,
+            now,
+            &mut last_identity_check_unix_ms,
+        );
         let unknown_timeout_elapsed = matches!(liveness, WorkerProcessLiveness::Unknown)
             && unknown_observation
                 .as_ref()
@@ -852,12 +874,11 @@ pub fn run_activity_cleanup_observer_system(
             liveness,
             unknown_timeout_elapsed,
         ) {
-            CleanupObserverAction::Deactivate(reason) => {
+            CleanupObserverAction::Deactivate(_) => {
                 if store
                     .deactivate_observed_worker(&observed, unix_ms())
                     .unwrap_or(false)
                 {
-                    let _ = store.write_exit(&ownership, reason);
                     return;
                 }
                 // A same-owner refresh may have won while the liveness query
@@ -865,7 +886,9 @@ pub fn run_activity_cleanup_observer_system(
                 // preserved; continue observing it rather than leaving an
                 // active lease without a cleanup observer.
                 unknown_observation = None;
-                thread::sleep(Duration::from_millis(CLEANUP_OBSERVER_POLL_MS));
+                thread::sleep(Duration::from_millis(cleanup_observer_poll_ms(
+                    &ownership.key_sha256,
+                )));
             }
             CleanupObserverAction::Stop => return,
             CleanupObserverAction::Wait => {
@@ -879,10 +902,59 @@ pub fn run_activity_cleanup_observer_system(
                 } else {
                     None
                 };
-                thread::sleep(Duration::from_millis(CLEANUP_OBSERVER_POLL_MS));
+                thread::sleep(Duration::from_millis(cleanup_observer_poll_ms(
+                    &ownership.key_sha256,
+                )));
             }
         }
     }
+}
+
+/// Keeps routine native liveness checks bounded while spreading simultaneous
+/// session starts across a four-second window. The digest is opaque and stable
+/// for one session/terminal binding, so this cannot expose workspace or Hook
+/// input data.
+fn cleanup_observer_poll_ms(key_sha256: &str) -> u64 {
+    let prefix = key_sha256
+        .get(..2)
+        .and_then(|value| u8::from_str_radix(value, 16).ok())
+        .map_or(0, u64::from);
+    CLEANUP_OBSERVER_POLL_MIN_MS
+        .saturating_add(prefix.saturating_mul(CLEANUP_OBSERVER_POLL_SPREAD_MS) / 255)
+}
+
+/// Preserves the exact process-identity proof at observer start and on a
+/// bounded recheck cadence. Between those checks, a native absence probe is
+/// sufficient to observe a crashed worker without repeatedly cold-starting
+/// PowerShell for every active terminal session.
+fn bounded_worker_process_liveness(
+    worker_pid: u32,
+    ownership: &WorkerOwnership,
+    expected_executable: &str,
+    now_unix_ms: u64,
+    last_identity_check_unix_ms: &mut Option<u64>,
+) -> WorkerProcessLiveness {
+    match tasklist_process_absence(worker_pid) {
+        Some(true) => return WorkerProcessLiveness::Exited,
+        Some(false) => {}
+        None => return WorkerProcessLiveness::Unknown,
+    }
+    let identity_recheck_due =
+        cleanup_identity_recheck_due(*last_identity_check_unix_ms, now_unix_ms);
+    if identity_recheck_due {
+        *last_identity_check_unix_ms = Some(now_unix_ms);
+        worker_process_liveness(worker_pid, ownership, expected_executable)
+    } else {
+        WorkerProcessLiveness::Alive
+    }
+}
+
+fn cleanup_identity_recheck_due(
+    last_identity_check_unix_ms: Option<u64>,
+    now_unix_ms: u64,
+) -> bool {
+    last_identity_check_unix_ms
+        .is_none_or(|last| now_unix_ms.saturating_sub(last) >= CLEANUP_OBSERVER_IDENTITY_RECHECK_MS)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -969,17 +1041,6 @@ fn cleanup_observer_action(
             CleanupObserverAction::Wait
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct WorkerExitReceipt {
-    schema: String,
-    key_sha256: String,
-    generation: u64,
-    revision: u64,
-    owner_sha256: String,
-    exited_unix_ms: u64,
-    exit_reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1077,6 +1138,44 @@ impl ActivityLeaseStore {
                 expires_unix_ms,
             )?;
             Ok((runtime_image, transition))
+        })
+    }
+
+    /// Refreshes a proven active runtime lease without reopening or hashing the
+    /// executable image. Ordinary Hook events can take this path only after a
+    /// prior publication has established the exact content-bound image; a
+    /// missing, stale, changed, or legacy lease still takes the full safe
+    /// publication path.
+    #[allow(clippy::too_many_arguments)]
+    fn refresh_runtime_backed_active_if_current(
+        &self,
+        key: &WorkerKey,
+        event_sequence: u64,
+        owner_sha256: &str,
+        presentation: &WorkerPresentation,
+        now: u64,
+    ) -> io::Result<Option<LeaseTransition>> {
+        let expires_unix_ms = now.saturating_add(presentation.lease_ttl_ms());
+        self.with_lock(|| {
+            let Some(mut current) = self.load(key.digest())? else {
+                return Ok(None);
+            };
+            if is_stale(key.generation, event_sequence, &current) {
+                return Ok(Some(LeaseTransition::Stale));
+            }
+            if !current.active
+                || current.generation != key.generation
+                || current.owner_sha256 != owner_sha256
+                || current.runtime_image_sha256.is_none()
+                || current.presentation.as_ref() != Some(presentation)
+            {
+                return Ok(None);
+            }
+            current.event_sequence = current.event_sequence.max(event_sequence);
+            current.updated_unix_ms = now;
+            current.expires_unix_ms = expires_unix_ms;
+            self.write(&current)?;
+            Ok(Some(LeaseTransition::AlreadyActive))
         })
     }
 
@@ -1232,33 +1331,6 @@ impl ActivityLeaseStore {
         })
     }
 
-    fn wait_for_exit(&self, predecessor: &WorkerOwnership, timeout_ms: u64) -> bool {
-        let deadline = unix_ms().saturating_add(timeout_ms);
-        loop {
-            let path = self.exit_path(predecessor);
-            if path.is_file() {
-                let valid = fs::read(&path)
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice::<WorkerExitReceipt>(&bytes).ok())
-                    .is_some_and(|receipt| {
-                        receipt.schema == EXIT_SCHEMA
-                            && receipt.key_sha256 == predecessor.key_sha256
-                            && receipt.generation == predecessor.generation
-                            && receipt.revision == predecessor.revision
-                            && receipt.owner_sha256 == predecessor.owner_sha256
-                    });
-                if valid {
-                    let _ = fs::remove_file(path);
-                    return true;
-                }
-            }
-            if unix_ms() >= deadline {
-                return false;
-            }
-            thread::sleep(Duration::from_millis(PREDECESSOR_POLL_MS));
-        }
-    }
-
     fn run_worker(
         &self,
         key_digest: &str,
@@ -1273,30 +1345,24 @@ impl ActivityLeaseStore {
             revision,
             owner_sha256: owner_sha256.to_owned(),
         };
-        let mut reason = "lease_unavailable";
         let Some(initial) = self.load_worker_lease(&ownership, terminal_binding_sha256, unix_ms())
         else {
-            let _ = self.write_exit(&ownership, reason);
             return;
         };
         let Some(presentation) = initial.presentation.clone() else {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
-            let _ = self.write_exit(&ownership, "inactive");
             return;
         };
         let Some(spinner) = presentation.spinner() else {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
-            let _ = self.write_exit(&ownership, "invalid_presentation");
             return;
         };
         let Some((phase, attention)) = presentation.semantic_input() else {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
-            let _ = self.write_exit(&ownership, "invalid_presentation");
             return;
         };
         let Ok(mut console) = open_owned_console() else {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
-            let _ = self.write_exit(&ownership, "terminal_unavailable");
             return;
         };
         let settings = PresentationSettings::new(
@@ -1321,6 +1387,7 @@ impl ActivityLeaseStore {
         };
         let mut frame_index = 0_usize;
         let mut next_frame_deadline = Instant::now();
+        let animated = presentation.semantic_state == "working";
         loop {
             let bytes = renderer.render_title_spinner_frame(state, frame_index);
             // Keep lease validation and the terminal write in one critical section:
@@ -1337,25 +1404,21 @@ impl ActivityLeaseStore {
                 Ok(Some(()))
             }) {
                 Ok(Some(())) => {}
-                Ok(None) => {
-                    reason = "superseded_or_expired";
-                    break;
-                }
-                Err(_) => {
-                    reason = "terminal_unavailable";
-                    break;
-                }
+                Ok(None) | Err(_) => break,
             }
             frame_index = frame_index.saturating_add(1);
-            next_frame_deadline =
-                next_animation_frame_deadline(next_frame_deadline, Instant::now());
-            let remaining = next_frame_deadline.saturating_duration_since(Instant::now());
-            if !remaining.is_zero() {
-                thread::sleep(remaining);
+            if animated {
+                next_frame_deadline =
+                    next_animation_frame_deadline(next_frame_deadline, Instant::now());
+                let remaining = next_frame_deadline.saturating_duration_since(Instant::now());
+                if !remaining.is_zero() {
+                    thread::sleep(remaining);
+                }
+            } else {
+                thread::sleep(Duration::from_millis(STATIC_ATTENTION_WORKER_POLL_MS));
             }
         }
         let _ = self.deactivate_if_owned(&initial, unix_ms());
-        let _ = self.write_exit(&ownership, reason);
     }
 
     fn load_worker_lease(
@@ -1387,21 +1450,6 @@ impl ActivityLeaseStore {
             && lease.presentation.is_some()
             && now <= lease.expires_unix_ms)
             .then_some(lease))
-    }
-
-    fn write_exit(&self, ownership: &WorkerOwnership, reason: &str) -> io::Result<()> {
-        let receipt = WorkerExitReceipt {
-            schema: EXIT_SCHEMA.to_owned(),
-            key_sha256: ownership.key_sha256.clone(),
-            generation: ownership.generation,
-            revision: ownership.revision,
-            owner_sha256: ownership.owner_sha256.clone(),
-            exited_unix_ms: unix_ms(),
-            exit_reason: reason.to_owned(),
-        };
-        let bytes = serde_json::to_vec_pretty(&receipt)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        self.with_lock(|| atomic_write(&self.exit_path(ownership), &bytes))
     }
 
     fn with_lock<T>(&self, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
@@ -1520,16 +1568,6 @@ impl ActivityLeaseStore {
 
     fn lease_path(&self, key_digest: &str) -> PathBuf {
         self.directory.join(format!("lease-{key_digest}.json"))
-    }
-
-    fn exit_path(&self, ownership: &WorkerOwnership) -> PathBuf {
-        self.directory.join(format!(
-            "exit-{}-{}-{}-{}.json",
-            ownership.key_sha256,
-            ownership.generation,
-            ownership.revision,
-            &ownership.owner_sha256[..16]
-        ))
     }
 }
 
@@ -1977,12 +2015,15 @@ fn tasklist_process_absence(worker_pid: u32) -> Option<bool> {
     if !output.status.success() {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let process_rows = stdout
+    Some(tasklist_output_reports_absence(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+fn tasklist_output_reports_absence(stdout: &str) -> bool {
+    !stdout
         .lines()
-        .filter(|line| line.trim_start().starts_with('"'))
-        .count();
-    (process_rows == 0).then_some(true)
+        .any(|line| line.trim_start().starts_with('"'))
 }
 
 fn command_output_with_timeout(
@@ -2148,9 +2189,10 @@ mod tests {
         ActivityCoordinator, ActivityExecution, ActivityLeaseHealth, ActivityLeaseStore,
         ActivityRender, CleanupObserverAction, LeaseTransition, SESSIONS_SCHEMA_VERSION,
         STATIC_ATTENTION_LEASE_TTL_MS, TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation,
-        WorkerProcessLiveness, cleanup_observer_action, command_output_with_timeout,
-        inspect_activity_leases_read_only, inspect_sessions_read_only,
-        next_animation_frame_deadline, normalized_windows_path, system_powershell_path,
+        WorkerProcessLiveness, cleanup_identity_recheck_due, cleanup_observer_action,
+        cleanup_observer_poll_ms, command_output_with_timeout, inspect_activity_leases_read_only,
+        inspect_sessions_read_only, next_animation_frame_deadline, normalized_windows_path,
+        system_powershell_path, tasklist_output_reports_absence,
     };
     use crate::{
         core::{Attention, Health, Phase},
@@ -2203,6 +2245,28 @@ mod tests {
     #[test]
     fn v03_worker_uses_the_normative_hundred_millisecond_interval() {
         assert_eq!(TARGET_FRAME_INTERVAL_MS, 100);
+    }
+
+    #[test]
+    fn cleanup_observer_poll_is_bounded_and_session_staggered() {
+        let low = cleanup_observer_poll_ms(&digest('0'));
+        let high = cleanup_observer_poll_ms(&digest('f'));
+        assert!(low >= 4_000);
+        assert!(high <= 8_000);
+        assert!(high > low, "distinct session digests must not herd polls");
+    }
+
+    #[test]
+    fn cleanup_observer_native_presence_and_identity_cadence_are_explicit() {
+        assert!(tasklist_output_reports_absence(
+            "INFO: No tasks are running which match the specified criteria."
+        ));
+        assert!(!tasklist_output_reports_absence(
+            "\"tabbeacon.exe\",\"52080\",\"Console\",\"1\",\"16,384 K\""
+        ));
+        assert!(cleanup_identity_recheck_due(None, 1_000));
+        assert!(!cleanup_identity_recheck_due(Some(1_000), 30_999));
+        assert!(cleanup_identity_recheck_due(Some(1_000), 31_000));
     }
 
     #[test]
@@ -2543,16 +2607,12 @@ mod tests {
 
         for (session, settings) in cases {
             let worker = key(1, session, 'c');
-            let LeaseTransition::Published { lease, .. } = store
+            let LeaseTransition::Published { .. } = store
                 .publish_active(&worker, 10, &owner, &presentation(), 1_000)
                 .expect("animated worker publishes")
             else {
                 panic!("animated worker must be active before a mode transition");
             };
-            store
-                .write_exit(&lease.ownership(), "superseded_or_expired")
-                .expect("predecessor exit receipt writes");
-
             assert_eq!(
                 coordinator.reconcile(
                     &digest(session),
@@ -2564,7 +2624,7 @@ mod tests {
                     settings,
                 ),
                 ActivityRender::Full,
-                "mode transition for session {session} waits for and retires the animation"
+                "mode transition for session {session} retires the animation without waiting"
             );
             let stopped = store
                 .load(worker.digest())
@@ -2614,6 +2674,44 @@ mod tests {
     }
 
     #[test]
+    fn active_runtime_image_refresh_skips_republication_but_preserves_ordering() {
+        let root = TestRoot::new("runtime-refresh");
+        let store = ActivityLeaseStore::new(&root.0);
+        let key = key(2, 'a', 'c');
+        let owner = digest('d');
+        let image = digest('e');
+        assert!(matches!(
+            store.publish_active_with_runtime_image(
+                &key,
+                10,
+                &owner,
+                Some(&image),
+                &presentation(),
+                1_000,
+            ),
+            Ok(LeaseTransition::Published { .. })
+        ));
+        assert_eq!(
+            store
+                .refresh_runtime_backed_active_if_current(&key, 11, &owner, &presentation(), 1_100,)
+                .expect("runtime-backed active lease refreshes"),
+            Some(LeaseTransition::AlreadyActive)
+        );
+        let lease = store
+            .load(key.digest())
+            .expect("refreshed lease reads")
+            .expect("refreshed lease exists");
+        assert_eq!(lease.event_sequence, 11);
+        assert_eq!(lease.runtime_image_sha256.as_deref(), Some(image.as_str()));
+        assert_eq!(
+            store
+                .refresh_runtime_backed_active_if_current(&key, 10, &owner, &presentation(), 1_200,)
+                .expect("delayed refresh classifies"),
+            Some(LeaseTransition::Stale)
+        );
+    }
+
+    #[test]
     fn lease_lock_orders_one_shot_writes_after_competing_hook_transitions() {
         let root = TestRoot::new("write-order");
         let store = ActivityLeaseStore::new(&root.0);
@@ -2659,7 +2757,7 @@ mod tests {
     }
 
     #[test]
-    fn newer_turn_waits_for_the_exact_predecessor_exit_receipt() {
+    fn newer_turn_identifies_its_predecessor_without_waiting_for_exit() {
         let root = TestRoot::new("supersession");
         let store = ActivityLeaseStore::new(&root.0);
         let first = key(1, 'a', 'c');
@@ -2680,11 +2778,13 @@ mod tests {
         };
         assert_eq!(predecessor.generation, 1);
         assert_eq!(lease.generation, 2);
-        store
-            .write_exit(&predecessor, "superseded")
-            .expect("owned exit receipt publishes");
-        assert!(store.wait_for_exit(&predecessor, 50));
-        assert!(!store.exit_path(&predecessor).exists());
+        assert_eq!(predecessor.owner_sha256, owner);
+        let active = store
+            .load(second.digest())
+            .expect("successor lease reads")
+            .expect("successor lease exists");
+        assert!(active.active);
+        assert_eq!(active.ownership(), lease.ownership());
     }
 
     #[test]
@@ -2819,6 +2919,108 @@ mod tests {
         let (active_images, ownership_proven) = store.active_runtime_images_for_gc();
         assert!(ownership_proven);
         assert_eq!(active_images, std::collections::BTreeSet::from([image]));
+    }
+
+    #[test]
+    fn runtime_backed_successor_stays_active_while_predecessor_winds_down() {
+        let root = TestRoot::new("runtime-successor-no-wait");
+        fs::create_dir_all(&root.0).expect("isolated runtime root creates");
+        let source = root.0.join("tabbeacon.exe");
+        fs::write(&source, b"runtime-successor-no-wait").expect("runtime source writes");
+        let store = ActivityLeaseStore::new(&root.0);
+        let runtime_store = WorkerRuntimeStore::new(&root.0);
+        let owner = digest('d');
+        let first_key = key(1, 'a', 'c');
+        let second_key = key(2, 'a', 'c');
+        let (first_image, first_transition) = store
+            .publish_runtime_backed_active(
+                &runtime_store,
+                &source,
+                &first_key,
+                1,
+                &owner,
+                &presentation(),
+                1_000,
+            )
+            .expect("first runtime-backed lease publishes");
+        let LeaseTransition::Published {
+            lease: first_lease,
+            predecessor: None,
+        } = first_transition
+        else {
+            panic!("first runtime-backed lease has no predecessor");
+        };
+
+        let result = WorkerPresentation::result_ready("OWH", SpinnerPreset::Braille);
+        let (successor_image, successor_transition) = store
+            .publish_runtime_backed_active(
+                &runtime_store,
+                &source,
+                &second_key,
+                2,
+                &owner,
+                &result,
+                1_100,
+            )
+            .expect("successor runtime-backed lease publishes without an exit receipt");
+        let LeaseTransition::Published {
+            lease: successor_lease,
+            predecessor: Some(predecessor),
+        } = successor_transition
+        else {
+            panic!("successor must identify the winding-down predecessor");
+        };
+
+        assert_eq!(predecessor, first_lease.ownership());
+        let current = store
+            .load(second_key.digest())
+            .expect("successor lease reads")
+            .expect("successor lease exists");
+        assert!(
+            current.active,
+            "successor remains authoritative without waiting"
+        );
+        assert_eq!(
+            current.runtime_image_sha256.as_deref(),
+            Some(successor_image.content_sha256.as_str())
+        );
+        assert!(
+            store
+                .load_worker_lease(
+                    &successor_lease.ownership(),
+                    &digest('c'),
+                    successor_lease.updated_unix_ms,
+                )
+                .is_some(),
+            "successor lease continues authorizing its runtime-backed worker"
+        );
+        assert_eq!(first_image.content_sha256, successor_image.content_sha256);
+    }
+
+    #[test]
+    fn repeated_supersession_does_not_accumulate_exit_receipts() {
+        let root = TestRoot::new("supersession-without-exit-receipts");
+        let store = ActivityLeaseStore::new(&root.0);
+        let owner = digest('d');
+        for generation in 1..=16 {
+            let worker = key(generation, 'a', 'c');
+            assert!(matches!(
+                store.publish_active(
+                    &worker,
+                    generation,
+                    &owner,
+                    &presentation(),
+                    1_000 + generation,
+                ),
+                Ok(LeaseTransition::Published { .. })
+            ));
+        }
+        let exit_receipt_count = fs::read_dir(&store.directory)
+            .expect("activity state reads")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("exit-"))
+            .count();
+        assert_eq!(exit_receipt_count, 0);
     }
 
     #[test]

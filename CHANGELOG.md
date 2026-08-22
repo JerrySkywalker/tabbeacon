@@ -6,6 +6,20 @@ All notable changes to TabBeacon will be documented here.
 
 ### Added
 
+- Added the v0.5.2 High-Performance Codex Runtime: phase-attributed isolated
+  Hook measurements, a Root Workspace Fast Anchor Path with no Git subprocess
+  after anchoring, and a release-mode one-second regression gate.
+
+### Changed
+
+- Ordinary Windows `commandWindows` Hooks now use one quoted direct declaration
+  for safe executable paths under Codex's default COMSPEC runner. The generic
+  command—and every hostile path—retains the proven encoded PowerShell envelope.
+  Both remain synchronous with a one-second timeout.
+- Activity cleanup observers retain exact process-identity admission but use a
+  bounded native presence check between periodic rechecks, preventing active
+  multi-session tabs from repeatedly cold-starting PowerShell.
+
 - Added content-minimal, no-mutation Agy pre-admission qualification fixtures,
   version-drift diagnostics, and an Owner-present G64 runbook. Agy remains
   explicitly unadmitted and unavailable for production use.

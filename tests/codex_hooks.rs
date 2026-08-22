@@ -59,6 +59,9 @@ const LEGACY_HOOK_EVENTS: [&str; 7] = [
 
 #[cfg(windows)]
 const WINDOWS_HOOK_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(windows)]
+const WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT: Duration = Duration::from_millis(900);
+const WINDOWS_HOOK_COMMAND_PREFIX: &str = "\"";
 
 struct TestRoot {
     path: PathBuf,
@@ -322,7 +325,12 @@ fn receive_hook_stream(
 }
 
 #[cfg(windows)]
-fn write_and_wait_for_windows_hook(mut child: Child, input: &[u8], stage: &str) -> Output {
+fn write_and_wait_for_windows_hook(
+    mut child: Child,
+    input: &[u8],
+    stage: &str,
+    timeout: Duration,
+) -> Output {
     let process_id = child.id();
     let mut stdin = child
         .stdin
@@ -357,14 +365,14 @@ fn write_and_wait_for_windows_hook(mut child: Child, input: &[u8], stage: &str) 
         let _ = sender.send(HookStream::Stderr(result));
     });
 
-    let deadline = Instant::now() + WINDOWS_HOOK_STAGE_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
             Ok(None) => {
                 terminate_windows_hook_tree(process_id);
-                panic!("Windows hook stage {stage} exceeded {WINDOWS_HOOK_STAGE_TIMEOUT:?}");
+                panic!("Windows hook stage {stage} exceeded {timeout:?}");
             }
             Err(error) => {
                 terminate_windows_hook_tree(process_id);
@@ -399,6 +407,27 @@ fn run_codex_windows_hook_with_shell(
     input: &[u8],
     isolate_runtime_state: bool,
     local_app_data: Option<&Path>,
+) -> std::process::Output {
+    run_codex_windows_hook_with_shell_and_terminal(
+        shell,
+        command_line,
+        input,
+        isolate_runtime_state,
+        local_app_data,
+        None,
+        WINDOWS_HOOK_STAGE_TIMEOUT,
+    )
+}
+
+#[cfg(windows)]
+fn run_codex_windows_hook_with_shell_and_terminal(
+    shell: CodexWindowsHookShell,
+    command_line: &str,
+    input: &[u8],
+    isolate_runtime_state: bool,
+    local_app_data: Option<&Path>,
+    terminal_session: Option<&str>,
+    timeout: Duration,
 ) -> std::process::Output {
     // Mirror Codex 0.147.0 command_runner::build_command exactly. A non-empty
     // CommandShell receives normal arguments, except cmd.exe's /c branch uses
@@ -438,8 +467,13 @@ fn run_codex_windows_hook_with_shell(
     } else if isolate_runtime_state {
         command.env_remove("LOCALAPPDATA");
     }
+    if let Some(terminal_session) = terminal_session {
+        command.env("WT_SESSION", terminal_session);
+    } else {
+        command.env_remove("WT_SESSION");
+    }
     let child = command.spawn().expect("Codex-compatible hook shell starts");
-    write_and_wait_for_windows_hook(child, input, shell.label())
+    write_and_wait_for_windows_hook(child, input, shell.label(), timeout)
 }
 
 fn codex_event_key(event: &str) -> &'static str {
@@ -523,11 +557,13 @@ fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
                 group["hooks"].as_array().is_some_and(|handlers| {
                     handlers.iter().any(|handler| {
                         handler["type"] == "command"
-                            && handler["command"] == handler["commandWindows"]
-                            && handler["commandWindows"].as_str().is_some_and(|command| {
+                            && handler["command"].as_str().is_some_and(|command| {
                                 command.starts_with(
                                     "powershell.exe -NoProfile -NonInteractive -EncodedCommand ",
                                 )
+                            })
+                            && handler["commandWindows"].as_str().is_some_and(|command| {
+                                command.starts_with(WINDOWS_HOOK_COMMAND_PREFIX)
                             })
                     })
                 })
@@ -606,7 +642,7 @@ fn remove_exact_manifest_owned_declarations(hooks: &mut Value, manifest: &Value)
     }
 }
 
-fn shell_independent_owned_handler_count(hooks: &Value) -> usize {
+fn owned_fast_windows_handler_count(hooks: &Value) -> usize {
     hooks["hooks"]
         .as_object()
         .expect("hooks object")
@@ -616,7 +652,9 @@ fn shell_independent_owned_handler_count(hooks: &Value) -> usize {
         .filter(|handler| {
             handler["command"].as_str().is_some_and(|command| {
                 command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
-            })
+            }) && handler["commandWindows"]
+                .as_str()
+                .is_some_and(|command| command.starts_with(WINDOWS_HOOK_COMMAND_PREFIX))
         })
         .count()
 }
@@ -631,7 +669,12 @@ fn assert_real_hook_direct(executable: &Path, payload: &[u8]) {
         .stderr(Stdio::piped())
         .spawn()
         .expect("real TabBeacon starts");
-    let output = write_and_wait_for_windows_hook(child, payload, "direct real hook");
+    let output = write_and_wait_for_windows_hook(
+        child,
+        payload,
+        "direct real hook",
+        WINDOWS_HOOK_STAGE_TIMEOUT,
+    );
     assert!(
         output.status.success(),
         "real direct hook failed: {}",
@@ -639,6 +682,36 @@ fn assert_real_hook_direct(executable: &Path, payload: &[u8]) {
     );
     assert!(output.stdout.is_empty());
     assert!(output.stderr.is_empty());
+}
+
+#[cfg(windows)]
+fn assert_real_hook_with_local_state_within(
+    executable: &Path,
+    payload: &[u8],
+    local_app_data: &Path,
+    timeout: Duration,
+    stage: &str,
+) -> Duration {
+    let child = Command::new(executable)
+        .args(["hook", "codex"])
+        .env("LOCALAPPDATA", local_app_data)
+        .env_remove("WT_SESSION")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("real TabBeacon starts");
+    let started = Instant::now();
+    let output = write_and_wait_for_windows_hook(child, payload, stage, timeout);
+    let elapsed = started.elapsed();
+    assert!(
+        output.status.success(),
+        "real Hook failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty(), "real Hook wrote stdout");
+    assert!(output.stderr.is_empty(), "real Hook wrote stderr");
+    elapsed
 }
 
 #[cfg(windows)]
@@ -744,9 +817,67 @@ fn real_windows_hook_command(root: &TestRoot) -> (PathBuf, String) {
     assert!(command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand "));
     assert!(
         !command.contains(executable.to_str().expect("binary path is UTF-8")),
-        "the outer declaration must not expose shell-sensitive executable quoting"
+        "the hostile path must retain the encoded PowerShell safety envelope"
     );
     (executable, command.to_owned())
+}
+
+#[cfg(windows)]
+fn fast_real_windows_hook_command(root: &TestRoot) -> (PathBuf, String, String) {
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon"));
+    let executable_text = executable.to_str().expect("compiled binary path is UTF-8");
+    assert!(
+        !executable_text.chars().any(|character| {
+            matches!(
+                character,
+                '!' | '&'
+                    | '|'
+                    | ';'
+                    | '$'
+                    | '\''
+                    | '`'
+                    | '('
+                    | ')'
+                    | '<'
+                    | '>'
+                    | '@'
+                    | '#'
+                    | '{'
+                    | '}'
+            )
+        }),
+        "the isolated test binary path must select the fast cmd declaration"
+    );
+    let integration = CodexIntegration::new(
+        root.child("codex-home"),
+        root.child("integration-state"),
+        &executable,
+    )
+    .with_codex_program(compile_codex_probe(root));
+    assert_eq!(
+        integration.setup().expect("setup succeeds"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    let hooks: Value =
+        serde_json::from_slice(&fs::read(root.child("codex-home/hooks.json")).expect("hooks read"))
+            .expect("hooks parse");
+    let handler = &hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0];
+    let command = handler["commandWindows"]
+        .as_str()
+        .expect("generated Windows command is a string");
+    let generic_command = handler["command"]
+        .as_str()
+        .expect("generated generic command is a string");
+    assert!(command.starts_with(WINDOWS_HOOK_COMMAND_PREFIX));
+    assert!(
+        command.contains(&format!("\"{executable_text}\" hook codex")),
+        "the fast cmd declaration keeps the executable as one quoted argument"
+    );
+    assert!(
+        generic_command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand "),
+        "the generic command retains compatibility for configured PowerShell shells"
+    );
+    (executable, generic_command.to_owned(), command.to_owned())
 }
 
 #[cfg(windows)]
@@ -2232,6 +2363,10 @@ fn root_workspace_anchor_keeps_titles_stable_and_persists_only_safe_observations
         .expect("explicit lifecycle observation writes one owned anchor state");
     let anchor_text = fs::read_to_string(&anchor_state).expect("anchor state reads");
     assert!(anchor_text.contains("\"active_subagents\": 1"));
+    assert!(
+        anchor_text.contains("\"workspace_mismatch_observed\": true"),
+        "a distinct post-anchor worktree latches observability without replacing root authority"
+    );
     let alternate_path = alternate_workspace.to_string_lossy().into_owned();
     for forbidden in [
         "agent-private-child",
@@ -3003,7 +3138,7 @@ fn repeated_setup_ten_times_keeps_exactly_eleven_owned_hook_definitions() {
         &fs::read(root.child("codex-home/hooks.json")).expect("installed hooks read"),
     )
     .expect("installed hooks parse");
-    assert_eq!(shell_independent_owned_handler_count(&hooks), 11);
+    assert_eq!(owned_fast_windows_handler_count(&hooks), 11);
     for event in ADMITTED_HOOK_EVENTS {
         assert_eq!(hooks["hooks"][event].as_array().map(Vec::len), Some(1));
     }
@@ -3059,7 +3194,7 @@ fn relocated_executable_migrates_exact_owned_hooks_without_duplicates() {
         &fs::read(root.child("codex-home/hooks.json")).expect("migrated hooks read"),
     )
     .expect("migrated hooks parse");
-    assert_eq!(shell_independent_owned_handler_count(&hooks), 11);
+    assert_eq!(owned_fast_windows_handler_count(&hooks), 11);
     let after_migration = relocated.doctor();
     assert!(after_migration.checks().iter().any(|check| {
         check.id() == "hooks.currentness" && check.status() == DoctorStatus::Pass
@@ -3188,7 +3323,7 @@ fn setup_upgrades_exact_owned_declarations_without_duplicates_or_baseline_loss()
         &fs::read(codex_home.join("hooks.json")).expect("upgraded hooks read"),
     )
     .expect("upgraded hooks parse");
-    let owned_handler_count = shell_independent_owned_handler_count(&upgraded_hooks);
+    let owned_handler_count = owned_fast_windows_handler_count(&upgraded_hooks);
     assert_eq!(
         owned_handler_count, 11,
         "upgrade must never append another eleven hooks"
@@ -3544,7 +3679,7 @@ fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
         let command = hooks["hooks"][event][0]["hooks"][0]["commandWindows"]
             .as_str()
             .expect("Windows command is a string");
-        assert!(command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand "));
+        assert!(command.starts_with(WINDOWS_HOOK_COMMAND_PREFIX));
     }
     #[cfg(windows)]
     {
@@ -3574,6 +3709,35 @@ fn generated_windows_command_runs_the_real_binary_in_the_codex_0_147_shell_model
     assert_real_hook_direct(&executable, &payload);
     assert_real_hook_shell_matrix(&command, &payload);
     assert_real_hook_ingress(&root, &command);
+}
+
+#[cfg(windows)]
+#[test]
+fn safe_windows_declaration_keeps_generic_shell_compatibility_and_comspec_sla_path() {
+    let root = TestRoot::new("safe-command-windows-shell");
+    let (executable, generic_command, windows_command) = fast_real_windows_hook_command(&root);
+    let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "safe-shell", &root.path))
+        .expect("Codex-shaped payload serializes");
+
+    // Custom/generic PowerShell and Cmd models retain the historical encoded
+    // declaration. The direct `commandWindows` form is admitted only for the
+    // default COMSPEC path measured by the production SLA gate.
+    assert_real_hook_direct(&executable, &payload);
+    assert_real_hook_shell_matrix(&generic_command, &payload);
+    let output = run_codex_windows_hook_with_shell(
+        CodexWindowsHookShell::ComspecFallback,
+        &windows_command,
+        &payload,
+        true,
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "default COMSPEC direct declaration failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
 }
 
 #[cfg(windows)]
@@ -3623,6 +3787,126 @@ fn real_windows_hook_shell_stages_are_independently_bounded() {
         failures.is_empty(),
         "bounded real Windows hook stages failed: {}",
         failures.join(", ")
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn anchored_production_hook_is_bounded_below_the_one_second_declaration() {
+    let root = TestRoot::new("anchored-production-hook-sla");
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon"));
+    let workspace = root.child("workspace");
+    let local_app_data = root.child("isolated-local-app-data");
+    init_repo(
+        &workspace,
+        "https://example.invalid/team/performance-anchor.git",
+    );
+
+    let mut start = hook_payload("SessionStart", "performance-session", &workspace);
+    start["source"] = Value::String("startup".to_owned());
+    let start = serde_json::to_vec(&start).expect("start payload serializes");
+    let _ = assert_real_hook_with_local_state_within(
+        &executable,
+        &start,
+        &local_app_data,
+        WINDOWS_HOOK_STAGE_TIMEOUT,
+        "SessionStart anchor",
+    );
+
+    let prompt = serde_json::to_vec(&hook_payload_for_turn(
+        "UserPromptSubmit",
+        "performance-session",
+        "performance-turn",
+        &workspace,
+    ))
+    .expect("prompt payload serializes");
+    let _ = assert_real_hook_with_local_state_within(
+        &executable,
+        &prompt,
+        &local_app_data,
+        WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
+        "anchored UserPromptSubmit",
+    );
+
+    let post_tool = serde_json::to_vec(&hook_payload_for_turn(
+        "PostToolUse",
+        "performance-session",
+        "performance-turn",
+        &workspace,
+    ))
+    .expect("post-tool payload serializes");
+    let elapsed = assert_real_hook_with_local_state_within(
+        &executable,
+        &post_tool,
+        &local_app_data,
+        WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
+        "anchored PostToolUse",
+    );
+    assert!(
+        elapsed < WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
+        "ordinary production Hook must remain below the one-second declaration, elapsed={elapsed:?}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn anchored_default_windows_hook_declaration_finishes_within_the_one_second_sla() {
+    // The system coordinator publishes a content-bound worker image. Debug
+    // test binaries are deliberately much larger than the distributed release
+    // CLI, so the enforceable production SLA belongs to the explicit release
+    // CI stage below rather than a misleading debug-artifact threshold.
+    if cfg!(debug_assertions) {
+        eprintln!("release-only Codex Hook SLA gate");
+        return;
+    }
+    let root = TestRoot::new("anchored-default-shell-hook-declaration-sla");
+    let (_executable, _generic_command, command) = fast_real_windows_hook_command(&root);
+    let workspace = root.child("workspace");
+    let local_app_data = root.child("isolated-local-app-data");
+    init_repo(
+        &workspace,
+        "https://example.invalid/team/performance-shell-anchor.git",
+    );
+    let terminal_session = "00000000-0000-0000-0000-000000000052";
+
+    let mut start = hook_payload("SessionStart", "performance-shell-session", &workspace);
+    start["source"] = Value::String("startup".to_owned());
+    let start = serde_json::to_vec(&start).expect("start payload serializes");
+    let start_output = run_codex_windows_hook_with_shell_and_terminal(
+        CodexWindowsHookShell::ComspecFallback,
+        &command,
+        &start,
+        false,
+        Some(&local_app_data),
+        Some(terminal_session),
+        WINDOWS_HOOK_STAGE_TIMEOUT,
+    );
+    assert!(
+        start_output.status.success(),
+        "SessionStart declaration failed: {}",
+        String::from_utf8_lossy(&start_output.stderr)
+    );
+
+    let post_tool = serde_json::to_vec(&hook_payload_for_turn(
+        "PostToolUse",
+        "performance-shell-session",
+        "performance-shell-turn",
+        &workspace,
+    ))
+    .expect("post-tool payload serializes");
+    let output = run_codex_windows_hook_with_shell_and_terminal(
+        CodexWindowsHookShell::ComspecFallback,
+        &command,
+        &post_tool,
+        false,
+        Some(&local_app_data),
+        Some(terminal_session),
+        WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
+    );
+    assert!(
+        output.status.success(),
+        "anchored default Windows declaration failed: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
