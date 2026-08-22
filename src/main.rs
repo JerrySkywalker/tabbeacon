@@ -18,8 +18,9 @@ use tabbeacon::cli::{
     UpgradePreflightArgs,
 };
 use tabbeacon::diagnostics::{
-    collect_operational_diagnostics, collect_operational_diagnostics_with_title_probe,
-    human_doctor_lines, human_status_lines,
+    collect_operational_diagnostics, collect_operational_diagnostics_with_hook_runtime_probe,
+    collect_operational_diagnostics_with_title_and_hook_runtime_probe,
+    collect_operational_diagnostics_with_title_probe, human_doctor_lines, human_status_lines,
 };
 use tabbeacon::guided_setup::{GuidedInput, choose_interface_preferences, choose_presentation};
 use tabbeacon::human_diagnostics::{render_human_doctor, render_human_status, terminal_width};
@@ -172,7 +173,13 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Doctor(DoctorArgs {
             output,
             probe_title,
-        })) => doctor(output.mode(), probe_title, output.language.preference()),
+            probe_hook_runtime,
+        })) => doctor(
+            output.mode(),
+            probe_title,
+            probe_hook_runtime,
+            output.language.preference(),
+        ),
         Some(Command::Status(output)) => status(output.mode(), output.language.preference()),
         Some(Command::Sessions(output)) => sessions(output.mode(), output.language.preference()),
         Some(Command::Hooks(output)) => hooks(output.mode(), output.language.preference()),
@@ -1371,12 +1378,14 @@ fn setup_outcome_document(outcome: SetupOutcome) -> HumanDocument {
 fn doctor(
     output_mode: OutputMode,
     probe_title: bool,
+    probe_hook_runtime: bool,
     language: Option<InterfaceLanguage>,
 ) -> ExitCode {
-    let report = if probe_title {
-        collect_operational_diagnostics_with_title_probe()
-    } else {
-        collect_operational_diagnostics()
+    let report = match (probe_title, probe_hook_runtime) {
+        (true, true) => collect_operational_diagnostics_with_title_and_hook_runtime_probe(true),
+        (true, false) => collect_operational_diagnostics_with_title_probe(),
+        (false, true) => collect_operational_diagnostics_with_hook_runtime_probe(true),
+        (false, false) => collect_operational_diagnostics(),
     };
     if output_mode == OutputMode::Json {
         return match serde_json::to_string(&report.doctor) {

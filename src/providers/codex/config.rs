@@ -4,8 +4,12 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
@@ -24,6 +28,8 @@ const MANIFEST_SCHEMA: &str = "tabbeacon-codex-integration-v1";
 const MANIFEST_FILE: &str = "integration-v1.json";
 const LOCK_FILE: &str = "integration.lock";
 const OWNED_DESCRIPTION: &str = "TabBeacon user-global lifecycle hooks";
+const RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
+const RUNTIME_PROBE_EVENT: &str = "UserPromptSubmit";
 const HOOK_EVENTS: [&str; 11] = [
     "PreToolUse",
     "PermissionRequest",
@@ -319,6 +325,24 @@ impl CodexDoctorReport {
     #[must_use]
     pub fn check_status(&self, id: &str) -> Option<DoctorStatus> {
         self.check(id).map(DoctorCheck::status)
+    }
+
+    fn replace_check(&mut self, replacement: DoctorCheck) {
+        if let Some(existing) = self
+            .checks
+            .iter_mut()
+            .find(|check| check.id() == replacement.id())
+        {
+            *existing = replacement;
+        } else {
+            self.checks.push(replacement);
+        }
+        self.overall = self
+            .checks
+            .iter()
+            .map(DoctorCheck::status)
+            .max()
+            .unwrap_or(DoctorStatus::Fail);
     }
 }
 
@@ -773,6 +797,12 @@ impl CodexIntegration {
                 "RUNTIME_CONTINUITY_UNPROVEN: installed Hook declarations, trust, title ownership, or known wire shape is not exact",
             ),
         });
+        if runtime_proven {
+            checks.push(warning(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_REQUIRED: static declaration health is not execution proof; run `tabbeacon doctor --probe-hook-runtime`",
+            ));
+        }
 
         CodexDoctorReport::from_diagnosis(
             checks,
@@ -783,6 +813,93 @@ impl CodexIntegration {
             hook_profile,
             (owned_hook_count, title_owned),
         )
+    }
+
+    /// Audits the installed integration, then executes one exact owned Hook
+    /// declaration in isolated temporary state. This never mutates Codex
+    /// configuration or Hook trust.
+    #[must_use]
+    pub fn doctor_with_runtime_probe(&self) -> CodexDoctorReport {
+        let mut report = self.doctor();
+        report.replace_check(self.runtime_execution_probe(&report));
+        report
+    }
+
+    fn runtime_execution_probe(&self, report: &CodexDoctorReport) -> DoctorCheck {
+        if report.check_status("codex.runtime-continuity") != Some(DoctorStatus::Pass) {
+            return fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_BLOCKED: exact admitted declarations, trust, and title ownership are required before execution",
+            );
+        }
+
+        let Ok(profile) = self.require_supported_profile() else {
+            return fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_BLOCKED: the Codex Hook profile is no longer admitted",
+            );
+        };
+        let Ok(desired) = desired_hooks(&self.tabbeacon_executable, profile) else {
+            return fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_BLOCKED: the current owned declaration cannot be generated safely",
+            );
+        };
+        let Some(manifest) = self.load_manifest().ok().flatten() else {
+            return fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_BLOCKED: the ownership manifest is unavailable",
+            );
+        };
+        let Ok(hooks) = read_hooks_document(&self.hooks_path()) else {
+            return fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_BLOCKED: the Hook declaration document is unavailable",
+            );
+        };
+        if manifest.hooks != desired
+            || !locate_owned_hooks(&hooks, &manifest.hooks)
+                .is_ok_and(|locations| locations.len() == manifest.hooks.len())
+        {
+            return fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_BLOCKED: the owned declaration changed during probe preflight",
+            );
+        }
+        let Some(command) = desired
+            .iter()
+            .find(|hook| hook.event == RUNTIME_PROBE_EVENT)
+            .and_then(|hook| hook.group.pointer("/hooks/0/commandWindows"))
+            .and_then(Value::as_str)
+        else {
+            return fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_BLOCKED: the representative owned declaration is unavailable",
+            );
+        };
+
+        match run_windows_hook_runtime_probe(command) {
+            RuntimeProbeOutcome::Pass => pass(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_PASS: representative owned Hook executed through the bounded COMSPEC fallback",
+            ),
+            RuntimeProbeOutcome::TimedOut => fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_TIMEOUT: representative owned Hook exceeded the 900 ms bound",
+            ),
+            RuntimeProbeOutcome::NonZero => fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_FAILED: representative owned Hook exited nonzero",
+            ),
+            RuntimeProbeOutcome::MissingMarker => fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_FAILED: representative owned Hook did not publish its isolated timing marker",
+            ),
+            RuntimeProbeOutcome::Unavailable => fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_UNAVAILABLE: the bounded Windows Hook probe could not start",
+            ),
+        }
     }
 
     /// Produces a provider-neutral, command-redacted Hook inventory without
@@ -1560,8 +1677,8 @@ fn owned_command_hooks(
         })
         .ok_or(CodexIntegrationError::UnsafeExecutablePath)?;
     // Keep the generic command on the proven cross-shell PowerShell envelope.
-    // The Windows-specific field is selected by the admitted default-COMSPEC
-    // profile and may use the faster direct shape for a safe executable path.
+    // The Windows-specific field is selected by Codex's current Windows runner
+    // and may use the faster direct shape for a shell-neutral executable path.
     let command = powershell_encoded_windows_hook_command(executable);
     let windows_command = windows_hook_command_for_default_comspec(executable);
     Ok(HOOK_EVENTS
@@ -1582,40 +1699,31 @@ fn owned_command_hooks(
 }
 
 fn windows_hook_command_for_default_comspec(executable: &str) -> String {
-    // `commandWindows` is measured only for Codex's admitted default COMSPEC
-    // runner. A quoted direct command avoids layering a second cmd.exe process
-    // onto every synchronous Hook. The generic `command` field deliberately
-    // remains the encoded PowerShell envelope for custom/generic shell
-    // execution. A small set of shell metacharacters cannot be represented in
-    // the compact default-shell shape, so those hostile executable paths retain
-    // the proven encoded PowerShell envelope in both fields.
+    // Codex 0.149 passes `commandWindows` to a non-empty TurnEnvironment shell
+    // when one is configured; COMSPEC is only the empty-shell fallback. A
+    // quoted executable plus `|| exit /b 0` is therefore cmd syntax, not a
+    // Windows declaration. For a shell-safe, whitespace-free native `.exe`
+    // path use one direct native invocation. A Codex raw-quoted cmd /c command
+    // accepts only its first line, so a shell-neutral trailing exit helper is
+    // not representable. The Hook ingress itself is silent and fail-open for
+    // malformed input and runtime errors; non-fast paths retain the encoded
+    // PowerShell envelope for their compatibility exit handling.
+    //
+    // Paths outside that narrow grammar retain the encoded PowerShell envelope
+    // in both fields. It quotes hostile paths safely and ends in `exit 0`.
     if requires_powershell_command_envelope(executable) {
         powershell_encoded_windows_hook_command(executable)
     } else {
-        format!("\"{executable}\" hook codex || exit /b 0")
+        format!("{executable} hook codex")
     }
 }
 
 fn requires_powershell_command_envelope(executable: &str) -> bool {
-    executable.chars().any(|character| {
-        matches!(
-            character,
-            '!' | '&'
-                | '|'
-                | ';'
-                | '$'
-                | '\''
-                | '`'
-                | '('
-                | ')'
-                | '<'
-                | '>'
-                | '@'
-                | '#'
-                | '{'
-                | '}'
-        )
-    })
+    !executable.to_ascii_lowercase().ends_with(".exe")
+        || !executable.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, ':' | '\\' | '/' | '.' | '_' | '-')
+        })
 }
 
 fn powershell_encoded_windows_hook_command(executable: &str) -> String {
@@ -1631,6 +1739,102 @@ fn powershell_encoded_windows_hook_command(executable: &str) -> String {
         "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
         base64_encode(&utf16)
     )
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeProbeOutcome {
+    Pass,
+    TimedOut,
+    NonZero,
+    MissingMarker,
+    Unavailable,
+}
+
+#[cfg(windows)]
+fn run_windows_hook_runtime_probe(command_line: &str) -> RuntimeProbeOutcome {
+    let Ok(probe_root) = create_runtime_probe_root() else {
+        return RuntimeProbeOutcome::Unavailable;
+    };
+    let marker = probe_root.join("hook-timing.txt");
+    let comspec = env::var_os("COMSPEC")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "cmd.exe".into());
+    let payload = json!({
+        "hook_event_name": RUNTIME_PROBE_EVENT,
+        "session_id": "00000000-0000-0000-0000-000000000052",
+        "cwd": probe_root,
+    })
+    .to_string();
+
+    let mut process = Command::new(comspec);
+    process.arg("/C");
+    process.raw_arg(format!(r#""{command_line}""#));
+    process
+        .current_dir(&probe_root)
+        .env("LOCALAPPDATA", &probe_root)
+        .env("TABBEACON_HOOK_TIMING_FILE", &marker)
+        .env_remove("WT_SESSION")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let Ok(mut child) = process.spawn() else {
+        let _ = fs::remove_dir_all(&probe_root);
+        return RuntimeProbeOutcome::Unavailable;
+    };
+    let write_succeeded = child
+        .stdin
+        .take()
+        .is_some_and(|mut stdin| stdin.write_all(payload.as_bytes()).is_ok());
+    let deadline = Instant::now() + RUNTIME_PROBE_TIMEOUT;
+    let exited_successfully = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status.success()),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Err(_) => break Some(false),
+        }
+    };
+    let marker_present = fs::read_to_string(&marker)
+        .is_ok_and(|contents| contents.starts_with("TABBEACON_HOOK_TIMING_V1 "));
+    let _ = fs::remove_dir_all(&probe_root);
+
+    match (write_succeeded, exited_successfully, marker_present) {
+        (_, None, _) => RuntimeProbeOutcome::TimedOut,
+        (true, Some(true), true) => RuntimeProbeOutcome::Pass,
+        (false, _, _) | (_, Some(_), false) => RuntimeProbeOutcome::MissingMarker,
+        _ => RuntimeProbeOutcome::NonZero,
+    }
+}
+
+#[cfg(windows)]
+fn create_runtime_probe_root() -> io::Result<PathBuf> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    for attempt in 0..8_u8 {
+        let path = env::temp_dir().join(format!(
+            "tabbeacon-hook-runtime-probe-{}-{nonce}-{attempt}",
+            std::process::id()
+        ));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not create a unique runtime-probe directory",
+    ))
+}
+
+#[cfg(not(windows))]
+fn run_windows_hook_runtime_probe(_command_line: &str) -> RuntimeProbeOutcome {
+    RuntimeProbeOutcome::Unavailable
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -2863,12 +3067,14 @@ mod tests {
     }
 
     #[test]
-    fn windows_hook_envelope_uses_default_comspec_fast_path_and_preserves_hostile_path_safety() {
-        let fast =
+    fn windows_hook_envelope_uses_shell_neutral_fast_path_and_preserves_hostile_path_safety() {
+        let fast = windows_hook_command_for_default_comspec(r"C:\TabBeacon\tabbeacon.exe");
+        assert_eq!(fast, "C:\\TabBeacon\\tabbeacon.exe hook codex");
+
+        let whitespace =
             windows_hook_command_for_default_comspec(r"C:\Program Files\TabBeacon\tabbeacon.exe");
-        assert_eq!(
-            fast,
-            r#""C:\Program Files\TabBeacon\tabbeacon.exe" hook codex || exit /b 0"#
+        assert!(
+            whitespace.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
         );
 
         let hostile =
@@ -2880,6 +3086,10 @@ mod tests {
         );
         assert!(
             windows_hook_command_for_default_comspec(r"C:\release!candidate\tabbeacon.exe")
+                .starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
+        );
+        assert!(
+            windows_hook_command_for_default_comspec(r"C:\TabBeacon\tabbeacon.cmd")
                 .starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
         );
     }

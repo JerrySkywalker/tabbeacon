@@ -379,6 +379,9 @@ pub struct DoctorArgs {
     /// Include the existing bounded visible-title probe.
     #[arg(long)]
     pub probe_title: bool,
+    /// Execute one exact owned Hook declaration with isolated temporary state.
+    #[arg(long)]
+    pub probe_hook_runtime: bool,
 }
 
 /// Arguments for the package-upgrade preflight.
@@ -570,13 +573,20 @@ mod tests {
         };
         assert_eq!(output.mode(), OutputMode::Plain);
 
-        let doctor = Cli::try_parse_from(["tabbeacon", "doctor", "--json", "--probe-title"])
-            .expect("doctor options parse in either declared order");
+        let doctor = Cli::try_parse_from([
+            "tabbeacon",
+            "doctor",
+            "--json",
+            "--probe-title",
+            "--probe-hook-runtime",
+        ])
+        .expect("doctor options parse in either declared order");
         let Command::Doctor(doctor) = doctor.command.expect("doctor command") else {
             panic!("doctor command is typed");
         };
         assert_eq!(doctor.output.mode(), OutputMode::Json);
         assert!(doctor.probe_title);
+        assert!(doctor.probe_hook_runtime);
 
         let setup = Cli::try_parse_from(["tabbeacon", "setup", "codex"])
             .expect("direct Codex setup parses");

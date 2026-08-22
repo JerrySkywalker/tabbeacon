@@ -61,7 +61,7 @@ const LEGACY_HOOK_EVENTS: [&str; 7] = [
 const WINDOWS_HOOK_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(windows)]
 const WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT: Duration = Duration::from_millis(900);
-const WINDOWS_HOOK_COMMAND_PREFIX: &str = "\"";
+const WINDOWS_HOOK_COMMAND_SUFFIX: &str = " hook codex";
 
 struct TestRoot {
     path: PathBuf,
@@ -249,17 +249,6 @@ fn hook_group_fixture(name: &str, event: &str) -> Value {
 }
 
 #[cfg(windows)]
-fn run_codex_windows_hook(command_line: &str) -> std::process::Output {
-    run_codex_windows_hook_with_shell(
-        CodexWindowsHookShell::ComspecFallback,
-        command_line,
-        &[],
-        false,
-        None,
-    )
-}
-
-#[cfg(windows)]
 #[derive(Clone, Copy)]
 enum CodexWindowsHookShell {
     Pwsh7,
@@ -429,9 +418,10 @@ fn run_codex_windows_hook_with_shell_and_terminal(
     terminal_session: Option<&str>,
     timeout: Duration,
 ) -> std::process::Output {
-    // Mirror Codex 0.147.0 command_runner::build_command exactly. A non-empty
-    // CommandShell receives normal arguments, except cmd.exe's /c branch uses
-    // the runner's raw outer quotation. An empty program falls back to COMSPEC.
+    // Mirror Codex 0.149 command_runner semantics exactly. A non-empty
+    // TurnEnvironment shell receives normal arguments, except cmd.exe's /c
+    // branch uses the runner's raw outer quotation. An empty program falls
+    // back to COMSPEC.
     let mut command = match shell {
         CodexWindowsHookShell::Pwsh7 => {
             let mut command = Command::new("pwsh.exe");
@@ -563,7 +553,8 @@ fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
                                 )
                             })
                             && handler["commandWindows"].as_str().is_some_and(|command| {
-                                command.starts_with(WINDOWS_HOOK_COMMAND_PREFIX)
+                                command.ends_with(WINDOWS_HOOK_COMMAND_SUFFIX)
+                                    && !command.contains(['\r', '\n'])
                             })
                     })
                 })
@@ -652,9 +643,9 @@ fn owned_fast_windows_handler_count(hooks: &Value) -> usize {
         .filter(|handler| {
             handler["command"].as_str().is_some_and(|command| {
                 command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
-            }) && handler["commandWindows"]
-                .as_str()
-                .is_some_and(|command| command.starts_with(WINDOWS_HOOK_COMMAND_PREFIX))
+            }) && handler["commandWindows"].as_str().is_some_and(|command| {
+                command.ends_with(WINDOWS_HOOK_COMMAND_SUFFIX) && !command.contains(['\r', '\n'])
+            })
         })
         .count()
 }
@@ -846,7 +837,7 @@ fn fast_real_windows_hook_command(root: &TestRoot) -> (PathBuf, String, String) 
                     | '}'
             )
         }),
-        "the isolated test binary path must select the fast cmd declaration"
+        "the isolated test binary path must select the shell-neutral fast declaration"
     );
     let integration = CodexIntegration::new(
         root.child("codex-home"),
@@ -868,16 +859,33 @@ fn fast_real_windows_hook_command(root: &TestRoot) -> (PathBuf, String, String) 
     let generic_command = handler["command"]
         .as_str()
         .expect("generated generic command is a string");
-    assert!(command.starts_with(WINDOWS_HOOK_COMMAND_PREFIX));
-    assert!(
-        command.contains(&format!("\"{executable_text}\" hook codex")),
-        "the fast cmd declaration keeps the executable as one quoted argument"
+    assert_eq!(
+        command,
+        format!("{executable_text} hook codex"),
+        "the fast declaration is a single native command accepted by every admitted shell"
     );
     assert!(
         generic_command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand "),
         "the generic command retains compatibility for configured PowerShell shells"
     );
     (executable, generic_command.to_owned(), command.to_owned())
+}
+
+#[cfg(windows)]
+fn trusted_real_windows_integration(root: &TestRoot) -> CodexIntegration {
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon"));
+    let integration = CodexIntegration::new(
+        root.child("codex-home"),
+        root.child("integration-state"),
+        executable,
+    )
+    .with_codex_program(compile_codex_probe(root));
+    assert_eq!(
+        integration.setup().expect("setup succeeds"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    install_current_codex_trust_state(&root.child("codex-home"));
+    integration
 }
 
 #[cfg(windows)]
@@ -3388,7 +3396,10 @@ fn doctor_supports_current_codex_trust_shape_and_detects_inactive_or_conflicting
     let trusted_keys = install_current_codex_trust_state(&codex_home);
 
     let report = integration.doctor();
-    assert_eq!(report.overall(), DoctorStatus::Pass);
+    assert_eq!(report.overall(), DoctorStatus::Warning);
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.runtime-probe" && check.status() == DoctorStatus::Warning
+    }));
     assert!(report.checks().iter().any(|check| {
         check.id() == "hooks.trust"
             && check.status() == DoctorStatus::Pass
@@ -3679,24 +3690,17 @@ fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
         let command = hooks["hooks"][event][0]["hooks"][0]["commandWindows"]
             .as_str()
             .expect("Windows command is a string");
-        assert!(command.starts_with(WINDOWS_HOOK_COMMAND_PREFIX));
-    }
-    #[cfg(windows)]
-    {
-        let command = hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["commandWindows"]
-            .as_str()
-            .expect("Windows command is a string");
-        let output = run_codex_windows_hook(command);
+        assert!(command.ends_with(WINDOWS_HOOK_COMMAND_SUFFIX));
         assert!(
-            output.status.success(),
-            "missing managed binary must fail open"
+            !command.contains(['\r', '\n']),
+            "the direct fast declaration is exactly one command line"
         );
     }
 }
 
 #[cfg(windows)]
 #[test]
-fn generated_windows_command_runs_the_real_binary_in_the_codex_0_147_shell_model() {
+fn generated_windows_command_runs_the_real_binary_in_the_codex_0149_shell_model() {
     // Keep a fixture component between `windows` and the generated process id.
     // The bare `...-windows-<pid>` shape can leave the nested PowerShell
     // command host open on this Windows runner, obscuring the command-shape
@@ -3713,31 +3717,84 @@ fn generated_windows_command_runs_the_real_binary_in_the_codex_0_147_shell_model
 
 #[cfg(windows)]
 #[test]
-fn safe_windows_declaration_keeps_generic_shell_compatibility_and_comspec_sla_path() {
+fn shell_neutral_windows_declaration_succeeds_in_every_codex_0149_shell_mode() {
     let root = TestRoot::new("safe-command-windows-shell");
     let (executable, generic_command, windows_command) = fast_real_windows_hook_command(&root);
     let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "safe-shell", &root.path))
         .expect("Codex-shaped payload serializes");
 
-    // Custom/generic PowerShell and Cmd models retain the historical encoded
-    // declaration. The direct `commandWindows` form is admitted only for the
-    // default COMSPEC path measured by the production SLA gate.
+    // The generic declaration remains the established compatibility fallback.
+    // Production `commandWindows` must use the same shell-neutral form in a
+    // configured pwsh/PowerShell/cmd shell and in the empty-shell COMSPEC path.
     assert_real_hook_direct(&executable, &payload);
     assert_real_hook_shell_matrix(&generic_command, &payload);
-    let output = run_codex_windows_hook_with_shell(
-        CodexWindowsHookShell::ComspecFallback,
-        &windows_command,
-        &payload,
-        true,
-        None,
+    assert_real_hook_shell_matrix(&windows_command, &payload);
+    assert_real_hook_ingress(&root, &windows_command);
+}
+
+#[cfg(windows)]
+#[test]
+fn legacy_cmd_fail_open_declaration_reproduces_the_codex_0149_turn_environment_failure() {
+    let root = TestRoot::new("legacy-cmd-turn-environment");
+    let (executable, _generic_command, _windows_command) = fast_real_windows_hook_command(&root);
+    let legacy_command = format!("\"{}\" hook codex || exit /b 0", executable.display());
+    let payload = serde_json::to_vec(&hook_payload(
+        "UserPromptSubmit",
+        "legacy-shell",
+        &root.path,
+    ))
+    .expect("Codex-shaped payload serializes");
+
+    for shell in [
+        CodexWindowsHookShell::Pwsh7,
+        CodexWindowsHookShell::WindowsPowerShell,
+    ] {
+        let output =
+            run_codex_windows_hook_with_shell(shell, &legacy_command, &payload, true, None);
+        assert!(
+            !output.status.success(),
+            "legacy cmd declaration unexpectedly succeeded in {}",
+            shell.label()
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn static_doctor_requires_a_bounded_explicit_hook_runtime_probe() {
+    let root = TestRoot::new("doctor-runtime-probe");
+    let integration = trusted_real_windows_integration(&root);
+    let hooks_path = root.child("codex-home/hooks.json");
+    let config_path = root.child("codex-home/config.toml");
+    let manifest_path = root.child("integration-state/integration-v1.json");
+    let before = [
+        fs::read(&hooks_path).expect("hooks read"),
+        fs::read(&config_path).expect("config read"),
+        fs::read(&manifest_path).expect("manifest read"),
+    ];
+
+    let static_report = integration.doctor();
+    assert_eq!(
+        static_report.check_status("hooks.runtime-probe"),
+        Some(DoctorStatus::Warning)
     );
-    assert!(
-        output.status.success(),
-        "default COMSPEC direct declaration failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+    assert_eq!(static_report.overall(), DoctorStatus::Warning);
+
+    let probed_report = integration.doctor_with_runtime_probe();
+    assert_eq!(
+        probed_report.check_status("hooks.runtime-probe"),
+        Some(DoctorStatus::Pass)
     );
-    assert!(output.stdout.is_empty());
-    assert!(output.stderr.is_empty());
+    assert_eq!(probed_report.overall(), DoctorStatus::Pass);
+    assert_eq!(
+        before,
+        [
+            fs::read(&hooks_path).expect("hooks reread"),
+            fs::read(&config_path).expect("config reread"),
+            fs::read(&manifest_path).expect("manifest reread"),
+        ],
+        "runtime probing must not mutate Codex configuration, trust, or the ownership manifest"
+    );
 }
 
 #[cfg(windows)]
@@ -3912,45 +3969,28 @@ fn anchored_default_windows_hook_declaration_finishes_within_the_one_second_sla(
 
 #[cfg(windows)]
 #[test]
-fn explicit_blocking_like_hook_failure_is_neutralized_with_a_bounded_declaration() {
-    let root = TestRoot::new("explicit-hook-failure");
-    let executable = root.child("bin").join("tabbeacon-failure.cmd");
-    let execution_marker = root.child("failure-probe-ran");
-    fs::create_dir_all(executable.parent().expect("failure binary parent"))
-        .expect("failure binary parent is created");
-    fs::write(
-        &executable,
-        format!(
-            "@echo off\r\necho ran> \"{}\"\r\nexit /b 2\r\n",
-            execution_marker.display()
-        ),
-    )
-    .expect("failure binary writes");
-    let integration =
-        CodexIntegration::new(root.child("codex-home"), root.child("state"), executable)
-            .with_codex_program(compile_codex_probe(&root));
-    integration.setup().expect("setup succeeds");
-    let hooks: Value =
-        serde_json::from_slice(&fs::read(root.child("codex-home/hooks.json")).expect("hooks read"))
-            .expect("hooks parse");
-    let handler = &hooks["hooks"]["PermissionRequest"][0]["hooks"][0];
-    assert_eq!(handler["timeout"], 1);
-    assert_eq!(handler["async"], false);
-    let command = handler["commandWindows"]
-        .as_str()
-        .expect("Windows command is a string");
-    let output = run_codex_windows_hook(command);
-    assert!(
-        output.status.success(),
-        "exit-code-2 hook failure must be neutralized: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        execution_marker.is_file(),
-        "failure probe must have executed; command={command:?}; stdout={}; stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+fn malformed_hook_runtime_is_fail_open_in_every_admitted_shell() {
+    let root = TestRoot::new("malformed-hook-runtime-fail-open");
+    let (_executable, _generic_command, command) = fast_real_windows_hook_command(&root);
+    for shell in [
+        CodexWindowsHookShell::Pwsh7,
+        CodexWindowsHookShell::WindowsPowerShell,
+        CodexWindowsHookShell::Cmd,
+        CodexWindowsHookShell::ComspecFallback,
+    ] {
+        let output = run_codex_windows_hook_with_shell(shell, &command, b"malformed", false, None);
+        assert!(
+            output.status.success(),
+            "malformed hook runtime input must fail open in {}: {}",
+            shell.label(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty() && output.stderr.is_empty(),
+            "malformed runtime handling must remain silent in {}",
+            shell.label()
+        );
+    }
 }
 
 #[test]

@@ -50,11 +50,20 @@ changes, exact backups and an ownership manifest are written below:
 Setup is idempotent. It refuses a TabBeacon-like declaration that it cannot
 prove it owns.
 
-For a safe executable path, v0.5.2 emits the compact quoted `commandWindows`
-form used by Codex's default Windows COMSPEC Hook runner. The generic command
-retains the encoded PowerShell compatibility envelope; paths containing shell
-metacharacters use that envelope in both fields. The direct form is therefore
-proven only for the default COMSPEC runner, not an arbitrary custom Hook shell.
+For a shell-safe, whitespace-free native `.exe` path, v0.5.2 emits a compact
+single-token `commandWindows` form: direct native invocation with no shell
+operators or bare `exit` keyword. It is therefore valid for Codex's configured
+Pwsh7, Windows PowerShell, explicit cmd, and empty-shell COMSPEC runners. The
+Hook ingress is itself silent and fail-open for malformed input and runtime
+handling errors. The generic command—and paths outside that narrow path
+grammar—retain the encoded PowerShell compatibility envelope in both fields.
+
+Static `tabbeacon doctor` deliberately reports the Hook runtime as unproven:
+matching declarations and trust state do not prove that Codex can execute the
+command. `tabbeacon doctor --probe-hook-runtime` runs one manifest-exact
+representative declaration through the COMSPEC fallback, with isolated temporary
+`LOCALAPPDATA`, no terminal session, a 900 ms bound, and a non-sensitive timing
+marker. The probe never modifies Codex configuration or Hook trust.
 An Owner upgrading an existing declaration must still review the generated Hook
 in `/hooks` and approve trust there; TabBeacon never changes Hook trust itself.
 
