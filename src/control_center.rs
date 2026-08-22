@@ -14,7 +14,10 @@ use crossterm::{
 use jerry_terminal_ui::{
     footer::{FooterAction, FooterState, format_footer},
     input::{InputKind, admits_input},
-    interaction::{OverlayDismissKey, OverlayState as SharedOverlayState},
+    interaction::{
+        DiscardDecision, OverlayDismissKey, OverlayState as SharedOverlayState, QuitDisposition,
+        SettingsEditor,
+    },
     layout::HUMAN_SHELL,
     navigation::TopLevelNavigation,
 };
@@ -288,8 +291,11 @@ pub struct ControlCenterApp {
     interface_conflict: bool,
     workspace_conflict: bool,
     confirm_discard: bool,
+    discard_editor: SettingsEditor<()>,
     appearance_field: Option<AppearanceField>,
+    appearance_editor: SettingsEditor<AppearanceField>,
     interface_field: Option<InterfaceField>,
+    interface_editor: SettingsEditor<InterfaceField>,
 }
 
 impl ControlCenterApp {
@@ -324,8 +330,11 @@ impl ControlCenterApp {
             interface_conflict: false,
             workspace_conflict: false,
             confirm_discard: false,
+            discard_editor: SettingsEditor::new(()),
             appearance_field: None,
+            appearance_editor: SettingsEditor::new(AppearanceField::Title),
             interface_field: None,
+            interface_editor: SettingsEditor::new(InterfaceField::Language),
         }
     }
 
@@ -566,7 +575,12 @@ impl ControlCenterApp {
             {
                 self.open_previewable_repair();
             }
-            KeyCode::Char('q') if self.dirty => self.confirm_discard = true,
+            KeyCode::Char('q') if self.dirty => {
+                self.confirm_discard = matches!(
+                    self.discard_editor.request_quit(true),
+                    QuitDisposition::ConfirmDiscard
+                );
+            }
             _ => {}
         }
         ControlCenterCommand::None
@@ -584,7 +598,10 @@ impl ControlCenterApp {
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             if self.dirty {
-                self.confirm_discard = true;
+                self.confirm_discard = matches!(
+                    self.discard_editor.request_quit(true),
+                    QuitDisposition::ConfirmDiscard
+                );
                 return ControlCenterCommand::None;
             }
             return ControlCenterCommand::Quit;
@@ -627,10 +644,18 @@ impl ControlCenterApp {
     fn handle_discard_key(&mut self, key: KeyCode) -> ControlCenterCommand {
         match key {
             KeyCode::Char('d') => {
-                self.revert();
-                self.confirm_discard = false;
+                if self
+                    .discard_editor
+                    .resolve_discard(DiscardDecision::Discard)
+                {
+                    self.revert();
+                }
+                self.confirm_discard = self.discard_editor.awaiting_discard_confirmation();
             }
-            KeyCode::Char('k' | 'q') | KeyCode::Esc => self.confirm_discard = false,
+            KeyCode::Char('k' | 'q') | KeyCode::Esc => {
+                let _ = self.discard_editor.resolve_discard(DiscardDecision::Cancel);
+                self.confirm_discard = self.discard_editor.awaiting_discard_confirmation();
+            }
             _ => {}
         }
         ControlCenterCommand::None
@@ -709,13 +734,22 @@ impl ControlCenterApp {
         self.workspace_conflict = false;
         self.appearance_field = None;
         self.interface_field = None;
+        if self.appearance_editor.is_editing() {
+            self.appearance_editor.enter_or_finish();
+        }
+        if self.interface_editor.is_editing() {
+            self.interface_editor.enter_or_finish();
+        }
         self.update_dirty();
     }
 
     fn toggle_appearance_focus(&mut self) {
-        self.appearance_field = self
-            .appearance_field
-            .map_or(Some(AppearanceField::Title), |_| None);
+        self.appearance_editor.enter_or_finish();
+        self.appearance_field = if self.appearance_editor.is_editing() {
+            Some(self.appearance_editor.selected_field())
+        } else {
+            None
+        };
     }
 
     fn step(&mut self, offset: isize) {
@@ -734,21 +768,21 @@ impl ControlCenterApp {
     }
 
     fn step_appearance_field(&mut self, offset: isize) {
-        let index = AppearanceField::ALL
-            .iter()
-            .position(|field| Some(*field) == self.appearance_field)
-            .unwrap_or(0);
-        self.appearance_field =
-            Some(AppearanceField::ALL[shifted_index(index, AppearanceField::ALL.len(), offset)]);
+        if self
+            .appearance_editor
+            .move_field(&AppearanceField::ALL, offset)
+        {
+            self.appearance_field = Some(self.appearance_editor.selected_field());
+        }
     }
 
     fn step_interface_field(&mut self, offset: isize) {
-        let index = InterfaceField::ALL
-            .iter()
-            .position(|field| Some(*field) == self.interface_field)
-            .unwrap_or(0);
-        self.interface_field =
-            Some(InterfaceField::ALL[shifted_index(index, InterfaceField::ALL.len(), offset)]);
+        if self
+            .interface_editor
+            .move_field(&InterfaceField::ALL, offset)
+        {
+            self.interface_field = Some(self.interface_editor.selected_field());
+        }
     }
 
     fn change_focused(&mut self, offset: isize) {
@@ -783,9 +817,12 @@ impl ControlCenterApp {
     }
 
     fn toggle_interface_focus(&mut self) {
-        self.interface_field = self
-            .interface_field
-            .map_or(Some(InterfaceField::Language), |_| None);
+        self.interface_editor.enter_or_finish();
+        self.interface_field = if self.interface_editor.is_editing() {
+            Some(self.interface_editor.selected_field())
+        } else {
+            None
+        };
     }
 
     fn change_focused_interface(&mut self, offset: isize) {
