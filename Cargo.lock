@@ -596,7 +596,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 [[package]]
 name = "jerry-terminal-ui"
 version = "0.1.0"
-source = "git+https://github.com/JerrySkywalker/jerry-terminal-ui?rev=75eea801a0a2c8f6f72d344da796b847710673f2#75eea801a0a2c8f6f72d344da796b847710673f2"
+source = "git+https://github.com/JerrySkywalker/jerry-terminal-ui?rev=5bf1db60ba911c5ea7a01c7f7ef3924f730a0054#5bf1db60ba911c5ea7a01c7f7ef3924f730a0054"
 dependencies = [
  "unicode-segmentation",
  "unicode-width 0.2.0",
