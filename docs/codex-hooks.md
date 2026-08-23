@@ -106,6 +106,49 @@ MCP groups and their existing trust hashes. Only the newly introduced
 SessionEnd command needs review in `/hooks`; TabBeacon never changes Hook trust
 itself.
 
+## Package upgrades with a live MCP child
+
+On Windows, the session-scoped MCP child intentionally executes the installed
+`tabbeacon.exe`, so it can temporarily hold that package file open. Before an
+official-channel replacement, inspect it without changing anything:
+
+```powershell
+tabbeacon upgrade-preflight --plain
+```
+
+When the report says `REPLACEABILITY=blocked_by_owned_tabbeacon_mcp`, the
+process is drainable only if an ephemeral local lease, PID creation time,
+canonical executable path hash, and executable content hash all match the
+manifest-proven TabBeacon MCP runtime. Image name, command text, or a Codex
+parent name alone never grant drain authority. The report uses
+`stale_or_invalid_lease` and `process_identity_mismatch` for safe refusals;
+those processes remain untouched.
+
+After reviewing the report, drain only the exact currently proven MCP children:
+
+```powershell
+tabbeacon upgrade-preflight --drain --plain
+```
+
+The drain rechecks each process immediately before terminating its exact handle.
+It never kills Codex, a process tree, an arbitrary `tabbeacon.exe`, or a
+third-party MCP server. Normal Hook events keep their session-scoped MCP hot
+path; this ownership proof adds no recurring process query to lifecycle events.
+
+For a release closeout, verify the installed Cargo source after the explicit
+official installation command. The release helper takes a deliberately selected
+Cargo home, exact package, and exact version; it emits no credentials or raw
+metadata:
+
+```powershell
+scripts/verify-cargo-install-source.ps1 -CargoHome <isolated-or-owner-approved-cargo-home> -Package tabbeacon -Version <version>
+```
+
+An official crates.io cutover requires `OWNER_INSTALL_SOURCE=REGISTRY_OFFICIAL`
+and `OWNER_GIT_REV_INSTALL=false`. Binary version, path, and existence are not
+source proof. Run `tabbeacon setup codex` only as ownership-aware reconciliation
+after the official cutover; it never changes Hook trust automatically.
+
 ## Orphaned owned-Hook repair
 
 An interrupted Codex upgrade can leave a valid TabBeacon ownership manifest and

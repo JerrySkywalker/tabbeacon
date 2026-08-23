@@ -546,6 +546,39 @@ impl CodexIntegration {
         Ok(Self::new(codex_home, state_root, env::current_exe()?))
     }
 
+    /// Proves the exact local declaration which is allowed to register an
+    /// ephemeral package-MCP ownership lease.  This is intentionally
+    /// read-only: it does not probe Codex, alter Hook trust, or reconcile any
+    /// configuration.  A missing or modified declaration merely prevents
+    /// automatic upgrade drain while the MCP server itself remains fail-open.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the manifest, owned Hook declarations, MCP
+    /// server declaration, or managed paths are no longer exact.
+    pub fn mcp_runtime_lease_authority(&self) -> Result<(), CodexIntegrationError> {
+        reject_symbolic_link(&self.tabbeacon_executable)?;
+        let manifest = self
+            .load_manifest()?
+            .ok_or(CodexIntegrationError::OwnershipManifest)?;
+        self.validate_manifest_scope(&manifest)?;
+        if !Self::manifest_has_known_owned_declarations(&manifest)
+            || manifest.executable != self.tabbeacon_executable
+            || manifest.mcp_server != desired_mcp_server_for_manifest(&self.tabbeacon_executable)?
+        {
+            return Err(CodexIntegrationError::OwnershipManifest);
+        }
+        let hooks = read_hooks_document(&self.hooks_path())?;
+        if validate_known_hook_wire_shape(&hooks).is_err()
+            || !locate_owned_hooks(&hooks, &manifest.hooks)
+                .is_ok_and(|locations| locations.len() == manifest.hooks.len())
+        {
+            return Err(CodexIntegrationError::ModifiedOwnedHook);
+        }
+        let config = read_config_document(&self.config_path())?;
+        Self::validate_mcp_server_ownership(&manifest, &config)
+    }
+
     /// Installs or verifies the exact owned user-global hook integration.
     ///
     /// # Errors

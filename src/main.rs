@@ -1749,6 +1749,7 @@ fn print_upgrade_preflight_plain(report: &UpgradePreflight) {
     );
     println!("PROCESS_INSPECTION={}", report.process_inspection.as_str());
     println!("WORKER_LEASE_HEALTH={}", report.worker_lease_health);
+    println!("MCP_LEASE_HEALTH={}", report.mcp_lease_health);
     println!(
         "RUNTIME_IMAGE_INSPECTION={}",
         report.runtime_images.inspection.as_str()
@@ -1769,10 +1770,18 @@ fn print_upgrade_preflight_plain(report: &UpgradePreflight) {
         report.runtime_images.cleanup_safe
     );
     println!("REPLACEABILITY={}", report.replaceability.as_str());
+    if let Some(alias) = report.replaceability.compatibility_alias() {
+        println!("REPLACEABILITY_COMPATIBILITY_ALIAS={alias}");
+    }
     println!("OWNED_WORKERS={}", report.proved_owned_worker_count());
+    println!("OWNED_MCP_CHILDREN={}", report.proved_owned_mcp_count());
     println!("AMBIGUOUS_PROCESSES={}", report.ambiguous_process_count());
     println!("DRAIN_REQUESTED={}", report.drain_requested);
     println!("DRAINED_OWNED_WORKERS={}", report.drained_owned_workers);
+    println!(
+        "DRAINED_OWNED_MCP_CHILDREN={}",
+        report.drained_owned_mcp_children
+    );
     println!(
         "UPGRADE_PREFLIGHT_DEFAULT_READ_ONLY={}",
         report.boundaries.default_read_only
@@ -1788,8 +1797,9 @@ fn print_upgrade_preflight_plain(report: &UpgradePreflight) {
     );
     for worker in &report.workers {
         println!(
-            "WORKER=process_id={}|ownership={}|drain={}",
+            "WORKER=process_id={}|kind={}|ownership={}|drain={}",
             worker.process_id,
+            worker.kind.as_str(),
             worker.ownership.as_str(),
             worker.drain.as_str(),
         );
@@ -1829,7 +1839,10 @@ fn print_upgrade_preflight_human(report: &UpgradePreflight) {
         ),
     );
     print_human_tone(
-        if report.replaceability == UpgradeReplaceability::Blocked {
+        if matches!(
+            report.replaceability,
+            UpgradeReplaceability::Blocked | UpgradeReplaceability::BlockedByOwnedTabBeaconMcp
+        ) {
             HumanTone::Attention
         } else {
             HumanTone::Plain
@@ -1855,8 +1868,9 @@ fn print_upgrade_preflight_human(report: &UpgradePreflight) {
     print_human_tone(
         HumanTone::Plain,
         format!(
-            "Proved owned workers: {}; preserved ambiguous processes: {}",
+            "Proved owned workers: {}; proved owned MCP children: {}; preserved ambiguous processes: {}",
             report.proved_owned_worker_count(),
+            report.proved_owned_mcp_count(),
             report.ambiguous_process_count()
         ),
     );
@@ -1864,8 +1878,8 @@ fn print_upgrade_preflight_human(report: &UpgradePreflight) {
         print_human_tone(
             HumanTone::Plain,
             format!(
-                "Explicit drain stopped {} proved worker(s).",
-                report.drained_owned_workers
+                "Explicit drain stopped {} proved worker(s) and {} proved MCP child(ren).",
+                report.drained_owned_workers, report.drained_owned_mcp_children
             ),
         );
     } else {

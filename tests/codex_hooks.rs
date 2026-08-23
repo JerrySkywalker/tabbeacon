@@ -1397,6 +1397,24 @@ fn codex_0149_owned_mcp_server_forwards_only_the_terminal_session() {
         Some(vec!["WT_SESSION"]),
         "the owned MCP child forwards only the terminal session binding"
     );
+    assert!(
+        integration.mcp_runtime_lease_authority().is_ok(),
+        "only the exact manifest-owned MCP declaration may register an upgrade lease"
+    );
+
+    let mut modified = config;
+    let mut modified_args = Array::new();
+    modified_args.push("unexpected-stdio-entrypoint");
+    modified["mcp_servers"]["tabbeacon-hook"]
+        .as_table_like_mut()
+        .expect("owned MCP server table")
+        .insert("args", value(modified_args));
+    fs::write(codex_home.join("config.toml"), modified.to_string())
+        .expect("modified owned MCP config writes");
+    assert!(
+        integration.mcp_runtime_lease_authority().is_err(),
+        "a modified MCP declaration must never authorize a new upgrade lease"
+    );
 }
 
 #[test]
