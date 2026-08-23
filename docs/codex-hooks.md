@@ -89,9 +89,10 @@ activity-lease revocation, Windows Terminal progress clear, and indexed
 `OSC 104;264` frame-color reset. The report exposes
 `MCP_EVENT_TRANSPORT_PROVEN` and `REAL_SESSION_END_CLEANUP_PROVEN` separately;
 an artificial EOF can establish only `EOF_CLEANUP_CAPABLE`. The activity proof
-has a five-second diagnostic bound; the normal Hook timeout and the SessionEnd
-command timeout remain one second. For 0.147 it uses the 900 ms COMSPEC command
-fallback.
+has a ten-second diagnostic bound; the terminate-before-EOF phase is bounded
+to one second and the isolated cleanup diagnostic to five seconds. The normal
+Hook timeout and the SessionEnd command timeout remain one second. For 0.147
+it uses the 900 ms COMSPEC command fallback.
 The probe records no prompt, tool, assistant, title, or environment content
 and never modifies Codex configuration or Hook trust.
 

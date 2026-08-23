@@ -1050,7 +1050,7 @@ impl CodexIntegration {
             RuntimeProbeOutcome::TimedOut => vec![fail(
                 "hooks.runtime-probe",
                 if profile.uses_mcp_hook_transport() {
-                    "MCP_RUNTIME_PROBE_TIMEOUT: terminal-bound activity proof exceeded the 5 s diagnostic bound"
+                    "MCP_RUNTIME_PROBE_TIMEOUT: terminal-bound activity proof exceeded the 10 s diagnostic bound"
                 } else {
                     "RUNTIME_PROBE_TIMEOUT: representative owned Hook exceeded the 900 ms bound"
                 },
