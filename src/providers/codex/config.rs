@@ -932,86 +932,70 @@ impl CodexIntegration {
         let hybrid_transport = report
             .hook_profile()
             .is_some_and(CodexHookProfile::uses_mcp_hook_transport);
-        let runtime_check = self.runtime_execution_probe(&report);
-        let hybrid_proven = runtime_check.status() == DoctorStatus::Pass
-            && runtime_check
-                .summary()
-                .contains("MCP_EVENT_TRANSPORT_PROVEN")
-            && runtime_check
-                .summary()
-                .contains("REAL_SESSION_END_CLEANUP_PROVEN");
-        report.replace_check(runtime_check);
-        if hybrid_transport {
-            // Keep the two claims independently machine-readable. The bounded
-            // probe deliberately terminates the MCP child before stdin EOF,
-            // then invokes the separately declared SessionEnd command.
-            report.replace_check(if hybrid_proven {
-                pass(
-                    "hooks.mcp-event-transport",
-                    "MCP_EVENT_TRANSPORT_PROVEN: the content-minimal MCP stdio path delivered normal lifecycle events without a command shell",
-                )
-            } else {
-                fail(
-                    "hooks.mcp-event-transport",
-                    "MCP_EVENT_TRANSPORT_UNPROVEN: see hooks.runtime-probe; artificial EOF is not real-session cleanup proof",
-                )
-            });
-            report.replace_check(if hybrid_proven {
-                pass(
-                    "hooks.session-end-cleanup",
-                    "REAL_SESSION_END_CLEANUP_PROVEN: an independent synchronous SessionEnd command ran after terminate-before-EOF and reset terminal cleanup state",
-                )
-            } else {
-                fail(
-                    "hooks.session-end-cleanup",
-                    "REAL_SESSION_END_CLEANUP_UNPROVEN: see hooks.runtime-probe; EOF remains fallback only",
-                )
-            });
+        let runtime_checks = self.runtime_execution_probe(&report);
+        let hybrid_claims_present = runtime_checks.iter().any(|check| {
+            matches!(
+                check.id(),
+                "hooks.mcp-event-transport" | "hooks.session-end-cleanup"
+            )
+        });
+        for check in runtime_checks {
+            report.replace_check(check);
+        }
+        if hybrid_transport && !hybrid_claims_present {
+            report.replace_check(fail(
+                "hooks.mcp-event-transport",
+                "MCP_EVENT_TRANSPORT_UNPROVEN: runtime probe preflight did not reach the independent MCP event check",
+            ));
+            report.replace_check(fail(
+                "hooks.session-end-cleanup",
+                "REAL_SESSION_END_CLEANUP_UNPROVEN: runtime probe preflight did not reach the independent SessionEnd check; EOF remains fallback only",
+            ));
         }
         report
     }
 
     #[allow(clippy::too_many_lines)] // Ordered preflight and exact transport proof remain one diagnostic contract.
-    fn runtime_execution_probe(&self, report: &CodexDoctorReport) -> DoctorCheck {
+    fn runtime_execution_probe(&self, report: &CodexDoctorReport) -> Vec<DoctorCheck> {
         if report.check_status("codex.runtime-continuity") != Some(DoctorStatus::Pass) {
-            return fail(
+            return vec![fail(
                 "hooks.runtime-probe",
                 "RUNTIME_PROBE_BLOCKED: exact admitted declarations, trust, and title ownership are required before execution",
-            );
+            )];
         }
 
         let Ok(profile) = self.require_supported_profile() else {
-            return fail(
+            return vec![fail(
                 "hooks.runtime-probe",
                 "RUNTIME_PROBE_BLOCKED: the Codex Hook profile is no longer admitted",
-            );
+            )];
         };
         let Ok(desired) = desired_hooks(&self.tabbeacon_executable, profile) else {
-            return fail(
+            return vec![fail(
                 "hooks.runtime-probe",
                 "RUNTIME_PROBE_BLOCKED: the current owned declaration cannot be generated safely",
-            );
+            )];
         };
         let Some(manifest) = self.load_manifest().ok().flatten() else {
-            return fail(
+            return vec![fail(
                 "hooks.runtime-probe",
                 "RUNTIME_PROBE_BLOCKED: the ownership manifest is unavailable",
-            );
+            )];
         };
         let Ok(hooks) = read_hooks_document(&self.hooks_path()) else {
-            return fail(
+            return vec![fail(
                 "hooks.runtime-probe",
                 "RUNTIME_PROBE_BLOCKED: the Hook declaration document is unavailable",
-            );
+            )];
         };
         if manifest.hooks != desired
             || !locate_owned_hooks(&hooks, &manifest.hooks)
                 .is_ok_and(|locations| locations.len() == manifest.hooks.len())
         {
-            return fail(
+            return vec![fail(
                 "hooks.runtime-probe",
                 "RUNTIME_PROBE_BLOCKED: the owned declaration changed during probe preflight",
-            );
+            )];
         }
         let outcome = if profile.uses_mcp_hook_transport() {
             let Some(command) = desired
@@ -1020,10 +1004,10 @@ impl CodexIntegration {
                 .and_then(|hook| hook.group.pointer("/hooks/0/commandWindows"))
                 .and_then(Value::as_str)
             else {
-                return fail(
+                return vec![fail(
                     "hooks.runtime-probe",
                     "RUNTIME_PROBE_BLOCKED: the hybrid SessionEnd command declaration is unavailable",
-                );
+                )];
             };
             run_windows_mcp_hook_runtime_probe(&self.tabbeacon_executable, command)
         } else {
@@ -1033,57 +1017,44 @@ impl CodexIntegration {
                 .and_then(|hook| hook.group.pointer("/hooks/0/commandWindows"))
                 .and_then(Value::as_str)
             else {
-                return fail(
+                return vec![fail(
                     "hooks.runtime-probe",
                     "RUNTIME_PROBE_BLOCKED: the representative owned declaration is unavailable",
-                );
+                )];
             };
             run_windows_hook_runtime_probe(command)
         };
 
         match outcome {
-            RuntimeProbeOutcome::Pass => pass(
+            RuntimeProbeOutcome::Pass => vec![pass(
                 "hooks.runtime-probe",
                 "RUNTIME_PROBE_PASS: representative owned Hook executed through the bounded COMSPEC fallback",
-            ),
-            RuntimeProbeOutcome::McpActivityPass { frame_interval_ms } => pass(
-                "hooks.runtime-probe",
-                format!(
-                    "MCP_EVENT_TRANSPORT_PROVEN: direct stdio transport proved WT_SESSION forwarding, Working/Stop/result-ready transitions, and terminal-bound activity with two spinner frames at {frame_interval_ms} ms; REAL_SESSION_END_CLEANUP_PROVEN: Codex 0.149 terminate-before-EOF model then used the independent synchronous command reset"
-                ),
-            ),
-            RuntimeProbeOutcome::TimedOut => fail(
+            )],
+            RuntimeProbeOutcome::McpHybrid {
+                mcp_event,
+                session_end,
+                frame_interval_ms,
+            } => hybrid_runtime_probe_checks(mcp_event, session_end, frame_interval_ms),
+            RuntimeProbeOutcome::TimedOut => vec![fail(
                 "hooks.runtime-probe",
                 if profile.uses_mcp_hook_transport() {
                     "MCP_RUNTIME_PROBE_TIMEOUT: terminal-bound activity proof exceeded the 5 s diagnostic bound"
                 } else {
                     "RUNTIME_PROBE_TIMEOUT: representative owned Hook exceeded the 900 ms bound"
                 },
-            ),
-            RuntimeProbeOutcome::NonZero => fail(
+            )],
+            RuntimeProbeOutcome::NonZero => vec![fail(
                 "hooks.runtime-probe",
                 "RUNTIME_PROBE_FAILED: representative owned Hook exited nonzero",
-            ),
-            RuntimeProbeOutcome::MissingMarker => fail(
+            )],
+            RuntimeProbeOutcome::MissingMarker => vec![fail(
                 "hooks.runtime-probe",
                 "RUNTIME_PROBE_FAILED: representative owned Hook did not publish its isolated timing marker",
-            ),
-            RuntimeProbeOutcome::ActivityWorkerProcessMissing => fail(
-                "hooks.runtime-probe",
-                "MCP_ACTIVITY_WORKER_PROCESS_MISSING: terminal-bound Working did not launch __activity-worker-v1",
-            ),
-            RuntimeProbeOutcome::ActivityWorkerNotStarted => fail(
-                "hooks.runtime-probe",
-                "MCP_ACTIVITY_WORKER_NOT_STARTED: terminal-bound Working did not enter the owned activity worker",
-            ),
-            RuntimeProbeOutcome::ActivityFramesMissing => fail(
-                "hooks.runtime-probe",
-                "MCP_ACTIVITY_FRAMES_MISSING: activity worker entered but did not write two distinct spinner frames",
-            ),
-            RuntimeProbeOutcome::Unavailable => fail(
+            )],
+            RuntimeProbeOutcome::Unavailable => vec![fail(
                 "hooks.runtime-probe",
                 "RUNTIME_PROBE_UNAVAILABLE: the bounded Windows Hook probe could not start",
-            ),
+            )],
         }
     }
 
@@ -2205,14 +2176,89 @@ fn powershell_encoded_windows_hook_command(executable: &str) -> String {
 #[derive(Clone, Copy)]
 enum RuntimeProbeOutcome {
     Pass,
-    McpActivityPass { frame_interval_ms: u64 },
+    McpHybrid {
+        mcp_event: ProbeClaim,
+        session_end: ProbeClaim,
+        frame_interval_ms: Option<u64>,
+    },
     TimedOut,
     NonZero,
     MissingMarker,
-    ActivityWorkerProcessMissing,
-    ActivityWorkerNotStarted,
-    ActivityFramesMissing,
     Unavailable,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProbeClaim {
+    Proven,
+    Failed,
+    TimedOut,
+}
+
+impl ProbeClaim {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Proven => "PROVEN",
+            Self::Failed => "UNPROVEN",
+            Self::TimedOut => "TIMEOUT",
+        }
+    }
+}
+
+/// Converts the bounded hybrid probe's independent claims into three doctor
+/// observations. The aggregate remains strict, while a proof for one transport
+/// is never erased merely because the other transport failed.
+fn hybrid_runtime_probe_checks(
+    mcp_event: ProbeClaim,
+    session_end: ProbeClaim,
+    frame_interval_ms: Option<u64>,
+) -> Vec<DoctorCheck> {
+    let mcp_check = match mcp_event {
+        ProbeClaim::Proven => pass(
+            "hooks.mcp-event-transport",
+            format!(
+                "MCP_EVENT_TRANSPORT_PROVEN: direct stdio delivered WT_SESSION-bound Working/Stop/result-ready transitions and terminal activity with two spinner frames at {} ms without a command shell",
+                frame_interval_ms.unwrap_or_default()
+            ),
+        ),
+        ProbeClaim::Failed => fail(
+            "hooks.mcp-event-transport",
+            "MCP_EVENT_TRANSPORT_UNPROVEN: the normal MCP conversation did not prove all required lifecycle/activity observations",
+        ),
+        ProbeClaim::TimedOut => fail(
+            "hooks.mcp-event-transport",
+            "MCP_EVENT_TRANSPORT_TIMEOUT: the normal MCP conversation exceeded its bounded diagnostic window",
+        ),
+    };
+    let session_end_check = match session_end {
+        ProbeClaim::Proven => pass(
+            "hooks.session-end-cleanup",
+            "REAL_SESSION_END_CLEANUP_PROVEN: the independent synchronous SessionEnd command ran after terminate-before-EOF and reset terminal cleanup state",
+        ),
+        ProbeClaim::Failed => fail(
+            "hooks.session-end-cleanup",
+            "REAL_SESSION_END_CLEANUP_UNPROVEN: the independent SessionEnd command did not prove all cleanup facts; EOF remains fallback only",
+        ),
+        ProbeClaim::TimedOut => fail(
+            "hooks.session-end-cleanup",
+            "REAL_SESSION_END_CLEANUP_TIMEOUT: the independent SessionEnd command exceeded its 900 ms diagnostic bound",
+        ),
+    };
+    let aggregate = if mcp_event == ProbeClaim::Proven && session_end == ProbeClaim::Proven {
+        pass(
+            "hooks.runtime-probe",
+            "RUNTIME_PROBE_PASS: MCP_EVENT_TRANSPORT_PROVEN and REAL_SESSION_END_CLEANUP_PROVEN",
+        )
+    } else {
+        fail(
+            "hooks.runtime-probe",
+            format!(
+                "RUNTIME_PROBE_PARTIAL_OR_FAILED: MCP_EVENT_TRANSPORT={}; REAL_SESSION_END_CLEANUP={}",
+                mcp_event.label(),
+                session_end.label()
+            ),
+        )
+    };
+    vec![aggregate, mcp_check, session_end_check]
 }
 
 #[cfg(windows)]
@@ -2646,42 +2692,32 @@ fn run_windows_mcp_hook_runtime_probe(
                 && receipt.get("windows_terminal_indexed_reset") == Some(&json!(true))
         });
     let _ = fs::remove_dir_all(&probe_root);
-    if !activity_worker_process_started {
-        return RuntimeProbeOutcome::ActivityWorkerProcessMissing;
-    }
-    if !activity_worker_started {
-        return RuntimeProbeOutcome::ActivityWorkerNotStarted;
-    }
-    if !animation_proves_runtime {
-        return RuntimeProbeOutcome::ActivityFramesMissing;
-    }
-    match (
-        writes_succeeded,
-        stop_and_renew_succeeded,
-        completed_calls == BTreeSet::from([2, 3, 4, 5]),
-        mcp_terminated_before_eof,
-        mcp_terminated,
-        session_end_write_succeeded,
-        session_end_exited,
-        session_end_cleanup_proven,
-        animation_proves_runtime,
-    ) {
-        (_, _, _, _, false, _, _, _, _) | (_, _, _, _, _, _, None, _, _) => {
-            RuntimeProbeOutcome::TimedOut
-        }
-        (true, true, true, true, true, true, Some(true), true, true) => {
-            RuntimeProbeOutcome::McpActivityPass {
-                frame_interval_ms: animation_frame_interval_ms.unwrap_or_default(),
-            }
-        }
-        (false, _, _, _, _, _, _, _, _)
-        | (_, false, _, _, _, _, _, _, _)
-        | (_, _, false, _, _, _, _, _, _)
-        | (_, _, _, false, _, _, _, _, _)
-        | (_, _, _, _, _, false, _, _, _)
-        | (_, _, _, _, _, _, Some(false), _, _)
-        | (_, _, _, _, _, _, _, false, _)
-        | (_, _, _, _, _, _, _, _, false) => RuntimeProbeOutcome::MissingMarker,
+    let mcp_event = if writes_succeeded
+        && stop_and_renew_succeeded
+        && completed_calls == BTreeSet::from([2, 3, 4, 5])
+        && activity_worker_process_started
+        && activity_worker_started
+        && animation_proves_runtime
+    {
+        ProbeClaim::Proven
+    } else {
+        ProbeClaim::Failed
+    };
+    let session_end = if !mcp_terminated || session_end_exited.is_none() {
+        ProbeClaim::TimedOut
+    } else if mcp_terminated_before_eof
+        && session_end_write_succeeded
+        && session_end_exited == Some(true)
+        && session_end_cleanup_proven
+    {
+        ProbeClaim::Proven
+    } else {
+        ProbeClaim::Failed
+    };
+    RuntimeProbeOutcome::McpHybrid {
+        mcp_event,
+        session_end,
+        frame_interval_ms: animation_frame_interval_ms,
     }
 }
 
@@ -4006,7 +4042,8 @@ mod tests {
     };
 
     use super::{
-        CodexIntegrationError, OwnedHook, ensure_not_symbolic_link, normalized_hook_hash,
+        CodexIntegrationError, DoctorStatus, OwnedHook, ProbeClaim, ensure_not_symbolic_link,
+        hybrid_runtime_probe_checks, normalized_hook_hash,
         windows_hook_command_for_default_comspec, write_if_unchanged,
     };
     use serde_json::json;
@@ -4136,5 +4173,46 @@ mod tests {
             b"external replacement"
         );
         fs::remove_dir_all(&root).expect("isolated repair test cleanup");
+    }
+
+    #[test]
+    fn hybrid_runtime_probe_reports_mcp_and_session_end_claims_independently() {
+        for (mcp_event, session_end, expected_mcp, expected_session_end) in [
+            (
+                ProbeClaim::Proven,
+                ProbeClaim::Failed,
+                DoctorStatus::Pass,
+                DoctorStatus::Fail,
+            ),
+            (
+                ProbeClaim::Failed,
+                ProbeClaim::Proven,
+                DoctorStatus::Fail,
+                DoctorStatus::Pass,
+            ),
+        ] {
+            let checks = hybrid_runtime_probe_checks(mcp_event, session_end, Some(100));
+            assert_eq!(
+                checks
+                    .iter()
+                    .find(|check| check.id() == "hooks.runtime-probe")
+                    .map(super::DoctorCheck::status),
+                Some(DoctorStatus::Fail)
+            );
+            assert_eq!(
+                checks
+                    .iter()
+                    .find(|check| check.id() == "hooks.mcp-event-transport")
+                    .map(super::DoctorCheck::status),
+                Some(expected_mcp)
+            );
+            assert_eq!(
+                checks
+                    .iter()
+                    .find(|check| check.id() == "hooks.session-end-cleanup")
+                    .map(super::DoctorCheck::status),
+                Some(expected_session_end)
+            );
+        }
     }
 }
