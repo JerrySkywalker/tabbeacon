@@ -14,6 +14,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
         mpsc,
     },
@@ -22,7 +23,7 @@ use std::{
 };
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use std::{io::Read, os::windows::process::CommandExt, time::Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -36,6 +37,15 @@ const MAX_LEASE_FILES: usize = 128;
 const MAX_LEASE_BYTES: u64 = 16 * 1024;
 const WINDOWS_TICKS_AT_UNIX_EPOCH: u64 = 621_355_968_000_000_000;
 static LEASE_GENERATION_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(windows)]
+// Windows PowerShell cold start is host-dependent. This is still a bounded,
+// one-shot registration query (never a Hook-event timer); give a concurrent
+// Codex/MCP start enough headroom to avoid turning a healthy process into an
+// unprovable lease solely because the shell was cold.
+const PROCESS_CREATION_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(windows)]
+const MAX_PROCESS_CREATION_QUERY_BYTES: u64 = 128;
 
 /// Whether the bounded local MCP lease directory was safe to inspect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,15 +134,32 @@ impl Drop for McpLeaseFileGuard {
     }
 }
 
-/// Keeps a per-MCP registration task alive without delaying the synchronous
-/// stdio server. The task blocks on this one-shot stop channel after it has
-/// registered an exact lease; it is not a daemon or a recurring observer.
+/// Shared state makes a graceful MCP exit remove an exact lease synchronously.
+/// The registration task may not create a lease after this state has been
+/// stopped, so a racing EOF cannot leave a false ownership record behind.
+#[derive(Default)]
+struct McpLeaseRegistrationState {
+    stopping: bool,
+    lease: Option<McpLeaseFileGuard>,
+}
+
+/// Owns the local, one-shot registration task without delaying the synchronous
+/// stdio server. It is not a daemon or a recurring observer. Dropping this
+/// guard removes an already-created lease in the MCP process itself before the
+/// process can exit; a registration still in progress observes `stopping` and
+/// fails closed without creating one.
 pub(crate) struct McpRuntimeLeaseGuard {
     stop: mpsc::SyncSender<()>,
+    state: Arc<Mutex<McpLeaseRegistrationState>>,
 }
 
 impl Drop for McpRuntimeLeaseGuard {
     fn drop(&mut self) {
+        let lease = self.state.lock().ok().and_then(|mut state| {
+            state.stopping = true;
+            state.lease.take()
+        });
+        drop(lease);
         let _ = self.stop.try_send(());
     }
 }
@@ -144,6 +171,8 @@ impl Drop for McpRuntimeLeaseGuard {
 #[must_use]
 pub(crate) fn register_system_mcp_runtime_lease() -> Option<McpRuntimeLeaseGuard> {
     let (stop, stopped) = mpsc::sync_channel(1);
+    let state = Arc::new(Mutex::new(McpLeaseRegistrationState::default()));
+    let registration_state = Arc::clone(&state);
     thread::Builder::new()
         .name("tabbeacon-mcp-lease-v1".to_owned())
         .spawn(move || {
@@ -152,7 +181,11 @@ pub(crate) fn register_system_mcp_runtime_lease() -> Option<McpRuntimeLeaseGuard
             // configuration or starts the bounded Windows creation-time query.
             // Short-lived MCP children therefore never create a lease.
             thread::sleep(Duration::from_secs(2));
-            if stopped.try_recv().is_ok() {
+            if registration_state
+                .lock()
+                .map(|state| state.stopping)
+                .unwrap_or(true)
+            {
                 return;
             }
             let Some(executable) = env::current_exe().ok() else {
@@ -174,6 +207,15 @@ pub(crate) fn register_system_mcp_runtime_lease() -> Option<McpRuntimeLeaseGuard
             let Some(creation_ticks) = system_process_creation_ticks(process_id) else {
                 return;
             };
+            // Hold the state lock over file creation and retention. A graceful
+            // EOF either wins first (and blocks registration), or waits here
+            // and synchronously removes the exact newly-created lease.
+            let Ok(mut registration) = registration_state.lock() else {
+                return;
+            };
+            if registration.stopping {
+                return;
+            }
             let store = McpLeaseStore::new(state_root);
             let Ok(lease) = store.register(
                 process_id,
@@ -183,11 +225,12 @@ pub(crate) fn register_system_mcp_runtime_lease() -> Option<McpRuntimeLeaseGuard
             ) else {
                 return;
             };
+            registration.lease = Some(lease);
+            drop(registration);
             let _ = stopped.recv();
-            drop(lease);
         })
         .ok()?;
-    Some(McpRuntimeLeaseGuard { stop })
+    Some(McpRuntimeLeaseGuard { stop, state })
 }
 
 /// Inspects the current user's MCP lease state without creating, changing, or
@@ -555,7 +598,8 @@ fn metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
 #[cfg(windows)]
 fn system_process_creation_ticks(process_id: u32) -> Option<u64> {
     let powershell = system_powershell_path()?;
-    let output = Command::new(powershell)
+    let mut command = Command::new(powershell);
+    command
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -566,16 +610,51 @@ fn system_process_creation_ticks(process_id: u32) -> Option<u64> {
         .env("TABBEACON_MCP_LEASE_PID", process_id.to_string())
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(0x0800_0000)
-        .output()
+        .creation_flags(0x0800_0000);
+    let output = bounded_command_output(command, PROCESS_CREATION_QUERY_TIMEOUT)?;
+    String::from_utf8(output).ok()?.trim().parse::<u64>().ok()
+}
+
+#[cfg(windows)]
+fn bounded_command_output(mut command: Command, timeout: Duration) -> Option<Vec<u8>> {
+    command.stdout(Stdio::piped());
+    let mut child = command.spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let _reader = thread::Builder::new()
+        .name("tabbeacon-mcp-lease-output-v1".to_owned())
+        .spawn(move || {
+            let mut output = Vec::new();
+            let result = stdout
+                .by_ref()
+                .take(MAX_PROCESS_CREATION_QUERY_BYTES.saturating_add(1))
+                .read_to_end(&mut output)
+                .map(|_| output);
+            let _ = sender.send(result);
+        })
         .ok()?;
-    output.status.success().then(|| {
-        String::from_utf8(output.stdout)
-            .ok()?
-            .trim()
-            .parse::<u64>()
-            .ok()
-    })?
+    let deadline = Instant::now().checked_add(timeout)?;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let remaining = deadline.checked_duration_since(Instant::now())?;
+    let output = receiver.recv_timeout(remaining).ok()?.ok()?;
+    (status.success() && output.len() <= usize::try_from(MAX_PROCESS_CREATION_QUERY_BYTES).ok()?)
+        .then_some(output)
 }
 
 #[cfg(not(windows))]
@@ -595,10 +674,16 @@ fn system_powershell_path() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::{Arc, Mutex, mpsc},
+        time::Duration,
+    };
 
     use super::{
-        LEASE_SCHEMA, McpExecutableIdentity, McpLeaseHealth, McpLeaseRecord, McpLeaseStore,
+        LEASE_SCHEMA, McpExecutableIdentity, McpLeaseHealth, McpLeaseRecord,
+        McpLeaseRegistrationState, McpLeaseStore, McpRuntimeLeaseGuard,
         WINDOWS_TICKS_AT_UNIX_EPOCH, sha256,
     };
 
@@ -711,6 +796,43 @@ mod tests {
         assert!(
             !store.remove_matching(111, now - 99, &identity),
             "a creation-time mismatch must not settle the lease"
+        );
+    }
+
+    #[test]
+    fn graceful_mcp_guard_drop_removes_a_registered_lease_synchronously() {
+        let root = TestRoot::new("mcp-lease-graceful-eof");
+        let store = McpLeaseStore::new(&root.0);
+        let now = WINDOWS_TICKS_AT_UNIX_EPOCH + 10_000;
+        let lease = store
+            .register(222, now - 100, executable(), now)
+            .expect("lease registers");
+        let state = Arc::new(Mutex::new(McpLeaseRegistrationState {
+            stopping: false,
+            lease: Some(lease),
+        }));
+        let (stop, stopped) = mpsc::sync_channel(1);
+        drop(McpRuntimeLeaseGuard {
+            stop,
+            state: Arc::clone(&state),
+        });
+
+        assert!(
+            state.lock().expect("state remains available").stopping,
+            "EOF marks registration stopped before process exit"
+        );
+        stopped
+            .recv_timeout(Duration::from_millis(50))
+            .expect("EOF wakes the one-shot registration task");
+        assert!(store.inspect_read_only(now + 1).identities.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_windows_creation_query_binds_the_current_process() {
+        assert!(
+            super::system_process_creation_ticks(std::process::id()).is_some(),
+            "the bounded one-shot query must bind this MCP process before it can register a lease"
         );
     }
 }
