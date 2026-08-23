@@ -495,7 +495,7 @@ pub struct DoctorArgs {
 /// Arguments for the package-upgrade preflight.
 #[derive(Clone, Copy, Debug, Args)]
 pub struct UpgradePreflightArgs {
-    /// Stop only processes freshly proven to be active `TabBeacon` activity workers.
+    /// Stop only processes freshly proven to be owned `TabBeacon` activity workers or MCP children.
     #[arg(long)]
     pub drain: bool,
     #[command(flatten)]

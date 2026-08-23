@@ -354,6 +354,10 @@ pub fn run_stdio_hook_server() -> io::Result<()> {
             None,
         );
     };
+    // The guard is created only after the real system runtime and exact owned
+    // MCP declaration are available.  It is deliberately outside the normal
+    // event loop, so lease work never adds shell or polling activity to a Hook.
+    let _mcp_lease = crate::mcp_runtime_lease::register_system_mcp_runtime_lease();
     let console = open_owned_console().ok();
     serve_stdio_with_runtime(
         BufReader::new(stdin.lock()),
