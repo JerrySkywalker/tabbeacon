@@ -183,8 +183,7 @@ pub(crate) fn register_system_mcp_runtime_lease() -> Option<McpRuntimeLeaseGuard
             thread::sleep(Duration::from_secs(2));
             if registration_state
                 .lock()
-                .map(|state| state.stopping)
-                .unwrap_or(true)
+                .map_or(true, |state| state.stopping)
             {
                 return;
             }
