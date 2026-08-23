@@ -13,7 +13,12 @@ use std::{
 };
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use std::{
+    io::Read,
+    os::windows::process::CommandExt,
+    thread,
+    time::{Duration, Instant},
+};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -30,6 +35,11 @@ use crate::worker_runtime::WorkerRuntimeStore;
 
 /// Stable JSON schema version for upgrade preflight output.
 pub const UPGRADE_PREFLIGHT_SCHEMA_VERSION: u32 = 3;
+
+#[cfg(windows)]
+const PROCESS_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(windows)]
+const MAX_PROCESS_OBSERVATION_STDOUT_BYTES: u64 = 512 * 1024;
 
 /// Which local executable the preflight inspected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -902,7 +912,8 @@ Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
   } |
   ConvertTo-Json -Compress
 ";
-    let output = Command::new(powershell)
+    let mut command = Command::new(powershell);
+    command
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -913,14 +924,45 @@ Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
         .env("TABBEACON_UPGRADE_TARGET", target)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(0x0800_0000)
-        .output()
-        .map_err(|_| ())?;
-    if !output.status.success() {
+        .creation_flags(0x0800_0000);
+    let output = bounded_command_output(command, PROCESS_OBSERVATION_TIMEOUT)?;
+    let output = String::from_utf8(output).map_err(|_| ())?;
+    parse_processes(&output)
+}
+
+/// Runs only the observer process TabBeacon started, with bounded output and
+/// time. A stalled Windows management query is unavailable evidence, never a
+/// reason to hold an upgrade or widen drain authority.
+#[cfg(windows)]
+fn bounded_command_output(mut command: Command, timeout: Duration) -> Result<Vec<u8>, ()> {
+    command.stdout(Stdio::piped());
+    let mut child = command.spawn().map_err(|_| ())?;
+    let stdout = child.stdout.take().ok_or(())?;
+    let reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout
+            .take(MAX_PROCESS_OBSERVATION_STDOUT_BYTES.saturating_add(1))
+            .read_to_end(&mut output)
+            .map(|_| output)
+    });
+    let deadline = Instant::now().checked_add(timeout).ok_or(())?;
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|_| ())? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(());
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let output = reader.join().map_err(|_| ())?.map_err(|_| ())?;
+    if !status.success() || output.len() > MAX_PROCESS_OBSERVATION_STDOUT_BYTES as usize {
         return Err(());
     }
-    let output = String::from_utf8(output.stdout).map_err(|_| ())?;
-    parse_processes(&output)
+    Ok(output)
 }
 
 #[cfg(not(windows))]
@@ -1249,6 +1291,41 @@ mod tests {
         assert_eq!(
             parse_processes(" ").expect("empty output is valid"),
             Vec::new()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_observer_output_refuses_a_stalled_self_owned_command() {
+        let powershell = system_path("WindowsPowerShell\\v1.0\\powershell.exe")
+            .expect("Windows PowerShell exists");
+        let mut command = Command::new(powershell);
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Sleep -Seconds 2",
+        ]);
+        assert!(bounded_command_output(command, Duration::from_millis(25)).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn bounded_observer_output_keeps_small_successful_output() {
+        let powershell = system_path("WindowsPowerShell\\v1.0\\powershell.exe")
+            .expect("Windows PowerShell exists");
+        let mut command = Command::new(powershell);
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "[Console]::Out.Write('[]')",
+        ]);
+        assert_eq!(
+            bounded_command_output(command, Duration::from_secs(5)).expect("small output succeeds"),
+            b"[]"
         );
     }
 
