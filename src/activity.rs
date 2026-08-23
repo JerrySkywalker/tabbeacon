@@ -43,6 +43,19 @@ const LEASE_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 /// and drops overdue frames rather than accumulating catch-up work.
 pub const TARGET_FRAME_INTERVAL_MS: u64 = 100;
 const FRAME_INTERVAL: Duration = Duration::from_millis(TARGET_FRAME_INTERVAL_MS);
+/// Private opt-in receipt used solely by the isolated MCP activity probe.
+/// It records timing/count facts after real worker-rendered bytes reach the
+/// isolated probe sink, never title text, Hook input, or any other user
+/// content.
+pub const ACTIVITY_WORKER_PROBE_RECEIPT_ENV: &str = "TABBEACON_ACTIVITY_WORKER_PROBE_RECEIPT";
+/// Required basename for the private activity probe receipt.
+pub const ACTIVITY_WORKER_PROBE_RECEIPT_FILE: &str = "activity-worker-probe.json";
+/// Required basename for the non-content worker-start marker used when a
+/// probe must distinguish a spawn failure from a missing rendered frame.
+pub const ACTIVITY_WORKER_PROBE_STARTED_FILE: &str = "activity-worker-probe-started.json";
+/// Required basename for the non-content process-entry marker used by the
+/// isolated MCP activity probe.
+pub const ACTIVITY_WORKER_PROBE_PROCESS_FILE: &str = "activity-worker-probe-process.json";
 // The worker renders at 100 ms, but cleanup is a bounded recovery path. A
 // five-second native presence poll avoids turning every active Codex tab into
 // a recurring PowerShell/CIM process under multi-session load.
@@ -60,6 +73,90 @@ const STATIC_ATTENTION_WORKER_POLL_MS: u64 = 5_000;
 const STATIC_ATTENTION_LEASE_TTL_MS: u64 = CLEANUP_OBSERVER_UNKNOWN_MAX_MS;
 const MAX_DIAGNOSTIC_LEASE_FILES: usize = 512;
 const MAX_DIAGNOSTIC_LEASE_BYTES: u64 = 128 * 1_024;
+
+/// One-process capture proving that the spawned worker rendered two distinct
+/// title frames. This is deliberately unavailable unless a bounded, isolated
+/// probe supplies an exact receipt path below its own `LOCALAPPDATA` root.
+struct ActivityWorkerProbeCapture {
+    path: PathBuf,
+    first_frame_sha256: Option<String>,
+    first_frame_at: Option<Instant>,
+    published: bool,
+}
+
+impl ActivityWorkerProbeCapture {
+    fn from_environment() -> Option<Self> {
+        let path = PathBuf::from(env::var_os(ACTIVITY_WORKER_PROBE_RECEIPT_ENV)?);
+        let local_app_data = env::var_os("LOCALAPPDATA")?;
+        if !(path.is_absolute()
+            && path
+                .file_name()
+                .is_some_and(|name| name == ACTIVITY_WORKER_PROBE_RECEIPT_FILE)
+            && path.parent() == Some(Path::new(&local_app_data)))
+        {
+            return None;
+        }
+        let started_path = path.with_file_name(ACTIVITY_WORKER_PROBE_STARTED_FILE);
+        if let Ok(file) = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(started_path)
+        {
+            let _ = serde_json::to_writer(
+                file,
+                &serde_json::json!({
+                    "schema": "tabbeacon-activity-worker-probe-v1",
+                    "worker_entered": true,
+                }),
+            );
+        }
+        Some(Self {
+            path,
+            first_frame_sha256: None,
+            first_frame_at: None,
+            published: false,
+        })
+    }
+
+    fn record_frame(&mut self, bytes: &[u8]) {
+        if self.published {
+            return;
+        }
+        let now = Instant::now();
+        let frame_sha256 = format!("{:x}", Sha256::digest(bytes));
+        let Some(first_frame_sha256) = self.first_frame_sha256.as_ref() else {
+            self.first_frame_sha256 = Some(frame_sha256);
+            self.first_frame_at = Some(now);
+            return;
+        };
+        if first_frame_sha256 == &frame_sha256 {
+            return;
+        }
+        let frame_interval_ms = self.first_frame_at.map_or(0, |first| {
+            u64::try_from(now.saturating_duration_since(first).as_millis()).unwrap_or(u64::MAX)
+        });
+        let Ok(file) = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)
+        else {
+            return;
+        };
+        if serde_json::to_writer(
+            file,
+            &serde_json::json!({
+                "schema": "tabbeacon-activity-worker-probe-v1",
+                "worker_started": true,
+                "distinct_spinner_frames": 2,
+                "frame_interval_ms": frame_interval_ms,
+            }),
+        )
+        .is_ok()
+        {
+            self.published = true;
+        }
+    }
+}
 
 /// Safe health classification for a read-only activity-lease inspection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -559,6 +656,13 @@ impl ActivityCoordinator {
         })
     }
 
+    /// Whether this runtime has the inherited terminal binding needed to own
+    /// a session-scoped activity worker.
+    #[must_use]
+    pub(crate) const fn system_enabled(&self) -> bool {
+        matches!(&self.execution, ActivityExecution::System { .. })
+    }
+
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)]
     pub(crate) fn reconcile(
@@ -788,6 +892,7 @@ impl ActivityCoordinator {
 
 /// Runs the hidden production worker command. Every failure is decoration-only.
 pub fn run_activity_worker_system(key_digest: &str, generation: u64, revision: u64) {
+    record_activity_worker_probe_process_entry();
     let Ok(state_root) = crate::repo::StableAliasRegistry::default_state_root() else {
         return;
     };
@@ -812,6 +917,33 @@ pub fn run_activity_worker_system(key_digest: &str, generation: u64, revision: u
         &owner_sha256,
         &terminal_binding_sha256,
     );
+}
+
+fn record_activity_worker_probe_process_entry() {
+    let Some(path) = activity_worker_probe_path(ACTIVITY_WORKER_PROBE_PROCESS_FILE) else {
+        return;
+    };
+    let Ok(file) = OpenOptions::new().write(true).create_new(true).open(path) else {
+        return;
+    };
+    let _ = serde_json::to_writer(
+        file,
+        &serde_json::json!({
+            "schema": "tabbeacon-activity-worker-probe-v1",
+            "worker_process_entered": true,
+        }),
+    );
+}
+
+fn activity_worker_probe_path(file_name: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(env::var_os(ACTIVITY_WORKER_PROBE_RECEIPT_ENV)?);
+    let local_app_data = env::var_os("LOCALAPPDATA")?;
+    (path.is_absolute()
+        && path
+            .file_name()
+            .is_some_and(|name| name == ACTIVITY_WORKER_PROBE_RECEIPT_FILE)
+        && path.parent() == Some(Path::new(&local_app_data)))
+    .then(|| path.with_file_name(file_name))
 }
 
 /// Clears only a terminal-ended worker's exact lease from a detached,
@@ -1361,7 +1493,8 @@ impl ActivityLeaseStore {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
             return;
         };
-        let Ok(mut console) = open_owned_console() else {
+        let mut probe = ActivityWorkerProbeCapture::from_environment();
+        let Ok(mut console) = open_owned_console(probe.is_some()) else {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
             return;
         };
@@ -1405,6 +1538,11 @@ impl ActivityLeaseStore {
             }) {
                 Ok(Some(())) => {}
                 Ok(None) | Err(_) => break,
+            }
+            if let Some(probe) = probe.as_mut() {
+                // The recorder runs only after the real owned-console write
+                // and flush succeeded. It stores no rendered title content.
+                probe.record_frame(&bytes);
             }
             frame_index = frame_index.saturating_add(1);
             if animated {
@@ -2172,8 +2310,33 @@ fn reject_symbolic_link(path: &Path) -> io::Result<()> {
     }
 }
 
-fn open_owned_console() -> io::Result<crate::console_output::OwnedConsole> {
-    crate::console_output::open_owned_console()
+fn open_owned_console(probe_enabled: bool) -> io::Result<Box<dyn Write>> {
+    if probe_enabled {
+        // A test process can inherit a syntactically open CONOUT$ handle that
+        // still rejects SetConsoleTitleW because its host is noninteractive.
+        // Route the isolated probe's already-rendered bytes to NUL instead:
+        // this proves the worker's real write/flush/cadence path without
+        // persisting a title or conflating test-host UI ownership with the
+        // MCP environment contract.
+        #[cfg(windows)]
+        {
+            return OpenOptions::new()
+                .write(true)
+                .open("NUL")
+                .map(|sink| Box::new(sink) as Box<dyn Write>);
+        }
+        #[cfg(not(windows))]
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "owned Windows console output is unavailable",
+            ));
+        }
+    }
+    match crate::console_output::open_owned_console() {
+        Ok(console) => Ok(Box::new(console)),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]

@@ -679,6 +679,9 @@ fn owned_current_windows_handler_count(hooks: &Value) -> usize {
 
 #[cfg(windows)]
 fn assert_real_hook_direct(executable: &Path, payload: &[u8], local_app_data: &Path) {
+    let _shell_guard = WINDOWS_HOOK_SHELL_SERIALIZER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let child = Command::new(executable)
         .args(["hook", "codex"])
         .env("LOCALAPPDATA", local_app_data)
@@ -711,6 +714,9 @@ fn assert_real_hook_with_local_state_within(
     timeout: Duration,
     stage: &str,
 ) -> Duration {
+    let _shell_guard = WINDOWS_HOOK_SHELL_SERIALIZER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let child = Command::new(executable)
         .args(["hook", "codex"])
         .env("LOCALAPPDATA", local_app_data)
@@ -1229,7 +1235,33 @@ fn codex_0149_owned_mcp_server_preserves_external_servers_and_refuses_name_colli
 }
 
 #[test]
-fn prerelease_mcp_manifest_without_tool_visibility_upgrades_exactly_once() {
+fn codex_0149_owned_mcp_server_forwards_only_the_terminal_session() {
+    let root = TestRoot::new("codex-0149-mcp-terminal-binding");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("0.149 owned MCP setup succeeds");
+
+    let config: DocumentMut = fs::read_to_string(codex_home.join("config.toml"))
+        .expect("installed config reads")
+        .parse()
+        .expect("installed config parses");
+    let env_vars = config["mcp_servers"]["tabbeacon-hook"]
+        .get("env_vars")
+        .and_then(Item::as_array)
+        .expect("owned MCP server declares its explicit environment allow-list")
+        .iter()
+        .map(|variable| variable.as_str())
+        .collect::<Option<Vec<_>>>();
+    assert_eq!(
+        env_vars,
+        Some(vec!["WT_SESSION"]),
+        "the owned MCP child forwards only the terminal session binding"
+    );
+}
+
+#[test]
+fn prerelease_mcp_manifest_without_visibility_or_terminal_forwarding_upgrades_exactly_once() {
     let root = TestRoot::new("codex-0149-mcp-visibility-upgrade");
     let codex_home = root.child("codex-home");
     write_hooks_fixture(&codex_home, "0.149.0-observed.json");
@@ -1237,15 +1269,22 @@ fn prerelease_mcp_manifest_without_tool_visibility_upgrades_exactly_once() {
     let manifest_path = root.child("state/integration-v1.json");
     let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
     integration.setup().expect("initial MCP setup succeeds");
+    let hooks_before = fs::read(codex_home.join("hooks.json")).expect("installed hooks read");
+    install_current_codex_trust_state(&codex_home);
 
     let mut prior_config = fs::read_to_string(&config_path)
         .expect("installed config reads")
         .parse::<DocumentMut>()
         .expect("installed config parses");
+    let trusted_state_before = prior_config["hooks"]["state"].to_string();
     prior_config["mcp_servers"]["tabbeacon-hook"]
         .as_table_like_mut()
         .expect("owned MCP server table")
         .remove("omit_tools_from");
+    prior_config["mcp_servers"]["tabbeacon-hook"]
+        .as_table_like_mut()
+        .expect("owned MCP server table")
+        .remove("env_vars");
     fs::write(&config_path, prior_config.to_string()).expect("pre-release config is written");
     let mut prior_manifest: Value =
         serde_json::from_slice(&fs::read(&manifest_path).expect("installed manifest reads"))
@@ -1254,11 +1293,22 @@ fn prerelease_mcp_manifest_without_tool_visibility_upgrades_exactly_once() {
         .as_object_mut()
         .expect("owned MCP manifest")
         .remove("omit_tools_from");
+    prior_manifest["mcp_server"]
+        .as_object_mut()
+        .expect("owned MCP manifest")
+        .remove("env_vars");
     fs::write(
         &manifest_path,
         serde_json::to_vec_pretty(&prior_manifest).expect("pre-release manifest serializes"),
     )
     .expect("pre-release manifest is written");
+
+    let stale_report = integration.doctor();
+    assert_eq!(
+        stale_report.check_status("mcp.terminal-binding"),
+        Some(DoctorStatus::Fail),
+        "a no-env_vars pre-release declaration must not present as healthy"
+    );
 
     assert_eq!(
         integration.setup().expect("pre-release MCP setup upgrades"),
@@ -1276,15 +1326,89 @@ fn prerelease_mcp_manifest_without_tool_visibility_upgrades_exactly_once() {
         .map(|value| value.as_str())
         .collect::<Option<Vec<_>>>();
     assert_eq!(omitted, Some(vec!["code_mode", "deferred", "direct"]));
+    let forwarded = upgraded["mcp_servers"]["tabbeacon-hook"]
+        .get("env_vars")
+        .and_then(Item::as_array)
+        .expect("upgraded MCP server forwards its terminal binding")
+        .iter()
+        .map(|value| value.as_str())
+        .collect::<Option<Vec<_>>>();
+    assert_eq!(forwarded, Some(vec!["WT_SESSION"]));
+    assert_eq!(
+        fs::read(codex_home.join("hooks.json")).expect("upgraded hooks read"),
+        hooks_before,
+        "MCP environment reconciliation must not rewrite exact Hook declarations"
+    );
+    assert_eq!(
+        upgraded["hooks"]["state"].to_string(),
+        trusted_state_before,
+        "MCP environment reconciliation must preserve existing Hook trust state"
+    );
     assert_eq!(
         integration.setup().expect("upgraded MCP setup is stable"),
         SetupOutcome::AlreadyInstalled
     );
 }
 
+#[test]
+fn prerelease_mcp_manifest_refuses_a_present_malformed_terminal_allow_list_without_writing() {
+    let root = TestRoot::new("codex-0149-mcp-terminal-binding-malformed");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let config_path = codex_home.join("config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("initial MCP setup succeeds");
+
+    let mut malformed_config: DocumentMut = fs::read_to_string(&config_path)
+        .expect("installed config reads")
+        .parse()
+        .expect("installed config parses");
+    malformed_config["mcp_servers"]["tabbeacon-hook"]
+        .as_table_like_mut()
+        .expect("owned MCP server table")
+        .insert("env_vars", value("WT_SESSION"));
+    fs::write(&config_path, malformed_config.to_string()).expect("malformed config is written");
+    let mut legacy_manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("installed manifest reads"))
+            .expect("installed manifest parses");
+    legacy_manifest["mcp_server"]
+        .as_object_mut()
+        .expect("owned MCP manifest")
+        .remove("env_vars");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&legacy_manifest).expect("legacy manifest serializes"),
+    )
+    .expect("legacy manifest is written");
+    let config_before = fs::read(&config_path).expect("malformed config reads");
+    let manifest_before = fs::read(&manifest_path).expect("legacy manifest reads");
+
+    assert!(matches!(
+        integration.setup(),
+        Err(CodexIntegrationError::ModifiedOwnedHook)
+    ));
+    assert_eq!(
+        fs::read(&config_path).expect("malformed config rereads"),
+        config_before,
+        "setup must not overwrite a present malformed allow-list"
+    );
+    assert_eq!(
+        fs::read(&manifest_path).expect("legacy manifest rereads"),
+        manifest_before,
+        "setup must not rewrite ownership evidence after rejecting the declaration"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn doctor_runtime_probe_executes_the_exact_0149_mcp_stdio_transport() {
+    // The probe starts a real stdio server and a real worker process. Keep its
+    // diagnostic window independent of the parallel test suite's real shell
+    // fixtures; lock acquisition is deliberately outside the measured proof.
+    let _shell_guard = WINDOWS_HOOK_SHELL_SERIALIZER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = TestRoot::new("codex-0149-mcp-runtime-probe");
     let codex_home = root.child("codex-home");
     write_hooks_fixture(&codex_home, "0.149.0-observed.json");
@@ -1307,13 +1431,15 @@ fn doctor_runtime_probe_executes_the_exact_0149_mcp_stdio_transport() {
     let report = integration.doctor_with_runtime_probe();
     assert_eq!(
         report.check_status("hooks.runtime-probe"),
-        Some(DoctorStatus::Pass)
+        Some(DoctorStatus::Pass),
+        "runtime probe: {:?}",
+        report.check("hooks.runtime-probe")
     );
-    assert!(
-        report
-            .check("hooks.runtime-probe")
-            .is_some_and(|check| { check.summary().contains("bounded direct stdio transport") })
-    );
+    assert!(report.check("hooks.runtime-probe").is_some_and(|check| {
+        check
+            .summary()
+            .contains("WT_SESSION forwarding, terminal-bound activity")
+    }));
     assert_eq!(
         fs::read(codex_home.join("hooks.json")).expect("hooks after probe read"),
         hooks_before

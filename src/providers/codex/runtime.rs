@@ -130,6 +130,13 @@ impl CodexHookRuntime {
         Ok(runtime)
     }
 
+    /// Whether the production runtime acquired a terminal-bound activity
+    /// coordinator. The MCP probe uses this only for its isolated receipt.
+    #[must_use]
+    pub(crate) const fn activity_system_enabled(&self) -> bool {
+        self.activity.system_enabled()
+    }
+
     /// Handles a hook using the platform state root and owned console output.
     ///
     /// This function is deliberately infallible to its caller. The internal
