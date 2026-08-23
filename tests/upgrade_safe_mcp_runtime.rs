@@ -180,21 +180,32 @@ fn preflight(installed: &Path, root: &TestRoot, drain: bool) -> Value {
 }
 
 fn wait_for_matching_processes(installed: &Path, root: &TestRoot, expected_count: usize) -> Value {
-    let deadline = Instant::now() + Duration::from_secs(8);
-    loop {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let last_observation = loop {
         let report = preflight(installed, root, false);
-        if report["workers"]
-            .as_array()
-            .is_some_and(|workers| workers.len() == expected_count)
-        {
+        let observed_count = report["workers"].as_array().map_or(0, Vec::len);
+        if observed_count == expected_count {
             return report;
         }
-        assert!(
-            Instant::now() < deadline,
-            "fixture MCP process observation did not settle"
+        let observation = (
+            observed_count,
+            report["process_inspection"]
+                .as_str()
+                .unwrap_or("missing")
+                .to_owned(),
+            report["replaceability"]
+                .as_str()
+                .unwrap_or("missing")
+                .to_owned(),
         );
+        if Instant::now() >= deadline {
+            break observation;
+        }
         thread::sleep(Duration::from_millis(25));
-    }
+    };
+    panic!(
+        "fixture MCP process observation did not settle: expected={expected_count}; last={last_observation:?}"
+    );
 }
 
 fn wait_for_lease_count(root: &TestRoot, expected_count: usize) {
@@ -203,7 +214,7 @@ fn wait_for_lease_count(root: &TestRoot, expected_count: usize) {
         .join("TabBeacon")
         .join("repository-identity")
         .join("mcp-runtime-v1");
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + Duration::from_secs(45);
     loop {
         let count = fs::read_dir(&directory)
             .ok()

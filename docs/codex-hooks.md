@@ -381,9 +381,12 @@ process command lines, Hook payloads, or native session IDs.
 
 `tabbeacon upgrade-preflight --drain` is an explicit local operation. Before a
 stop, TabBeacon rechecks that the exact process uses the inspected executable,
-has the internal activity-worker arguments, and matches a current valid local
-lease. Unowned or ambiguous processes are preserved. It never targets Codex,
-Windows Terminal, PowerShell, Cargo, or another `tabbeacon` executable path.
+has either the internal activity-worker arguments and a current worker lease,
+or a manifest-authorized MCP runtime lease bound to its PID, creation time,
+canonical path digest, and executable digest. Unowned or ambiguous processes
+are preserved. It never targets Codex, Windows Terminal, PowerShell, Cargo,
+or another `tabbeacon` executable path. MCP process observation carries no raw
+command line or raw executable path in the report.
 After a requested drain leaves no matching process, it performs the final
 replacement-access probe without writing bytes to the target.
 
