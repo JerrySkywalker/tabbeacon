@@ -33,7 +33,8 @@ use crate::{
 
 use super::{
     CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookProfile, MCP_HOOK_SERVER_NAME,
-    MCP_HOOK_TOOL_NAME, MCP_RUNTIME_PROBE_RECEIPT_ENV, hook_input_template,
+    MCP_HOOK_TOOL_NAME, hook_input_template,
+    runtime::{SESSION_END_PROBE_RECEIPT_ENV, SESSION_END_PROBE_RECEIPT_FILE},
 };
 
 const MANIFEST_SCHEMA: &str = "tabbeacon-codex-integration-v1";
@@ -41,12 +42,12 @@ const MANIFEST_FILE: &str = "integration-v1.json";
 const LOCK_FILE: &str = "integration.lock";
 const OWNED_DESCRIPTION: &str = "TabBeacon user-global lifecycle hooks";
 const RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
-// The MCP probe owns one fresh stdio server plus an immutable worker image and
-// waits for two 100 ms frames before proving Stop/EOF. This is diagnostic
-// setup work, not the synchronous normal-event performance budget.
+// The MCP probe owns one fresh stdio server plus an immutable worker image,
+// then models Codex 0.149 terminating that server before transport close. It
+// proves the independent command SessionEnd cleanup in the same isolated state.
+// This is diagnostic setup work, not the synchronous normal-event budget.
 const MCP_ACTIVITY_RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_PROBE_EVENT: &str = "UserPromptSubmit";
-const MCP_RUNTIME_PROBE_RECEIPT_FILE: &str = "mcp-runtime-probe.json";
 const HOOK_EVENTS: [&str; 11] = [
     "PreToolUse",
     "PermissionRequest",
@@ -928,7 +929,45 @@ impl CodexIntegration {
     #[must_use]
     pub fn doctor_with_runtime_probe(&self) -> CodexDoctorReport {
         let mut report = self.doctor();
-        report.replace_check(self.runtime_execution_probe(&report));
+        let hybrid_transport = report
+            .hook_profile()
+            .is_some_and(CodexHookProfile::uses_mcp_hook_transport);
+        let runtime_check = self.runtime_execution_probe(&report);
+        let hybrid_proven = runtime_check.status() == DoctorStatus::Pass
+            && runtime_check
+                .summary()
+                .contains("MCP_EVENT_TRANSPORT_PROVEN")
+            && runtime_check
+                .summary()
+                .contains("REAL_SESSION_END_CLEANUP_PROVEN");
+        report.replace_check(runtime_check);
+        if hybrid_transport {
+            // Keep the two claims independently machine-readable. The bounded
+            // probe deliberately terminates the MCP child before stdin EOF,
+            // then invokes the separately declared SessionEnd command.
+            report.replace_check(if hybrid_proven {
+                pass(
+                    "hooks.mcp-event-transport",
+                    "MCP_EVENT_TRANSPORT_PROVEN: the content-minimal MCP stdio path delivered normal lifecycle events without a command shell",
+                )
+            } else {
+                fail(
+                    "hooks.mcp-event-transport",
+                    "MCP_EVENT_TRANSPORT_UNPROVEN: see hooks.runtime-probe; artificial EOF is not real-session cleanup proof",
+                )
+            });
+            report.replace_check(if hybrid_proven {
+                pass(
+                    "hooks.session-end-cleanup",
+                    "REAL_SESSION_END_CLEANUP_PROVEN: an independent synchronous SessionEnd command ran after terminate-before-EOF and reset terminal cleanup state",
+                )
+            } else {
+                fail(
+                    "hooks.session-end-cleanup",
+                    "REAL_SESSION_END_CLEANUP_UNPROVEN: see hooks.runtime-probe; EOF remains fallback only",
+                )
+            });
+        }
         report
     }
 
@@ -974,7 +1013,18 @@ impl CodexIntegration {
             );
         }
         let outcome = if profile.uses_mcp_hook_transport() {
-            run_windows_mcp_hook_runtime_probe(&self.tabbeacon_executable)
+            let Some(command) = desired
+                .iter()
+                .find(|hook| hook.event == "SessionEnd")
+                .and_then(|hook| hook.group.pointer("/hooks/0/commandWindows"))
+                .and_then(Value::as_str)
+            else {
+                return fail(
+                    "hooks.runtime-probe",
+                    "RUNTIME_PROBE_BLOCKED: the hybrid SessionEnd command declaration is unavailable",
+                );
+            };
+            run_windows_mcp_hook_runtime_probe(&self.tabbeacon_executable, command)
         } else {
             let Some(command) = desired
                 .iter()
@@ -998,7 +1048,7 @@ impl CodexIntegration {
             RuntimeProbeOutcome::McpActivityPass { frame_interval_ms } => pass(
                 "hooks.runtime-probe",
                 format!(
-                    "MCP_RUNTIME_ACTIVITY_PASS: bounded direct stdio transport proved WT_SESSION forwarding, terminal-bound activity, two spinner frames at {frame_interval_ms} ms, Stop supersession, and EOF cleanup"
+                    "MCP_EVENT_TRANSPORT_PROVEN: direct stdio transport proved WT_SESSION forwarding, Working/Stop/result-ready transitions, and terminal-bound activity with two spinner frames at {frame_interval_ms} ms; REAL_SESSION_END_CLEANUP_PROVEN: Codex 0.149 terminate-before-EOF model then used the independent synchronous command reset"
                 ),
             ),
             RuntimeProbeOutcome::TimedOut => fail(
@@ -1219,8 +1269,26 @@ impl CodexIntegration {
             )?;
             let mut changed = config_changed;
             if manifest.hooks != desired_hooks {
-                remove_owned_hooks(&mut hooks, &manifest.hooks)?;
-                append_owned_hooks(&mut hooks, &desired_hooks)?;
+                if is_legacy_mcp_session_end_upgrade(&manifest, &desired_hooks) {
+                    // Codex 0.149's first MCP transport deliberately omitted
+                    // SessionEnd because that event is not admitted as an
+                    // mcp_tool Hook. Keep those ten exact declarations (and
+                    // therefore their existing Codex trust hashes) in place;
+                    // this upgrade adds only the independently reviewable
+                    // command cleanup boundary.
+                    let session_end = desired_hooks
+                        .iter()
+                        .filter(|declaration| declaration.event == "SessionEnd")
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    if session_end.len() != 1 {
+                        return Err(CodexIntegrationError::OwnershipManifest);
+                    }
+                    append_owned_hooks(&mut hooks, &session_end)?;
+                } else {
+                    remove_owned_hooks(&mut hooks, &manifest.hooks)?;
+                    append_owned_hooks(&mut hooks, &desired_hooks)?;
+                }
                 manifest.hooks = desired_hooks;
                 manifest.executable.clone_from(&self.tabbeacon_executable);
                 changed = true;
@@ -1554,8 +1622,8 @@ impl CodexIntegration {
     fn manifest_has_known_owned_declarations(manifest: &IntegrationManifest) -> bool {
         match &manifest.mcp_server {
             Some(mcp_server) => {
-                owned_mcp_tool_hooks_for_manifest(&manifest.executable).is_ok_and(|expected| {
-                    expected == manifest.hooks
+                owned_mcp_hook_sets_for_manifest(&manifest.executable).is_ok_and(|expected| {
+                    expected.into_iter().any(|hooks| hooks == manifest.hooks)
                         && desired_mcp_server_for_manifest(&manifest.executable).is_ok_and(
                             |expected| {
                                 expected.as_ref().is_some_and(|expected| {
@@ -1924,7 +1992,14 @@ fn desired_hooks(
     profile: CodexHookProfile,
 ) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
     if profile.uses_mcp_hook_transport() {
-        owned_mcp_tool_hooks(executable, profile)
+        let mut hooks = owned_mcp_tool_hooks(executable, profile)?;
+        hooks.extend(owned_command_hooks_for_events(
+            executable,
+            &["SessionEnd"],
+            profile.timeout().declaration_timeout_seconds(),
+            false,
+        )?);
+        Ok(hooks)
     } else {
         owned_command_hooks(
             executable,
@@ -2002,14 +2077,49 @@ fn owned_mcp_tool_hooks(
         .collect())
 }
 
-fn owned_mcp_tool_hooks_for_manifest(
+fn owned_mcp_hook_sets_for_manifest(
     executable: &Path,
-) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
-    owned_mcp_tool_hooks(executable, mcp_transport_profile()?)
+) -> Result<Vec<Vec<OwnedHook>>, CodexIntegrationError> {
+    let profile = mcp_transport_profile()?;
+    let legacy = owned_mcp_tool_hooks(executable, profile)?;
+    let hybrid = desired_hooks(executable, profile)?;
+    Ok(vec![legacy, hybrid])
+}
+
+/// Recognizes the one admitted migration from the first 0.149 transport to the
+/// hybrid transport. The previous ten MCP declarations are complete and exact;
+/// only the command `SessionEnd` boundary is newly introduced and therefore
+/// must become the sole new Codex trust-review item.
+fn is_legacy_mcp_session_end_upgrade(
+    manifest: &IntegrationManifest,
+    desired: &[OwnedHook],
+) -> bool {
+    if manifest.mcp_server.is_none() {
+        return false;
+    }
+    let Ok(sets) = owned_mcp_hook_sets_for_manifest(&manifest.executable) else {
+        return false;
+    };
+    let Some((legacy, hybrid)) = sets
+        .split_first()
+        .and_then(|(legacy, rest)| rest.first().map(|hybrid| (legacy, hybrid)))
+    else {
+        return false;
+    };
+    manifest.hooks == *legacy && desired == hybrid
 }
 
 fn owned_command_hooks(
     executable: &Path,
+    timeout_seconds: u8,
+    asynchronous: bool,
+) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
+    owned_command_hooks_for_events(executable, &HOOK_EVENTS, timeout_seconds, asynchronous)
+}
+
+fn owned_command_hooks_for_events(
+    executable: &Path,
+    events: &[&str],
     timeout_seconds: u8,
     asynchronous: bool,
 ) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
@@ -2030,8 +2140,9 @@ fn owned_command_hooks(
     // and may use the faster direct shape for a shell-neutral executable path.
     let command = powershell_encoded_windows_hook_command(executable);
     let windows_command = windows_hook_command_for_default_comspec(executable);
-    Ok(HOOK_EVENTS
-        .into_iter()
+    Ok(events
+        .iter()
+        .copied()
         .map(|event| OwnedHook {
             event: event.to_owned(),
             group: json!({
@@ -2233,14 +2344,17 @@ fn run_windows_hook_runtime_probe(_command_line: &str) -> RuntimeProbeOutcome {
 /// Executes one real MCP Hook transport conversation without invoking a
 /// command shell. The temporary state root is isolated from Owner state and
 /// the Codex configuration/trust files are only read by the caller's
-/// preflight. EOF deliberately proves the server's cleanup boundary too.
+/// preflight. It models Codex process termination before transport close and
+/// proves cleanup through the independent SessionEnd command declaration.
 #[cfg(windows)]
 #[allow(clippy::too_many_lines)] // One bounded probe owns its child lifecycle, protocol exchange, and receipt check.
-fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome {
+fn run_windows_mcp_hook_runtime_probe(
+    executable: &Path,
+    session_end_command: &str,
+) -> RuntimeProbeOutcome {
     let Ok(probe_root) = create_runtime_probe_root() else {
         return RuntimeProbeOutcome::Unavailable;
     };
-    let receipt = probe_root.join(MCP_RUNTIME_PROBE_RECEIPT_FILE);
     let activity_receipt = probe_root.join(ACTIVITY_WORKER_PROBE_RECEIPT_FILE);
     let activity_process = probe_root.join(ACTIVITY_WORKER_PROBE_PROCESS_FILE);
     let activity_started = probe_root.join(ACTIVITY_WORKER_PROBE_STARTED_FILE);
@@ -2270,7 +2384,6 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
         .arg("__mcp-hook-stdio-v1")
         .current_dir(&probe_root)
         .env("LOCALAPPDATA", &probe_root)
-        .env(MCP_RUNTIME_PROBE_RECEIPT_ENV, &receipt)
         .env(ACTIVITY_WORKER_PROBE_RECEIPT_ENV, &activity_receipt)
         .env("WT_SESSION", terminal_binding)
         .stdin(Stdio::piped())
@@ -2356,6 +2469,20 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
             }
         }
     });
+    let renewed_call = json!({
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "tools/call",
+        "params": {
+            "name": MCP_HOOK_TOOL_NAME,
+            "arguments": {
+                "hook_event_name": RUNTIME_PROBE_EVENT,
+                "session_id": "00000000-0000-0000-0000-000000000052",
+                "turn_id": "00000000-0000-0000-0000-000000000053",
+                "cwd": probe_root,
+            }
+        }
+    });
     let writes_succeeded = [initialize, start, call].iter().all(|request| {
         serde_json::to_writer(&mut stdin, request)
             .and_then(|()| stdin.write_all(b"\n").map_err(serde_json::Error::io))
@@ -2378,7 +2505,7 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
         }
     }
     // Keep a deterministic closeout budget. A missing worker receipt must not
-    // consume the entire probe window and masquerade as an EOF timeout.
+    // consume the entire probe window and masquerade as an MCP event failure.
     let animation_deadline = deadline
         .checked_sub(Duration::from_secs(1))
         .unwrap_or_else(Instant::now);
@@ -2391,13 +2518,15 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
         }
         thread::sleep(Duration::from_millis(5));
     };
-    let stop_write_succeeded = writes_succeeded
-        && serde_json::to_writer(&mut stdin, &stop)
+    // Prove the normal MCP Stop/result-ready path independently, then open a
+    // new active generation so the command SessionEnd must revoke a live
+    // activity-worker lease rather than only clear an already-stopped state.
+    let stop_and_renew_succeeded = [stop, renewed_call].iter().all(|request| {
+        serde_json::to_writer(&mut stdin, request)
             .and_then(|()| stdin.write_all(b"\n").map_err(serde_json::Error::io))
             .is_ok()
-        && stdin.flush().is_ok();
-    drop(stdin);
-    while Instant::now() < deadline && !completed_calls.contains(&4) {
+    }) && stdin.flush().is_ok();
+    while Instant::now() < deadline && !completed_calls.is_superset(&BTreeSet::from([4, 5])) {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let Ok(line) = receiver.recv_timeout(remaining) else {
             break;
@@ -2405,36 +2534,35 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
         if let Ok(response) = serde_json::from_str::<Value>(&line)
             && response.pointer("/result/isError") == Some(&Value::Bool(false))
             && let Some(id) = response.get("id").and_then(Value::as_i64)
-            && matches!(id, 2..=4)
+            && matches!(id, 4 | 5)
         {
             completed_calls.insert(id);
         }
     }
-    let exited_successfully = loop {
+    // Model Codex 0.149's LocalStdioServerTransport::close ordering exactly:
+    // the server process is terminated before its transport is closed. Keep
+    // our stdin handle open during termination so this cannot be mistaken for
+    // a successful EOF cleanup. EOF remains a best-effort fallback, not the
+    // authoritative SessionEnd boundary.
+    let mcp_terminated_before_eof = if terminate_runtime_probe_tree(child.id()) {
+        true
+    } else {
+        child.kill().is_ok()
+    };
+    drop(stdin);
+    let mcp_terminated = loop {
         match child.try_wait() {
-            Ok(Some(status)) => break Some(status.success()),
+            Ok(Some(_)) => break true,
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
             Ok(None) => {
                 if !terminate_runtime_probe_tree(child.id()) {
                     let _ = child.kill();
                 }
-                break None;
+                break false;
             }
-            Err(_) => break Some(false),
+            Err(_) => break false,
         }
     };
-    let receipt_proves_runtime = fs::read(&receipt)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .is_some_and(|receipt| {
-            receipt.get("schema") == Some(&json!("tabbeacon-mcp-runtime-probe-v1"))
-                && receipt.get("applied_calls") == Some(&json!(3))
-                && receipt.get("activity_coordinator_system") == Some(&json!(true))
-                && receipt.get("terminal_binding_forwarded") == Some(&json!(true))
-                && receipt.get("working_event_applied") == Some(&json!(true))
-                && receipt.get("stop_result_ready_applied") == Some(&json!(true))
-                && receipt.get("eof_cleanup") == Some(&json!("applied"))
-        });
     let animation_frame_interval_ms = animation_receipt
         .as_ref()
         .and_then(|receipt| receipt.get("frame_interval_ms"))
@@ -2461,6 +2589,61 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
             receipt.get("schema") == Some(&json!("tabbeacon-activity-worker-probe-v1"))
                 && receipt.get("worker_process_entered") == Some(&json!(true))
         });
+    let session_end_receipt = probe_root.join(SESSION_END_PROBE_RECEIPT_FILE);
+    let session_end_payload = json!({
+        "hook_event_name": "SessionEnd",
+        "session_id": "00000000-0000-0000-0000-000000000052",
+        "cwd": probe_root,
+    })
+    .to_string();
+    let comspec = env::var_os("COMSPEC")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "cmd.exe".into());
+    let mut session_end = Command::new(comspec);
+    session_end.arg("/C");
+    session_end.raw_arg(format!(r#""{session_end_command}""#));
+    session_end
+        .current_dir(&probe_root)
+        .env("LOCALAPPDATA", &probe_root)
+        .env("WT_SESSION", terminal_binding)
+        .env(SESSION_END_PROBE_RECEIPT_ENV, &session_end_receipt)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut session_end = session_end.spawn().ok();
+    let session_end_write_succeeded = session_end.as_mut().is_some_and(|child| {
+        child.stdin.take().is_some_and(|mut stdin| {
+            stdin.write_all(session_end_payload.as_bytes()).is_ok() && stdin.flush().is_ok()
+        })
+    });
+    let session_end_exited = session_end.as_mut().and_then(|child| {
+        let deadline = Instant::now() + RUNTIME_PROBE_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status.success()),
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+                Ok(None) => {
+                    if !terminate_runtime_probe_tree(child.id()) {
+                        let _ = child.kill();
+                    }
+                    break None;
+                }
+                Err(_) => break Some(false),
+            }
+        }
+    });
+    let session_end_cleanup_proven = fs::read(&session_end_receipt)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|receipt| {
+            receipt.get("schema") == Some(&json!("tabbeacon-session-end-probe-v1"))
+                && receipt.get("generation_retired") == Some(&json!(true))
+                && receipt.get("root_anchor_retired") == Some(&json!(true))
+                && receipt.get("activity_lease_revoked") == Some(&json!(true))
+                && receipt.get("progress_reset") == Some(&json!(true))
+                && receipt.get("frame_color_reset") == Some(&json!(true))
+                && receipt.get("windows_terminal_indexed_reset") == Some(&json!(true))
+        });
     let _ = fs::remove_dir_all(&probe_root);
     if !activity_worker_process_started {
         return RuntimeProbeOutcome::ActivityWorkerProcessMissing;
@@ -2473,27 +2656,39 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
     }
     match (
         writes_succeeded,
-        stop_write_succeeded,
-        completed_calls == BTreeSet::from([2, 3, 4]),
-        exited_successfully,
-        receipt_proves_runtime,
+        stop_and_renew_succeeded,
+        completed_calls == BTreeSet::from([2, 3, 4, 5]),
+        mcp_terminated_before_eof,
+        mcp_terminated,
+        session_end_write_succeeded,
+        session_end_exited,
+        session_end_cleanup_proven,
         animation_proves_runtime,
     ) {
-        (_, _, _, None, _, _) => RuntimeProbeOutcome::TimedOut,
-        (true, true, true, Some(true), true, true) => RuntimeProbeOutcome::McpActivityPass {
-            frame_interval_ms: animation_frame_interval_ms.unwrap_or_default(),
-        },
-        (false, _, _, _, _, _)
-        | (_, false, _, _, _, _)
-        | (_, _, false, _, _, _)
-        | (_, _, _, _, false, _)
-        | (_, _, _, _, _, false) => RuntimeProbeOutcome::MissingMarker,
-        _ => RuntimeProbeOutcome::NonZero,
+        (_, _, _, _, false, _, _, _, _) | (_, _, _, _, _, _, None, _, _) => {
+            RuntimeProbeOutcome::TimedOut
+        }
+        (true, true, true, true, true, true, Some(true), true, true) => {
+            RuntimeProbeOutcome::McpActivityPass {
+                frame_interval_ms: animation_frame_interval_ms.unwrap_or_default(),
+            }
+        }
+        (false, _, _, _, _, _, _, _, _)
+        | (_, false, _, _, _, _, _, _, _)
+        | (_, _, false, _, _, _, _, _, _)
+        | (_, _, _, false, _, _, _, _, _)
+        | (_, _, _, _, _, false, _, _, _)
+        | (_, _, _, _, _, _, Some(false), _, _)
+        | (_, _, _, _, _, _, _, false, _)
+        | (_, _, _, _, _, _, _, _, false) => RuntimeProbeOutcome::MissingMarker,
     }
 }
 
 #[cfg(not(windows))]
-fn run_windows_mcp_hook_runtime_probe(_executable: &Path) -> RuntimeProbeOutcome {
+fn run_windows_mcp_hook_runtime_probe(
+    _executable: &Path,
+    _session_end_command: &str,
+) -> RuntimeProbeOutcome {
     RuntimeProbeOutcome::Unavailable
 }
 
