@@ -65,10 +65,10 @@ TabBeacon has two first-class installation channels:
   cargo install tabbeacon --locked
   ```
 
-  To install this release exactly:
+  To install v0.5.2 exactly after its public release:
 
   ```powershell
-  cargo install tabbeacon --version 0.5.1 --locked
+  cargo install tabbeacon --version 0.5.2 --locked
   ```
 
 TabBeacon requires Rust 1.97.1. If your default Rust toolchain is older, use a

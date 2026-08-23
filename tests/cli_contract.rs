@@ -84,6 +84,43 @@ fn isolated_command_with_codex(root: &TestRoot, codex_directory: &Path) -> Comma
     command
 }
 
+fn git(cwd: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never")
+        .output()
+        .expect("local Git executable starts");
+    assert!(
+        output.status.success(),
+        "local Git failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn init_repository(path: &Path) {
+    fs::create_dir_all(path).expect("repository directory is created");
+    git(path, &["init", "--quiet"]);
+    fs::write(path.join("README.md"), "portable alias test repository\n")
+        .expect("repository fixture is written");
+    git(path, &["add", "README.md"]);
+    git(
+        path,
+        &[
+            "-c",
+            "user.name=TabBeacon Test",
+            "-c",
+            "user.email=tabbeacon@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    );
+}
+
 fn command_with_stdin(mut command: Command, input: &[u8]) -> std::process::Output {
     command
         .stdin(Stdio::piped())
@@ -738,7 +775,8 @@ fn alias_set_reset_and_collision_remain_device_local_and_generic() {
 fn export_import_is_preview_first_portable_and_non_tty_apply_is_explicit() {
     let source = TestRoot::new("export-source");
     let target = TestRoot::new("import-target");
-    let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let repository = source.child("repository");
+    init_repository(&repository);
     let export_path = source.child("portable-settings.json");
 
     let config = isolated_command(&source)

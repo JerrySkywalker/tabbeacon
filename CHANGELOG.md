@@ -2,34 +2,33 @@
 
 All notable changes to TabBeacon will be documented here.
 
-## Unreleased
+## [0.5.2] - 2026-08-23
 
 ### Added
 
-- Added the v0.5.2 High-Performance Codex Runtime: phase-attributed isolated
-  Hook measurements, a Root Workspace Fast Anchor Path with no Git subprocess
-  after anchoring, and a release-mode one-second regression gate.
+- Added the high-performance Codex 0.149 runtime: a Root Workspace Fast
+  Anchor Path keeps normal post-anchor events at zero Git subprocesses, with
+  a release-mode one-second regression gate.
+- Added the Codex 0.149 hybrid transport: ten normal lifecycle Hooks use the
+  session-scoped TabBeacon stdio MCP server, which alone receives
+  `WT_SESSION`; only `SessionEnd` remains a command Hook.
+- Added authoritative `SessionEnd` cleanup for activity, Windows Terminal
+  progress, and owned frame/tab color. EOF cleanup remains fallback-only.
 
 ### Changed
 
-- Ordinary Windows `commandWindows` Hooks now use one quoted direct declaration
-  for safe executable paths under Codex's default COMSPEC runner. The generic
-  command—and every hostile path—retains the proven encoded PowerShell envelope.
-  Both remain synchronous with a one-second timeout.
-- Activity cleanup observers retain exact process-identity admission but use a
-  bounded native presence check between periodic rechecks, preventing active
-  multi-session tabs from repeatedly cold-starting PowerShell.
-
-- Added content-minimal, no-mutation Agy pre-admission qualification fixtures,
-  version-drift diagnostics, and an Owner-present G64 runbook. Agy remains
-  explicitly unadmitted and unavailable for production use.
-- Added preview-first, ownership-safe Codex orphaned-Hook repair. It restores
-  only proven-absent exact groups, preserves backup-proven third-party and MCP
-  Hook groups, detects concurrent target drift, leaves trust manual-only, and
-  refuses lookalike, replacement, redirected, or modified declarations.
-- Added separate machine-readable Codex mutation-authority and installed-runtime
-  continuity diagnostics, plus bounded source/protocol delta audit receipts for
-  future exact profile admission.
+- Normal events keep real spinner animation and result-ready transitions
+  without starting a command shell; the synchronous `SessionEnd` cleanup Hook
+  starts one command process per session.
+- The source-audited Codex 0.147 command fallback remains supported. The
+  direct Windows declaration and generic hostile-path declaration both retain
+  synchronous one-second bounds.
+- Strengthened owned-Hook repair and runtime continuity: exact owned groups
+  are repaired only when proven absent, while third-party Hooks and MCP
+  servers remain preserved. `/hooks` trust remains manual-only; existing MCP
+  trust hashes are preserved and the new `SessionEnd` definition requires
+  Owner review.
+- Agy has no admitted production provider in this release.
 
 ## [0.5.1] - 2026-08-21
 
