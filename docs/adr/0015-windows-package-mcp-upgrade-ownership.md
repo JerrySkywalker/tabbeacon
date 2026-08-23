@@ -41,9 +41,11 @@ can leave a stale record, but stale or malformed state is only a warning and
 never drain authority.
 
 Lease registration is deliberately deferred behind immediate stdio-server
-readiness. It is a one-shot, per-MCP task that blocks on server shutdown after
-registration; it is neither a machine-global daemon nor normal-event polling.
-Until the proof appears, upgrade preflight preserves the child as ambiguous.
+readiness. It is a bounded, one-shot, per-MCP task; clean server exit settles
+an already-created exact lease synchronously and prevents an in-flight task
+from registering after EOF. It is neither a machine-global daemon nor
+normal-event polling. Until the proof appears, upgrade preflight preserves the
+child as ambiguous.
 
 `upgrade-preflight` considers an MCP process `PROVED_TABBEACON_MCP` only when
 all of these agree during the same bounded observation:
@@ -57,25 +59,30 @@ all of these agree during the same bounded observation:
    target; and
 6. there is exactly one valid lease for that PID.
 
-Windows observation carries only a transient canonical-image digest, PID, and
-creation time; it never reads a raw process command line. The manifest-bound
-lease supplies the internal-entrypoint proof. The command, image name, or
-Codex parent name alone never grants ownership.
+MCP diagnostics carry only a transient canonical-image digest, PID, and
+creation time. To preserve the pre-existing activity-worker proof, Windows
+may read a bounded command line transiently for that separate worker classifier;
+it is never persisted, serialized, or exposed in Human output, and it never
+contributes MCP ownership. The manifest-bound lease supplies the
+internal-entrypoint proof. The command, image name, or Codex parent name alone
+never grants ownership.
 The resulting diagnostic distinguishes `proved_tabbeacon_mcp`,
 `unowned_or_ambiguous`, `stale_or_invalid_lease`, and
 `process_identity_mismatch`.
 
 The default preflight remains read-only. `--drain` re-reads process and MCP
-lease state immediately before every mutation. It opens the exact PID and
-compares the expected creation time on that same process handle before calling
-the non-tree `Kill()` operation. A vanished process is a successful no-op;
-PID reuse, a new executable, an unknown lease, or metadata uncertainty causes
-refusal. TabBeacon never kills a Codex parent, a process tree, a name-matched
-`tabbeacon.exe`, or any third-party MCP server.
+lease state immediately before every mutation, and recomputes the package
+canonical-path/content identity both during and immediately before that
+recheck; the two identities must agree. It opens the exact PID and compares
+the expected creation time on that same process handle before calling the
+non-tree `Kill()` operation. A vanished process is a successful no-op; PID
+reuse, target replacement/reparse drift, an unknown lease, or metadata
+uncertainty causes refusal. TabBeacon never kills a Codex parent, a process
+tree, a name-matched `tabbeacon.exe`, or any third-party MCP server.
 
 No daemon, recurring WMI polling, or normal-event shell work is introduced.
-The only Windows process-time query occurs once during MCP lease registration;
-ordinary already-connected MCP Hook events retain their existing hot path.
+The only registration-time Windows process query is bounded; ordinary
+already-connected MCP Hook events retain their existing hot path.
 
 ## Official-channel source proof
 
