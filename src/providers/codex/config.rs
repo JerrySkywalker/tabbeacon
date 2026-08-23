@@ -3335,15 +3335,17 @@ fn owned_mcp_server_is_exact(
                 .map(|item| item.as_str().map(ToOwned::to_owned))
                 .collect::<Option<Vec<_>>>()
         });
-    let env_vars = server
-        .get("env_vars")
-        .and_then(Item::as_array)
-        .and_then(|variables| {
+    // Preserve the distinction between an absent legacy field and a present
+    // malformed one. The former is the exact v0.5.2 migration predecessor;
+    // the latter is an external modification that setup must never overwrite.
+    let env_vars = server.get("env_vars").map(|variables| {
+        variables.as_array().and_then(|variables| {
             variables
                 .iter()
                 .map(|item| item.as_str().map(ToOwned::to_owned))
                 .collect::<Option<Vec<_>>>()
-        });
+        })
+    });
     let omit_tools_from = server
         .get("omit_tools_from")
         .and_then(Item::as_array)
@@ -3359,7 +3361,8 @@ fn owned_mcp_server_is_exact(
     let env_vars_are_exact = if declaration.env_vars.is_empty() {
         env_vars.is_none()
     } else {
-        env_vars.as_deref() == Some(declaration.env_vars.as_slice())
+        env_vars.as_ref().and_then(|variables| variables.as_deref())
+            == Some(declaration.env_vars.as_slice())
     };
     // A short-lived pre-release manifest can legitimately lack the new
     // visibility declaration. Recognize that exact older form so setup can

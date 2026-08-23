@@ -1344,6 +1344,56 @@ fn prerelease_mcp_manifest_without_visibility_or_terminal_forwarding_upgrades_ex
     );
 }
 
+#[test]
+fn prerelease_mcp_manifest_refuses_a_present_malformed_terminal_allow_list_without_writing() {
+    let root = TestRoot::new("codex-0149-mcp-terminal-binding-malformed");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let config_path = codex_home.join("config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("initial MCP setup succeeds");
+
+    let mut malformed_config: DocumentMut = fs::read_to_string(&config_path)
+        .expect("installed config reads")
+        .parse()
+        .expect("installed config parses");
+    malformed_config["mcp_servers"]["tabbeacon-hook"]
+        .as_table_like_mut()
+        .expect("owned MCP server table")
+        .insert("env_vars", value("WT_SESSION"));
+    fs::write(&config_path, malformed_config.to_string()).expect("malformed config is written");
+    let mut legacy_manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("installed manifest reads"))
+            .expect("installed manifest parses");
+    legacy_manifest["mcp_server"]
+        .as_object_mut()
+        .expect("owned MCP manifest")
+        .remove("env_vars");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&legacy_manifest).expect("legacy manifest serializes"),
+    )
+    .expect("legacy manifest is written");
+    let config_before = fs::read(&config_path).expect("malformed config reads");
+    let manifest_before = fs::read(&manifest_path).expect("legacy manifest reads");
+
+    assert!(matches!(
+        integration.setup(),
+        Err(CodexIntegrationError::ModifiedOwnedHook)
+    ));
+    assert_eq!(
+        fs::read(&config_path).expect("malformed config rereads"),
+        config_before,
+        "setup must not overwrite a present malformed allow-list"
+    );
+    assert_eq!(
+        fs::read(&manifest_path).expect("legacy manifest rereads"),
+        manifest_before,
+        "setup must not rewrite ownership evidence after rejecting the declaration"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn doctor_runtime_probe_executes_the_exact_0149_mcp_stdio_transport() {
