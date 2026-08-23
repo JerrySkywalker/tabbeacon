@@ -1027,7 +1027,7 @@ fn source_audited_profiles_are_explicit_and_future_versions_are_not_assumed() {
     assert_eq!(profile.wire_shape().trust_state_field(), "trusted_hash");
     assert_eq!(
         profile_149.reconciliation_note(),
-        "owned-mcp-tool-hooks;session-eof-cleanup;external-mcp-preserved"
+        "10-owned-mcp-tool-hooks;1-owned-session-end-command;session-eof-fallback;external-mcp-preserved"
     );
     assert_eq!(
         CodexCompatibilityRegistry::admitted_profiles(),
@@ -1065,7 +1065,44 @@ fn observed_codex_0149_shape_reconciles_only_exact_owned_declarations() {
         SetupOutcome::InstalledTrustReviewRequired
     );
     let trusted_keys = install_current_codex_trust_state(&codex_home);
-    assert_eq!(trusted_keys.len(), ADMITTED_HOOK_EVENTS.len() - 1);
+    assert_eq!(trusted_keys.len(), ADMITTED_HOOK_EVENTS.len());
+
+    let hooks: Value = serde_json::from_slice(
+        &fs::read(codex_home.join("hooks.json")).expect("installed hooks read"),
+    )
+    .expect("installed hooks parse");
+    let mut mcp_owned = 0_usize;
+    let mut session_end_command = 0_usize;
+    for (event, groups) in hooks["hooks"].as_object().expect("hooks object is present") {
+        for group in groups.as_array().expect("event groups are arrays") {
+            let handler = &group["hooks"][0];
+            if handler["type"] == "mcp_tool"
+                && handler["server"] == "tabbeacon-hook"
+                && handler["tool"] == "tabbeacon_hook_event"
+            {
+                mcp_owned += 1;
+            }
+            if event == "SessionEnd"
+                && handler["type"] == "command"
+                && handler["commandWindows"]
+                    .as_str()
+                    .is_some_and(is_current_windows_hook_command)
+            {
+                session_end_command += 1;
+                assert_eq!(handler["timeout"], 1);
+                assert_eq!(handler["async"], false);
+                let command_windows = handler["commandWindows"]
+                    .as_str()
+                    .expect("SessionEnd commandWindows is a string");
+                assert!(
+                    is_current_windows_hook_command(command_windows),
+                    "SessionEnd commandWindows must stay shell-neutral: {command_windows}"
+                );
+            }
+        }
+    }
+    assert_eq!(mcp_owned, ADMITTED_HOOK_EVENTS.len() - 1);
+    assert_eq!(session_end_command, 1);
 
     let report = integration.doctor();
     assert_eq!(report.compatibility_state().label(), "supported");
@@ -1097,6 +1134,108 @@ fn observed_codex_0149_shape_reconciles_only_exact_owned_declarations() {
         hooks["hooks"]["Stop"][0]["hooks"][0]["statusMessage"],
         "fixture external stop hook"
     );
+}
+
+#[test]
+fn codex_0149_session_end_upgrade_preserves_ten_mcp_groups_and_trust() {
+    let root = TestRoot::new("codex-0149-session-end-upgrade");
+    let codex_home = root.child("codex-home");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("hybrid setup installs");
+
+    // Reconstruct the admitted 0.149 predecessor: ten exact mcp_tool hooks,
+    // its MCP server/WT_SESSION binding, and no command SessionEnd boundary.
+    // This fixture is intentionally created after the hybrid installer has
+    // established the owned manifest so both forms share the exact same
+    // executable and server declaration.
+    let hooks_path = codex_home.join("hooks.json");
+    let manifest_path = root.child("state/integration-v1.json");
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("hooks read")).expect("hooks parse");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest read"))
+            .expect("manifest parse");
+    let legacy_mcp = manifest["hooks"]
+        .as_array()
+        .expect("manifest hooks are an array")
+        .iter()
+        .filter(|declaration| declaration["event"] != "SessionEnd")
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(legacy_mcp.len(), ADMITTED_HOOK_EVENTS.len() - 1);
+    let session_end = manifest["hooks"]
+        .as_array()
+        .expect("manifest hooks are an array")
+        .iter()
+        .find(|declaration| declaration["event"] == "SessionEnd")
+        .cloned()
+        .expect("hybrid manifest has one SessionEnd declaration");
+    let session_end_group = session_end["group"].clone();
+    hooks["hooks"]["SessionEnd"]
+        .as_array_mut()
+        .expect("SessionEnd groups are an array")
+        .retain(|group| group != &session_end_group);
+    manifest["hooks"] = Value::Array(legacy_mcp.clone());
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("legacy hooks serialize"),
+    )
+    .expect("legacy hooks write");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("legacy manifest serializes"),
+    )
+    .expect("legacy manifest write");
+
+    let trusted_keys = install_current_codex_trust_state(&codex_home);
+    assert_eq!(trusted_keys.len(), ADMITTED_HOOK_EVENTS.len() - 1);
+    let trust_before = fs::read(codex_home.join("config.toml")).expect("trusted config read");
+
+    assert_eq!(
+        integration.setup().expect("legacy 0.149 upgrade is safe"),
+        SetupOutcome::Upgraded
+    );
+    assert_eq!(
+        fs::read(codex_home.join("config.toml")).expect("post-upgrade config read"),
+        trust_before,
+        "the ten existing MCP trust entries are byte-for-byte preserved"
+    );
+
+    let upgraded_hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("upgraded hooks read"))
+            .expect("upgraded hooks parse");
+    for declaration in &legacy_mcp {
+        let event = declaration["event"].as_str().expect("legacy event name");
+        let group = &declaration["group"];
+        assert!(
+            upgraded_hooks["hooks"][event]
+                .as_array()
+                .is_some_and(|groups| groups.contains(group)),
+            "the pre-existing {event} MCP group is preserved"
+        );
+    }
+    let session_end_groups = upgraded_hooks["hooks"]["SessionEnd"]
+        .as_array()
+        .expect("SessionEnd groups are an array");
+    let owned_session_end = session_end_groups
+        .iter()
+        .filter(|group| group["hooks"][0]["type"] == "command")
+        .filter(|group| {
+            group["hooks"][0]["commandWindows"]
+                .as_str()
+                .is_some_and(is_current_windows_hook_command)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(owned_session_end.len(), 1);
+    assert_eq!(owned_session_end[0]["hooks"][0]["timeout"], 1);
+    assert_eq!(owned_session_end[0]["hooks"][0]["async"], false);
+
+    let report = integration.doctor();
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.trust"
+            && check.status() == DoctorStatus::Warning
+            && check.summary().contains("TRUST_REVIEW_REQUIRED: 1")
+    }));
 }
 
 #[test]
@@ -1402,7 +1541,7 @@ fn prerelease_mcp_manifest_refuses_a_present_malformed_terminal_allow_list_witho
 
 #[cfg(windows)]
 #[test]
-fn doctor_runtime_probe_executes_the_exact_0149_mcp_stdio_transport() {
+fn doctor_runtime_probe_models_codex_0149_terminate_before_eof_and_proves_session_end_cleanup() {
     // The probe starts a real stdio server and a real worker process. Keep its
     // diagnostic window independent of the parallel test suite's real shell
     // fixtures; lock acquisition is deliberately outside the measured proof.
@@ -1436,10 +1575,24 @@ fn doctor_runtime_probe_executes_the_exact_0149_mcp_stdio_transport() {
         report.check("hooks.runtime-probe")
     );
     assert!(report.check("hooks.runtime-probe").is_some_and(|check| {
-        check
-            .summary()
-            .contains("WT_SESSION forwarding, terminal-bound activity")
+        check.summary().contains("MCP_EVENT_TRANSPORT_PROVEN")
+            && check
+                .summary()
+                .contains("CODEX_0149_TERMINATE_BEFORE_EOF_REPRODUCED")
+            && check.summary().contains("REAL_SESSION_END_CLEANUP_PROVEN")
     }));
+    assert_eq!(
+        report.check_status("hooks.mcp-event-transport"),
+        Some(DoctorStatus::Pass)
+    );
+    assert_eq!(
+        report.check_status("hooks.codex-terminate-before-eof"),
+        Some(DoctorStatus::Pass)
+    );
+    assert_eq!(
+        report.check_status("hooks.session-end-cleanup"),
+        Some(DoctorStatus::Pass)
+    );
     assert_eq!(
         fs::read(codex_home.join("hooks.json")).expect("hooks after probe read"),
         hooks_before
@@ -1507,7 +1660,7 @@ fn repair_v2_preserves_original_baseline_third_party_groups_and_is_idempotent() 
         .repair(false, None)
         .expect("repair preview is safe");
     assert_eq!(preview.disposition, CodexRepairDisposition::ReadyToApply);
-    assert_eq!(preview.missing_declarations, ADMITTED_HOOK_EVENTS.len() - 1);
+    assert_eq!(preview.missing_declarations, ADMITTED_HOOK_EVENTS.len());
     assert_eq!(preview.schema_version, 2);
     assert_eq!(preview.third_party_groups_preserved, 2);
     assert_eq!(preview.postinstall_third_party_groups_preserved, 0);
@@ -1533,10 +1686,7 @@ fn repair_v2_preserves_original_baseline_third_party_groups_and_is_idempotent() 
         repaired.disposition,
         CodexRepairDisposition::RepairedTrustReviewRequired
     );
-    assert_eq!(
-        repaired.missing_declarations,
-        ADMITTED_HOOK_EVENTS.len() - 1
-    );
+    assert_eq!(repaired.missing_declarations, ADMITTED_HOOK_EVENTS.len());
     assert_eq!(repaired.third_party_groups_preserved, 2);
     assert_eq!(repaired.postinstall_third_party_groups_preserved, 0);
     assert!(repaired.manual_hook_trust_review_required);

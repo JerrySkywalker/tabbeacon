@@ -50,8 +50,9 @@ changes, exact backups and an ownership manifest are written below:
 Setup is idempotent. It refuses a TabBeacon-like declaration that it cannot
 prove it owns.
 
-Codex 0.149 uses a different owned transport: one named, session-scoped stdio
-MCP server and ten content-minimal `mcp_tool` lifecycle declarations. Its tool
+Codex 0.149 uses a hybrid owned transport: one named, session-scoped stdio MCP
+server, ten content-minimal normal-event `mcp_tool` lifecycle declarations,
+and exactly one TabBeacon-owned `SessionEnd` command declaration. Its tool
 is explicitly omitted from Codex's direct, deferred, and Code Mode model-facing
 surfaces. The owned server declares exactly `env_vars = ["WT_SESSION"]`.
 Codex clears a local stdio child's inherited environment, so this one
@@ -61,8 +62,10 @@ events are calls over the already-connected MCP channel, so they do not start
 Pwsh7, Windows PowerShell, or cmd. The templates carry only event, session,
 turn, CWD, source, and explicit subagent identity fields—never prompt,
 assistant, or tool content. Codex does not admit a `SessionEnd` MCP Hook;
-TabBeacon releases its in-memory binding on MCP EOF and retains bounded stale
-state recovery.
+therefore its synchronous, fail-open command Hook has `timeout = 1` and
+`async = false`. That command is the authoritative cleanup boundary. MCP EOF
+can release only the server's in-memory binding as a best-effort fallback and
+retains bounded stale-state recovery; it is never real SessionEnd proof.
 
 The source-audited 0.147 profile retains the command fallback. For a shell-safe,
 whitespace-free native `.exe` path it emits a compact direct `commandWindows`
@@ -77,14 +80,31 @@ MCP declaration must forward exactly `WT_SESSION` before presentation can be
 healthy. `tabbeacon doctor --probe-hook-runtime` runs one manifest-exact
 representative declaration in isolated temporary `LOCALAPPDATA`. Its 0.149
 path mirrors the cleared Codex local-stdio environment, adds only the owned
-terminal binding, then proves MCP initialize, Working activity, two distinct
-spinner writes at the worker cadence, Stop supersession, and EOF cleanup. The
-activity proof has a five-second diagnostic bound; the normal Hook timeout
-remains one second. For 0.147 it uses the 900 ms COMSPEC command fallback.
+terminal binding, then separately proves MCP initialize, Working activity, two
+distinct spinner writes at the worker cadence, and Stop supersession without a
+command shell. It next models Codex 0.149 terminating the MCP child before
+transport EOF and independently invokes the exact SessionEnd command
+declaration. That second proof requires generation and root-anchor retirement,
+activity-lease revocation, Windows Terminal progress clear, and indexed
+`OSC 104;264` frame-color reset. The report exposes
+`MCP_EVENT_TRANSPORT_PROVEN` and `REAL_SESSION_END_CLEANUP_PROVEN` separately;
+an artificial EOF can establish only `EOF_CLEANUP_CAPABLE`. The activity proof
+has a ten-second diagnostic bound; the terminate-before-EOF phase is bounded
+to one second and the isolated cleanup diagnostic to five seconds. The normal
+Hook timeout and the SessionEnd command timeout remain one second. For 0.147
+it uses the 900 ms COMSPEC command fallback.
 The probe records no prompt, tool, assistant, title, or environment content
 and never modifies Codex configuration or Hook trust.
-An Owner upgrading an existing declaration must still review the generated Hook
-in `/hooks` and approve trust there; TabBeacon never changes Hook trust itself.
+
+For an exact-head 0.149 transport measurement, use
+`scripts/measure-codex-mcp-hybrid-runtime.ps1`. It launches normal events
+directly through the owned stdio server (zero shell processes), measures an
+eight-session warm concurrency distribution, and separately measures the one
+SessionEnd command after the terminate-before-EOF model in isolated state.
+An Owner upgrading the original 0.149 MCP integration preserves the exact ten
+MCP groups and their existing trust hashes. Only the newly introduced
+SessionEnd command needs review in `/hooks`; TabBeacon never changes Hook trust
+itself.
 
 ## Orphaned owned-Hook repair
 
@@ -131,7 +151,8 @@ repair still requires the Owner to launch `codex`, review the definitions in
 
 When upgrading to a binary at a new path, run `tabbeacon setup codex` from
 that new binary. TabBeacon migrates the exact manifest-proven transport (eleven
-command groups for 0.147, or ten MCP groups plus its owned MCP server for 0.149)
+command groups for 0.147, or ten MCP groups plus one SessionEnd command and its
+owned MCP server for 0.149)
 and updates its manifest atomically; it never adopts a lookalike hook,
 an unsafe recorded executable path, or a different Codex configuration root.
 
@@ -412,11 +433,13 @@ become authoritative failed/warning/interrupted states.
 ## Fail-open behavior
 
 The admitted transports are synchronous. The 0.149 MCP handler declares the
-source-audited one-second timeout and has no `async` field; its server always
-returns a non-error empty tool result when normalization, state, or rendering
-degrades. The 0.147 command fallback remains `async=false` with a one-second
-timeout. Neither transport returns a Codex block decision for TabBeacon
-failures; decoration may be lost, but Codex continues.
+source-audited one-second timeout and has no `async` field; normal lifecycle
+events remain on that connected MCP channel with no shell process. Its sole
+SessionEnd command Hook is `async=false` with a one-second timeout and runs one
+fail-open command process per session. The 0.147 command fallback remains
+`async=false` with a one-second timeout. Neither transport returns a Codex
+block decision for TabBeacon failures; decoration may be lost, but Codex
+continues.
 
 ## Exact compatibility registry
 

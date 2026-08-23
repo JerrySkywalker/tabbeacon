@@ -22,7 +22,8 @@ use super::{CodexHookEvent, CodexHookRuntime, HookDispatchOutcome};
 
 pub const MCP_HOOK_SERVER_NAME: &str = "tabbeacon-hook";
 pub const MCP_HOOK_TOOL_NAME: &str = "tabbeacon_hook_event";
-/// Private opt-in receipt used only by Doctor's isolated stdio runtime probe.
+/// Private opt-in receipt used only by the isolated EOF-fallback capability
+/// regression. It never proves that Codex delivered a real `SessionEnd`.
 pub const MCP_RUNTIME_PROBE_RECEIPT_ENV: &str = "TABBEACON_MCP_RUNTIME_PROBE_RECEIPT";
 const MAX_ID_BYTES: usize = 512;
 const MAX_CWD_BYTES: usize = 32 * 1024;
@@ -113,6 +114,7 @@ impl McpRuntimeProbeCapture {
                 "working_event_applied": self.facts.contains(&McpRuntimeProbeFact::WorkingEventApplied),
                 "stop_result_ready_applied": self.facts.contains(&McpRuntimeProbeFact::StopResultReadyApplied),
                 "eof_cleanup": "applied",
+                "eof_cleanup_capable": true,
             }),
         );
     }
@@ -121,8 +123,9 @@ impl McpRuntimeProbeCapture {
 /// Returns the exact content-minimal template for one admitted MCP Hook event.
 ///
 /// `SessionEnd` intentionally has no template: Codex 0.149 does not admit an
-/// `mcp_tool` `SessionEnd` hook. The server releases its in-memory session binding
-/// on stdio EOF and the existing bounded stale-state recovery remains in force.
+/// `mcp_tool` `SessionEnd` hook. The TabBeacon-owned command declaration is the
+/// authoritative cleanup boundary. The server releases its in-memory binding on
+/// stdio EOF only as a best-effort fallback, with bounded stale-state recovery.
 #[must_use]
 pub fn hook_input_template(event: CodexHookEvent) -> Option<Value> {
     let common = |mut input: Map<String, Value>| {
@@ -169,7 +172,8 @@ pub fn hook_input_template(event: CodexHookEvent) -> Option<Value> {
 }
 
 /// A one-session MCP Hook receiver. It has no global listener or cross-session
-/// state: Codex owns the stdio process and EOF is its lifetime boundary.
+/// state: Codex owns the stdio process. EOF can release only this server's
+/// in-memory binding; it is not authoritative `SessionEnd` delivery.
 #[derive(Debug)]
 pub struct McpHookSession {
     runtime: CodexHookRuntime,
@@ -230,9 +234,10 @@ impl McpHookSession {
         self.runtime.dispatch_to(&payload, observed_at, sink)
     }
 
-    /// Applies the internal equivalent of a `SessionEnd` only after the owning
-    /// Codex MCP stdio connection reaches EOF. No `SessionEnd` `mcp_tool` hook is
-    /// declared for Codex 0.149.
+    /// Applies a best-effort internal `SessionEnd` after the owning Codex MCP
+    /// stdio connection reaches EOF. No `SessionEnd` `mcp_tool` hook is declared
+    /// for Codex 0.149, so this fallback must never be treated as authoritative
+    /// cleanup proof.
     #[must_use]
     pub fn cleanup_on_eof_to(
         &mut self,
@@ -402,6 +407,8 @@ fn serve_stdio_inner<R: BufRead, W: Write>(
             writer.flush()?;
         }
     }
+    // Codex may terminate this child before it closes the transport. This EOF
+    // path is intentionally a fallback, never the real SessionEnd authority.
     let eof_outcome = if let Some(session) = session.as_mut() {
         if let Some(console) = console.as_mut() {
             session.cleanup_on_eof_to(SystemTime::now(), console)
@@ -694,7 +701,7 @@ mod tests {
     }
 
     #[test]
-    fn eof_cleanup_closes_the_bound_root_without_a_session_end_hook() {
+    fn eof_cleanup_is_capable_but_not_authoritative_session_end() {
         let root = TestRoot::new();
         let runtime = CodexHookRuntime::new(root.path().join("state"), true);
         let mut session = McpHookSession::new(runtime);
@@ -848,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn probe_receipt_requires_terminal_bound_activity_stop_and_eof_cleanup() {
+    fn eof_fallback_probe_receipt_marks_capability_not_real_session_end_proof() {
         let root = TestRoot::new();
         let receipt = root.path().join("mcp-runtime-probe.json");
         let mut capture = McpRuntimeProbeCapture {
@@ -874,5 +881,6 @@ mod tests {
         assert_eq!(receipt["working_event_applied"], true);
         assert_eq!(receipt["stop_result_ready_applied"], true);
         assert_eq!(receipt["eof_cleanup"], "applied");
+        assert_eq!(receipt["eof_cleanup_capable"], true);
     }
 }

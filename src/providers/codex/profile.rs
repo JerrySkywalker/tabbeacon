@@ -450,8 +450,9 @@ const RUST_V0_147_0_PROFILE: CodexHookProfile = CodexHookProfile {
 
 // The source audit found an added `mcp_tool` handler family, a session-owned
 // prewarmed runtime, and an explicit rejection of `SessionEnd` mcp_tool
-// handlers. TabBeacon uses its own named, stdio MCP server only on this exact
-// profile; all third-party MCP servers remain outside its ownership boundary.
+// handlers. TabBeacon therefore retains MCP only for normal events and uses
+// one owned command Hook for SessionEnd. All third-party MCP servers remain
+// outside its ownership boundary.
 const RUST_V0_149_0_PROFILE: CodexHookProfile = CodexHookProfile {
     id: "codex-hooks-rust-v0.149.0",
     version: (0, 149, 0),
@@ -475,7 +476,7 @@ const RUST_V0_149_0_PROFILE: CodexHookProfile = CodexHookProfile {
         TerminalTitleOwnershipSemantics::CodexDefaultWithExplicitTabBeaconDelegation,
     unknown_event_policy: UnknownEventPolicy::IgnoreFailOpen,
     wire_shape: RUST_COMMAND_HOOK_WIRE_V1,
-    reconciliation_note: "owned-mcp-tool-hooks;session-eof-cleanup;external-mcp-preserved",
+    reconciliation_note: "10-owned-mcp-tool-hooks;1-owned-session-end-command;session-eof-fallback;external-mcp-preserved",
 };
 
 const ADMITTED_PROFILES: [CodexHookProfile; 2] = [RUST_V0_147_0_PROFILE, RUST_V0_149_0_PROFILE];

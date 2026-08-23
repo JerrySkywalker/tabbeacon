@@ -25,6 +25,13 @@ use super::{
     generation::{CodexGenerationStore, GenerationAdmission, RequestedHandling},
 };
 
+/// Private receipt path used only by the isolated hybrid `SessionEnd` probe.
+/// The receipt contains fixed cleanup facts rather than terminal/title bytes or
+/// Hook content.
+pub(crate) const SESSION_END_PROBE_RECEIPT_ENV: &str = "TABBEACON_SESSION_END_PROBE_RECEIPT";
+/// Required basename for the isolated hybrid `SessionEnd` receipt.
+pub(crate) const SESSION_END_PROBE_RECEIPT_FILE: &str = "session-end-probe.json";
+
 /// Fail-open result for one internal hook invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookDispatchOutcome {
@@ -144,7 +151,8 @@ impl CodexHookRuntime {
     #[must_use]
     pub fn dispatch_system(raw: &[u8]) -> HookDispatchOutcome {
         let mut timing = HookTimingCapture::from_environment();
-        let outcome = Self::dispatch_system_with_timing(raw, &mut timing);
+        let mut session_end_probe = SessionEndProbeCapture::from_environment();
+        let outcome = Self::dispatch_system_with_timing(raw, &mut timing, &mut session_end_probe);
         timing.emit(outcome);
         outcome
     }
@@ -152,6 +160,7 @@ impl CodexHookRuntime {
     fn dispatch_system_with_timing(
         raw: &[u8],
         timing: &mut HookTimingCapture,
+        session_end_probe: &mut Option<SessionEndProbeCapture>,
     ) -> HookDispatchOutcome {
         let started = Instant::now();
         let Ok(state_root) = StableAliasRegistry::default_state_root() else {
@@ -175,7 +184,13 @@ impl CodexHookRuntime {
             return HookDispatchOutcome::DegradedPresentationOutput;
         };
         timing.record("console_open", started);
-        runtime.dispatch_to_with_timing(raw, SystemTime::now(), &mut console, timing)
+        runtime.dispatch_to_with_timing(
+            raw,
+            SystemTime::now(),
+            &mut console,
+            timing,
+            session_end_probe,
+        )
     }
 
     /// Handles one hook with deterministic time and an injected byte sink.
@@ -192,7 +207,8 @@ impl CodexHookRuntime {
         sink: &mut impl Write,
     ) -> HookDispatchOutcome {
         let mut timing = HookTimingCapture::disabled();
-        self.dispatch_to_with_timing(raw, observed_at, sink, &mut timing)
+        let mut session_end_probe = None;
+        self.dispatch_to_with_timing(raw, observed_at, sink, &mut timing, &mut session_end_probe)
     }
 
     #[allow(clippy::too_many_lines)]
@@ -202,6 +218,7 @@ impl CodexHookRuntime {
         observed_at: SystemTime,
         sink: &mut impl Write,
         timing: &mut HookTimingCapture,
+        session_end_probe: &mut Option<SessionEndProbeCapture>,
     ) -> HookDispatchOutcome {
         let observed_at_unix_seconds = observed_at
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -341,6 +358,11 @@ impl CodexHookRuntime {
             return HookDispatchOutcome::DegradedPresentationOutput;
         }
         timing.record("terminal_write", started);
+        if normalized.context().event() == super::CodexHookEvent::SessionEnd
+            && let Some(probe) = session_end_probe.as_mut()
+        {
+            probe.record(&bytes, matches!(render, ActivityRender::Full));
+        }
         HookDispatchOutcome::Applied
     }
 
@@ -487,6 +509,50 @@ struct HookTimingCapture {
     started: Instant,
     phases: Vec<(&'static str, u128)>,
     destination: Option<PathBuf>,
+}
+
+/// Opt-in content-free receipt for the independent command `SessionEnd` path.
+/// It is deliberately unavailable to ordinary Hook execution and records no
+/// title text, OSC payload, path, session identity, or Hook input.
+struct SessionEndProbeCapture {
+    destination: PathBuf,
+}
+
+impl SessionEndProbeCapture {
+    fn from_environment() -> Option<Self> {
+        let destination = PathBuf::from(std::env::var_os(SESSION_END_PROBE_RECEIPT_ENV)?);
+        let local_app_data = std::env::var_os("LOCALAPPDATA")?;
+        (destination.is_absolute()
+            && destination
+                .file_name()
+                .is_some_and(|name| name == SESSION_END_PROBE_RECEIPT_FILE)
+            && destination.parent() == Some(std::path::Path::new(&local_app_data)))
+        .then_some(Self { destination })
+    }
+
+    fn record(&self, bytes: &[u8], activity_lease_revoked: bool) {
+        const PROGRESS_CLEAR: &[u8] = b"\x1b]9;4;0;0\x1b\\";
+        const FRAME_COLOR_RESET: &[u8] = b"\x1b]104;264\x1b\\";
+        let Ok(file) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.destination)
+        else {
+            return;
+        };
+        let _ = serde_json::to_writer(
+            file,
+            &serde_json::json!({
+                "schema": "tabbeacon-session-end-probe-v1",
+                "generation_retired": true,
+                "root_anchor_retired": true,
+                "activity_lease_revoked": activity_lease_revoked,
+                "progress_reset": bytes.windows(PROGRESS_CLEAR.len()).any(|window| window == PROGRESS_CLEAR),
+                "frame_color_reset": bytes.windows(FRAME_COLOR_RESET.len()).any(|window| window == FRAME_COLOR_RESET),
+                "windows_terminal_indexed_reset": bytes.windows(FRAME_COLOR_RESET.len()).any(|window| window == FRAME_COLOR_RESET),
+            }),
+        );
+    }
 }
 
 impl HookTimingCapture {
