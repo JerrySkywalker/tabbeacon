@@ -971,6 +971,7 @@ impl CodexIntegration {
         report
     }
 
+    #[allow(clippy::too_many_lines)] // Ordered preflight and exact transport proof remain one diagnostic contract.
     fn runtime_execution_probe(&self, report: &CodexDoctorReport) -> DoctorCheck {
         if report.check_status("codex.runtime-continuity") != Some(DoctorStatus::Pass) {
             return fail(
@@ -2345,7 +2346,7 @@ fn run_windows_hook_runtime_probe(_command_line: &str) -> RuntimeProbeOutcome {
 /// command shell. The temporary state root is isolated from Owner state and
 /// the Codex configuration/trust files are only read by the caller's
 /// preflight. It models Codex process termination before transport close and
-/// proves cleanup through the independent SessionEnd command declaration.
+/// proves cleanup through the independent `SessionEnd` command declaration.
 #[cfg(windows)]
 #[allow(clippy::too_many_lines)] // One bounded probe owns its child lifecycle, protocol exchange, and receipt check.
 fn run_windows_mcp_hook_runtime_probe(
