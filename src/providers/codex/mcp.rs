@@ -6,6 +6,7 @@
 //! rejected before it can reach the product runtime or persistent state.
 
 use std::{
+    collections::BTreeSet,
     env, fs,
     io::{self, BufRead, BufReader, BufWriter, Write},
     path::{Path, PathBuf},
@@ -30,12 +31,28 @@ const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 struct McpRuntimeProbeCapture {
     path: PathBuf,
     applied_calls: usize,
+    facts: BTreeSet<McpRuntimeProbeFact>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum McpRuntimeProbeFact {
+    ActivityCoordinatorSystem,
+    TerminalBindingForwarded,
+    WorkingEventApplied,
+    StopResultReadyApplied,
 }
 
 impl McpRuntimeProbeCapture {
-    fn from_environment() -> Option<Self> {
+    fn from_environment(activity_coordinator_system: bool) -> Option<Self> {
         let path = PathBuf::from(env::var_os(MCP_RUNTIME_PROBE_RECEIPT_ENV)?);
         let local_app_data = env::var_os("LOCALAPPDATA")?;
+        let mut facts = BTreeSet::new();
+        if activity_coordinator_system {
+            facts.insert(McpRuntimeProbeFact::ActivityCoordinatorSystem);
+        }
+        if env::var_os("WT_SESSION").is_some_and(|value| !value.is_empty()) {
+            facts.insert(McpRuntimeProbeFact::TerminalBindingForwarded);
+        }
         (path.is_absolute()
             && path
                 .file_name()
@@ -44,17 +61,39 @@ impl McpRuntimeProbeCapture {
         .then_some(Self {
             path,
             applied_calls: 0,
+            facts,
         })
     }
 
-    fn record_dispatch(&mut self, outcome: HookDispatchOutcome) {
+    fn record_dispatch(&mut self, event: Option<&str>, outcome: HookDispatchOutcome) {
         if outcome == HookDispatchOutcome::Applied {
             self.applied_calls += 1;
+            if event == Some("UserPromptSubmit") {
+                self.facts.insert(McpRuntimeProbeFact::WorkingEventApplied);
+            }
+            if event == Some("Stop") {
+                self.facts
+                    .insert(McpRuntimeProbeFact::StopResultReadyApplied);
+            }
         }
     }
 
     fn finish(self, eof_outcome: Option<HookDispatchOutcome>) {
-        if self.applied_calls != 2 || eof_outcome != Some(HookDispatchOutcome::Applied) {
+        if self.applied_calls != 3
+            || !self
+                .facts
+                .contains(&McpRuntimeProbeFact::ActivityCoordinatorSystem)
+            || !self
+                .facts
+                .contains(&McpRuntimeProbeFact::TerminalBindingForwarded)
+            || !self
+                .facts
+                .contains(&McpRuntimeProbeFact::WorkingEventApplied)
+            || !self
+                .facts
+                .contains(&McpRuntimeProbeFact::StopResultReadyApplied)
+            || eof_outcome != Some(HookDispatchOutcome::Applied)
+        {
             return;
         }
         let Ok(file) = fs::OpenOptions::new()
@@ -69,6 +108,10 @@ impl McpRuntimeProbeCapture {
             &json!({
                 "schema": "tabbeacon-mcp-runtime-probe-v1",
                 "applied_calls": self.applied_calls,
+                "activity_coordinator_system": self.facts.contains(&McpRuntimeProbeFact::ActivityCoordinatorSystem),
+                "terminal_binding_forwarded": self.facts.contains(&McpRuntimeProbeFact::TerminalBindingForwarded),
+                "working_event_applied": self.facts.contains(&McpRuntimeProbeFact::WorkingEventApplied),
+                "stop_result_ready_applied": self.facts.contains(&McpRuntimeProbeFact::StopResultReadyApplied),
                 "eof_cleanup": "applied",
             }),
         );
@@ -163,6 +206,10 @@ impl McpHookSession {
             runtime,
             binding: None,
         }
+    }
+
+    fn activity_system_enabled(&self) -> bool {
+        self.runtime.activity_system_enabled()
     }
 
     /// Dispatches one MCP `tools/call` argument object through the unchanged
@@ -338,7 +385,11 @@ fn serve_stdio_inner<R: BufRead, W: Write>(
     mut session: Option<McpHookSession>,
     mut console: Option<crate::console_output::OwnedConsole>,
 ) -> io::Result<()> {
-    let mut probe = McpRuntimeProbeCapture::from_environment();
+    let mut probe = McpRuntimeProbeCapture::from_environment(
+        session
+            .as_ref()
+            .is_some_and(McpHookSession::activity_system_enabled),
+    );
     let mut message = Vec::with_capacity(MAX_MESSAGE_BYTES);
     while let Some(message_is_bounded) = read_bounded_message(&mut reader, &mut message)? {
         if message_is_bounded
@@ -427,6 +478,11 @@ fn response_for_request(
                 })
                 .and_then(|params| params.get("arguments"))
                 .cloned();
+            let event = arguments
+                .as_ref()
+                .and_then(|arguments| arguments.get("hook_event_name"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
             let outcome = if let (Some(session), Some(arguments)) = (session, arguments) {
                 if let Some(console) = console {
                     Some(session.dispatch_to(&arguments, SystemTime::now(), console))
@@ -437,7 +493,7 @@ fn response_for_request(
                 None
             };
             if let (Some(probe), Some(outcome)) = (probe.as_mut(), outcome) {
-                probe.record_dispatch(outcome);
+                probe.record_dispatch(event.as_deref(), outcome);
             }
             json!({ "content": [], "isError": false })
         }
@@ -792,22 +848,31 @@ mod tests {
     }
 
     #[test]
-    fn probe_receipt_requires_two_applied_dispatches_and_eof_cleanup() {
+    fn probe_receipt_requires_terminal_bound_activity_stop_and_eof_cleanup() {
         let root = TestRoot::new();
         let receipt = root.path().join("mcp-runtime-probe.json");
         let mut capture = McpRuntimeProbeCapture {
             path: receipt.clone(),
             applied_calls: 0,
+            facts: BTreeSet::from([
+                McpRuntimeProbeFact::ActivityCoordinatorSystem,
+                McpRuntimeProbeFact::TerminalBindingForwarded,
+            ]),
         };
-        capture.record_dispatch(HookDispatchOutcome::Applied);
-        capture.record_dispatch(HookDispatchOutcome::Applied);
+        capture.record_dispatch(Some("SessionStart"), HookDispatchOutcome::Applied);
+        capture.record_dispatch(Some("UserPromptSubmit"), HookDispatchOutcome::Applied);
+        capture.record_dispatch(Some("Stop"), HookDispatchOutcome::Applied);
         capture.finish(Some(HookDispatchOutcome::Applied));
 
         let receipt: Value = serde_json::from_slice(
             &fs::read(receipt).expect("complete runtime proof writes a receipt"),
         )
         .expect("receipt is valid json");
-        assert_eq!(receipt["applied_calls"], 2);
+        assert_eq!(receipt["applied_calls"], 3);
+        assert_eq!(receipt["activity_coordinator_system"], true);
+        assert_eq!(receipt["terminal_binding_forwarded"], true);
+        assert_eq!(receipt["working_event_applied"], true);
+        assert_eq!(receipt["stop_result_ready_applied"], true);
         assert_eq!(receipt["eof_cleanup"], "applied");
     }
 }

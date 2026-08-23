@@ -53,7 +53,11 @@ prove it owns.
 Codex 0.149 uses a different owned transport: one named, session-scoped stdio
 MCP server and ten content-minimal `mcp_tool` lifecycle declarations. Its tool
 is explicitly omitted from Codex's direct, deferred, and Code Mode model-facing
-surfaces. Ordinary events are calls over the already-connected MCP channel, so they do not start
+surfaces. The owned server declares exactly `env_vars = ["WT_SESSION"]`.
+Codex clears a local stdio child's inherited environment, so this one
+allow-listed value is required for Windows Terminal activity binding; TabBeacon
+does not inherit the parent environment or forward `WT_PROFILE_ID`. Ordinary
+events are calls over the already-connected MCP channel, so they do not start
 Pwsh7, Windows PowerShell, or cmd. The templates carry only event, session,
 turn, CWD, source, and explicit subagent identity fields—never prompt,
 assistant, or tool content. Codex does not admit a `SessionEnd` MCP Hook;
@@ -68,11 +72,17 @@ fail-open after ingress starts.
 
 Static `tabbeacon doctor` deliberately reports the Hook runtime as unproven:
 matching declarations and trust state do not prove that Codex can execute the
-transport. `tabbeacon doctor --probe-hook-runtime` runs one manifest-exact
-representative declaration in isolated temporary `LOCALAPPDATA` with a 900 ms
-bound. For 0.149 it starts the owned executable directly and proves an MCP
-initialize/tools-call/EOF exchange; for 0.147 it uses the COMSPEC command
-fallback. The probe never modifies Codex configuration or Hook trust.
+transport. For 0.149 it separately reports `mcp.terminal-binding`; the owned
+MCP declaration must forward exactly `WT_SESSION` before presentation can be
+healthy. `tabbeacon doctor --probe-hook-runtime` runs one manifest-exact
+representative declaration in isolated temporary `LOCALAPPDATA`. Its 0.149
+path mirrors the cleared Codex local-stdio environment, adds only the owned
+terminal binding, then proves MCP initialize, Working activity, two distinct
+spinner writes at the worker cadence, Stop supersession, and EOF cleanup. The
+activity proof has a five-second diagnostic bound; the normal Hook timeout
+remains one second. For 0.147 it uses the 900 ms COMSPEC command fallback.
+The probe records no prompt, tool, assistant, title, or environment content
+and never modifies Codex configuration or Hook trust.
 An Owner upgrading an existing declaration must still review the generated Hook
 in `/hooks` and approve trust there; TabBeacon never changes Hook trust itself.
 
@@ -259,6 +269,8 @@ After setup:
 Doctor reports declaration exactness, currentness, trust review or
 trusted-hash drift, disabled Hooks, title ownership, executable presence,
 version compatibility, the exact Hook profile, and manifest consistency. A
+0.149 report additionally distinguishes a missing or broadened owned
+terminal-binding allow-list from a healthy presentation configuration.
 trusted-hash mismatch does not imply that the Hook declaration itself was
 modified. Declaration presence alone is not reported as active.
 

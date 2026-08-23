@@ -19,9 +19,16 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use toml_edit::{Array, DocumentMut, Item, Table, value};
 
-use crate::hook_inventory::{
-    HookCurrentness, HookHandlerKind, HookInventory, HookInventoryEntry, HookOwner, HookSourceKind,
-    HookTrustState,
+use crate::{
+    activity::{
+        ACTIVITY_WORKER_PROBE_PROCESS_FILE, ACTIVITY_WORKER_PROBE_RECEIPT_ENV,
+        ACTIVITY_WORKER_PROBE_RECEIPT_FILE, ACTIVITY_WORKER_PROBE_STARTED_FILE,
+        TARGET_FRAME_INTERVAL_MS,
+    },
+    hook_inventory::{
+        HookCurrentness, HookHandlerKind, HookInventory, HookInventoryEntry, HookOwner,
+        HookSourceKind, HookTrustState,
+    },
 };
 
 use super::{
@@ -34,6 +41,10 @@ const MANIFEST_FILE: &str = "integration-v1.json";
 const LOCK_FILE: &str = "integration.lock";
 const OWNED_DESCRIPTION: &str = "TabBeacon user-global lifecycle hooks";
 const RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
+// The MCP probe owns one fresh stdio server plus an immutable worker image and
+// waits for two 100 ms frames before proving Stop/EOF. This is diagnostic
+// setup work, not the synchronous normal-event performance budget.
+const MCP_ACTIVITY_RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_PROBE_EVENT: &str = "UserPromptSubmit";
 const MCP_RUNTIME_PROBE_RECEIPT_FILE: &str = "mcp-runtime-probe.json";
 const HOOK_EVENTS: [&str; 11] = [
@@ -710,6 +721,50 @@ impl CodexIntegration {
                 "MCP_SERVER_UNPROVEN: Codex config is unavailable",
             ),
         });
+        let mcp_terminal_binding_exact = match &manifest {
+            Some(IntegrationManifest {
+                mcp_server: Some(server),
+                ..
+            }) => {
+                mcp_server_exact && server.env_vars.len() == 1 && server.env_vars[0] == "WT_SESSION"
+            }
+            // The admitted 0.147 command transport owns no MCP child, so the
+            // forwarding contract is outside that profile's risk surface.
+            Some(IntegrationManifest {
+                mcp_server: None, ..
+            }) => true,
+            None => false,
+        };
+        checks.push(match (&manifest, &config) {
+            (
+                Some(IntegrationManifest {
+                    mcp_server: Some(_),
+                    ..
+                }),
+                Ok(_),
+            ) if mcp_terminal_binding_exact => pass(
+                "mcp.terminal-binding",
+                "MCP_WT_SESSION_FORWARDING_EXACT: owned MCP child forwards only WT_SESSION for terminal activity binding",
+            ),
+            (
+                Some(IntegrationManifest {
+                    mcp_server: Some(_),
+                    ..
+                }),
+                Ok(_),
+            ) => fail(
+                "mcp.terminal-binding",
+                "MCP_WT_SESSION_FORWARDING_MISSING_OR_MODIFIED: owned MCP terminal binding must declare exactly WT_SESSION",
+            ),
+            (Some(_), Ok(_)) => pass(
+                "mcp.terminal-binding",
+                "MCP_WT_SESSION_FORWARDING_NA: this exact legacy command transport owns no MCP child",
+            ),
+            _ => fail(
+                "mcp.terminal-binding",
+                "MCP_WT_SESSION_FORWARDING_UNPROVEN: owned MCP terminal binding cannot be verified",
+            ),
+        });
         let declarations_exact = match (&manifest, &hooks) {
             (Some(manifest), Ok(hooks))
                 if manifest_has_known_owned_declarations
@@ -822,6 +877,7 @@ impl CodexIntegration {
             && known_wire_shape
             && declarations_exact
             && mcp_server_exact
+            && mcp_terminal_binding_exact
             && trust_exact
             && title_exact;
         let runtime_continuity = match (runtime_proven, mutation_authority) {
@@ -937,15 +993,21 @@ impl CodexIntegration {
         match outcome {
             RuntimeProbeOutcome::Pass => pass(
                 "hooks.runtime-probe",
-                if profile.uses_mcp_hook_transport() {
-                    "RUNTIME_PROBE_PASS: representative owned MCP Hook completed through the bounded direct stdio transport"
-                } else {
-                    "RUNTIME_PROBE_PASS: representative owned Hook executed through the bounded COMSPEC fallback"
-                },
+                "RUNTIME_PROBE_PASS: representative owned Hook executed through the bounded COMSPEC fallback",
+            ),
+            RuntimeProbeOutcome::McpActivityPass { frame_interval_ms } => pass(
+                "hooks.runtime-probe",
+                format!(
+                    "MCP_RUNTIME_ACTIVITY_PASS: bounded direct stdio transport proved WT_SESSION forwarding, terminal-bound activity, two spinner frames at {frame_interval_ms} ms, Stop supersession, and EOF cleanup"
+                ),
             ),
             RuntimeProbeOutcome::TimedOut => fail(
                 "hooks.runtime-probe",
-                "RUNTIME_PROBE_TIMEOUT: representative owned Hook exceeded the 900 ms bound",
+                if profile.uses_mcp_hook_transport() {
+                    "MCP_RUNTIME_PROBE_TIMEOUT: terminal-bound activity proof exceeded the 5 s diagnostic bound"
+                } else {
+                    "RUNTIME_PROBE_TIMEOUT: representative owned Hook exceeded the 900 ms bound"
+                },
             ),
             RuntimeProbeOutcome::NonZero => fail(
                 "hooks.runtime-probe",
@@ -954,6 +1016,18 @@ impl CodexIntegration {
             RuntimeProbeOutcome::MissingMarker => fail(
                 "hooks.runtime-probe",
                 "RUNTIME_PROBE_FAILED: representative owned Hook did not publish its isolated timing marker",
+            ),
+            RuntimeProbeOutcome::ActivityWorkerProcessMissing => fail(
+                "hooks.runtime-probe",
+                "MCP_ACTIVITY_WORKER_PROCESS_MISSING: terminal-bound Working did not launch __activity-worker-v1",
+            ),
+            RuntimeProbeOutcome::ActivityWorkerNotStarted => fail(
+                "hooks.runtime-probe",
+                "MCP_ACTIVITY_WORKER_NOT_STARTED: terminal-bound Working did not enter the owned activity worker",
+            ),
+            RuntimeProbeOutcome::ActivityFramesMissing => fail(
+                "hooks.runtime-probe",
+                "MCP_ACTIVITY_FRAMES_MISSING: activity worker entered but did not write two distinct spinner frames",
             ),
             RuntimeProbeOutcome::Unavailable => fail(
                 "hooks.runtime-probe",
@@ -1456,6 +1530,7 @@ impl CodexIntegration {
         if let Some(mcp_server) = &manifest.mcp_server {
             if mcp_server.name != MCP_HOOK_SERVER_NAME
                 || mcp_server.args != ["__mcp-hook-stdio-v1"]
+                || !mcp_env_vars_are_current_or_prerelease(&mcp_server.env_vars)
                 || !mcp_server.command.is_absolute()
                 || mcp_server
                     .command
@@ -1487,6 +1562,14 @@ impl CodexIntegration {
                                     mcp_server.name == expected.name
                                         && mcp_server.command == expected.command
                                         && mcp_server.args == expected.args
+                                        // Version 0.5.2's pre-release MCP
+                                        // declaration did not persist the
+                                        // WT_SESSION forwarding allow-list.
+                                        // Keep that exact predecessor
+                                        // repairable, then reconcile it to
+                                        // the current minimum declaration.
+                                        && (mcp_server.env_vars.is_empty()
+                                            || mcp_server.env_vars == expected.env_vars)
                                         // Version 0.5.2's pre-release MCP declaration did
                                         // not yet persist this visibility field. Keep that
                                         // precise predecessor repairable, then reconcile it
@@ -1789,8 +1872,24 @@ struct OwnedMcpServer {
     name: String,
     command: PathBuf,
     args: Vec<String>,
+    /// Explicit parent-environment allow-list for the session-scoped child.
+    /// Older v0.5.2 pre-release manifests omitted it, so deserialize that
+    /// precise predecessor as an upgradeable empty declaration.
+    #[serde(default)]
+    env_vars: Vec<String>,
     #[serde(default)]
     omit_tools_from: Vec<String>,
+}
+
+/// The sole compatibility exception is the pre-release declaration which
+/// lacked the field altogether. Any non-empty declaration other than the
+/// current one is ambiguous ownership rather than a migration candidate.
+fn mcp_env_vars_are_current_or_prerelease(env_vars: &[String]) -> bool {
+    match env_vars {
+        [] => true,
+        [value] => value == "WT_SESSION",
+        _ => false,
+    }
 }
 
 /// The exact owned declarations eligible for restoration plus a non-sensitive
@@ -1853,6 +1952,10 @@ fn desired_mcp_server(
         name: MCP_HOOK_SERVER_NAME.to_owned(),
         command: executable.to_path_buf(),
         args: vec!["__mcp-hook-stdio-v1".to_owned()],
+        // Codex 0.149 clears its MCP child environment. Activity workers bind
+        // to WT_SESSION, so forward that exact terminal identity and nothing
+        // else from the parent environment.
+        env_vars: vec!["WT_SESSION".to_owned()],
         // Codex 0.149 supports omitting one server's tools from each
         // model-facing exposure surface. Hook delivery calls this tool through
         // the internal MCP runtime; it must never become model-callable.
@@ -1990,9 +2093,13 @@ fn powershell_encoded_windows_hook_command(executable: &str) -> String {
 #[derive(Clone, Copy)]
 enum RuntimeProbeOutcome {
     Pass,
+    McpActivityPass { frame_interval_ms: u64 },
     TimedOut,
     NonZero,
     MissingMarker,
+    ActivityWorkerProcessMissing,
+    ActivityWorkerNotStarted,
+    ActivityFramesMissing,
     Unavailable,
 }
 
@@ -2134,16 +2241,47 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
         return RuntimeProbeOutcome::Unavailable;
     };
     let receipt = probe_root.join(MCP_RUNTIME_PROBE_RECEIPT_FILE);
+    let activity_receipt = probe_root.join(ACTIVITY_WORKER_PROBE_RECEIPT_FILE);
+    let activity_process = probe_root.join(ACTIVITY_WORKER_PROBE_PROCESS_FILE);
+    let activity_started = probe_root.join(ACTIVITY_WORKER_PROBE_STARTED_FILE);
+    // SessionStart is allowed to perform local Git discovery before it creates
+    // its fast anchor. Keep that setup confined to the probe root; ordinary
+    // events after the anchor remain zero-Git.
+    let repository_ready = Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(&probe_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !repository_ready {
+        let _ = fs::remove_dir_all(&probe_root);
+        return RuntimeProbeOutcome::Unavailable;
+    }
+    let terminal_binding = "00000000-0000-0000-0000-000000000052";
     let mut process = Command::new(executable);
+    // Mirror Codex 0.149's LocalStdioServerLauncher: construct the child from
+    // a clean environment, retain only fixed launcher prerequisites, then add
+    // the one value in the owned MCP `env_vars` declaration. This test must
+    // never pass through the complete parent environment.
+    process.env_clear();
     process
         .arg("__mcp-hook-stdio-v1")
         .current_dir(&probe_root)
         .env("LOCALAPPDATA", &probe_root)
         .env(MCP_RUNTIME_PROBE_RECEIPT_ENV, &receipt)
-        .env_remove("WT_SESSION")
+        .env(ACTIVITY_WORKER_PROBE_RECEIPT_ENV, &activity_receipt)
+        .env("WT_SESSION", terminal_binding)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    if let Some(path) = env::var_os("PATH") {
+        process.env("PATH", path);
+    }
+    if let Some(system_root) = env::var_os("SystemRoot") {
+        process.env("SystemRoot", system_root);
+    }
     let Ok(mut child) = process.spawn() else {
         let _ = fs::remove_dir_all(&probe_root);
         return RuntimeProbeOutcome::Unavailable;
@@ -2204,14 +2342,27 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
             }
         }
     });
+    let stop = json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": MCP_HOOK_TOOL_NAME,
+            "arguments": {
+                "hook_event_name": "Stop",
+                "session_id": "00000000-0000-0000-0000-000000000052",
+                "turn_id": "00000000-0000-0000-0000-000000000052",
+                "cwd": probe_root,
+            }
+        }
+    });
     let writes_succeeded = [initialize, start, call].iter().all(|request| {
         serde_json::to_writer(&mut stdin, request)
             .and_then(|()| stdin.write_all(b"\n").map_err(serde_json::Error::io))
             .is_ok()
     }) && stdin.flush().is_ok();
-    drop(stdin);
 
-    let deadline = Instant::now() + RUNTIME_PROBE_TIMEOUT;
+    let deadline = Instant::now() + MCP_ACTIVITY_RUNTIME_PROBE_TIMEOUT;
     let mut completed_calls = BTreeSet::new();
     while Instant::now() < deadline && completed_calls.len() < 2 {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -2222,6 +2373,39 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
             && response.pointer("/result/isError") == Some(&Value::Bool(false))
             && let Some(id) = response.get("id").and_then(Value::as_i64)
             && matches!(id, 2 | 3)
+        {
+            completed_calls.insert(id);
+        }
+    }
+    // Keep a deterministic closeout budget. A missing worker receipt must not
+    // consume the entire probe window and masquerade as an EOF timeout.
+    let animation_deadline = deadline
+        .checked_sub(Duration::from_secs(1))
+        .unwrap_or_else(Instant::now);
+    let animation_receipt = loop {
+        let receipt = fs::read(&activity_receipt)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        if receipt.is_some() || Instant::now() >= animation_deadline {
+            break receipt;
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+    let stop_write_succeeded = writes_succeeded
+        && serde_json::to_writer(&mut stdin, &stop)
+            .and_then(|()| stdin.write_all(b"\n").map_err(serde_json::Error::io))
+            .is_ok()
+        && stdin.flush().is_ok();
+    drop(stdin);
+    while Instant::now() < deadline && !completed_calls.contains(&4) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(line) = receiver.recv_timeout(remaining) else {
+            break;
+        };
+        if let Ok(response) = serde_json::from_str::<Value>(&line)
+            && response.pointer("/result/isError") == Some(&Value::Bool(false))
+            && let Some(id) = response.get("id").and_then(Value::as_i64)
+            && matches!(id, 2..=4)
         {
             completed_calls.insert(id);
         }
@@ -2244,21 +2428,66 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .is_some_and(|receipt| {
             receipt.get("schema") == Some(&json!("tabbeacon-mcp-runtime-probe-v1"))
-                && receipt.get("applied_calls") == Some(&json!(2))
+                && receipt.get("applied_calls") == Some(&json!(3))
+                && receipt.get("activity_coordinator_system") == Some(&json!(true))
+                && receipt.get("terminal_binding_forwarded") == Some(&json!(true))
+                && receipt.get("working_event_applied") == Some(&json!(true))
+                && receipt.get("stop_result_ready_applied") == Some(&json!(true))
                 && receipt.get("eof_cleanup") == Some(&json!("applied"))
         });
+    let animation_frame_interval_ms = animation_receipt
+        .as_ref()
+        .and_then(|receipt| receipt.get("frame_interval_ms"))
+        .and_then(Value::as_u64);
+    let animation_proves_runtime = animation_receipt.is_some_and(|receipt| {
+        let frame_interval_ms = animation_frame_interval_ms.unwrap_or(u64::MAX);
+        receipt.get("schema") == Some(&json!("tabbeacon-activity-worker-probe-v1"))
+            && receipt.get("worker_started") == Some(&json!(true))
+            && receipt.get("distinct_spinner_frames") == Some(&json!(2))
+            && (TARGET_FRAME_INTERVAL_MS / 2..=TARGET_FRAME_INTERVAL_MS * 2 + 50)
+                .contains(&frame_interval_ms)
+    });
+    let activity_worker_started = fs::read(&activity_started)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|receipt| {
+            receipt.get("schema") == Some(&json!("tabbeacon-activity-worker-probe-v1"))
+                && receipt.get("worker_entered") == Some(&json!(true))
+        });
+    let activity_worker_process_started = fs::read(&activity_process)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|receipt| {
+            receipt.get("schema") == Some(&json!("tabbeacon-activity-worker-probe-v1"))
+                && receipt.get("worker_process_entered") == Some(&json!(true))
+        });
     let _ = fs::remove_dir_all(&probe_root);
+    if !activity_worker_process_started {
+        return RuntimeProbeOutcome::ActivityWorkerProcessMissing;
+    }
+    if !activity_worker_started {
+        return RuntimeProbeOutcome::ActivityWorkerNotStarted;
+    }
+    if !animation_proves_runtime {
+        return RuntimeProbeOutcome::ActivityFramesMissing;
+    }
     match (
         writes_succeeded,
-        completed_calls.len() == 2,
+        stop_write_succeeded,
+        completed_calls == BTreeSet::from([2, 3, 4]),
         exited_successfully,
         receipt_proves_runtime,
+        animation_proves_runtime,
     ) {
-        (_, _, None, _) => RuntimeProbeOutcome::TimedOut,
-        (true, true, Some(true), true) => RuntimeProbeOutcome::Pass,
-        (false, _, _, _) | (_, false, _, _) | (_, _, _, false) => {
-            RuntimeProbeOutcome::MissingMarker
-        }
+        (_, _, _, None, _, _) => RuntimeProbeOutcome::TimedOut,
+        (true, true, true, Some(true), true, true) => RuntimeProbeOutcome::McpActivityPass {
+            frame_interval_ms: animation_frame_interval_ms.unwrap_or_default(),
+        },
+        (false, _, _, _, _, _)
+        | (_, false, _, _, _, _)
+        | (_, _, false, _, _, _)
+        | (_, _, _, _, false, _)
+        | (_, _, _, _, _, false) => RuntimeProbeOutcome::MissingMarker,
         _ => RuntimeProbeOutcome::NonZero,
     }
 }
@@ -3106,6 +3335,15 @@ fn owned_mcp_server_is_exact(
                 .map(|item| item.as_str().map(ToOwned::to_owned))
                 .collect::<Option<Vec<_>>>()
         });
+    let env_vars = server
+        .get("env_vars")
+        .and_then(Item::as_array)
+        .and_then(|variables| {
+            variables
+                .iter()
+                .map(|item| item.as_str().map(ToOwned::to_owned))
+                .collect::<Option<Vec<_>>>()
+        });
     let omit_tools_from = server
         .get("omit_tools_from")
         .and_then(Item::as_array)
@@ -3117,7 +3355,12 @@ fn owned_mcp_server_is_exact(
         });
     let no_unowned_fields = server
         .iter()
-        .all(|(key, _)| matches!(key, "command" | "args" | "omit_tools_from"));
+        .all(|(key, _)| matches!(key, "command" | "args" | "env_vars" | "omit_tools_from"));
+    let env_vars_are_exact = if declaration.env_vars.is_empty() {
+        env_vars.is_none()
+    } else {
+        env_vars.as_deref() == Some(declaration.env_vars.as_slice())
+    };
     // A short-lived pre-release manifest can legitimately lack the new
     // visibility declaration. Recognize that exact older form so setup can
     // replace it transactionally; never treat an arbitrary extra field as
@@ -3129,6 +3372,7 @@ fn owned_mcp_server_is_exact(
     };
     Ok(command.as_ref() == Some(&declaration.command)
         && args.as_deref() == Some(declaration.args.as_slice())
+        && env_vars_are_exact
         && omit_tools_from_is_exact
         && no_unowned_fields)
 }
@@ -3156,6 +3400,10 @@ fn install_owned_mcp_server(
     for arg in &declaration.args {
         args.push(arg.as_str());
     }
+    let mut env_vars = Array::new();
+    for variable in &declaration.env_vars {
+        env_vars.push(variable.as_str());
+    }
     let mut omitted_surfaces = Array::new();
     for surface in &declaration.omit_tools_from {
         omitted_surfaces.push(surface.as_str());
@@ -3163,6 +3411,7 @@ fn install_owned_mcp_server(
     let mut server = Table::new();
     server.insert("command", value(command));
     server.insert("args", value(args));
+    server.insert("env_vars", value(env_vars));
     server.insert("omit_tools_from", value(omitted_surfaces));
     servers.insert(&declaration.name, Item::Table(server));
     Ok(true)
