@@ -51,8 +51,9 @@ Setup is idempotent. It refuses a TabBeacon-like declaration that it cannot
 prove it owns.
 
 Codex 0.149 uses a different owned transport: one named, session-scoped stdio
-MCP server and ten content-minimal `mcp_tool` lifecycle declarations. Ordinary
-events are calls over the already-connected MCP channel, so they do not start
+MCP server and ten content-minimal `mcp_tool` lifecycle declarations. Its tool
+is explicitly omitted from Codex's direct, deferred, and Code Mode model-facing
+surfaces. Ordinary events are calls over the already-connected MCP channel, so they do not start
 Pwsh7, Windows PowerShell, or cmd. The templates carry only event, session,
 turn, CWD, source, and explicit subagent identity fields—never prompt,
 assistant, or tool content. Codex does not admit a `SessionEnd` MCP Hook;

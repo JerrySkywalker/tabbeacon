@@ -1,5 +1,7 @@
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use std::sync::Mutex;
 use std::{
     env, fs,
     io::{self, Read, Write},
@@ -61,6 +63,8 @@ const LEGACY_HOOK_EVENTS: [&str; 7] = [
 const WINDOWS_HOOK_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(windows)]
 const WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT: Duration = Duration::from_millis(900);
+#[cfg(windows)]
+static WINDOWS_HOOK_SHELL_SERIALIZER: Mutex<()> = Mutex::new(());
 const WINDOWS_HOOK_COMMAND_SUFFIX: &str = " hook codex";
 const WINDOWS_POWERSHELL_ENVELOPE_PREFIX: &str =
     "powershell.exe -NoProfile -NonInteractive -EncodedCommand ";
@@ -420,6 +424,13 @@ fn run_codex_windows_hook_with_shell_and_terminal(
     terminal_session: Option<&str>,
     timeout: Duration,
 ) -> std::process::Output {
+    // These regressions start actual PowerShell/cmd processes. Keep their
+    // bounded shell stages independent of unrelated fixture-compilation load
+    // in the parallel integration suite; the dedicated transport benchmark
+    // covers multi-session concurrency separately.
+    let _shell_guard = WINDOWS_HOOK_SHELL_SERIALIZER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Mirror Codex 0.149 command_runner semantics exactly. A non-empty
     // TurnEnvironment shell receives normal arguments, except cmd.exe's /c
     // branch uses the runner's raw outer quotation. An empty program falls
@@ -667,10 +678,11 @@ fn owned_current_windows_handler_count(hooks: &Value) -> usize {
 }
 
 #[cfg(windows)]
-fn assert_real_hook_direct(executable: &Path, payload: &[u8]) {
+fn assert_real_hook_direct(executable: &Path, payload: &[u8], local_app_data: &Path) {
     let child = Command::new(executable)
         .args(["hook", "codex"])
-        .env_remove("LOCALAPPDATA")
+        .env("LOCALAPPDATA", local_app_data)
+        .env_remove("WT_SESSION")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -722,14 +734,21 @@ fn assert_real_hook_with_local_state_within(
 }
 
 #[cfg(windows)]
-fn assert_real_hook_shell_matrix(command: &str, payload: &[u8]) {
+fn assert_real_hook_shell_matrix(root: &TestRoot, command: &str, payload: &[u8]) {
+    let local_app_data = root.child("shell-matrix-local-app-data");
     for shell in [
         CodexWindowsHookShell::Pwsh7,
         CodexWindowsHookShell::WindowsPowerShell,
         CodexWindowsHookShell::Cmd,
         CodexWindowsHookShell::ComspecFallback,
     ] {
-        let output = run_codex_windows_hook_with_shell(shell, command, payload, true, None);
+        let output = run_codex_windows_hook_with_shell(
+            shell,
+            command,
+            payload,
+            false,
+            Some(&local_app_data),
+        );
         assert!(
             output.status.success(),
             "{} real hook shell failed: {}",
@@ -1165,6 +1184,17 @@ fn codex_0149_owned_mcp_server_preserves_external_servers_and_refuses_name_colli
         .map(|value| value.as_str().map(ToOwned::to_owned))
         .collect::<Option<Vec<_>>>();
     assert_eq!(tabbeacon_args, Some(vec!["__mcp-hook-stdio-v1".to_owned()]));
+    let omitted_surfaces = tabbeacon_server
+        .get("omit_tools_from")
+        .and_then(Item::as_array)
+        .expect("owned MCP server omits all model-facing tool surfaces");
+    assert_eq!(
+        omitted_surfaces
+            .iter()
+            .map(|surface| surface.as_str())
+            .collect::<Option<Vec<_>>>(),
+        Some(vec!["code_mode", "deferred", "direct"])
+    );
     assert_eq!(
         integration
             .uninstall()
@@ -1195,6 +1225,60 @@ fn codex_0149_owned_mcp_server_preserves_external_servers_and_refuses_name_colli
     assert_eq!(
         fs::read(&collision_config).expect("conflicting config rereads"),
         before
+    );
+}
+
+#[test]
+fn prerelease_mcp_manifest_without_tool_visibility_upgrades_exactly_once() {
+    let root = TestRoot::new("codex-0149-mcp-visibility-upgrade");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let config_path = codex_home.join("config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("initial MCP setup succeeds");
+
+    let mut prior_config = fs::read_to_string(&config_path)
+        .expect("installed config reads")
+        .parse::<DocumentMut>()
+        .expect("installed config parses");
+    prior_config["mcp_servers"]["tabbeacon-hook"]
+        .as_table_like_mut()
+        .expect("owned MCP server table")
+        .remove("omit_tools_from");
+    fs::write(&config_path, prior_config.to_string()).expect("pre-release config is written");
+    let mut prior_manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("installed manifest reads"))
+            .expect("installed manifest parses");
+    prior_manifest["mcp_server"]
+        .as_object_mut()
+        .expect("owned MCP manifest")
+        .remove("omit_tools_from");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&prior_manifest).expect("pre-release manifest serializes"),
+    )
+    .expect("pre-release manifest is written");
+
+    assert_eq!(
+        integration.setup().expect("pre-release MCP setup upgrades"),
+        SetupOutcome::Upgraded
+    );
+    let upgraded = fs::read_to_string(&config_path)
+        .expect("upgraded config reads")
+        .parse::<DocumentMut>()
+        .expect("upgraded config parses");
+    let omitted = upgraded["mcp_servers"]["tabbeacon-hook"]
+        .get("omit_tools_from")
+        .and_then(Item::as_array)
+        .expect("upgraded MCP server hides its hook tool")
+        .iter()
+        .map(|value| value.as_str())
+        .collect::<Option<Vec<_>>>();
+    assert_eq!(omitted, Some(vec!["code_mode", "deferred", "direct"]));
+    assert_eq!(
+        integration.setup().expect("upgraded MCP setup is stable"),
+        SetupOutcome::AlreadyInstalled
     );
 }
 
@@ -3857,11 +3941,12 @@ fn generated_windows_command_runs_the_real_binary_in_the_codex_0149_shell_model(
     // behavior this test is intended to prove.
     let root = TestRoot::new("real-command-windows-shell");
     let (executable, command) = real_windows_hook_command(&root);
+    let local_app_data = root.child("direct-local-app-data");
 
     let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "real-shell", &root.path))
         .expect("Codex-shaped payload serializes");
-    assert_real_hook_direct(&executable, &payload);
-    assert_real_hook_shell_matrix(&command, &payload);
+    assert_real_hook_direct(&executable, &payload, &local_app_data);
+    assert_real_hook_shell_matrix(&root, &command, &payload);
     assert_real_hook_ingress(&root, &command);
 }
 
@@ -3870,15 +3955,16 @@ fn generated_windows_command_runs_the_real_binary_in_the_codex_0149_shell_model(
 fn shell_neutral_windows_declaration_succeeds_in_every_codex_0149_shell_mode() {
     let root = TestRoot::new("safe-command-windows-shell");
     let (executable, generic_command, windows_command) = fast_real_windows_hook_command(&root);
+    let local_app_data = root.child("direct-local-app-data");
     let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "safe-shell", &root.path))
         .expect("Codex-shaped payload serializes");
 
     // The generic declaration remains the established compatibility fallback.
     // Production `commandWindows` must use the same shell-neutral form in a
     // configured pwsh/PowerShell/cmd shell and in the empty-shell COMSPEC path.
-    assert_real_hook_direct(&executable, &payload);
-    assert_real_hook_shell_matrix(&generic_command, &payload);
-    assert_real_hook_shell_matrix(&windows_command, &payload);
+    assert_real_hook_direct(&executable, &payload, &local_app_data);
+    assert_real_hook_shell_matrix(&root, &generic_command, &payload);
+    assert_real_hook_shell_matrix(&root, &windows_command, &payload);
     assert_real_hook_ingress(&root, &windows_command);
 }
 
@@ -3894,13 +3980,19 @@ fn legacy_cmd_fail_open_declaration_reproduces_the_codex_0149_turn_environment_f
         &root.path,
     ))
     .expect("Codex-shaped payload serializes");
+    let local_app_data = root.child("legacy-local-app-data");
 
     for shell in [
         CodexWindowsHookShell::Pwsh7,
         CodexWindowsHookShell::WindowsPowerShell,
     ] {
-        let output =
-            run_codex_windows_hook_with_shell(shell, &legacy_command, &payload, true, None);
+        let output = run_codex_windows_hook_with_shell(
+            shell,
+            &legacy_command,
+            &payload,
+            false,
+            Some(&local_app_data),
+        );
         assert!(
             !output.status.success(),
             "legacy cmd declaration unexpectedly succeeded in {}",
@@ -3954,11 +4046,12 @@ fn static_doctor_requires_a_bounded_explicit_hook_runtime_probe() {
 fn real_windows_hook_shell_stages_are_independently_bounded() {
     let root = TestRoot::new("real-command-stage-diagnostics");
     let (executable, command) = real_windows_hook_command(&root);
+    let local_app_data = root.child("stage-local-app-data");
     let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "real-shell", &root.path))
         .expect("Codex-shaped payload serializes");
     let mut failures = Vec::new();
     capture_windows_hook_stage(&mut failures, "direct", || {
-        assert_real_hook_direct(&executable, &payload);
+        assert_real_hook_direct(&executable, &payload, &local_app_data);
     });
     for (stage, shell) in [
         ("Pwsh7", CodexWindowsHookShell::Pwsh7),
@@ -3970,7 +4063,13 @@ fn real_windows_hook_shell_stages_are_independently_bounded() {
         ("COMSPEC", CodexWindowsHookShell::ComspecFallback),
     ] {
         capture_windows_hook_stage(&mut failures, stage, || {
-            let output = run_codex_windows_hook_with_shell(shell, &command, &payload, true, None);
+            let output = run_codex_windows_hook_with_shell(
+                shell,
+                &command,
+                &payload,
+                false,
+                Some(&local_app_data),
+            );
             assert!(
                 output.status.success(),
                 "{} real hook shell failed: {}",
@@ -4124,13 +4223,20 @@ fn anchored_default_windows_hook_declaration_finishes_within_the_one_second_sla(
 fn malformed_hook_runtime_is_fail_open_in_every_admitted_shell() {
     let root = TestRoot::new("malformed-hook-runtime-fail-open");
     let (_executable, _generic_command, command) = fast_real_windows_hook_command(&root);
+    let local_app_data = root.child("malformed-local-app-data");
     for shell in [
         CodexWindowsHookShell::Pwsh7,
         CodexWindowsHookShell::WindowsPowerShell,
         CodexWindowsHookShell::Cmd,
         CodexWindowsHookShell::ComspecFallback,
     ] {
-        let output = run_codex_windows_hook_with_shell(shell, &command, b"malformed", false, None);
+        let output = run_codex_windows_hook_with_shell(
+            shell,
+            &command,
+            b"malformed",
+            false,
+            Some(&local_app_data),
+        );
         assert!(
             output.status.success(),
             "malformed hook runtime input must fail open in {}: {}",

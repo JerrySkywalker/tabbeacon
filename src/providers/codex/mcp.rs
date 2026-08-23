@@ -6,7 +6,9 @@
 //! rejected before it can reach the product runtime or persistent state.
 
 use std::{
+    env, fs,
     io::{self, BufRead, BufReader, BufWriter, Write},
+    path::{Path, PathBuf},
     time::SystemTime,
 };
 
@@ -19,9 +21,59 @@ use super::{CodexHookEvent, CodexHookRuntime, HookDispatchOutcome};
 
 pub const MCP_HOOK_SERVER_NAME: &str = "tabbeacon-hook";
 pub const MCP_HOOK_TOOL_NAME: &str = "tabbeacon_hook_event";
+/// Private opt-in receipt used only by Doctor's isolated stdio runtime probe.
+pub const MCP_RUNTIME_PROBE_RECEIPT_ENV: &str = "TABBEACON_MCP_RUNTIME_PROBE_RECEIPT";
 const MAX_ID_BYTES: usize = 512;
 const MAX_CWD_BYTES: usize = 32 * 1024;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+
+struct McpRuntimeProbeCapture {
+    path: PathBuf,
+    applied_calls: usize,
+}
+
+impl McpRuntimeProbeCapture {
+    fn from_environment() -> Option<Self> {
+        let path = PathBuf::from(env::var_os(MCP_RUNTIME_PROBE_RECEIPT_ENV)?);
+        let local_app_data = env::var_os("LOCALAPPDATA")?;
+        (path.is_absolute()
+            && path
+                .file_name()
+                .is_some_and(|name| name == "mcp-runtime-probe.json")
+            && path.parent() == Some(Path::new(&local_app_data)))
+        .then_some(Self {
+            path,
+            applied_calls: 0,
+        })
+    }
+
+    fn record_dispatch(&mut self, outcome: HookDispatchOutcome) {
+        if outcome == HookDispatchOutcome::Applied {
+            self.applied_calls += 1;
+        }
+    }
+
+    fn finish(self, eof_outcome: Option<HookDispatchOutcome>) {
+        if self.applied_calls != 2 || eof_outcome != Some(HookDispatchOutcome::Applied) {
+            return;
+        }
+        let Ok(file) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&self.path)
+        else {
+            return;
+        };
+        let _ = serde_json::to_writer(
+            file,
+            &json!({
+                "schema": "tabbeacon-mcp-runtime-probe-v1",
+                "applied_calls": self.applied_calls,
+                "eof_cleanup": "applied",
+            }),
+        );
+    }
+}
 
 /// Returns the exact content-minimal template for one admitted MCP Hook event.
 ///
@@ -286,33 +338,75 @@ fn serve_stdio_inner<R: BufRead, W: Write>(
     mut session: Option<McpHookSession>,
     mut console: Option<crate::console_output::OwnedConsole>,
 ) -> io::Result<()> {
-    let mut line = String::new();
-    while reader.read_line(&mut line)? != 0 {
-        if line.len() <= MAX_MESSAGE_BYTES
-            && let Ok(request) = serde_json::from_str::<Value>(&line)
+    let mut probe = McpRuntimeProbeCapture::from_environment();
+    let mut message = Vec::with_capacity(MAX_MESSAGE_BYTES);
+    while let Some(message_is_bounded) = read_bounded_message(&mut reader, &mut message)? {
+        if message_is_bounded
+            && let Ok(request) = serde_json::from_slice::<Value>(&message)
             && let Some(response) =
-                response_for_request(&request, session.as_mut(), console.as_mut())
+                response_for_request(&request, session.as_mut(), console.as_mut(), probe.as_mut())
         {
             serde_json::to_writer(&mut writer, &response).map_err(io::Error::other)?;
             writer.write_all(b"\n")?;
             writer.flush()?;
         }
-        line.clear();
     }
-    if let Some(session) = session.as_mut() {
+    let eof_outcome = if let Some(session) = session.as_mut() {
         if let Some(console) = console.as_mut() {
-            let _ = session.cleanup_on_eof_to(SystemTime::now(), console);
+            session.cleanup_on_eof_to(SystemTime::now(), console)
         } else {
-            let _ = session.cleanup_on_eof_to(SystemTime::now(), &mut io::sink());
+            session.cleanup_on_eof_to(SystemTime::now(), &mut io::sink())
         }
+    } else {
+        None
+    };
+    if let Some(probe) = probe {
+        probe.finish(eof_outcome);
     }
     Ok(())
+}
+
+/// Consumes exactly one newline-delimited request while retaining at most the
+/// protocol's bounded message size. Oversized lines are drained without an
+/// allocation and ignored, then the next request remains processable.
+fn read_bounded_message<R: BufRead>(
+    reader: &mut R,
+    message: &mut Vec<u8>,
+) -> io::Result<Option<bool>> {
+    message.clear();
+    let mut saw_bytes = false;
+    let mut too_large = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(saw_bytes.then_some(!too_large));
+        }
+        let consumed = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |position| position + 1);
+        let complete = available[consumed - 1] == b'\n';
+        saw_bytes = true;
+        if !too_large {
+            if message.len().saturating_add(consumed) > MAX_MESSAGE_BYTES {
+                message.clear();
+                too_large = true;
+            } else {
+                message.extend_from_slice(&available[..consumed]);
+            }
+        }
+        reader.consume(consumed);
+        if complete {
+            return Ok(Some(!too_large));
+        }
+    }
 }
 
 fn response_for_request(
     request: &Value,
     session: Option<&mut McpHookSession>,
     console: Option<&mut crate::console_output::OwnedConsole>,
+    mut probe: Option<&mut McpRuntimeProbeCapture>,
 ) -> Option<Value> {
     let object = request.as_object()?;
     let id = object.get("id")?.clone();
@@ -333,12 +427,17 @@ fn response_for_request(
                 })
                 .and_then(|params| params.get("arguments"))
                 .cloned();
-            if let (Some(session), Some(arguments)) = (session, arguments) {
+            let outcome = if let (Some(session), Some(arguments)) = (session, arguments) {
                 if let Some(console) = console {
-                    let _ = session.dispatch_to(&arguments, SystemTime::now(), console);
+                    Some(session.dispatch_to(&arguments, SystemTime::now(), console))
                 } else {
-                    let _ = session.dispatch_to(&arguments, SystemTime::now(), &mut io::sink());
+                    Some(session.dispatch_to(&arguments, SystemTime::now(), &mut io::sink()))
                 }
+            } else {
+                None
+            };
+            if let (Some(probe), Some(outcome)) = (probe.as_mut(), outcome) {
+                probe.record_dispatch(outcome);
             }
             json!({ "content": [], "isError": false })
         }
@@ -675,5 +774,40 @@ mod tests {
         assert_eq!(lines.lines().count(), 3);
         assert!(lines.contains(MCP_HOOK_TOOL_NAME));
         assert!(!lines.contains("blocked"));
+    }
+
+    #[test]
+    fn oversized_request_is_drained_and_the_next_protocol_request_survives() {
+        let mut request = vec![b'x'; MAX_MESSAGE_BYTES + 1];
+        request.push(b'\n');
+        request.extend_from_slice(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n",
+        );
+        let mut output = Vec::new();
+        serve_stdio(BufReader::new(request.as_slice()), &mut output, None)
+            .expect("oversized request is fail-open");
+        let lines = String::from_utf8(output).expect("protocol response is utf8");
+        assert_eq!(lines.lines().count(), 1);
+        assert!(lines.contains("protocolVersion"));
+    }
+
+    #[test]
+    fn probe_receipt_requires_two_applied_dispatches_and_eof_cleanup() {
+        let root = TestRoot::new();
+        let receipt = root.path().join("mcp-runtime-probe.json");
+        let mut capture = McpRuntimeProbeCapture {
+            path: receipt.clone(),
+            applied_calls: 0,
+        };
+        capture.record_dispatch(HookDispatchOutcome::Applied);
+        capture.record_dispatch(HookDispatchOutcome::Applied);
+        capture.finish(Some(HookDispatchOutcome::Applied));
+
+        let receipt: Value = serde_json::from_slice(
+            &fs::read(receipt).expect("complete runtime proof writes a receipt"),
+        )
+        .expect("receipt is valid json");
+        assert_eq!(receipt["applied_calls"], 2);
+        assert_eq!(receipt["eof_cleanup"], "applied");
     }
 }

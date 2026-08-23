@@ -26,7 +26,7 @@ use crate::hook_inventory::{
 
 use super::{
     CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookProfile, MCP_HOOK_SERVER_NAME,
-    MCP_HOOK_TOOL_NAME, hook_input_template,
+    MCP_HOOK_TOOL_NAME, MCP_RUNTIME_PROBE_RECEIPT_ENV, hook_input_template,
 };
 
 const MANIFEST_SCHEMA: &str = "tabbeacon-codex-integration-v1";
@@ -35,6 +35,7 @@ const LOCK_FILE: &str = "integration.lock";
 const OWNED_DESCRIPTION: &str = "TabBeacon user-global lifecycle hooks";
 const RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
 const RUNTIME_PROBE_EVENT: &str = "UserPromptSubmit";
+const MCP_RUNTIME_PROBE_RECEIPT_FILE: &str = "mcp-runtime-probe.json";
 const HOOK_EVENTS: [&str; 11] = [
     "PreToolUse",
     "PermissionRequest",
@@ -1480,8 +1481,22 @@ impl CodexIntegration {
             Some(mcp_server) => {
                 owned_mcp_tool_hooks_for_manifest(&manifest.executable).is_ok_and(|expected| {
                     expected == manifest.hooks
-                        && desired_mcp_server_for_manifest(&manifest.executable)
-                            .is_ok_and(|expected| expected.as_ref() == Some(mcp_server))
+                        && desired_mcp_server_for_manifest(&manifest.executable).is_ok_and(
+                            |expected| {
+                                expected.as_ref().is_some_and(|expected| {
+                                    mcp_server.name == expected.name
+                                        && mcp_server.command == expected.command
+                                        && mcp_server.args == expected.args
+                                        // Version 0.5.2's pre-release MCP declaration did
+                                        // not yet persist this visibility field. Keep that
+                                        // precise predecessor repairable, then reconcile it
+                                        // to the non-model-callable declaration.
+                                        && (mcp_server.omit_tools_from.is_empty()
+                                            || mcp_server.omit_tools_from
+                                                == expected.omit_tools_from)
+                                })
+                            },
+                        )
                 })
             }
             None => owned_command_hooks(&manifest.executable, 1, false)
@@ -1774,6 +1789,8 @@ struct OwnedMcpServer {
     name: String,
     command: PathBuf,
     args: Vec<String>,
+    #[serde(default)]
+    omit_tools_from: Vec<String>,
 }
 
 /// The exact owned declarations eligible for restoration plus a non-sensitive
@@ -1836,6 +1853,14 @@ fn desired_mcp_server(
         name: MCP_HOOK_SERVER_NAME.to_owned(),
         command: executable.to_path_buf(),
         args: vec!["__mcp-hook-stdio-v1".to_owned()],
+        // Codex 0.149 supports omitting one server's tools from each
+        // model-facing exposure surface. Hook delivery calls this tool through
+        // the internal MCP runtime; it must never become model-callable.
+        omit_tools_from: vec![
+            "code_mode".to_owned(),
+            "deferred".to_owned(),
+            "direct".to_owned(),
+        ],
     }))
 }
 
@@ -2103,15 +2128,18 @@ fn run_windows_hook_runtime_probe(_command_line: &str) -> RuntimeProbeOutcome {
 /// the Codex configuration/trust files are only read by the caller's
 /// preflight. EOF deliberately proves the server's cleanup boundary too.
 #[cfg(windows)]
+#[allow(clippy::too_many_lines)] // One bounded probe owns its child lifecycle, protocol exchange, and receipt check.
 fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome {
     let Ok(probe_root) = create_runtime_probe_root() else {
         return RuntimeProbeOutcome::Unavailable;
     };
+    let receipt = probe_root.join(MCP_RUNTIME_PROBE_RECEIPT_FILE);
     let mut process = Command::new(executable);
     process
         .arg("__mcp-hook-stdio-v1")
         .current_dir(&probe_root)
         .env("LOCALAPPDATA", &probe_root)
+        .env(MCP_RUNTIME_PROBE_RECEIPT_ENV, &receipt)
         .env_remove("WT_SESSION")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -2148,9 +2176,23 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
         "method": "initialize",
         "params": { "protocolVersion": "2025-06-18", "capabilities": {} }
     });
-    let call = json!({
+    let start = json!({
         "jsonrpc": "2.0",
         "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": MCP_HOOK_TOOL_NAME,
+            "arguments": {
+                "hook_event_name": "SessionStart",
+                "session_id": "00000000-0000-0000-0000-000000000052",
+                "cwd": probe_root,
+                "source": "startup",
+            }
+        }
+    });
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
         "method": "tools/call",
         "params": {
             "name": MCP_HOOK_TOOL_NAME,
@@ -2162,7 +2204,7 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
             }
         }
     });
-    let writes_succeeded = [initialize, call].iter().all(|request| {
+    let writes_succeeded = [initialize, start, call].iter().all(|request| {
         serde_json::to_writer(&mut stdin, request)
             .and_then(|()| stdin.write_all(b"\n").map_err(serde_json::Error::io))
             .is_ok()
@@ -2170,16 +2212,19 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
     drop(stdin);
 
     let deadline = Instant::now() + RUNTIME_PROBE_TIMEOUT;
-    let mut call_completed = false;
-    while Instant::now() < deadline && !call_completed {
+    let mut completed_calls = BTreeSet::new();
+    while Instant::now() < deadline && completed_calls.len() < 2 {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let Ok(line) = receiver.recv_timeout(remaining) else {
             break;
         };
-        call_completed = serde_json::from_str::<Value>(&line).is_ok_and(|response| {
-            response.get("id") == Some(&json!(2))
-                && response.pointer("/result/isError") == Some(&Value::Bool(false))
-        });
+        if let Ok(response) = serde_json::from_str::<Value>(&line)
+            && response.pointer("/result/isError") == Some(&Value::Bool(false))
+            && let Some(id) = response.get("id").and_then(Value::as_i64)
+            && matches!(id, 2 | 3)
+        {
+            completed_calls.insert(id);
+        }
     }
     let exited_successfully = loop {
         match child.try_wait() {
@@ -2194,11 +2239,26 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
             Err(_) => break Some(false),
         }
     };
+    let receipt_proves_runtime = fs::read(&receipt)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|receipt| {
+            receipt.get("schema") == Some(&json!("tabbeacon-mcp-runtime-probe-v1"))
+                && receipt.get("applied_calls") == Some(&json!(2))
+                && receipt.get("eof_cleanup") == Some(&json!("applied"))
+        });
     let _ = fs::remove_dir_all(&probe_root);
-    match (writes_succeeded, call_completed, exited_successfully) {
-        (_, _, None) => RuntimeProbeOutcome::TimedOut,
-        (true, true, Some(true)) => RuntimeProbeOutcome::Pass,
-        (false, _, _) | (_, false, _) => RuntimeProbeOutcome::MissingMarker,
+    match (
+        writes_succeeded,
+        completed_calls.len() == 2,
+        exited_successfully,
+        receipt_proves_runtime,
+    ) {
+        (_, _, None, _) => RuntimeProbeOutcome::TimedOut,
+        (true, true, Some(true), true) => RuntimeProbeOutcome::Pass,
+        (false, _, _, _) | (_, false, _, _) | (_, _, _, false) => {
+            RuntimeProbeOutcome::MissingMarker
+        }
         _ => RuntimeProbeOutcome::NonZero,
     }
 }
@@ -3046,11 +3106,30 @@ fn owned_mcp_server_is_exact(
                 .map(|item| item.as_str().map(ToOwned::to_owned))
                 .collect::<Option<Vec<_>>>()
         });
+    let omit_tools_from = server
+        .get("omit_tools_from")
+        .and_then(Item::as_array)
+        .and_then(|surfaces| {
+            surfaces
+                .iter()
+                .map(|item| item.as_str().map(ToOwned::to_owned))
+                .collect::<Option<Vec<_>>>()
+        });
     let no_unowned_fields = server
         .iter()
-        .all(|(key, _)| matches!(key, "command" | "args"));
+        .all(|(key, _)| matches!(key, "command" | "args" | "omit_tools_from"));
+    // A short-lived pre-release manifest can legitimately lack the new
+    // visibility declaration. Recognize that exact older form so setup can
+    // replace it transactionally; never treat an arbitrary extra field as
+    // owned.
+    let omit_tools_from_is_exact = if declaration.omit_tools_from.is_empty() {
+        omit_tools_from.is_none()
+    } else {
+        omit_tools_from.as_deref() == Some(declaration.omit_tools_from.as_slice())
+    };
     Ok(command.as_ref() == Some(&declaration.command)
         && args.as_deref() == Some(declaration.args.as_slice())
+        && omit_tools_from_is_exact
         && no_unowned_fields)
 }
 
@@ -3077,9 +3156,14 @@ fn install_owned_mcp_server(
     for arg in &declaration.args {
         args.push(arg.as_str());
     }
+    let mut omitted_surfaces = Array::new();
+    for surface in &declaration.omit_tools_from {
+        omitted_surfaces.push(surface.as_str());
+    }
     let mut server = Table::new();
     server.insert("command", value(command));
     server.insert("args", value(args));
+    server.insert("omit_tools_from", value(omitted_surfaces));
     servers.insert(&declaration.name, Item::Table(server));
     Ok(true)
 }
