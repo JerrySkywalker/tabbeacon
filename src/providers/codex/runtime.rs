@@ -111,6 +111,11 @@ impl CodexHookRuntime {
     /// coordination used by the command Hook runtime. The MCP server keeps
     /// this runtime for its Codex-owned stdio lifetime, avoiding repeat
     /// settings and state-root discovery on every Hook event.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fail-open dispatch outcome when the platform state root cannot
+    /// be established.
     pub fn from_system_environment() -> Result<Self, HookDispatchOutcome> {
         let state_root = StableAliasRegistry::default_state_root()
             .map_err(|_| HookDispatchOutcome::DegradedStateRoot)?;

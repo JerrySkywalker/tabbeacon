@@ -1136,8 +1136,8 @@ impl CodexIntegration {
             Self::validate_title_ownership(&manifest, &config)?;
             Self::validate_mcp_server_ownership(&manifest, &config)?;
             let mut config_changed =
-                self.apply_title_ownership(&mut manifest, &mut config, tabbeacon_owns_title)?;
-            config_changed |= self.reconcile_mcp_server_ownership(
+                Self::apply_title_ownership(&mut manifest, &mut config, tabbeacon_owns_title)?;
+            config_changed |= Self::reconcile_mcp_server_ownership(
                 &mut manifest,
                 &mut config,
                 desired_mcp_server,
@@ -1316,7 +1316,7 @@ impl CodexIntegration {
         let mut config = read_config_document(&self.config_path())?;
         Self::validate_title_ownership(&manifest, &config)?;
         Self::validate_mcp_server_ownership(&manifest, &config)?;
-        if !self.apply_title_ownership(&mut manifest, &mut config, tabbeacon_owns_title)? {
+        if !Self::apply_title_ownership(&mut manifest, &mut config, tabbeacon_owns_title)? {
             return Ok(TitleOwnershipOutcome::AlreadyConfigured);
         }
         self.write_owned_config(&manifest, &config)?;
@@ -1339,7 +1339,6 @@ impl CodexIntegration {
     }
 
     fn apply_title_ownership(
-        &self,
         manifest: &mut IntegrationManifest,
         config: &mut DocumentMut,
         tabbeacon_owns_title: bool,
@@ -1503,7 +1502,6 @@ impl CodexIntegration {
     }
 
     fn reconcile_mcp_server_ownership(
-        &self,
         manifest: &mut IntegrationManifest,
         config: &mut DocumentMut,
         desired: Option<OwnedMcpServer>,
@@ -1767,7 +1765,7 @@ struct OwnedHook {
     group: Value,
 }
 
-/// Exact, process-scoped MCP server declaration that TabBeacon may own.
+/// Exact, process-scoped MCP server declaration that `TabBeacon` may own.
 ///
 /// The server is never a global daemon: Codex starts it from this stdio
 /// declaration for one Codex runtime and EOF closes that ownership boundary.
@@ -2166,7 +2164,7 @@ fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome 
     });
     let writes_succeeded = [initialize, call].iter().all(|request| {
         serde_json::to_writer(&mut stdin, request)
-            .and_then(|_| stdin.write_all(b"\n").map_err(serde_json::Error::io))
+            .and_then(|()| stdin.write_all(b"\n").map_err(serde_json::Error::io))
             .is_ok()
     }) && stdin.flush().is_ok();
     drop(stdin);

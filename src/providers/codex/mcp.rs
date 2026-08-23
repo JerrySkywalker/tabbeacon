@@ -2,7 +2,7 @@
 //!
 //! Codex 0.149 keeps an MCP server connected for the lifetime of one Codex
 //! session. This module deliberately accepts only the lifecycle identity fields
-//! TabBeacon needs; prompt, assistant, tool-input, and tool-response content is
+//! `TabBeacon` needs; prompt, assistant, tool-input, and tool-response content is
 //! rejected before it can reach the product runtime or persistent state.
 
 use std::{
@@ -25,8 +25,8 @@ const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 
 /// Returns the exact content-minimal template for one admitted MCP Hook event.
 ///
-/// SessionEnd intentionally has no template: Codex 0.149 does not admit an
-/// `mcp_tool` SessionEnd hook. The server releases its in-memory session binding
+/// `SessionEnd` intentionally has no template: Codex 0.149 does not admit an
+/// `mcp_tool` `SessionEnd` hook. The server releases its in-memory session binding
 /// on stdio EOF and the existing bounded stale-state recovery remains in force.
 #[must_use]
 pub fn hook_input_template(event: CodexHookEvent) -> Option<Value> {
@@ -131,8 +131,8 @@ impl McpHookSession {
         self.runtime.dispatch_to(&payload, observed_at, sink)
     }
 
-    /// Applies the internal equivalent of a SessionEnd only after the owning
-    /// Codex MCP stdio connection reaches EOF. No SessionEnd `mcp_tool` hook is
+    /// Applies the internal equivalent of a `SessionEnd` only after the owning
+    /// Codex MCP stdio connection reaches EOF. No `SessionEnd` `mcp_tool` hook is
     /// declared for Codex 0.149.
     #[must_use]
     pub fn cleanup_on_eof_to(
@@ -235,6 +235,11 @@ fn bounded_nonempty(value: &str, limit: usize) -> bool {
 /// Runs the internal stdio MCP server used by an owned Codex 0.149 transport.
 /// It returns successfully on malformed traffic and never writes diagnostics to
 /// stdout, which is reserved for the MCP protocol.
+///
+/// # Errors
+///
+/// Returns an I/O error only when stdin/stdout cannot be read, written, or
+/// flushed; malformed Hook traffic is handled fail-open.
 pub fn run_stdio_hook_server() -> io::Result<()> {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -466,7 +471,7 @@ mod tests {
             session.dispatch_to(&permission, UNIX_EPOCH, &mut output),
             HookDispatchOutcome::Applied
         );
-        assert!(String::from_utf8_lossy(&output).contains("!"));
+        assert!(String::from_utf8_lossy(&output).contains('!'));
     }
 
     #[test]
