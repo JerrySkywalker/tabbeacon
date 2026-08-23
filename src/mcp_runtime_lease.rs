@@ -13,8 +13,12 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(windows)]
@@ -98,12 +102,12 @@ struct McpLeaseRecord {
 /// Forced process death intentionally leaves a bounded stale record.  That
 /// record is never authority for a later process and naturally becomes a
 /// warning rather than a drain target.
-pub(crate) struct McpRuntimeLeaseGuard {
+struct McpLeaseFileGuard {
     path: PathBuf,
     generation: String,
 }
 
-impl Drop for McpRuntimeLeaseGuard {
+impl Drop for McpLeaseFileGuard {
     fn drop(&mut self) {
         if ensure_safe_path(&self.path).is_err() {
             return;
@@ -120,27 +124,70 @@ impl Drop for McpRuntimeLeaseGuard {
     }
 }
 
+/// Keeps a per-MCP registration task alive without delaying the synchronous
+/// stdio server. The task blocks on this one-shot stop channel after it has
+/// registered an exact lease; it is not a daemon or a recurring observer.
+pub(crate) struct McpRuntimeLeaseGuard {
+    stop: mpsc::SyncSender<()>,
+}
+
+impl Drop for McpRuntimeLeaseGuard {
+    fn drop(&mut self) {
+        let _ = self.stop.try_send(());
+    }
+}
+
 /// Registers a lease only after the internal MCP runtime has validated its
 /// exact, manifest-owned server declaration.  Registration failure is
 /// fail-open for Codex: the MCP server remains usable but cannot be drained
 /// automatically during a later package upgrade.
 #[must_use]
 pub(crate) fn register_system_mcp_runtime_lease() -> Option<McpRuntimeLeaseGuard> {
-    let executable = env::current_exe().ok()?;
-    let integration = CodexIntegration::from_environment().ok()?;
-    integration.mcp_runtime_lease_authority().ok()?;
-    let state_root = StableAliasRegistry::default_state_root().ok()?;
-    let process_id = std::process::id();
-    let creation_ticks = system_process_creation_ticks(process_id)?;
-    let executable_identity = executable_identity(&executable)?;
-    McpLeaseStore::new(state_root)
-        .register(
-            process_id,
-            creation_ticks,
-            executable_identity,
-            current_ticks(),
-        )
-        .ok()
+    let (stop, stopped) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("tabbeacon-mcp-lease-v1".to_owned())
+        .spawn(move || {
+            // The synchronous stdio server must be ready for its first normal
+            // lifecycle delivery before this optional upgrade-only proof reads
+            // configuration or starts the bounded Windows creation-time query.
+            // Short-lived MCP children therefore never create a lease.
+            thread::sleep(Duration::from_secs(2));
+            if stopped.try_recv().is_ok() {
+                return;
+            }
+            let Some(executable) = env::current_exe().ok() else {
+                return;
+            };
+            let Ok(integration) = CodexIntegration::from_environment() else {
+                return;
+            };
+            if integration.mcp_runtime_lease_authority().is_err() {
+                return;
+            }
+            let Some(state_root) = StableAliasRegistry::default_state_root().ok() else {
+                return;
+            };
+            let Some(executable_identity) = executable_identity(&executable) else {
+                return;
+            };
+            let process_id = std::process::id();
+            let Some(creation_ticks) = system_process_creation_ticks(process_id) else {
+                return;
+            };
+            let store = McpLeaseStore::new(state_root);
+            let Ok(lease) = store.register(
+                process_id,
+                creation_ticks,
+                executable_identity,
+                current_ticks(),
+            ) else {
+                return;
+            };
+            let _ = stopped.recv();
+            drop(lease);
+        })
+        .ok()?;
+    Some(McpRuntimeLeaseGuard { stop })
 }
 
 /// Inspects the current user's MCP lease state without creating, changing, or
@@ -207,7 +254,7 @@ impl McpLeaseStore {
         creation_ticks: u64,
         executable: McpExecutableIdentity,
         now_ticks: u64,
-    ) -> io::Result<McpRuntimeLeaseGuard> {
+    ) -> io::Result<McpLeaseFileGuard> {
         ensure_safe_path(&self.directory)?;
         fs::create_dir_all(&self.directory)?;
         ensure_safe_path(&self.directory)?;
@@ -233,7 +280,7 @@ impl McpLeaseStore {
             .open(&path)?;
         file.write_all(&bytes)?;
         file.flush()?;
-        Ok(McpRuntimeLeaseGuard { path, generation })
+        Ok(McpLeaseFileGuard { path, generation })
     }
 
     fn inspect_read_only(&self, now_ticks: u64) -> McpLeaseInspection {
@@ -514,7 +561,7 @@ fn system_process_creation_ticks(process_id: u32) -> Option<u64> {
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "$p = Get-Process -Id ([int]$env:TABBEACON_MCP_LEASE_PID) -ErrorAction Stop; [Console]::Out.Write($p.StartTime.ToUniversalTime().Ticks)",
+            "$p = [Diagnostics.Process]::GetProcessById([int]$env:TABBEACON_MCP_LEASE_PID); try { [Console]::Out.Write($p.StartTime.ToUniversalTime().Ticks) } finally { $p.Dispose() }",
         ])
         .env("TABBEACON_MCP_LEASE_PID", process_id.to_string())
         .stdin(Stdio::null())

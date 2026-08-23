@@ -40,18 +40,27 @@ process command line. A normal exit removes its exact generation. Forced death
 can leave a stale record, but stale or malformed state is only a warning and
 never drain authority.
 
+Lease registration is deliberately deferred behind immediate stdio-server
+readiness. It is a one-shot, per-MCP task that blocks on server shutdown after
+registration; it is neither a machine-global daemon nor normal-event polling.
+Until the proof appears, upgrade preflight preserves the child as ambiguous.
+
 `upgrade-preflight` considers an MCP process `PROVED_TABBEACON_MCP` only when
 all of these agree during the same bounded observation:
 
 1. the process executable canonically resolves to the inspected package target;
-2. its internal command contains the exact MCP stdio entrypoint;
+2. its current lease was created by the actual internal MCP stdio runtime only
+   after manifest-owned MCP authority was established;
 3. one current lease names that PID;
 4. the lease and process creation times are identical;
 5. the canonical-path SHA-256 and executable-byte SHA-256 match the current
    target; and
 6. there is exactly one valid lease for that PID.
 
-The command, image name, or Codex parent name alone never grants ownership.
+Windows observation carries only a transient canonical-image digest, PID, and
+creation time; it never reads a raw process command line. The manifest-bound
+lease supplies the internal-entrypoint proof. The command, image name, or
+Codex parent name alone never grants ownership.
 The resulting diagnostic distinguishes `proved_tabbeacon_mcp`,
 `unowned_or_ambiguous`, `stale_or_invalid_lease`, and
 `process_identity_mismatch`.

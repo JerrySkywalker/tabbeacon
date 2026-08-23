@@ -16,12 +16,14 @@ use std::{
 use std::{
     io::Read,
     os::windows::process::CommandExt,
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::activity::{
     ActiveWorkerLeaseIdentity, ActiveWorkerLeaseInspection, ActivityLeaseHealth,
@@ -37,7 +39,13 @@ use crate::worker_runtime::WorkerRuntimeStore;
 pub const UPGRADE_PREFLIGHT_SCHEMA_VERSION: u32 = 3;
 
 #[cfg(windows)]
-const PROCESS_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
+// Windows PowerShell process startup is host-dependent (and may take several
+// seconds even with `-NoProfile`). This remains a finite release-tooling
+// boundary, not a Hook-path timer; an unavailable observation still fails
+// closed rather than assuming there are no package locks.
+const PROCESS_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(45);
+#[cfg(windows)]
+const PROCESS_TERMINATION_TIMEOUT: Duration = Duration::from_secs(50);
 #[cfg(windows)]
 const MAX_PROCESS_OBSERVATION_STDOUT_BYTES: u64 = 512 * 1024;
 
@@ -368,6 +376,10 @@ struct ObservedProcess {
     process_id: u32,
     creation_ticks: u64,
     command_line: String,
+    // This is transient process-observation input, never report output. A
+    // normalized canonical path digest lets the Rust side select the exact
+    // package image without retaining a raw executable path.
+    image_path_sha256: Option<String>,
 }
 
 trait UpgradeProcessInspector {
@@ -681,20 +693,18 @@ fn classify_processes(
                     .identities
                     .iter()
                     .any(|identity| worker_command_matches(&process.command_line, identity));
-            let mcp_command = mcp_command_matches(&process.command_line);
+            let mcp_ownership = mcp_ownership(process, mcp_leases, target_identity);
             let kind = if worker_proved || process.command_line.contains("__activity-worker-v1") {
                 UpgradeProcessKind::ActivityWorker
-            } else if mcp_command {
+            } else if mcp_ownership != UpgradeWorkerOwnership::UnownedOrAmbiguous {
                 UpgradeProcessKind::McpStdioServer
             } else {
                 UpgradeProcessKind::Unknown
             };
             let ownership = if worker_proved {
                 UpgradeWorkerOwnership::ProvedTabBeaconWorker
-            } else if mcp_command {
-                mcp_ownership(process, mcp_leases, target_identity)
             } else {
-                UpgradeWorkerOwnership::UnownedOrAmbiguous
+                mcp_ownership
             };
             let drain = match (drain_requested, ownership) {
                 (false, _) => UpgradeDrainDisposition::NotRequested,
@@ -712,13 +722,6 @@ fn classify_processes(
         .collect::<Vec<_>>();
     result.sort_by_key(|worker| worker.process_id);
     result
-}
-
-fn mcp_command_matches(command_line: &str) -> bool {
-    command_line
-        .split_ascii_whitespace()
-        .map(|argument| argument.trim_matches('"'))
-        .any(|argument| argument == "__mcp-hook-stdio-v1")
 }
 
 fn mcp_ownership(
@@ -812,6 +815,10 @@ fn display_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 struct SystemUpgradeProcessInspector;
 
 impl UpgradeProcessInspector for SystemUpgradeProcessInspector {
@@ -870,13 +877,9 @@ try {
                     process.creation_ticks.to_string(),
                 )
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .creation_flags(0x0800_0000);
-            command
-                .status()
-                .map_err(|_| ())
-                .and_then(|status| if status.success() { Ok(()) } else { Err(()) })
+            bounded_command_output(command, PROCESS_TERMINATION_TIMEOUT).map(|_| ())
         }
         #[cfg(not(windows))]
         {
@@ -890,28 +893,35 @@ try {
 fn system_matching_processes(target: &Path) -> Result<Vec<ObservedProcess>, ()> {
     let target = normalized_path(target).ok_or(())?;
     let powershell = system_path("WindowsPowerShell\\v1.0\\powershell.exe").ok_or(())?;
-    let script = r"
-$target = $env:TABBEACON_UPGRADE_TARGET
-Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
-  Where-Object {
-    -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
-    (([IO.Path]::GetFullPath($_.ExecutablePath).Replace('\','/').ToLowerInvariant()).Replace('//?/','') -eq $target)
-  } |
-  Select-Object -First 64 |
-  ForEach-Object {
-    $line = [string]$_.CommandLine
-    if ($line.Length -gt 4096) { $line = $line.Substring(0, 4096) }
-    try {
-      $created = (Get-Process -Id ([int]$_.ProcessId) -ErrorAction Stop).StartTime.ToUniversalTime().Ticks
-      [pscustomobject]@{ process_id = [uint32]$_.ProcessId; creation_ticks = [Int64]$created; command_line = $line }
-    } catch {
-      # A target process that exits during this bounded observation is not a
-      # drain target.  Skip it; a later fresh recheck must see a live exact
-      # process before any termination handle can be opened.
+    // The observer emits only PID and creation time. It deliberately does not
+    // collect command lines: a valid MCP lease supplies the internal-runtime
+    // proof, while every other matching process remains ambiguous. Direct .NET
+    // APIs avoid WMI and PowerShell module initialization on the hot release
+    // tooling path.
+    let script = r#"
+$rows = [System.Collections.Generic.List[string]]::new()
+$processes = [System.Diagnostics.Process]::GetProcessesByName('tabbeacon')
+foreach ($process in $processes) {
+  try {
+    $path = [string]$process.MainModule.FileName
+    if (-not [string]::IsNullOrWhiteSpace($path)) {
+      $canonicalPath = [IO.Path]::GetFullPath($path).Replace('\', '/').ToLowerInvariant().Replace('//?/', '')
+      $sha256 = [Security.Cryptography.SHA256]::Create()
+      try {
+        $pathHash = ([BitConverter]::ToString($sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonicalPath))).Replace('-', '')).ToLowerInvariant()
+      } finally {
+        $sha256.Dispose()
+      }
+      $created = $process.StartTime.ToUniversalTime().Ticks
+      [void]$rows.Add(('{{"process_id":{0},"creation_ticks":{1},"command_line":"","image_path_sha256":"{2}"}}' -f [uint32]$process.Id, [Int64]$created, $pathHash))
     }
-  } |
-  ConvertTo-Json -Compress
-";
+  } catch {
+  } finally {
+    $process.Dispose()
+  }
+}
+'[' + [string]::Join(',', $rows) + ']'
+"#;
     let mut command = Command::new(powershell);
     command
         .args([
@@ -921,53 +931,18 @@ Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
             "-Command",
             script,
         ])
-        .env("TABBEACON_UPGRADE_TARGET", target)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .creation_flags(0x0800_0000);
     let output = bounded_command_output(command, PROCESS_OBSERVATION_TIMEOUT)?;
     let output = String::from_utf8(output).map_err(|_| ())?;
-    parse_processes(&output)
-}
-
-/// Runs only the observer process TabBeacon started, with bounded output and
-/// time. A stalled Windows management query is unavailable evidence, never a
-/// reason to hold an upgrade or widen drain authority.
-#[cfg(windows)]
-fn bounded_command_output(mut command: Command, timeout: Duration) -> Result<Vec<u8>, ()> {
-    command.stdout(Stdio::piped());
-    let mut child = command.spawn().map_err(|_| ())?;
-    let stdout = child.stdout.take().ok_or(())?;
-    let reader = thread::spawn(move || {
-        let mut output = Vec::new();
-        stdout
-            .take(MAX_PROCESS_OBSERVATION_STDOUT_BYTES.saturating_add(1))
-            .read_to_end(&mut output)
-            .map(|_| output)
-    });
-    let deadline = Instant::now().checked_add(timeout).ok_or(())?;
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(|_| ())? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = reader.join();
-            return Err(());
-        }
-        thread::sleep(Duration::from_millis(10));
-    };
-    let output = reader.join().map_err(|_| ())?.map_err(|_| ())?;
-    if !status.success() || output.len() > MAX_PROCESS_OBSERVATION_STDOUT_BYTES as usize {
-        return Err(());
-    }
-    Ok(output)
-}
-
-#[cfg(not(windows))]
-fn system_matching_processes(_target: &Path) -> Result<Vec<ObservedProcess>, ()> {
-    Err(())
+    let target_hash = sha256_hex(target.as_bytes());
+    let processes = parse_processes(&output)?;
+    let matching = processes
+        .into_iter()
+        .filter(|process| process.image_path_sha256.as_deref() == Some(target_hash.as_str()))
+        .collect::<Vec<_>>();
+    (matching.len() <= 64).then_some(matching).ok_or(())
 }
 
 #[cfg(windows)]
@@ -976,6 +951,59 @@ fn system_path(suffix: &str) -> Option<PathBuf> {
         .join("System32")
         .join(suffix);
     path.is_file().then_some(path)
+}
+
+#[cfg(windows)]
+fn bounded_command_output(mut command: Command, timeout: Duration) -> Result<Vec<u8>, ()> {
+    command.stdout(Stdio::piped());
+    let mut child = command.spawn().map_err(|_| ())?;
+    let mut stdout = child.stdout.take().ok_or(())?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let _reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let result = stdout
+            .by_ref()
+            .take(MAX_PROCESS_OBSERVATION_STDOUT_BYTES.saturating_add(1))
+            .read_to_end(&mut output)
+            .map(|_| output);
+        let _ = sender.send(result);
+    });
+    let deadline = Instant::now().checked_add(timeout).ok_or(())?;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(());
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(());
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .unwrap_or(Duration::ZERO);
+    let output = receiver
+        .recv_timeout(remaining)
+        .map_err(|_| ())?
+        .map_err(|_| ())?;
+    if !status.success()
+        || output.len() > usize::try_from(MAX_PROCESS_OBSERVATION_STDOUT_BYTES).map_err(|_| ())?
+    {
+        return Err(());
+    }
+    Ok(output)
+}
+
+#[cfg(not(windows))]
+fn system_matching_processes(_target: &Path) -> Result<Vec<ObservedProcess>, ()> {
+    Err(())
 }
 
 fn parse_processes(output: &str) -> Result<Vec<ObservedProcess>, ()> {
@@ -989,7 +1017,7 @@ fn parse_processes(output: &str) -> Result<Vec<ObservedProcess>, ()> {
         Value::Object(_) => vec![value],
         _ => return Err(()),
     };
-    if values.len() > 64 {
+    if values.len() > 512 {
         return Err(());
     }
     let mut processes = Vec::with_capacity(values.len());
@@ -1011,10 +1039,16 @@ fn parse_processes(output: &str) -> Result<Vec<ObservedProcess>, ()> {
             .and_then(Value::as_u64)
             .filter(|ticks| *ticks >= 621_355_968_000_000_000)
             .ok_or(())?;
+        let image_path_sha256 = value
+            .get("image_path_sha256")
+            .and_then(Value::as_str)
+            .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(str::to_owned);
         processes.push(ObservedProcess {
             process_id,
             creation_ticks,
             command_line,
+            image_path_sha256,
         });
     }
     processes.sort_by_key(|process| process.process_id);
@@ -1157,6 +1191,7 @@ mod tests {
             process_id,
             creation_ticks: 638_000_000_000_000_000_u64.saturating_add(u64::from(process_id)),
             command_line: command_line.into(),
+            image_path_sha256: None,
         }
     }
 
@@ -1294,41 +1329,15 @@ mod tests {
         );
     }
 
-    #[cfg(windows)]
-    #[test]
-    fn bounded_observer_output_refuses_a_stalled_self_owned_command() {
-        let powershell = system_path("WindowsPowerShell\\v1.0\\powershell.exe")
-            .expect("Windows PowerShell exists");
-        let mut command = Command::new(powershell);
-        command.args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "Start-Sleep -Seconds 2",
-        ]);
-        assert!(bounded_command_output(command, Duration::from_millis(25)).is_err());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn bounded_observer_output_keeps_small_successful_output() {
-        let command_shell = system_path("cmd.exe").expect("Windows command shell exists");
-        let mut command = Command::new(command_shell);
-        command.args(["/d", "/s", "/c", "echo []"]);
-        assert_eq!(
-            bounded_command_output(command, Duration::from_secs(5)).expect("small output succeeds"),
-            b"[]\r\n"
-        );
-    }
-
     #[test]
     fn exact_mcp_lease_is_drained_but_ambiguous_and_identity_mismatched_processes_are_preserved() {
         let root = TestRoot::new("mcp-drain");
         let target = root.0.join("tabbeacon.exe");
         std::fs::write(&target, b"exact package executable").expect("fixture executable writes");
         let target_identity = executable_identity(&target).expect("fixture identity resolves");
-        let process = observed(71, "tabbeacon.exe __mcp-hook-stdio-v1");
+        // Native process snapshots deliberately omit raw command lines. The
+        // validated MCP runtime lease is the internal-entrypoint proof.
+        let process = observed(71, "");
         let lease = mcp_lease_for(process.process_id, process.creation_ticks, &target_identity);
         let mut default_inspector = FakeInspector {
             processes: vec![process.clone()],
