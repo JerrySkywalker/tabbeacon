@@ -1,5 +1,7 @@
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use std::sync::Mutex;
 use std::{
     env, fs,
     io::{self, Read, Write},
@@ -61,7 +63,11 @@ const LEGACY_HOOK_EVENTS: [&str; 7] = [
 const WINDOWS_HOOK_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(windows)]
 const WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT: Duration = Duration::from_millis(900);
-const WINDOWS_HOOK_COMMAND_PREFIX: &str = "\"";
+#[cfg(windows)]
+static WINDOWS_HOOK_SHELL_SERIALIZER: Mutex<()> = Mutex::new(());
+const WINDOWS_HOOK_COMMAND_SUFFIX: &str = " hook codex";
+const WINDOWS_POWERSHELL_ENVELOPE_PREFIX: &str =
+    "powershell.exe -NoProfile -NonInteractive -EncodedCommand ";
 
 struct TestRoot {
     path: PathBuf,
@@ -249,17 +255,6 @@ fn hook_group_fixture(name: &str, event: &str) -> Value {
 }
 
 #[cfg(windows)]
-fn run_codex_windows_hook(command_line: &str) -> std::process::Output {
-    run_codex_windows_hook_with_shell(
-        CodexWindowsHookShell::ComspecFallback,
-        command_line,
-        &[],
-        false,
-        None,
-    )
-}
-
-#[cfg(windows)]
 #[derive(Clone, Copy)]
 enum CodexWindowsHookShell {
     Pwsh7,
@@ -429,9 +424,17 @@ fn run_codex_windows_hook_with_shell_and_terminal(
     terminal_session: Option<&str>,
     timeout: Duration,
 ) -> std::process::Output {
-    // Mirror Codex 0.147.0 command_runner::build_command exactly. A non-empty
-    // CommandShell receives normal arguments, except cmd.exe's /c branch uses
-    // the runner's raw outer quotation. An empty program falls back to COMSPEC.
+    // These regressions start actual PowerShell/cmd processes. Keep their
+    // bounded shell stages independent of unrelated fixture-compilation load
+    // in the parallel integration suite; the dedicated transport benchmark
+    // covers multi-session concurrency separately.
+    let _shell_guard = WINDOWS_HOOK_SHELL_SERIALIZER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Mirror Codex 0.149 command_runner semantics exactly. A non-empty
+    // TurnEnvironment shell receives normal arguments, except cmd.exe's /c
+    // branch uses the runner's raw outer quotation. An empty program falls
+    // back to COMSPEC.
     let mut command = match shell {
         CodexWindowsHookShell::Pwsh7 => {
             let mut command = Command::new("pwsh.exe");
@@ -512,18 +515,34 @@ fn canonical_json(value: &Value) -> Value {
 
 fn normalized_codex_hash(event: &str, group: &Value) -> String {
     let handler = &group["hooks"][0];
-    let normalized = json!({
-        "event_name": codex_event_key(event),
-        "hooks": [{
+    let normalized_handler = match handler["type"].as_str() {
+        Some("command") => json!({
             "type": "command",
             "command": handler["commandWindows"],
             "timeout": handler["timeout"],
             "async": handler["async"]
-        }]
+        }),
+        Some("mcp_tool") => json!({
+            "type": "mcp_tool",
+            "server": handler["server"],
+            "tool": handler["tool"],
+            "input": handler["input"],
+            "timeout": handler["timeout"]
+        }),
+        other => panic!("unsupported owned Hook handler type: {other:?}"),
+    };
+    let normalized = json!({
+        "event_name": codex_event_key(event),
+        "hooks": [normalized_handler]
     });
     let bytes = serde_json::to_vec(&canonical_json(&normalized))
         .expect("normalized hook fixture serializes");
     format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn is_current_windows_hook_command(command: &str) -> bool {
+    (command.ends_with(WINDOWS_HOOK_COMMAND_SUFFIX) && !command.contains(['\r', '\n']))
+        || command.starts_with(WINDOWS_POWERSHELL_ENVELOPE_PREFIX)
 }
 
 fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
@@ -547,41 +566,39 @@ fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
     }
 
     let mut keys = Vec::new();
-    for event in ADMITTED_HOOK_EVENTS {
-        let groups = hooks["hooks"][event]
-            .as_array()
-            .expect("hook event groups are an array");
-        let group_index = groups
-            .iter()
-            .position(|group| {
-                group["hooks"].as_array().is_some_and(|handlers| {
-                    handlers.iter().any(|handler| {
-                        handler["type"] == "command"
-                            && handler["command"].as_str().is_some_and(|command| {
-                                command.starts_with(
-                                    "powershell.exe -NoProfile -NonInteractive -EncodedCommand ",
-                                )
-                            })
-                            && handler["commandWindows"].as_str().is_some_and(|command| {
-                                command.starts_with(WINDOWS_HOOK_COMMAND_PREFIX)
-                            })
-                    })
+    for (event, groups) in hooks["hooks"].as_object().expect("hooks object is present") {
+        let groups = groups.as_array().expect("hook event groups are an array");
+        for (group_index, group) in groups.iter().enumerate() {
+            let owned = group["hooks"].as_array().is_some_and(|handlers| {
+                handlers.iter().any(|handler| {
+                    (handler["type"] == "command"
+                        && handler["command"].as_str().is_some_and(|command| {
+                            command.starts_with(WINDOWS_POWERSHELL_ENVELOPE_PREFIX)
+                        })
+                        && handler["commandWindows"]
+                            .as_str()
+                            .is_some_and(is_current_windows_hook_command))
+                        || (handler["type"] == "mcp_tool"
+                            && handler["server"] == "tabbeacon-hook"
+                            && handler["tool"] == "tabbeacon_hook_event")
                 })
-            })
-            .expect("owned command hook group is present exactly once");
-        let group = &groups[group_index];
-        let key = format!(
-            "{}:{}:{group_index}:0",
-            hooks_path.display(),
-            codex_event_key(event)
-        );
-        let mut trusted = Table::new();
-        trusted.insert("trusted_hash", value(normalized_codex_hash(event, group)));
-        config["hooks"]["state"]
-            .as_table_like_mut()
-            .expect("hook state is a table")
-            .insert(&key, Item::Table(trusted));
-        keys.push(key);
+            });
+            if !owned {
+                continue;
+            }
+            let key = format!(
+                "{}:{}:{group_index}:0",
+                hooks_path.display(),
+                codex_event_key(event)
+            );
+            let mut trusted = Table::new();
+            trusted.insert("trusted_hash", value(normalized_codex_hash(event, group)));
+            config["hooks"]["state"]
+                .as_table_like_mut()
+                .expect("hook state is a table")
+                .insert(&key, Item::Table(trusted));
+            keys.push(key);
+        }
     }
     fs::write(config_path, config.to_string()).expect("trusted config writes");
     keys
@@ -642,7 +659,7 @@ fn remove_exact_manifest_owned_declarations(hooks: &mut Value, manifest: &Value)
     }
 }
 
-fn owned_fast_windows_handler_count(hooks: &Value) -> usize {
+fn owned_current_windows_handler_count(hooks: &Value) -> usize {
     hooks["hooks"]
         .as_object()
         .expect("hooks object")
@@ -650,20 +667,22 @@ fn owned_fast_windows_handler_count(hooks: &Value) -> usize {
         .flat_map(|groups| groups.as_array().into_iter().flatten())
         .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
         .filter(|handler| {
-            handler["command"].as_str().is_some_and(|command| {
-                command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
-            }) && handler["commandWindows"]
+            handler["command"]
                 .as_str()
-                .is_some_and(|command| command.starts_with(WINDOWS_HOOK_COMMAND_PREFIX))
+                .is_some_and(|command| command.starts_with(WINDOWS_POWERSHELL_ENVELOPE_PREFIX))
+                && handler["commandWindows"]
+                    .as_str()
+                    .is_some_and(is_current_windows_hook_command)
         })
         .count()
 }
 
 #[cfg(windows)]
-fn assert_real_hook_direct(executable: &Path, payload: &[u8]) {
+fn assert_real_hook_direct(executable: &Path, payload: &[u8], local_app_data: &Path) {
     let child = Command::new(executable)
         .args(["hook", "codex"])
-        .env_remove("LOCALAPPDATA")
+        .env("LOCALAPPDATA", local_app_data)
+        .env_remove("WT_SESSION")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -715,14 +734,21 @@ fn assert_real_hook_with_local_state_within(
 }
 
 #[cfg(windows)]
-fn assert_real_hook_shell_matrix(command: &str, payload: &[u8]) {
+fn assert_real_hook_shell_matrix(root: &TestRoot, command: &str, payload: &[u8]) {
+    let local_app_data = root.child("shell-matrix-local-app-data");
     for shell in [
         CodexWindowsHookShell::Pwsh7,
         CodexWindowsHookShell::WindowsPowerShell,
         CodexWindowsHookShell::Cmd,
         CodexWindowsHookShell::ComspecFallback,
     ] {
-        let output = run_codex_windows_hook_with_shell(shell, command, payload, true, None);
+        let output = run_codex_windows_hook_with_shell(
+            shell,
+            command,
+            payload,
+            false,
+            Some(&local_app_data),
+        );
         assert!(
             output.status.success(),
             "{} real hook shell failed: {}",
@@ -846,7 +872,7 @@ fn fast_real_windows_hook_command(root: &TestRoot) -> (PathBuf, String, String) 
                     | '}'
             )
         }),
-        "the isolated test binary path must select the fast cmd declaration"
+        "the isolated test binary path must select the shell-neutral fast declaration"
     );
     let integration = CodexIntegration::new(
         root.child("codex-home"),
@@ -868,16 +894,33 @@ fn fast_real_windows_hook_command(root: &TestRoot) -> (PathBuf, String, String) 
     let generic_command = handler["command"]
         .as_str()
         .expect("generated generic command is a string");
-    assert!(command.starts_with(WINDOWS_HOOK_COMMAND_PREFIX));
-    assert!(
-        command.contains(&format!("\"{executable_text}\" hook codex")),
-        "the fast cmd declaration keeps the executable as one quoted argument"
+    assert_eq!(
+        command,
+        format!("{executable_text} hook codex"),
+        "the fast declaration is a single native command accepted by every admitted shell"
     );
     assert!(
         generic_command.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand "),
         "the generic command retains compatibility for configured PowerShell shells"
     );
     (executable, generic_command.to_owned(), command.to_owned())
+}
+
+#[cfg(windows)]
+fn trusted_real_windows_integration(root: &TestRoot) -> CodexIntegration {
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon"));
+    let integration = CodexIntegration::new(
+        root.child("codex-home"),
+        root.child("integration-state"),
+        executable,
+    )
+    .with_codex_program(compile_codex_probe(root));
+    assert_eq!(
+        integration.setup().expect("setup succeeds"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    install_current_codex_trust_state(&root.child("codex-home"));
+    integration
 }
 
 #[cfg(windows)]
@@ -961,6 +1004,8 @@ fn source_audited_profiles_are_explicit_and_future_versions_are_not_assumed() {
     assert_eq!(profile_149.lifecycle_events(), profile.lifecycle_events());
     assert_eq!(profile_149.identity(), profile.identity());
     assert_eq!(profile_149.timeout(), profile.timeout());
+    assert!(!profile.uses_mcp_hook_transport());
+    assert!(profile_149.uses_mcp_hook_transport());
     assert_eq!(profile.wire_shape(), profile_149.wire_shape());
     assert_eq!(profile.wire_shape().id(), "codex-command-hooks-wire-v1");
     assert_eq!(profile.wire_shape().root_key(), "hooks");
@@ -976,7 +1021,7 @@ fn source_audited_profiles_are_explicit_and_future_versions_are_not_assumed() {
     assert_eq!(profile.wire_shape().trust_state_field(), "trusted_hash");
     assert_eq!(
         profile_149.reconciliation_note(),
-        "owned-command-hooks;external-mcp-tool-preserved"
+        "owned-mcp-tool-hooks;session-eof-cleanup;external-mcp-preserved"
     );
     assert_eq!(
         CodexCompatibilityRegistry::admitted_profiles(),
@@ -1014,7 +1059,7 @@ fn observed_codex_0149_shape_reconciles_only_exact_owned_declarations() {
         SetupOutcome::InstalledTrustReviewRequired
     );
     let trusted_keys = install_current_codex_trust_state(&codex_home);
-    assert_eq!(trusted_keys.len(), ADMITTED_HOOK_EVENTS.len());
+    assert_eq!(trusted_keys.len(), ADMITTED_HOOK_EVENTS.len() - 1);
 
     let report = integration.doctor();
     assert_eq!(report.compatibility_state().label(), "supported");
@@ -1063,7 +1108,7 @@ fn codex_0149_mcp_extension_is_preserved_during_owned_command_reconciliation() {
     assert_eq!(
         integration
             .setup()
-            .expect("0.149 MCP extension does not block command reconciliation"),
+            .expect("0.149 MCP extension does not block owned MCP reconciliation"),
         SetupOutcome::InstalledTrustReviewRequired
     );
     install_current_codex_trust_state(&codex_home);
@@ -1074,7 +1119,7 @@ fn codex_0149_mcp_extension_is_preserved_during_owned_command_reconciliation() {
     assert_eq!(after["hooks"]["PostToolUse"][0], external_mcp_group);
     assert_eq!(
         after["hooks"]["PostToolUse"][1]["hooks"][0]["type"],
-        "command"
+        "mcp_tool"
     );
     let report = integration.doctor();
     assert!(report.checks().iter().any(|check| {
@@ -1085,6 +1130,201 @@ fn codex_0149_mcp_extension_is_preserved_during_owned_command_reconciliation() {
             .checks()
             .iter()
             .any(|check| { check.id() == "hooks.trust" && check.status() == DoctorStatus::Pass })
+    );
+}
+
+#[test]
+fn codex_0149_owned_mcp_server_preserves_external_servers_and_refuses_name_collision() {
+    let root = TestRoot::new("codex-0149-mcp-server-ownership");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let config_path = codex_home.join("config.toml");
+    let owner_config = concat!(
+        "model = \"gpt-test\"\n\n",
+        "[mcp_servers.owner-audit]\n",
+        "command = \"owner-audit.exe\"\n",
+        "args = [\"--stdio\"]\n\n",
+        "[mcp_servers.owner-audit.env]\n",
+        "OWNER_MODE = \"preserve\"\n"
+    );
+    fs::write(&config_path, owner_config).expect("owner MCP config is written");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+
+    assert_eq!(
+        integration.setup().expect("0.149 owned MCP setup succeeds"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    let installed = fs::read_to_string(&config_path).expect("installed config reads");
+    let installed_config = installed
+        .parse::<DocumentMut>()
+        .expect("installed config parses");
+    let owner_server = installed_config["mcp_servers"]["owner-audit"]
+        .as_table_like()
+        .expect("external MCP server remains a table");
+    assert_eq!(
+        owner_server.get("command").and_then(Item::as_str),
+        Some("owner-audit.exe")
+    );
+    assert_eq!(
+        owner_server
+            .get("env")
+            .and_then(Item::as_table_like)
+            .and_then(|env| env.get("OWNER_MODE"))
+            .and_then(Item::as_str),
+        Some("preserve")
+    );
+    let tabbeacon_server = installed_config["mcp_servers"]["tabbeacon-hook"]
+        .as_table_like()
+        .expect("owned MCP server is configured");
+    let tabbeacon_args = tabbeacon_server
+        .get("args")
+        .and_then(Item::as_array)
+        .expect("owned MCP server args are an array")
+        .iter()
+        .map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect::<Option<Vec<_>>>();
+    assert_eq!(tabbeacon_args, Some(vec!["__mcp-hook-stdio-v1".to_owned()]));
+    let omitted_surfaces = tabbeacon_server
+        .get("omit_tools_from")
+        .and_then(Item::as_array)
+        .expect("owned MCP server omits all model-facing tool surfaces");
+    assert_eq!(
+        omitted_surfaces
+            .iter()
+            .map(|surface| surface.as_str())
+            .collect::<Option<Vec<_>>>(),
+        Some(vec!["code_mode", "deferred", "direct"])
+    );
+    assert_eq!(
+        integration
+            .uninstall()
+            .expect("owned MCP server uninstalls"),
+        UninstallOutcome::Removed
+    );
+    let restored = fs::read_to_string(&config_path).expect("restored config reads");
+    assert!(restored.contains("owner-audit.exe"));
+    assert!(restored.contains("OWNER_MODE = \"preserve\""));
+    assert!(!restored.contains("tabbeacon-hook"));
+
+    let collision = TestRoot::new("codex-0149-mcp-server-collision");
+    let collision_home = collision.child("codex-home");
+    write_hooks_fixture(&collision_home, "0.149.0-observed.json");
+    let collision_config = collision_home.join("config.toml");
+    fs::write(
+        &collision_config,
+        "[mcp_servers.tabbeacon-hook]\ncommand = \"owner-server.exe\"\nargs = [\"--stdio\"]\n",
+    )
+    .expect("conflicting external MCP server is written");
+    let before = fs::read(&collision_config).expect("conflicting config reads");
+    let collision_integration =
+        test_integration_with_codex_fixture(&collision, "codex_version_probe_0149.rs");
+    assert!(matches!(
+        collision_integration.setup(),
+        Err(CodexIntegrationError::TabBeaconLikeAmbiguityBlocked)
+    ));
+    assert_eq!(
+        fs::read(&collision_config).expect("conflicting config rereads"),
+        before
+    );
+}
+
+#[test]
+fn prerelease_mcp_manifest_without_tool_visibility_upgrades_exactly_once() {
+    let root = TestRoot::new("codex-0149-mcp-visibility-upgrade");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let config_path = codex_home.join("config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("initial MCP setup succeeds");
+
+    let mut prior_config = fs::read_to_string(&config_path)
+        .expect("installed config reads")
+        .parse::<DocumentMut>()
+        .expect("installed config parses");
+    prior_config["mcp_servers"]["tabbeacon-hook"]
+        .as_table_like_mut()
+        .expect("owned MCP server table")
+        .remove("omit_tools_from");
+    fs::write(&config_path, prior_config.to_string()).expect("pre-release config is written");
+    let mut prior_manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("installed manifest reads"))
+            .expect("installed manifest parses");
+    prior_manifest["mcp_server"]
+        .as_object_mut()
+        .expect("owned MCP manifest")
+        .remove("omit_tools_from");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&prior_manifest).expect("pre-release manifest serializes"),
+    )
+    .expect("pre-release manifest is written");
+
+    assert_eq!(
+        integration.setup().expect("pre-release MCP setup upgrades"),
+        SetupOutcome::Upgraded
+    );
+    let upgraded = fs::read_to_string(&config_path)
+        .expect("upgraded config reads")
+        .parse::<DocumentMut>()
+        .expect("upgraded config parses");
+    let omitted = upgraded["mcp_servers"]["tabbeacon-hook"]
+        .get("omit_tools_from")
+        .and_then(Item::as_array)
+        .expect("upgraded MCP server hides its hook tool")
+        .iter()
+        .map(|value| value.as_str())
+        .collect::<Option<Vec<_>>>();
+    assert_eq!(omitted, Some(vec!["code_mode", "deferred", "direct"]));
+    assert_eq!(
+        integration.setup().expect("upgraded MCP setup is stable"),
+        SetupOutcome::AlreadyInstalled
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn doctor_runtime_probe_executes_the_exact_0149_mcp_stdio_transport() {
+    let root = TestRoot::new("codex-0149-mcp-runtime-probe");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let integration = CodexIntegration::new(
+        &codex_home,
+        root.child("state"),
+        PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon")),
+    )
+    .with_codex_program(compile_codex_probe_fixture(
+        &root,
+        "codex_version_probe_0149.rs",
+    ));
+    integration.setup().expect("0.149 MCP setup succeeds");
+    install_current_codex_trust_state(&codex_home);
+    let hooks_before = fs::read(codex_home.join("hooks.json")).expect("hooks before probe read");
+    let config_before = fs::read(codex_home.join("config.toml")).expect("config before probe read");
+    let manifest_before =
+        fs::read(root.child("state/integration-v1.json")).expect("manifest before probe read");
+
+    let report = integration.doctor_with_runtime_probe();
+    assert_eq!(
+        report.check_status("hooks.runtime-probe"),
+        Some(DoctorStatus::Pass)
+    );
+    assert!(
+        report
+            .check("hooks.runtime-probe")
+            .is_some_and(|check| { check.summary().contains("bounded direct stdio transport") })
+    );
+    assert_eq!(
+        fs::read(codex_home.join("hooks.json")).expect("hooks after probe read"),
+        hooks_before
+    );
+    assert_eq!(
+        fs::read(codex_home.join("config.toml")).expect("config after probe read"),
+        config_before
+    );
+    assert_eq!(
+        fs::read(root.child("state/integration-v1.json")).expect("manifest after probe read"),
+        manifest_before
     );
 }
 
@@ -1141,7 +1381,7 @@ fn repair_v2_preserves_original_baseline_third_party_groups_and_is_idempotent() 
         .repair(false, None)
         .expect("repair preview is safe");
     assert_eq!(preview.disposition, CodexRepairDisposition::ReadyToApply);
-    assert_eq!(preview.missing_declarations, ADMITTED_HOOK_EVENTS.len());
+    assert_eq!(preview.missing_declarations, ADMITTED_HOOK_EVENTS.len() - 1);
     assert_eq!(preview.schema_version, 2);
     assert_eq!(preview.third_party_groups_preserved, 2);
     assert_eq!(preview.postinstall_third_party_groups_preserved, 0);
@@ -1167,7 +1407,10 @@ fn repair_v2_preserves_original_baseline_third_party_groups_and_is_idempotent() 
         repaired.disposition,
         CodexRepairDisposition::RepairedTrustReviewRequired
     );
-    assert_eq!(repaired.missing_declarations, ADMITTED_HOOK_EVENTS.len());
+    assert_eq!(
+        repaired.missing_declarations,
+        ADMITTED_HOOK_EVENTS.len() - 1
+    );
     assert_eq!(repaired.third_party_groups_preserved, 2);
     assert_eq!(repaired.postinstall_third_party_groups_preserved, 0);
     assert!(repaired.manual_hook_trust_review_required);
@@ -1445,7 +1688,7 @@ fn repair_v2_blocks_a_modified_partial_owned_group() {
     let mut hooks: Value =
         serde_json::from_slice(&fs::read(&hooks_path).expect("installed hooks read"))
             .expect("installed hooks parse");
-    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["async"] = json!(true);
+    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["timeout"] = json!(2);
     fs::write(
         &hooks_path,
         serde_json::to_vec_pretty(&hooks).expect("modified partial group serialize"),
@@ -1769,8 +2012,7 @@ fn future_unknown_declaration_drift_disables_runtime_continuity() {
 
     let mut hooks: Value =
         serde_json::from_slice(&fs::read(&hooks_path).expect("hooks read")).expect("hooks parse");
-    hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = json!("declaration drift");
-    hooks["hooks"]["PreToolUse"][0]["hooks"][0]["commandWindows"] = json!("declaration drift");
+    hooks["hooks"]["PreToolUse"][0]["hooks"][0]["tool"] = json!("declaration-drift");
     fs::write(
         &hooks_path,
         serde_json::to_vec_pretty(&hooks).expect("drifted hooks serialize"),
@@ -1878,8 +2120,7 @@ fn observed_codex_0149_command_drift_is_never_reconciled_or_trusted() {
     let mut hooks: Value =
         serde_json::from_slice(&fs::read(&hooks_path).expect("owned hooks read"))
             .expect("owned hooks parse");
-    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["command"] = json!("external replacement");
-    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["commandWindows"] = json!("external replacement");
+    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["tool"] = json!("external-replacement");
     fs::write(
         &hooks_path,
         serde_json::to_vec_pretty(&hooks).expect("drifted hooks serialize"),
@@ -3138,7 +3379,7 @@ fn repeated_setup_ten_times_keeps_exactly_eleven_owned_hook_definitions() {
         &fs::read(root.child("codex-home/hooks.json")).expect("installed hooks read"),
     )
     .expect("installed hooks parse");
-    assert_eq!(owned_fast_windows_handler_count(&hooks), 11);
+    assert_eq!(owned_current_windows_handler_count(&hooks), 11);
     for event in ADMITTED_HOOK_EVENTS {
         assert_eq!(hooks["hooks"][event].as_array().map(Vec::len), Some(1));
     }
@@ -3194,7 +3435,7 @@ fn relocated_executable_migrates_exact_owned_hooks_without_duplicates() {
         &fs::read(root.child("codex-home/hooks.json")).expect("migrated hooks read"),
     )
     .expect("migrated hooks parse");
-    assert_eq!(owned_fast_windows_handler_count(&hooks), 11);
+    assert_eq!(owned_current_windows_handler_count(&hooks), 11);
     let after_migration = relocated.doctor();
     assert!(after_migration.checks().iter().any(|check| {
         check.id() == "hooks.currentness" && check.status() == DoctorStatus::Pass
@@ -3323,7 +3564,7 @@ fn setup_upgrades_exact_owned_declarations_without_duplicates_or_baseline_loss()
         &fs::read(codex_home.join("hooks.json")).expect("upgraded hooks read"),
     )
     .expect("upgraded hooks parse");
-    let owned_handler_count = owned_fast_windows_handler_count(&upgraded_hooks);
+    let owned_handler_count = owned_current_windows_handler_count(&upgraded_hooks);
     assert_eq!(
         owned_handler_count, 11,
         "upgrade must never append another eleven hooks"
@@ -3388,7 +3629,10 @@ fn doctor_supports_current_codex_trust_shape_and_detects_inactive_or_conflicting
     let trusted_keys = install_current_codex_trust_state(&codex_home);
 
     let report = integration.doctor();
-    assert_eq!(report.overall(), DoctorStatus::Pass);
+    assert_eq!(report.overall(), DoctorStatus::Warning);
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.runtime-probe" && check.status() == DoctorStatus::Warning
+    }));
     assert!(report.checks().iter().any(|check| {
         check.id() == "hooks.trust"
             && check.status() == DoctorStatus::Pass
@@ -3652,7 +3896,7 @@ fn title_drift_and_unowned_matching_hooks_are_refused_without_overwrite() {
 }
 
 #[test]
-fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
+fn missing_managed_binary_is_diagnosed_without_claiming_direct_command_fail_open() {
     let root = TestRoot::new("missing-binary");
     let integration = test_integration(&root);
     integration.setup().expect("setup succeeds");
@@ -3670,6 +3914,7 @@ fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
     assert!(report.checks().iter().any(|check| {
         check.id() == "tabbeacon.executable" && check.status() == DoctorStatus::Fail
     }));
+    assert_eq!(report.overall(), DoctorStatus::Fail);
     let hooks: Value =
         serde_json::from_slice(&fs::read(root.child("codex-home/hooks.json")).expect("hooks read"))
             .expect("hooks parse");
@@ -3679,65 +3924,121 @@ fn missing_managed_binary_is_diagnosed_and_command_shell_remains_fail_open() {
         let command = hooks["hooks"][event][0]["hooks"][0]["commandWindows"]
             .as_str()
             .expect("Windows command is a string");
-        assert!(command.starts_with(WINDOWS_HOOK_COMMAND_PREFIX));
-    }
-    #[cfg(windows)]
-    {
-        let command = hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["commandWindows"]
-            .as_str()
-            .expect("Windows command is a string");
-        let output = run_codex_windows_hook(command);
+        assert!(is_current_windows_hook_command(command));
         assert!(
-            output.status.success(),
-            "missing managed binary must fail open"
+            !command.contains(['\r', '\n']),
+            "the direct fast declaration is exactly one command line"
         );
     }
 }
 
 #[cfg(windows)]
 #[test]
-fn generated_windows_command_runs_the_real_binary_in_the_codex_0_147_shell_model() {
+fn generated_windows_command_runs_the_real_binary_in_the_codex_0149_shell_model() {
     // Keep a fixture component between `windows` and the generated process id.
     // The bare `...-windows-<pid>` shape can leave the nested PowerShell
     // command host open on this Windows runner, obscuring the command-shape
     // behavior this test is intended to prove.
     let root = TestRoot::new("real-command-windows-shell");
     let (executable, command) = real_windows_hook_command(&root);
+    let local_app_data = root.child("direct-local-app-data");
 
     let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "real-shell", &root.path))
         .expect("Codex-shaped payload serializes");
-    assert_real_hook_direct(&executable, &payload);
-    assert_real_hook_shell_matrix(&command, &payload);
+    assert_real_hook_direct(&executable, &payload, &local_app_data);
+    assert_real_hook_shell_matrix(&root, &command, &payload);
     assert_real_hook_ingress(&root, &command);
 }
 
 #[cfg(windows)]
 #[test]
-fn safe_windows_declaration_keeps_generic_shell_compatibility_and_comspec_sla_path() {
+fn shell_neutral_windows_declaration_succeeds_in_every_codex_0149_shell_mode() {
     let root = TestRoot::new("safe-command-windows-shell");
     let (executable, generic_command, windows_command) = fast_real_windows_hook_command(&root);
+    let local_app_data = root.child("direct-local-app-data");
     let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "safe-shell", &root.path))
         .expect("Codex-shaped payload serializes");
 
-    // Custom/generic PowerShell and Cmd models retain the historical encoded
-    // declaration. The direct `commandWindows` form is admitted only for the
-    // default COMSPEC path measured by the production SLA gate.
-    assert_real_hook_direct(&executable, &payload);
-    assert_real_hook_shell_matrix(&generic_command, &payload);
-    let output = run_codex_windows_hook_with_shell(
-        CodexWindowsHookShell::ComspecFallback,
-        &windows_command,
-        &payload,
-        true,
-        None,
+    // The generic declaration remains the established compatibility fallback.
+    // Production `commandWindows` must use the same shell-neutral form in a
+    // configured pwsh/PowerShell/cmd shell and in the empty-shell COMSPEC path.
+    assert_real_hook_direct(&executable, &payload, &local_app_data);
+    assert_real_hook_shell_matrix(&root, &generic_command, &payload);
+    assert_real_hook_shell_matrix(&root, &windows_command, &payload);
+    assert_real_hook_ingress(&root, &windows_command);
+}
+
+#[cfg(windows)]
+#[test]
+fn legacy_cmd_fail_open_declaration_reproduces_the_codex_0149_turn_environment_failure() {
+    let root = TestRoot::new("legacy-cmd-turn-environment");
+    let (executable, _generic_command, _windows_command) = fast_real_windows_hook_command(&root);
+    let legacy_command = format!("\"{}\" hook codex || exit /b 0", executable.display());
+    let payload = serde_json::to_vec(&hook_payload(
+        "UserPromptSubmit",
+        "legacy-shell",
+        &root.path,
+    ))
+    .expect("Codex-shaped payload serializes");
+    let local_app_data = root.child("legacy-local-app-data");
+
+    for shell in [
+        CodexWindowsHookShell::Pwsh7,
+        CodexWindowsHookShell::WindowsPowerShell,
+    ] {
+        let output = run_codex_windows_hook_with_shell(
+            shell,
+            &legacy_command,
+            &payload,
+            false,
+            Some(&local_app_data),
+        );
+        assert!(
+            !output.status.success(),
+            "legacy cmd declaration unexpectedly succeeded in {}",
+            shell.label()
+        );
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn static_doctor_requires_a_bounded_explicit_hook_runtime_probe() {
+    let root = TestRoot::new("doctor-runtime-probe");
+    let integration = trusted_real_windows_integration(&root);
+    let hooks_path = root.child("codex-home/hooks.json");
+    let config_path = root.child("codex-home/config.toml");
+    let manifest_path = root.child("integration-state/integration-v1.json");
+    let before = [
+        fs::read(&hooks_path).expect("hooks read"),
+        fs::read(&config_path).expect("config read"),
+        fs::read(&manifest_path).expect("manifest read"),
+    ];
+
+    let static_report = integration.doctor();
+    assert_eq!(
+        static_report.check_status("hooks.runtime-probe"),
+        Some(DoctorStatus::Warning)
     );
-    assert!(
-        output.status.success(),
-        "default COMSPEC direct declaration failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+    assert_eq!(static_report.overall(), DoctorStatus::Warning);
+
+    let probed_report = integration.doctor_with_runtime_probe();
+    assert_eq!(
+        probed_report.check_status("hooks.runtime-probe"),
+        Some(DoctorStatus::Pass),
+        "runtime probe checks: {:?}",
+        probed_report.checks()
     );
-    assert!(output.stdout.is_empty());
-    assert!(output.stderr.is_empty());
+    assert_eq!(probed_report.overall(), DoctorStatus::Pass);
+    assert_eq!(
+        before,
+        [
+            fs::read(&hooks_path).expect("hooks reread"),
+            fs::read(&config_path).expect("config reread"),
+            fs::read(&manifest_path).expect("manifest reread"),
+        ],
+        "runtime probing must not mutate Codex configuration, trust, or the ownership manifest"
+    );
 }
 
 #[cfg(windows)]
@@ -3745,11 +4046,12 @@ fn safe_windows_declaration_keeps_generic_shell_compatibility_and_comspec_sla_pa
 fn real_windows_hook_shell_stages_are_independently_bounded() {
     let root = TestRoot::new("real-command-stage-diagnostics");
     let (executable, command) = real_windows_hook_command(&root);
+    let local_app_data = root.child("stage-local-app-data");
     let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "real-shell", &root.path))
         .expect("Codex-shaped payload serializes");
     let mut failures = Vec::new();
     capture_windows_hook_stage(&mut failures, "direct", || {
-        assert_real_hook_direct(&executable, &payload);
+        assert_real_hook_direct(&executable, &payload, &local_app_data);
     });
     for (stage, shell) in [
         ("Pwsh7", CodexWindowsHookShell::Pwsh7),
@@ -3761,7 +4063,13 @@ fn real_windows_hook_shell_stages_are_independently_bounded() {
         ("COMSPEC", CodexWindowsHookShell::ComspecFallback),
     ] {
         capture_windows_hook_stage(&mut failures, stage, || {
-            let output = run_codex_windows_hook_with_shell(shell, &command, &payload, true, None);
+            let output = run_codex_windows_hook_with_shell(
+                shell,
+                &command,
+                &payload,
+                false,
+                Some(&local_app_data),
+            );
             assert!(
                 output.status.success(),
                 "{} real hook shell failed: {}",
@@ -3912,45 +4220,35 @@ fn anchored_default_windows_hook_declaration_finishes_within_the_one_second_sla(
 
 #[cfg(windows)]
 #[test]
-fn explicit_blocking_like_hook_failure_is_neutralized_with_a_bounded_declaration() {
-    let root = TestRoot::new("explicit-hook-failure");
-    let executable = root.child("bin").join("tabbeacon-failure.cmd");
-    let execution_marker = root.child("failure-probe-ran");
-    fs::create_dir_all(executable.parent().expect("failure binary parent"))
-        .expect("failure binary parent is created");
-    fs::write(
-        &executable,
-        format!(
-            "@echo off\r\necho ran> \"{}\"\r\nexit /b 2\r\n",
-            execution_marker.display()
-        ),
-    )
-    .expect("failure binary writes");
-    let integration =
-        CodexIntegration::new(root.child("codex-home"), root.child("state"), executable)
-            .with_codex_program(compile_codex_probe(&root));
-    integration.setup().expect("setup succeeds");
-    let hooks: Value =
-        serde_json::from_slice(&fs::read(root.child("codex-home/hooks.json")).expect("hooks read"))
-            .expect("hooks parse");
-    let handler = &hooks["hooks"]["PermissionRequest"][0]["hooks"][0];
-    assert_eq!(handler["timeout"], 1);
-    assert_eq!(handler["async"], false);
-    let command = handler["commandWindows"]
-        .as_str()
-        .expect("Windows command is a string");
-    let output = run_codex_windows_hook(command);
-    assert!(
-        output.status.success(),
-        "exit-code-2 hook failure must be neutralized: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        execution_marker.is_file(),
-        "failure probe must have executed; command={command:?}; stdout={}; stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
+fn malformed_hook_runtime_is_fail_open_in_every_admitted_shell() {
+    let root = TestRoot::new("malformed-hook-runtime-fail-open");
+    let (_executable, _generic_command, command) = fast_real_windows_hook_command(&root);
+    let local_app_data = root.child("malformed-local-app-data");
+    for shell in [
+        CodexWindowsHookShell::Pwsh7,
+        CodexWindowsHookShell::WindowsPowerShell,
+        CodexWindowsHookShell::Cmd,
+        CodexWindowsHookShell::ComspecFallback,
+    ] {
+        let output = run_codex_windows_hook_with_shell(
+            shell,
+            &command,
+            b"malformed",
+            false,
+            Some(&local_app_data),
+        );
+        assert!(
+            output.status.success(),
+            "malformed hook runtime input must fail open in {}: {}",
+            shell.label(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            output.stdout.is_empty() && output.stderr.is_empty(),
+            "malformed runtime handling must remain silent in {}",
+            shell.label()
+        );
+    }
 }
 
 #[test]

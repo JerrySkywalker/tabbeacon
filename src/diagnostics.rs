@@ -366,7 +366,16 @@ pub struct OperationalDiagnostics {
 /// Collects one read-only operational report without creating user state or locks.
 #[must_use]
 pub fn collect_operational_diagnostics() -> OperationalDiagnostics {
-    let (codex, integration, doctor) = collect_codex_diagnostics();
+    collect_operational_diagnostics_with_hook_runtime_probe(false)
+}
+
+/// Collects diagnostics and, when explicitly requested, executes one exact
+/// owned Hook declaration in isolated temporary state.
+#[must_use]
+pub fn collect_operational_diagnostics_with_hook_runtime_probe(
+    probe_hook_runtime: bool,
+) -> OperationalDiagnostics {
+    let (codex, integration, doctor) = collect_codex_diagnostics(probe_hook_runtime);
     let activity = inspect_system_activity_leases();
     let (workspace_health, alias_registry_count) = match StableAliasRegistry::default_state_root() {
         Ok(root) => {
@@ -412,7 +421,16 @@ pub fn collect_operational_diagnostics() -> OperationalDiagnostics {
 /// title, and it never changes user configuration.
 #[must_use]
 pub fn collect_operational_diagnostics_with_title_probe() -> OperationalDiagnostics {
-    let mut report = collect_operational_diagnostics();
+    collect_operational_diagnostics_with_title_and_hook_runtime_probe(false)
+}
+
+/// Collects diagnostics with the existing title probe and an optional bounded
+/// isolated Hook runtime probe.
+#[must_use]
+pub fn collect_operational_diagnostics_with_title_and_hook_runtime_probe(
+    probe_hook_runtime: bool,
+) -> OperationalDiagnostics {
+    let mut report = collect_operational_diagnostics_with_hook_runtime_probe(probe_hook_runtime);
     let title = report
         .title
         .clone()
@@ -422,7 +440,9 @@ pub fn collect_operational_diagnostics_with_title_probe() -> OperationalDiagnost
     report
 }
 
-fn collect_codex_diagnostics() -> (CodexDiagnostics, IntegrationDiagnostics, DoctorDiagnostics) {
+fn collect_codex_diagnostics(
+    probe_hook_runtime: bool,
+) -> (CodexDiagnostics, IntegrationDiagnostics, DoctorDiagnostics) {
     let Ok(integration) = CodexIntegration::from_environment() else {
         return (
             CodexDiagnostics {
@@ -444,7 +464,11 @@ fn collect_codex_diagnostics() -> (CodexDiagnostics, IntegrationDiagnostics, Doc
             DoctorDiagnostics::unavailable(),
         );
     };
-    let report = integration.doctor();
+    let report = if probe_hook_runtime {
+        integration.doctor_with_runtime_probe()
+    } else {
+        integration.doctor()
+    };
     let manifest_status = report.check_status("ownership.manifest");
     let declaration_status = report
         .check_status("hooks.declarations")

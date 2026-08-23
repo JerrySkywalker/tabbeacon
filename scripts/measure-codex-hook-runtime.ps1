@@ -21,9 +21,15 @@ param(
     [string]$OutputPath,
 
     # When supplied, execute the exact generated Hook declaration through the
-    # default COMSPEC shell used by the admitted Windows profile.
+    # selected Codex 0.149 Windows command-runner shell mode.
     [AllowEmptyString()]
     [string]$HookCommand = '',
+
+    # Codex 0.149 passes a configured non-empty TurnEnvironment shell through
+    # to `commandWindows`; COMSPEC is only the fallback when that program is
+    # empty. Measure both modes without changing Owner configuration.
+    [ValidateSet('ComspecFallback', 'Pwsh7')]
+    [string]$HookShell = 'ComspecFallback',
 
     [ValidateRange(10, 200)]
     [int]$ColdSamples = 30,
@@ -49,6 +55,12 @@ if ([string]::IsNullOrWhiteSpace($comspec)) {
 }
 $resolvedComspec = (Resolve-Path -LiteralPath $comspec -ErrorAction Stop).Path
 $comspecSha256 = (Get-FileHash -LiteralPath $resolvedComspec -Algorithm SHA256).Hash
+$resolvedPwsh = $null
+$pwshSha256 = $null
+if ($HookShell -eq 'Pwsh7') {
+    $resolvedPwsh = (Get-Command pwsh.exe -CommandType Application -ErrorAction Stop).Source
+    $pwshSha256 = (Get-FileHash -LiteralPath $resolvedPwsh -Algorithm SHA256).Hash
+}
 
 function Get-Percentile {
     param(
@@ -148,7 +160,7 @@ function Start-ProductionHook {
     else {
         $directDeclarationMatch = [regex]::Match(
             $HookCommand,
-            '^"(?<executable>[^"]+)" hook codex \|\| exit /b 0$'
+            '\A(?<executable>[^\r\n]+) hook codex\z'
         )
         $encodedPowerShellMatch = [regex]::Match(
             $HookCommand,
@@ -179,10 +191,20 @@ function Start-ProductionHook {
                 throw 'Encoded PowerShell Hook declaration does not bind to the measured binary.'
             }
         }
-        # Mirror the admitted Codex 0.147 fallback: the effective COMSPEC
-        # executable receives `/C` plus one raw outer-quoted declaration.
-        $info.FileName = $resolvedComspec
-        $info.Arguments = '/C "' + $HookCommand + '"'
+        if ($HookShell -eq 'Pwsh7') {
+            # Mirror the Codex 0.149 non-empty TurnEnvironment branch: each
+            # argument is forwarded normally to pwsh's `-Command` entrypoint.
+            $info.FileName = $resolvedPwsh
+            $info.ArgumentList.Add('-NoProfile')
+            $info.ArgumentList.Add('-Command')
+            $info.ArgumentList.Add($HookCommand)
+        }
+        else {
+            # Mirror the admitted empty-shell fallback: the effective COMSPEC
+            # executable receives `/C` plus one raw outer-quoted declaration.
+            $info.FileName = $resolvedComspec
+            $info.Arguments = '/C "' + $HookCommand + '"'
+        }
     }
     $info.WorkingDirectory = $Workspace
     $info.UseShellExecute = $false
@@ -478,14 +500,17 @@ $report = [ordered]@{
     binary_sha256 = $binarySha256
     comspec_basename = [System.IO.Path]::GetFileName($resolvedComspec)
     comspec_sha256 = $comspecSha256
+    hook_shell = $HookShell
+    hook_shell_basename = if ($HookShell -eq 'Pwsh7') { [System.IO.Path]::GetFileName($resolvedPwsh) } else { [System.IO.Path]::GetFileName($resolvedComspec) }
+    hook_shell_sha256 = if ($HookShell -eq 'Pwsh7') { $pwshSha256 } else { $comspecSha256 }
     workspace_kind = 'git_worktree'
-    invocation = if ([string]::IsNullOrWhiteSpace($HookCommand)) { 'direct_binary' } else { 'generated_command_windows_default_comspec' }
+    invocation = if ([string]::IsNullOrWhiteSpace($HookCommand)) { 'direct_binary' } else { "generated_command_windows_$HookShell" }
     hook_declaration_mode = if ([string]::IsNullOrWhiteSpace($HookCommand)) {
         'direct_binary'
     } elseif ($HookCommand.StartsWith('powershell.exe -NoProfile -NonInteractive -EncodedCommand ')) {
-        'encoded_powershell_default_comspec'
+        'encoded_powershell_compatibility_fallback'
     } else {
-        'direct_default_comspec'
+        'direct_native_shell_neutral'
     }
     hook_declaration_sha256 = if ([string]::IsNullOrWhiteSpace($HookCommand)) {
         $null

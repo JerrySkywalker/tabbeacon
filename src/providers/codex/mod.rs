@@ -6,6 +6,7 @@
 mod anchor;
 mod config;
 mod generation;
+mod mcp;
 mod profile;
 mod runtime;
 
@@ -13,6 +14,10 @@ pub use config::{
     CodexDoctorReport, CodexIntegration, CodexIntegrationError, CodexMutationAuthority,
     CodexRepairDisposition, CodexRepairReport, CodexRuntimeContinuity, DoctorStatus, SetupOutcome,
     TitleOwnershipOutcome, UninstallOutcome,
+};
+pub use mcp::{
+    MCP_HOOK_SERVER_NAME, MCP_HOOK_TOOL_NAME, MCP_RUNTIME_PROBE_RECEIPT_ENV, McpHookSession,
+    hook_input_template, run_stdio_hook_server,
 };
 pub use profile::{
     CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookEvent, CodexHookProfile,

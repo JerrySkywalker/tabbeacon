@@ -105,6 +105,31 @@ impl CodexHookRuntime {
         }
     }
 
+    /// Creates the production runtime once for a long-lived transport.
+    ///
+    /// Unlike [`Self::with_settings`], this enables the same bounded activity
+    /// coordination used by the command Hook runtime. The MCP server keeps
+    /// this runtime for its Codex-owned stdio lifetime, avoiding repeat
+    /// settings and state-root discovery on every Hook event.
+    ///
+    /// # Errors
+    ///
+    /// Returns a fail-open dispatch outcome when the platform state root cannot
+    /// be established.
+    pub fn from_system_environment() -> Result<Self, HookDispatchOutcome> {
+        let state_root = StableAliasRegistry::default_state_root()
+            .map_err(|_| HookDispatchOutcome::DegradedStateRoot)?;
+        let frame_color_supported = std::env::var_os("WT_SESSION").is_some();
+        let settings = PresentationSettingsStore::from_environment().map_or_else(
+            |_| PresentationSettings::default(),
+            |store| store.load_or_default(),
+        );
+        let mut runtime = Self::with_settings(&state_root, frame_color_supported, settings);
+        runtime.activity = ActivityCoordinator::system(&state_root)
+            .unwrap_or_else(|_| ActivityCoordinator::disabled(&state_root));
+        Ok(runtime)
+    }
+
     /// Handles a hook using the platform state root and owned console output.
     ///
     /// This function is deliberately infallible to its caller. The internal

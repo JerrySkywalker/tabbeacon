@@ -2,10 +2,16 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fmt,
     fs::{self, File, OpenOptions},
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{self, BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
@@ -18,12 +24,18 @@ use crate::hook_inventory::{
     HookTrustState,
 };
 
-use super::{CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookProfile};
+use super::{
+    CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookProfile, MCP_HOOK_SERVER_NAME,
+    MCP_HOOK_TOOL_NAME, MCP_RUNTIME_PROBE_RECEIPT_ENV, hook_input_template,
+};
 
 const MANIFEST_SCHEMA: &str = "tabbeacon-codex-integration-v1";
 const MANIFEST_FILE: &str = "integration-v1.json";
 const LOCK_FILE: &str = "integration.lock";
 const OWNED_DESCRIPTION: &str = "TabBeacon user-global lifecycle hooks";
+const RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
+const RUNTIME_PROBE_EVENT: &str = "UserPromptSubmit";
+const MCP_RUNTIME_PROBE_RECEIPT_FILE: &str = "mcp-runtime-probe.json";
 const HOOK_EVENTS: [&str; 11] = [
     "PreToolUse",
     "PermissionRequest",
@@ -319,6 +331,24 @@ impl CodexDoctorReport {
     #[must_use]
     pub fn check_status(&self, id: &str) -> Option<DoctorStatus> {
         self.check(id).map(DoctorCheck::status)
+    }
+
+    fn replace_check(&mut self, replacement: DoctorCheck) {
+        if let Some(existing) = self
+            .checks
+            .iter_mut()
+            .find(|check| check.id() == replacement.id())
+        {
+            *existing = replacement;
+        } else {
+            self.checks.push(replacement);
+        }
+        self.overall = self
+            .checks
+            .iter()
+            .map(DoctorCheck::status)
+            .max()
+            .unwrap_or(DoctorStatus::Fail);
     }
 }
 
@@ -644,9 +674,47 @@ impl CodexIntegration {
         let known_wire_shape = hooks
             .as_ref()
             .is_ok_and(|hooks| validate_known_hook_wire_shape(hooks).is_ok());
+        let mcp_server_exact = match (&manifest, &config) {
+            (Some(manifest), Ok(config)) => {
+                Self::validate_mcp_server_ownership(manifest, config).is_ok()
+            }
+            _ => false,
+        };
+        checks.push(match (&manifest, &config) {
+            (
+                Some(IntegrationManifest {
+                    mcp_server: Some(_),
+                    ..
+                }),
+                Ok(_),
+            ) if mcp_server_exact => pass(
+                "mcp.server",
+                "MCP_SERVER_EXACT: owned session-scoped TabBeacon MCP server is exact",
+            ),
+            (
+                Some(IntegrationManifest {
+                    mcp_server: Some(_),
+                    ..
+                }),
+                Ok(_),
+            ) => fail(
+                "mcp.server",
+                "MCP_SERVER_MODIFIED_OR_MISSING: owned TabBeacon MCP server is not exact",
+            ),
+            (Some(_), Ok(_)) => pass(
+                "mcp.server",
+                "MCP_SERVER_NA: this exact legacy command transport owns no MCP server",
+            ),
+            _ => fail(
+                "mcp.server",
+                "MCP_SERVER_UNPROVEN: Codex config is unavailable",
+            ),
+        });
         let declarations_exact = match (&manifest, &hooks) {
             (Some(manifest), Ok(hooks))
-                if manifest_has_known_owned_declarations && known_wire_shape =>
+                if manifest_has_known_owned_declarations
+                    && known_wire_shape
+                    && mcp_server_exact =>
             {
                 locate_owned_hooks(hooks, &manifest.hooks)
                     .is_ok_and(|locations| locations.len() == manifest.hooks.len())
@@ -665,16 +733,22 @@ impl CodexIntegration {
             )
         });
         checks.push(match (&manifest, hook_profile) {
-            (Some(manifest), Some(profile)) => match desired_hooks(&self.tabbeacon_executable, profile) {
-                Ok(desired) if desired == manifest.hooks => pass(
+            (Some(manifest), Some(profile)) => match (
+                desired_hooks(&self.tabbeacon_executable, profile),
+                desired_mcp_server(&self.tabbeacon_executable, profile),
+            ) {
+                (Ok(desired), Ok(desired_mcp))
+                    if desired == manifest.hooks
+                        && desired_mcp == manifest.mcp_server
+                        && mcp_server_exact => pass(
                     "hooks.currentness",
                     "CURRENTNESS_CURRENT: owned hook declarations match the current TabBeacon integration",
                 ),
-                Ok(_) => fail(
+                (Ok(_), Ok(_)) => fail(
                     "hooks.currentness",
                     "CURRENTNESS_STALE: owned hook declarations require a TabBeacon upgrade",
                 ),
-                Err(_) => fail(
+                _ => fail(
                     "hooks.currentness",
                     "CURRENTNESS_UNPROVEN: current TabBeacon hook declarations cannot be generated safely",
                 ),
@@ -747,6 +821,7 @@ impl CodexIntegration {
             && manifest_has_known_owned_declarations
             && known_wire_shape
             && declarations_exact
+            && mcp_server_exact
             && trust_exact
             && title_exact;
         let runtime_continuity = match (runtime_proven, mutation_authority) {
@@ -773,6 +848,12 @@ impl CodexIntegration {
                 "RUNTIME_CONTINUITY_UNPROVEN: installed Hook declarations, trust, title ownership, or known wire shape is not exact",
             ),
         });
+        if runtime_proven {
+            checks.push(warning(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_REQUIRED: static declaration health is not execution proof; run `tabbeacon doctor --probe-hook-runtime`",
+            ));
+        }
 
         CodexDoctorReport::from_diagnosis(
             checks,
@@ -783,6 +864,102 @@ impl CodexIntegration {
             hook_profile,
             (owned_hook_count, title_owned),
         )
+    }
+
+    /// Audits the installed integration, then executes one exact owned Hook
+    /// declaration in isolated temporary state. This never mutates Codex
+    /// configuration or Hook trust.
+    #[must_use]
+    pub fn doctor_with_runtime_probe(&self) -> CodexDoctorReport {
+        let mut report = self.doctor();
+        report.replace_check(self.runtime_execution_probe(&report));
+        report
+    }
+
+    fn runtime_execution_probe(&self, report: &CodexDoctorReport) -> DoctorCheck {
+        if report.check_status("codex.runtime-continuity") != Some(DoctorStatus::Pass) {
+            return fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_BLOCKED: exact admitted declarations, trust, and title ownership are required before execution",
+            );
+        }
+
+        let Ok(profile) = self.require_supported_profile() else {
+            return fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_BLOCKED: the Codex Hook profile is no longer admitted",
+            );
+        };
+        let Ok(desired) = desired_hooks(&self.tabbeacon_executable, profile) else {
+            return fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_BLOCKED: the current owned declaration cannot be generated safely",
+            );
+        };
+        let Some(manifest) = self.load_manifest().ok().flatten() else {
+            return fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_BLOCKED: the ownership manifest is unavailable",
+            );
+        };
+        let Ok(hooks) = read_hooks_document(&self.hooks_path()) else {
+            return fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_BLOCKED: the Hook declaration document is unavailable",
+            );
+        };
+        if manifest.hooks != desired
+            || !locate_owned_hooks(&hooks, &manifest.hooks)
+                .is_ok_and(|locations| locations.len() == manifest.hooks.len())
+        {
+            return fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_BLOCKED: the owned declaration changed during probe preflight",
+            );
+        }
+        let outcome = if profile.uses_mcp_hook_transport() {
+            run_windows_mcp_hook_runtime_probe(&self.tabbeacon_executable)
+        } else {
+            let Some(command) = desired
+                .iter()
+                .find(|hook| hook.event == RUNTIME_PROBE_EVENT)
+                .and_then(|hook| hook.group.pointer("/hooks/0/commandWindows"))
+                .and_then(Value::as_str)
+            else {
+                return fail(
+                    "hooks.runtime-probe",
+                    "RUNTIME_PROBE_BLOCKED: the representative owned declaration is unavailable",
+                );
+            };
+            run_windows_hook_runtime_probe(command)
+        };
+
+        match outcome {
+            RuntimeProbeOutcome::Pass => pass(
+                "hooks.runtime-probe",
+                if profile.uses_mcp_hook_transport() {
+                    "RUNTIME_PROBE_PASS: representative owned MCP Hook completed through the bounded direct stdio transport"
+                } else {
+                    "RUNTIME_PROBE_PASS: representative owned Hook executed through the bounded COMSPEC fallback"
+                },
+            ),
+            RuntimeProbeOutcome::TimedOut => fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_TIMEOUT: representative owned Hook exceeded the 900 ms bound",
+            ),
+            RuntimeProbeOutcome::NonZero => fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_FAILED: representative owned Hook exited nonzero",
+            ),
+            RuntimeProbeOutcome::MissingMarker => fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_FAILED: representative owned Hook did not publish its isolated timing marker",
+            ),
+            RuntimeProbeOutcome::Unavailable => fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_UNAVAILABLE: the bounded Windows Hook probe could not start",
+            ),
+        }
     }
 
     /// Produces a provider-neutral, command-redacted Hook inventory without
@@ -950,6 +1127,7 @@ impl CodexIntegration {
         reject_symbolic_link(&self.hooks_path())?;
         reject_symbolic_link(&self.config_path())?;
         let desired_hooks = desired_hooks(&self.tabbeacon_executable, profile)?;
+        let desired_mcp_server = desired_mcp_server(&self.tabbeacon_executable, profile)?;
         if let Some(mut manifest) = self.load_manifest()? {
             self.validate_manifest_scope(&manifest)?;
             let mut hooks = read_hooks_document(&self.hooks_path())?;
@@ -957,17 +1135,27 @@ impl CodexIntegration {
             locate_owned_hooks(&hooks, &manifest.hooks)
                 .map_err(|_| CodexIntegrationError::ModifiedOwnedHook)?;
             Self::validate_title_ownership(&manifest, &config)?;
-            let mut changed =
-                self.apply_title_ownership(&mut manifest, &mut config, tabbeacon_owns_title)?;
+            Self::validate_mcp_server_ownership(&manifest, &config)?;
+            let mut config_changed =
+                Self::apply_title_ownership(&mut manifest, &mut config, tabbeacon_owns_title)?;
+            config_changed |= Self::reconcile_mcp_server_ownership(
+                &mut manifest,
+                &mut config,
+                desired_mcp_server,
+            )?;
+            let mut changed = config_changed;
             if manifest.hooks != desired_hooks {
                 remove_owned_hooks(&mut hooks, &manifest.hooks)?;
                 append_owned_hooks(&mut hooks, &desired_hooks)?;
-                atomic_write(&self.hooks_path(), &serialize_hooks(&hooks)?)?;
                 manifest.hooks = desired_hooks;
                 manifest.executable.clone_from(&self.tabbeacon_executable);
                 changed = true;
             }
             if changed {
+                atomic_write(&self.hooks_path(), &serialize_hooks(&hooks)?)?;
+                if config_changed {
+                    self.write_owned_config(&manifest, &config)?;
+                }
                 self.write_manifest(&manifest)?;
                 return Ok(SetupOutcome::Upgraded);
             }
@@ -987,6 +1175,10 @@ impl CodexIntegration {
         if title_owned {
             disable_terminal_title(&mut config)?;
         }
+        let mcp_server = desired_mcp_server;
+        if let Some(server) = &mcp_server {
+            install_owned_mcp_server(&mut config, server)?;
+        }
 
         let hooks_backup = self.backup("hooks", original_hooks.as_deref())?;
         let config_backup = self.backup("config", original_config.as_deref())?;
@@ -1002,12 +1194,13 @@ impl CodexIntegration {
             config_backup,
             title_owned,
             prior_title,
+            mcp_server,
             hooks: desired_hooks,
         };
         self.write_manifest(&manifest)?;
         atomic_write(&self.hooks_path(), &serialize_hooks(&hooks)?)?;
-        if title_owned {
-            atomic_write(&self.config_path(), config.to_string().as_bytes())?;
+        if title_owned || manifest.mcp_server.is_some() {
+            self.write_owned_config(&manifest, &config)?;
         }
         manifest.phase = ManifestPhase::Active;
         self.write_manifest(&manifest)?;
@@ -1026,7 +1219,11 @@ impl CodexIntegration {
             .ok_or(CodexIntegrationError::OwnershipManifest)?;
         self.validate_manifest_scope(&manifest)?;
         let desired = desired_hooks(&self.tabbeacon_executable, profile)?;
-        if manifest.hooks != desired || !Self::manifest_has_known_owned_declarations(&manifest) {
+        let desired_mcp_server = desired_mcp_server(&self.tabbeacon_executable, profile)?;
+        if manifest.hooks != desired
+            || manifest.mcp_server != desired_mcp_server
+            || !Self::manifest_has_known_owned_declarations(&manifest)
+        {
             return Err(CodexIntegrationError::StaleOwnedHook);
         }
 
@@ -1051,6 +1248,7 @@ impl CodexIntegration {
         validate_known_hook_wire_shape(&hooks)?;
         let config = read_config_document(&self.config_path())?;
         Self::validate_title_ownership(&manifest, &config)?;
+        Self::validate_mcp_server_ownership(&manifest, &config)?;
         let repairable = self.missing_repairable_owned_hooks(&hooks, &manifest)?;
         let target_digest = sha256_digest(&original_hooks);
         if let Some(expected_target_digest) = expected_target_digest
@@ -1118,9 +1316,11 @@ impl CodexIntegration {
             .map_err(|_| CodexIntegrationError::ModifiedOwnedHook)?;
         let mut config = read_config_document(&self.config_path())?;
         Self::validate_title_ownership(&manifest, &config)?;
-        if !self.apply_title_ownership(&mut manifest, &mut config, tabbeacon_owns_title)? {
+        Self::validate_mcp_server_ownership(&manifest, &config)?;
+        if !Self::apply_title_ownership(&mut manifest, &mut config, tabbeacon_owns_title)? {
             return Ok(TitleOwnershipOutcome::AlreadyConfigured);
         }
+        self.write_owned_config(&manifest, &config)?;
         self.write_manifest(&manifest)?;
         Ok(TitleOwnershipOutcome::Updated)
     }
@@ -1140,7 +1340,6 @@ impl CodexIntegration {
     }
 
     fn apply_title_ownership(
-        &self,
         manifest: &mut IntegrationManifest,
         config: &mut DocumentMut,
         tabbeacon_owns_title: bool,
@@ -1150,17 +1349,10 @@ impl CodexIntegration {
         }
         if tabbeacon_owns_title {
             disable_terminal_title(config)?;
-            atomic_write(&self.config_path(), config.to_string().as_bytes())?;
             manifest.title_owned = true;
             return Ok(true);
         }
         restore_terminal_title(config, manifest.prior_title.as_deref())?;
-        let restored = config.to_string();
-        if !manifest.config_backup.existed && restored.trim().is_empty() {
-            fs::remove_file(self.config_path())?;
-        } else {
-            atomic_write(&self.config_path(), restored.as_bytes())?;
-        }
         manifest.title_owned = false;
         Ok(true)
     }
@@ -1174,9 +1366,8 @@ impl CodexIntegration {
         let mut config = read_config_document(&self.config_path())?;
         locate_owned_hooks(&hooks, &manifest.hooks)
             .map_err(|_| CodexIntegrationError::ModifiedOwnedHook)?;
-        if manifest.title_owned && !terminal_title_is_disabled(&config)? {
-            return Err(CodexIntegrationError::ModifiedOwnedTitle);
-        }
+        Self::validate_title_ownership(&manifest, &config)?;
+        Self::validate_mcp_server_ownership(&manifest, &config)?;
 
         remove_owned_hooks(&mut hooks, &manifest.hooks)?;
         if manifest.created_hooks_file && hooks_is_only_owned_scaffold(&hooks) {
@@ -1184,14 +1375,15 @@ impl CodexIntegration {
         } else {
             atomic_write(&self.hooks_path(), &serialize_hooks(&hooks)?)?;
         }
+        let config_changed = manifest.title_owned || manifest.mcp_server.is_some();
+        if let Some(server) = &manifest.mcp_server {
+            remove_owned_mcp_server(&mut config, server)?;
+        }
         if manifest.title_owned {
             restore_terminal_title(&mut config, manifest.prior_title.as_deref())?;
-            let restored = config.to_string();
-            if !manifest.config_backup.existed && restored.trim().is_empty() {
-                fs::remove_file(self.config_path())?;
-            } else {
-                atomic_write(&self.config_path(), restored.as_bytes())?;
-            }
+        }
+        if config_changed {
+            self.write_owned_config(&manifest, &config)?;
         }
         fs::remove_file(self.manifest_path())?;
         Ok(UninstallOutcome::Removed)
@@ -1261,8 +1453,21 @@ impl CodexIntegration {
         // declarations. It must be shell-safe, but it is intentionally not
         // required to equal this process: setup is the ownership-proven path
         // that migrates hooks during a same-user binary relocation.
-        owned_command_hooks(&manifest.executable, 1, false)
-            .map_err(|_| CodexIntegrationError::OwnershipManifest)?;
+        if let Some(mcp_server) = &manifest.mcp_server {
+            if mcp_server.name != MCP_HOOK_SERVER_NAME
+                || mcp_server.args != ["__mcp-hook-stdio-v1"]
+                || !mcp_server.command.is_absolute()
+                || mcp_server
+                    .command
+                    .to_str()
+                    .is_none_or(|path| path.trim().is_empty() || path.contains('\0'))
+            {
+                return Err(CodexIntegrationError::OwnershipManifest);
+            }
+        } else {
+            owned_command_hooks(&manifest.executable, 1, false)
+                .map_err(|_| CodexIntegrationError::OwnershipManifest)?;
+        }
         self.validate_backup_record("hooks", &manifest.hooks_backup)?;
         self.validate_backup_record("config", &manifest.config_backup)?;
         Ok(())
@@ -1272,8 +1477,77 @@ impl CodexIntegration {
     /// repair both need proof that its owned declarations are the known command
     /// Hook contract generated by the installing executable.
     fn manifest_has_known_owned_declarations(manifest: &IntegrationManifest) -> bool {
-        owned_command_hooks(&manifest.executable, 1, false)
-            .is_ok_and(|expected| expected == manifest.hooks)
+        match &manifest.mcp_server {
+            Some(mcp_server) => {
+                owned_mcp_tool_hooks_for_manifest(&manifest.executable).is_ok_and(|expected| {
+                    expected == manifest.hooks
+                        && desired_mcp_server_for_manifest(&manifest.executable).is_ok_and(
+                            |expected| {
+                                expected.as_ref().is_some_and(|expected| {
+                                    mcp_server.name == expected.name
+                                        && mcp_server.command == expected.command
+                                        && mcp_server.args == expected.args
+                                        // Version 0.5.2's pre-release MCP declaration did
+                                        // not yet persist this visibility field. Keep that
+                                        // precise predecessor repairable, then reconcile it
+                                        // to the non-model-callable declaration.
+                                        && (mcp_server.omit_tools_from.is_empty()
+                                            || mcp_server.omit_tools_from
+                                                == expected.omit_tools_from)
+                                })
+                            },
+                        )
+                })
+            }
+            None => owned_command_hooks(&manifest.executable, 1, false)
+                .is_ok_and(|expected| expected == manifest.hooks),
+        }
+    }
+
+    fn validate_mcp_server_ownership(
+        manifest: &IntegrationManifest,
+        config: &DocumentMut,
+    ) -> Result<(), CodexIntegrationError> {
+        if let Some(server) = &manifest.mcp_server
+            && !owned_mcp_server_is_exact(config, server)?
+        {
+            return Err(CodexIntegrationError::ModifiedOwnedHook);
+        }
+        Ok(())
+    }
+
+    fn reconcile_mcp_server_ownership(
+        manifest: &mut IntegrationManifest,
+        config: &mut DocumentMut,
+        desired: Option<OwnedMcpServer>,
+    ) -> Result<bool, CodexIntegrationError> {
+        if manifest.mcp_server == desired {
+            return Ok(false);
+        }
+        if let Some(previous) = &manifest.mcp_server {
+            remove_owned_mcp_server(config, previous)?;
+        }
+        if let Some(next) = &desired {
+            install_owned_mcp_server(config, next)?;
+        }
+        manifest.mcp_server = desired;
+        Ok(true)
+    }
+
+    fn write_owned_config(
+        &self,
+        manifest: &IntegrationManifest,
+        config: &DocumentMut,
+    ) -> Result<(), CodexIntegrationError> {
+        let rendered = config.to_string();
+        if !manifest.config_backup.existed && rendered.trim().is_empty() {
+            if self.config_path().exists() {
+                fs::remove_file(self.config_path())?;
+            }
+        } else {
+            atomic_write(&self.config_path(), rendered.as_bytes())?;
+        }
+        Ok(())
     }
 
     /// Refuse repair when a target or any existing parent redirects elsewhere.
@@ -1506,6 +1780,19 @@ struct OwnedHook {
     group: Value,
 }
 
+/// Exact, process-scoped MCP server declaration that `TabBeacon` may own.
+///
+/// The server is never a global daemon: Codex starts it from this stdio
+/// declaration for one Codex runtime and EOF closes that ownership boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct OwnedMcpServer {
+    name: String,
+    command: PathBuf,
+    args: Vec<String>,
+    #[serde(default)]
+    omit_tools_from: Vec<String>,
+}
+
 /// The exact owned declarations eligible for restoration plus a non-sensitive
 /// accounting of third-party groups retained by the repair.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1528,6 +1815,8 @@ struct IntegrationManifest {
     config_backup: BackupRecord,
     title_owned: bool,
     prior_title: Option<String>,
+    #[serde(default)]
+    mcp_server: Option<OwnedMcpServer>,
     hooks: Vec<OwnedHook>,
 }
 
@@ -1535,11 +1824,85 @@ fn desired_hooks(
     executable: &Path,
     profile: CodexHookProfile,
 ) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
-    owned_command_hooks(
-        executable,
-        profile.timeout().declaration_timeout_seconds(),
-        !profile.timeout().synchronous_required(),
-    )
+    if profile.uses_mcp_hook_transport() {
+        owned_mcp_tool_hooks(executable, profile)
+    } else {
+        owned_command_hooks(
+            executable,
+            profile.timeout().declaration_timeout_seconds(),
+            !profile.timeout().synchronous_required(),
+        )
+    }
+}
+
+fn desired_mcp_server(
+    executable: &Path,
+    profile: CodexHookProfile,
+) -> Result<Option<OwnedMcpServer>, CodexIntegrationError> {
+    if !profile.uses_mcp_hook_transport() {
+        return Ok(None);
+    }
+    if !executable.is_absolute()
+        || executable
+            .to_str()
+            .is_none_or(|path| path.trim().is_empty() || path.contains('\0'))
+    {
+        return Err(CodexIntegrationError::UnsafeExecutablePath);
+    }
+    Ok(Some(OwnedMcpServer {
+        name: MCP_HOOK_SERVER_NAME.to_owned(),
+        command: executable.to_path_buf(),
+        args: vec!["__mcp-hook-stdio-v1".to_owned()],
+        // Codex 0.149 supports omitting one server's tools from each
+        // model-facing exposure surface. Hook delivery calls this tool through
+        // the internal MCP runtime; it must never become model-callable.
+        omit_tools_from: vec![
+            "code_mode".to_owned(),
+            "deferred".to_owned(),
+            "direct".to_owned(),
+        ],
+    }))
+}
+
+fn mcp_transport_profile() -> Result<CodexHookProfile, CodexIntegrationError> {
+    CodexHookProfile::for_version((0, 149, 0)).ok_or(CodexIntegrationError::OwnershipManifest)
+}
+
+fn desired_mcp_server_for_manifest(
+    executable: &Path,
+) -> Result<Option<OwnedMcpServer>, CodexIntegrationError> {
+    desired_mcp_server(executable, mcp_transport_profile()?)
+}
+
+fn owned_mcp_tool_hooks(
+    executable: &Path,
+    profile: CodexHookProfile,
+) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
+    let server = desired_mcp_server(executable, profile)?
+        .ok_or(CodexIntegrationError::UnsupportedCodexVersion)?;
+    Ok(profile
+        .lifecycle_events()
+        .iter()
+        .filter_map(|event| hook_input_template(*event).map(|input| (*event, input)))
+        .map(|(event, input)| OwnedHook {
+            event: event.as_str().to_owned(),
+            group: json!({
+                "hooks": [{
+                    "type": "mcp_tool",
+                    "server": server.name,
+                    "tool": MCP_HOOK_TOOL_NAME,
+                    "input": input,
+                    "timeout": profile.timeout().declaration_timeout_seconds()
+                }]
+            }),
+        })
+        .collect())
+}
+
+fn owned_mcp_tool_hooks_for_manifest(
+    executable: &Path,
+) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
+    owned_mcp_tool_hooks(executable, mcp_transport_profile()?)
 }
 
 fn owned_command_hooks(
@@ -1560,8 +1923,8 @@ fn owned_command_hooks(
         })
         .ok_or(CodexIntegrationError::UnsafeExecutablePath)?;
     // Keep the generic command on the proven cross-shell PowerShell envelope.
-    // The Windows-specific field is selected by the admitted default-COMSPEC
-    // profile and may use the faster direct shape for a safe executable path.
+    // The Windows-specific field is selected by Codex's current Windows runner
+    // and may use the faster direct shape for a shell-neutral executable path.
     let command = powershell_encoded_windows_hook_command(executable);
     let windows_command = windows_hook_command_for_default_comspec(executable);
     Ok(HOOK_EVENTS
@@ -1582,40 +1945,31 @@ fn owned_command_hooks(
 }
 
 fn windows_hook_command_for_default_comspec(executable: &str) -> String {
-    // `commandWindows` is measured only for Codex's admitted default COMSPEC
-    // runner. A quoted direct command avoids layering a second cmd.exe process
-    // onto every synchronous Hook. The generic `command` field deliberately
-    // remains the encoded PowerShell envelope for custom/generic shell
-    // execution. A small set of shell metacharacters cannot be represented in
-    // the compact default-shell shape, so those hostile executable paths retain
-    // the proven encoded PowerShell envelope in both fields.
+    // Codex 0.149 passes `commandWindows` to a non-empty TurnEnvironment shell
+    // when one is configured; COMSPEC is only the empty-shell fallback. A
+    // quoted executable plus `|| exit /b 0` is therefore cmd syntax, not a
+    // Windows declaration. For a shell-safe, whitespace-free native `.exe`
+    // path use one direct native invocation. A Codex raw-quoted cmd /c command
+    // accepts only its first line, so a shell-neutral trailing exit helper is
+    // not representable. The Hook ingress itself is silent and fail-open for
+    // malformed input and runtime errors; non-fast paths retain the encoded
+    // PowerShell envelope for their compatibility exit handling.
+    //
+    // Paths outside that narrow grammar retain the encoded PowerShell envelope
+    // in both fields. It quotes hostile paths safely and ends in `exit 0`.
     if requires_powershell_command_envelope(executable) {
         powershell_encoded_windows_hook_command(executable)
     } else {
-        format!("\"{executable}\" hook codex || exit /b 0")
+        format!("{executable} hook codex")
     }
 }
 
 fn requires_powershell_command_envelope(executable: &str) -> bool {
-    executable.chars().any(|character| {
-        matches!(
-            character,
-            '!' | '&'
-                | '|'
-                | ';'
-                | '$'
-                | '\''
-                | '`'
-                | '('
-                | ')'
-                | '<'
-                | '>'
-                | '@'
-                | '#'
-                | '{'
-                | '}'
-        )
-    })
+    !executable.to_ascii_lowercase().ends_with(".exe")
+        || !executable.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(character, ':' | '\\' | '/' | '.' | '_' | '-')
+        })
 }
 
 fn powershell_encoded_windows_hook_command(executable: &str) -> String {
@@ -1631,6 +1985,287 @@ fn powershell_encoded_windows_hook_command(executable: &str) -> String {
         "powershell.exe -NoProfile -NonInteractive -EncodedCommand {}",
         base64_encode(&utf16)
     )
+}
+
+#[derive(Clone, Copy)]
+enum RuntimeProbeOutcome {
+    Pass,
+    TimedOut,
+    NonZero,
+    MissingMarker,
+    Unavailable,
+}
+
+#[cfg(windows)]
+fn run_windows_hook_runtime_probe(command_line: &str) -> RuntimeProbeOutcome {
+    let Ok(probe_root) = create_runtime_probe_root() else {
+        return RuntimeProbeOutcome::Unavailable;
+    };
+    let marker = probe_root.join("hook-timing.txt");
+    let payload = json!({
+        "hook_event_name": RUNTIME_PROBE_EVENT,
+        "session_id": "00000000-0000-0000-0000-000000000052",
+        "cwd": probe_root,
+    })
+    .to_string();
+
+    let comspec = env::var_os("COMSPEC")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "cmd.exe".into());
+    let mut process = Command::new(comspec);
+    process.arg("/C");
+    process.raw_arg(format!(r#""{command_line}""#));
+    process
+        .current_dir(&probe_root)
+        .env("LOCALAPPDATA", &probe_root)
+        .env("TABBEACON_HOOK_TIMING_FILE", &marker)
+        .env_remove("WT_SESSION")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let Ok(mut child) = process.spawn() else {
+        let _ = fs::remove_dir_all(&probe_root);
+        return RuntimeProbeOutcome::Unavailable;
+    };
+    let write_succeeded = child
+        .stdin
+        .take()
+        .is_some_and(|mut stdin| stdin.write_all(payload.as_bytes()).is_ok());
+    let deadline = Instant::now() + RUNTIME_PROBE_TIMEOUT;
+    let exited_successfully = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status.success()),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) => {
+                if !terminate_runtime_probe_tree(child.id()) {
+                    // Do not wait here: the probe's deadline must remain a real
+                    // bound even if Windows cannot start the tree terminator.
+                    // This only addresses the directly-owned command root; the
+                    // normal path uses taskkill /T to include its descendants.
+                    let _ = child.kill();
+                }
+                break None;
+            }
+            Err(_) => break Some(false),
+        }
+    };
+    let marker_present = fs::read_to_string(&marker)
+        .is_ok_and(|contents| contents.starts_with("TABBEACON_HOOK_TIMING_V1 "));
+    let _ = fs::remove_dir_all(&probe_root);
+
+    match (write_succeeded, exited_successfully, marker_present) {
+        (_, None, _) => RuntimeProbeOutcome::TimedOut,
+        (true, Some(true), true) => RuntimeProbeOutcome::Pass,
+        (false, _, _) | (_, Some(_), false) => RuntimeProbeOutcome::MissingMarker,
+        _ => RuntimeProbeOutcome::NonZero,
+    }
+}
+
+#[cfg(windows)]
+fn terminate_runtime_probe_tree(process_id: u32) -> bool {
+    let taskkill = env::var_os("SystemRoot").map_or_else(
+        || PathBuf::from("taskkill.exe"),
+        |root| PathBuf::from(root).join("System32").join("taskkill.exe"),
+    );
+    let Ok(mut terminator) = Command::new(taskkill)
+        .args(["/PID", &process_id.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+
+    let deadline = Instant::now() + Duration::from_millis(100);
+    loop {
+        match terminator.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Err(_) => {
+                let _ = terminator.kill();
+                return false;
+            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            Ok(None) => {
+                // A hung taskkill process must not extend the probe beyond its
+                // published bound. Dropping the owned handles never waits.
+                let _ = terminator.kill();
+                return false;
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn create_runtime_probe_root() -> io::Result<PathBuf> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    for attempt in 0..8_u8 {
+        let path = env::temp_dir().join(format!(
+            "tabbeacon-hook-runtime-probe-{}-{nonce}-{attempt}",
+            std::process::id()
+        ));
+        match fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not create a unique runtime-probe directory",
+    ))
+}
+
+#[cfg(not(windows))]
+fn run_windows_hook_runtime_probe(_command_line: &str) -> RuntimeProbeOutcome {
+    RuntimeProbeOutcome::Unavailable
+}
+
+/// Executes one real MCP Hook transport conversation without invoking a
+/// command shell. The temporary state root is isolated from Owner state and
+/// the Codex configuration/trust files are only read by the caller's
+/// preflight. EOF deliberately proves the server's cleanup boundary too.
+#[cfg(windows)]
+#[allow(clippy::too_many_lines)] // One bounded probe owns its child lifecycle, protocol exchange, and receipt check.
+fn run_windows_mcp_hook_runtime_probe(executable: &Path) -> RuntimeProbeOutcome {
+    let Ok(probe_root) = create_runtime_probe_root() else {
+        return RuntimeProbeOutcome::Unavailable;
+    };
+    let receipt = probe_root.join(MCP_RUNTIME_PROBE_RECEIPT_FILE);
+    let mut process = Command::new(executable);
+    process
+        .arg("__mcp-hook-stdio-v1")
+        .current_dir(&probe_root)
+        .env("LOCALAPPDATA", &probe_root)
+        .env(MCP_RUNTIME_PROBE_RECEIPT_ENV, &receipt)
+        .env_remove("WT_SESSION")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let Ok(mut child) = process.spawn() else {
+        let _ = fs::remove_dir_all(&probe_root);
+        return RuntimeProbeOutcome::Unavailable;
+    };
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = terminate_runtime_probe_tree(child.id());
+        let _ = fs::remove_dir_all(&probe_root);
+        return RuntimeProbeOutcome::Unavailable;
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = terminate_runtime_probe_tree(child.id());
+        let _ = fs::remove_dir_all(&probe_root);
+        return RuntimeProbeOutcome::Unavailable;
+    };
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        while reader.read_line(&mut line).is_ok_and(|count| count > 0) {
+            if sender.send(line.clone()).is_err() {
+                break;
+            }
+            line.clear();
+        }
+    });
+
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": { "protocolVersion": "2025-06-18", "capabilities": {} }
+    });
+    let start = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": MCP_HOOK_TOOL_NAME,
+            "arguments": {
+                "hook_event_name": "SessionStart",
+                "session_id": "00000000-0000-0000-0000-000000000052",
+                "cwd": probe_root,
+                "source": "startup",
+            }
+        }
+    });
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": MCP_HOOK_TOOL_NAME,
+            "arguments": {
+                "hook_event_name": RUNTIME_PROBE_EVENT,
+                "session_id": "00000000-0000-0000-0000-000000000052",
+                "turn_id": "00000000-0000-0000-0000-000000000052",
+                "cwd": probe_root,
+            }
+        }
+    });
+    let writes_succeeded = [initialize, start, call].iter().all(|request| {
+        serde_json::to_writer(&mut stdin, request)
+            .and_then(|()| stdin.write_all(b"\n").map_err(serde_json::Error::io))
+            .is_ok()
+    }) && stdin.flush().is_ok();
+    drop(stdin);
+
+    let deadline = Instant::now() + RUNTIME_PROBE_TIMEOUT;
+    let mut completed_calls = BTreeSet::new();
+    while Instant::now() < deadline && completed_calls.len() < 2 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(line) = receiver.recv_timeout(remaining) else {
+            break;
+        };
+        if let Ok(response) = serde_json::from_str::<Value>(&line)
+            && response.pointer("/result/isError") == Some(&Value::Bool(false))
+            && let Some(id) = response.get("id").and_then(Value::as_i64)
+            && matches!(id, 2 | 3)
+        {
+            completed_calls.insert(id);
+        }
+    }
+    let exited_successfully = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status.success()),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            Ok(None) => {
+                if !terminate_runtime_probe_tree(child.id()) {
+                    let _ = child.kill();
+                }
+                break None;
+            }
+            Err(_) => break Some(false),
+        }
+    };
+    let receipt_proves_runtime = fs::read(&receipt)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|receipt| {
+            receipt.get("schema") == Some(&json!("tabbeacon-mcp-runtime-probe-v1"))
+                && receipt.get("applied_calls") == Some(&json!(2))
+                && receipt.get("eof_cleanup") == Some(&json!("applied"))
+        });
+    let _ = fs::remove_dir_all(&probe_root);
+    match (
+        writes_succeeded,
+        completed_calls.len() == 2,
+        exited_successfully,
+        receipt_proves_runtime,
+    ) {
+        (_, _, None, _) => RuntimeProbeOutcome::TimedOut,
+        (true, true, Some(true), true) => RuntimeProbeOutcome::Pass,
+        (false, _, _, _) | (_, false, _, _) | (_, _, _, false) => {
+            RuntimeProbeOutcome::MissingMarker
+        }
+        _ => RuntimeProbeOutcome::NonZero,
+    }
+}
+
+#[cfg(not(windows))]
+fn run_windows_mcp_hook_runtime_probe(_executable: &Path) -> RuntimeProbeOutcome {
+    RuntimeProbeOutcome::Unavailable
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
@@ -1850,11 +2485,16 @@ fn group_is_partial_manifest_owned(group: &Value, event: &str, owned: &[OwnedHoo
                 .any(|owned_handlers| {
                     handlers.iter().any(|handler| {
                         owned_handlers.iter().any(|owned_handler| {
-                            ["command", "commandWindows"].into_iter().any(|key| {
+                            (["command", "commandWindows"].into_iter().any(|key| {
                                 handler.get(key).and_then(Value::as_str)
                                     == owned_handler.get(key).and_then(Value::as_str)
                                     && handler.get(key).and_then(Value::as_str).is_some()
-                            })
+                            })) || (handler.get("type").and_then(Value::as_str) == Some("mcp_tool")
+                                && owned_handler.get("type").and_then(Value::as_str)
+                                    == Some("mcp_tool")
+                                && handler.get("server").and_then(Value::as_str)
+                                    == owned_handler.get("server").and_then(Value::as_str)
+                                && handler.get("server").and_then(Value::as_str).is_some())
                         })
                     })
                 })
@@ -2010,10 +2650,10 @@ fn inventory_state_key(
 }
 
 fn inventory_handler_kind(handler: &Value) -> HookHandlerKind {
-    if handler.get("type").and_then(Value::as_str) == Some("command") {
-        HookHandlerKind::Command
-    } else {
-        HookHandlerKind::Unsupported
+    match handler.get("type").and_then(Value::as_str) {
+        Some("command") => HookHandlerKind::Command,
+        Some("mcp_tool") => HookHandlerKind::McpTool,
+        Some(_) | None => HookHandlerKind::Unsupported,
     }
 }
 
@@ -2438,6 +3078,118 @@ fn restore_terminal_title(
     Ok(())
 }
 
+fn owned_mcp_server_is_exact(
+    config: &DocumentMut,
+    declaration: &OwnedMcpServer,
+) -> Result<bool, CodexIntegrationError> {
+    let Some(servers) = config.as_table().get("mcp_servers") else {
+        return Ok(false);
+    };
+    let servers = servers
+        .as_table_like()
+        .ok_or(CodexIntegrationError::ConfigShape)?;
+    let Some(server) = servers.get(&declaration.name) else {
+        return Ok(false);
+    };
+    let server = server
+        .as_table_like()
+        .ok_or(CodexIntegrationError::ConfigShape)?;
+    let command = server
+        .get("command")
+        .and_then(Item::as_str)
+        .map(PathBuf::from);
+    let args = server
+        .get("args")
+        .and_then(Item::as_array)
+        .and_then(|args| {
+            args.iter()
+                .map(|item| item.as_str().map(ToOwned::to_owned))
+                .collect::<Option<Vec<_>>>()
+        });
+    let omit_tools_from = server
+        .get("omit_tools_from")
+        .and_then(Item::as_array)
+        .and_then(|surfaces| {
+            surfaces
+                .iter()
+                .map(|item| item.as_str().map(ToOwned::to_owned))
+                .collect::<Option<Vec<_>>>()
+        });
+    let no_unowned_fields = server
+        .iter()
+        .all(|(key, _)| matches!(key, "command" | "args" | "omit_tools_from"));
+    // A short-lived pre-release manifest can legitimately lack the new
+    // visibility declaration. Recognize that exact older form so setup can
+    // replace it transactionally; never treat an arbitrary extra field as
+    // owned.
+    let omit_tools_from_is_exact = if declaration.omit_tools_from.is_empty() {
+        omit_tools_from.is_none()
+    } else {
+        omit_tools_from.as_deref() == Some(declaration.omit_tools_from.as_slice())
+    };
+    Ok(command.as_ref() == Some(&declaration.command)
+        && args.as_deref() == Some(declaration.args.as_slice())
+        && omit_tools_from_is_exact
+        && no_unowned_fields)
+}
+
+fn install_owned_mcp_server(
+    config: &mut DocumentMut,
+    declaration: &OwnedMcpServer,
+) -> Result<bool, CodexIntegrationError> {
+    let root = config.as_table_mut();
+    if !root.contains_key("mcp_servers") {
+        root.insert("mcp_servers", Item::Table(Table::new()));
+    }
+    let servers = root
+        .get_mut("mcp_servers")
+        .and_then(Item::as_table_like_mut)
+        .ok_or(CodexIntegrationError::ConfigShape)?;
+    if servers.contains_key(&declaration.name) {
+        return Err(CodexIntegrationError::TabBeaconLikeAmbiguityBlocked);
+    }
+    let command = declaration
+        .command
+        .to_str()
+        .ok_or(CodexIntegrationError::UnsafeExecutablePath)?;
+    let mut args = Array::new();
+    for arg in &declaration.args {
+        args.push(arg.as_str());
+    }
+    let mut omitted_surfaces = Array::new();
+    for surface in &declaration.omit_tools_from {
+        omitted_surfaces.push(surface.as_str());
+    }
+    let mut server = Table::new();
+    server.insert("command", value(command));
+    server.insert("args", value(args));
+    server.insert("omit_tools_from", value(omitted_surfaces));
+    servers.insert(&declaration.name, Item::Table(server));
+    Ok(true)
+}
+
+fn remove_owned_mcp_server(
+    config: &mut DocumentMut,
+    declaration: &OwnedMcpServer,
+) -> Result<(), CodexIntegrationError> {
+    if !owned_mcp_server_is_exact(config, declaration)? {
+        return Err(CodexIntegrationError::ModifiedOwnedHook);
+    }
+    let remove_servers_table = {
+        let root = config.as_table_mut();
+        let servers = root
+            .get_mut("mcp_servers")
+            .and_then(Item::as_table_like_mut)
+            .ok_or(CodexIntegrationError::ConfigShape)?;
+        servers.remove(&declaration.name);
+        servers.is_empty()
+    };
+    if remove_servers_table {
+        config.as_table_mut().remove("mcp_servers");
+    }
+    Ok(())
+}
+
 fn hook_trust_check(
     config: &DocumentMut,
     hooks_path: &Path,
@@ -2525,8 +3277,13 @@ fn codex_profile_check(version: Option<&ProbedCodexProfile>) -> DoctorCheck {
         Some((_, CodexCompatibilityState::Supported(profile))) => pass(
             "codex.hook-profile",
             format!(
-                "{}: wire={}; events={}; turn-aware={}; agent-aware={}; compact-aware={}; synchronous={}; timeout={}s; title={}; unknown=ignore-fail-open; reconcile={}",
+                "{}: transport={}; wire={}; events={}; turn-aware={}; agent-aware={}; compact-aware={}; synchronous={}; timeout={}s; title={}; unknown=ignore-fail-open; reconcile={}",
                 profile.id(),
+                if profile.uses_mcp_hook_transport() {
+                    "mcp_tool"
+                } else {
+                    "command"
+                },
                 profile.wire_shape().id(),
                 profile.lifecycle_events().len(),
                 profile.turn_aware(),
@@ -2592,14 +3349,25 @@ fn trusted_hash<'a>(config: &'a DocumentMut, key: &str) -> Option<&'a str> {
 
 fn normalized_hook_hash(declaration: &OwnedHook) -> String {
     let handler = &declaration.group["hooks"][0];
-    let normalized = json!({
-        "event_name": event_key_label(&declaration.event),
-        "hooks": [{
+    let normalized_handler = match handler.get("type").and_then(Value::as_str) {
+        Some("command") => json!({
             "type": "command",
             "command": handler["commandWindows"],
             "timeout": handler["timeout"],
             "async": handler["async"]
-        }]
+        }),
+        Some("mcp_tool") => json!({
+            "type": "mcp_tool",
+            "server": handler["server"],
+            "tool": handler["tool"],
+            "input": handler["input"],
+            "timeout": handler["timeout"]
+        }),
+        Some(_) | None => Value::Null,
+    };
+    let normalized = json!({
+        "event_name": event_key_label(&declaration.event),
+        "hooks": [normalized_handler]
     });
     let canonical = canonical_json(&normalized);
     let bytes = serde_json::to_vec(&canonical).expect("JSON values always serialize");
@@ -2863,12 +3631,14 @@ mod tests {
     }
 
     #[test]
-    fn windows_hook_envelope_uses_default_comspec_fast_path_and_preserves_hostile_path_safety() {
-        let fast =
+    fn windows_hook_envelope_uses_shell_neutral_fast_path_and_preserves_hostile_path_safety() {
+        let fast = windows_hook_command_for_default_comspec(r"C:\TabBeacon\tabbeacon.exe");
+        assert_eq!(fast, "C:\\TabBeacon\\tabbeacon.exe hook codex");
+
+        let whitespace =
             windows_hook_command_for_default_comspec(r"C:\Program Files\TabBeacon\tabbeacon.exe");
-        assert_eq!(
-            fast,
-            r#""C:\Program Files\TabBeacon\tabbeacon.exe" hook codex || exit /b 0"#
+        assert!(
+            whitespace.starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
         );
 
         let hostile =
@@ -2880,6 +3650,10 @@ mod tests {
         );
         assert!(
             windows_hook_command_for_default_comspec(r"C:\release!candidate\tabbeacon.exe")
+                .starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
+        );
+        assert!(
+            windows_hook_command_for_default_comspec(r"C:\TabBeacon\tabbeacon.cmd")
                 .starts_with("powershell.exe -NoProfile -NonInteractive -EncodedCommand ")
         );
     }

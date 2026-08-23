@@ -161,6 +161,13 @@ pub enum TerminalTitleOwnershipSemantics {
     CodexDefaultWithExplicitTabBeaconDelegation,
 }
 
+/// Source-audited normal-event delivery transport for one Codex profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HookTransport {
+    Command,
+    McpTool,
+}
+
 /// Source-audited, bounded Hook wire contract shared by exact profiles.
 ///
 /// This is intentionally smaller than an upstream source tree: future source
@@ -241,6 +248,7 @@ pub struct CodexHookProfile {
     agent_aware: bool,
     compact_aware: bool,
     timeout: HookTimeoutSemantics,
+    transport: HookTransport,
     terminal_title_ownership: TerminalTitleOwnershipSemantics,
     unknown_event_policy: UnknownEventPolicy,
     wire_shape: CodexHookWireShape,
@@ -300,6 +308,13 @@ impl CodexHookProfile {
     #[must_use]
     pub const fn timeout(self) -> HookTimeoutSemantics {
         self.timeout
+    }
+
+    /// Whether this exact source-admitted profile uses a session-scoped MCP
+    /// tool transport instead of a command process for normal Hook delivery.
+    #[must_use]
+    pub const fn uses_mcp_hook_transport(self) -> bool {
+        matches!(self.transport, HookTransport::McpTool)
     }
 
     /// Title ownership behavior of the admitted Codex release.
@@ -425,6 +440,7 @@ const RUST_V0_147_0_PROFILE: CodexHookProfile = CodexHookProfile {
         maximum_timeout_seconds: 3,
         timeout_blocks_operation: false,
     },
+    transport: HookTransport::Command,
     terminal_title_ownership:
         TerminalTitleOwnershipSemantics::CodexDefaultWithExplicitTabBeaconDelegation,
     unknown_event_policy: UnknownEventPolicy::IgnoreFailOpen,
@@ -432,10 +448,10 @@ const RUST_V0_147_0_PROFILE: CodexHookProfile = CodexHookProfile {
     reconciliation_note: "owned-command-hooks-only",
 };
 
-// The source audit found an added `mcp_tool` handler family and runtime
-// refactoring in 0.149. The existing command-hook declaration fields and
-// eleven-event configuration surface remain compatible. TabBeacon therefore
-// reconciles only its exact command groups and preserves external MCP groups.
+// The source audit found an added `mcp_tool` handler family, a session-owned
+// prewarmed runtime, and an explicit rejection of `SessionEnd` mcp_tool
+// handlers. TabBeacon uses its own named, stdio MCP server only on this exact
+// profile; all third-party MCP servers remain outside its ownership boundary.
 const RUST_V0_149_0_PROFILE: CodexHookProfile = CodexHookProfile {
     id: "codex-hooks-rust-v0.149.0",
     version: (0, 149, 0),
@@ -454,11 +470,12 @@ const RUST_V0_149_0_PROFILE: CodexHookProfile = CodexHookProfile {
         maximum_timeout_seconds: 3,
         timeout_blocks_operation: false,
     },
+    transport: HookTransport::McpTool,
     terminal_title_ownership:
         TerminalTitleOwnershipSemantics::CodexDefaultWithExplicitTabBeaconDelegation,
     unknown_event_policy: UnknownEventPolicy::IgnoreFailOpen,
     wire_shape: RUST_COMMAND_HOOK_WIRE_V1,
-    reconciliation_note: "owned-command-hooks;external-mcp-tool-preserved",
+    reconciliation_note: "owned-mcp-tool-hooks;session-eof-cleanup;external-mcp-preserved",
 };
 
 const ADMITTED_PROFILES: [CodexHookProfile; 2] = [RUST_V0_147_0_PROFILE, RUST_V0_149_0_PROFILE];

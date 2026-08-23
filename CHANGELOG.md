@@ -47,6 +47,9 @@ All notable changes to TabBeacon will be documented here.
 
 - Admitted the source-audited Codex 0.149.0 Hook profile while preserving the
   manual trust boundary and fail-closed treatment of future unknown versions.
+- Codex 0.149 now delivers ten content-minimal lifecycle events through a
+  session-scoped stdio `mcp_tool` server with EOF cleanup, while preserving
+  third-party MCP configuration and the Codex 0.147 command fallback.
 - Long-lived activity workers now run from hash-verified immutable user-local
   runtime images, leaving the package-installed CLI replaceable on Windows.
 - Kept provider badges compact by default, retained fail-open one-shot Hooks,
