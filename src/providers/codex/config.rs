@@ -937,12 +937,13 @@ impl CodexIntegration {
             .hook_profile()
             .is_some_and(CodexHookProfile::uses_mcp_hook_transport);
         let runtime_checks = self.runtime_execution_probe(&report);
-        let hybrid_claims_present = runtime_checks.iter().any(|check| {
-            matches!(
-                check.id(),
-                "hooks.mcp-event-transport" | "hooks.session-end-cleanup"
-            )
-        });
+        let hybrid_claims_present = [
+            "hooks.mcp-event-transport",
+            "hooks.codex-terminate-before-eof",
+            "hooks.session-end-cleanup",
+        ]
+        .into_iter()
+        .all(|id| runtime_checks.iter().any(|check| check.id() == id));
         for check in runtime_checks {
             report.replace_check(check);
         }
@@ -950,6 +951,10 @@ impl CodexIntegration {
             report.replace_check(fail(
                 "hooks.mcp-event-transport",
                 "MCP_EVENT_TRANSPORT_UNPROVEN: runtime probe preflight did not reach the independent MCP event check",
+            ));
+            report.replace_check(fail(
+                "hooks.codex-terminate-before-eof",
+                "CODEX_0149_TERMINATE_BEFORE_EOF_UNPROVEN: runtime probe preflight did not reach the independent MCP process-termination check",
             ));
             report.replace_check(fail(
                 "hooks.session-end-cleanup",
@@ -1036,9 +1041,12 @@ impl CodexIntegration {
             )],
             RuntimeProbeOutcome::McpHybrid {
                 mcp_event,
+                termination,
                 session_end,
                 frame_interval_ms,
-            } => hybrid_runtime_probe_checks(mcp_event, session_end, frame_interval_ms),
+            } => {
+                hybrid_runtime_probe_checks(mcp_event, termination, session_end, frame_interval_ms)
+            }
             RuntimeProbeOutcome::TimedOut => vec![fail(
                 "hooks.runtime-probe",
                 if profile.uses_mcp_hook_transport() {
@@ -2182,6 +2190,7 @@ enum RuntimeProbeOutcome {
     Pass,
     McpHybrid {
         mcp_event: ProbeClaim,
+        termination: ProbeClaim,
         session_end: ProbeClaim,
         frame_interval_ms: Option<u64>,
     },
@@ -2208,11 +2217,12 @@ impl ProbeClaim {
     }
 }
 
-/// Converts the bounded hybrid probe's independent claims into three doctor
+/// Converts the bounded hybrid probe's independent claims into four doctor
 /// observations. The aggregate remains strict, while a proof for one transport
 /// is never erased merely because the other transport failed.
 fn hybrid_runtime_probe_checks(
     mcp_event: ProbeClaim,
+    termination: ProbeClaim,
     session_end: ProbeClaim,
     frame_interval_ms: Option<u64>,
 ) -> Vec<DoctorCheck> {
@@ -2233,6 +2243,20 @@ fn hybrid_runtime_probe_checks(
             "MCP_EVENT_TRANSPORT_TIMEOUT: the normal MCP conversation exceeded its bounded diagnostic window",
         ),
     };
+    let termination_check = match termination {
+        ProbeClaim::Proven => pass(
+            "hooks.codex-terminate-before-eof",
+            "CODEX_0149_TERMINATE_BEFORE_EOF_REPRODUCED: Codex's owned MCP process exited while its stdio input remained open",
+        ),
+        ProbeClaim::Failed => fail(
+            "hooks.codex-terminate-before-eof",
+            "CODEX_0149_TERMINATE_BEFORE_EOF_UNPROVEN: the owned MCP process did not reproduce the required terminate-before-EOF ordering",
+        ),
+        ProbeClaim::TimedOut => fail(
+            "hooks.codex-terminate-before-eof",
+            "CODEX_0149_TERMINATE_BEFORE_EOF_TIMEOUT: the owned MCP process did not exit within its bounded termination phase",
+        ),
+    };
     let session_end_check = match session_end {
         ProbeClaim::Proven => pass(
             "hooks.session-end-cleanup",
@@ -2247,22 +2271,26 @@ fn hybrid_runtime_probe_checks(
             "REAL_SESSION_END_CLEANUP_TIMEOUT: the independent SessionEnd command did not settle within the bounded cleanup diagnostic; timeout and p99 remain separately enforced by the exact transport measurement",
         ),
     };
-    let aggregate = if mcp_event == ProbeClaim::Proven && session_end == ProbeClaim::Proven {
+    let aggregate = if mcp_event == ProbeClaim::Proven
+        && termination == ProbeClaim::Proven
+        && session_end == ProbeClaim::Proven
+    {
         pass(
             "hooks.runtime-probe",
-            "RUNTIME_PROBE_PASS: MCP_EVENT_TRANSPORT_PROVEN and REAL_SESSION_END_CLEANUP_PROVEN",
+            "RUNTIME_PROBE_PASS: MCP_EVENT_TRANSPORT_PROVEN, CODEX_0149_TERMINATE_BEFORE_EOF_REPRODUCED, and REAL_SESSION_END_CLEANUP_PROVEN",
         )
     } else {
         fail(
             "hooks.runtime-probe",
             format!(
-                "RUNTIME_PROBE_PARTIAL_OR_FAILED: MCP_EVENT_TRANSPORT={}; REAL_SESSION_END_CLEANUP={}",
+                "RUNTIME_PROBE_PARTIAL_OR_FAILED: MCP_EVENT_TRANSPORT={}; CODEX_0149_TERMINATE_BEFORE_EOF={}; REAL_SESSION_END_CLEANUP={}",
                 mcp_event.label(),
+                termination.label(),
                 session_end.label()
             ),
         )
     };
-    vec![aggregate, mcp_check, session_end_check]
+    vec![aggregate, mcp_check, termination_check, session_end_check]
 }
 
 #[cfg(windows)]
@@ -2710,10 +2738,16 @@ fn run_windows_mcp_hook_runtime_probe(
     } else {
         ProbeClaim::Failed
     };
-    let session_end = if !mcp_terminated || session_end_exited.is_none() {
+    let termination = if mcp_terminated_before_eof && mcp_terminated {
+        ProbeClaim::Proven
+    } else if !mcp_terminated {
         ProbeClaim::TimedOut
-    } else if mcp_terminated_before_eof
-        && session_end_write_succeeded
+    } else {
+        ProbeClaim::Failed
+    };
+    let session_end = if session_end_exited.is_none() {
+        ProbeClaim::TimedOut
+    } else if session_end_write_succeeded
         && session_end_exited == Some(true)
         && session_end_cleanup_proven
     {
@@ -2723,6 +2757,7 @@ fn run_windows_mcp_hook_runtime_probe(
     };
     RuntimeProbeOutcome::McpHybrid {
         mcp_event,
+        termination,
         session_end,
         frame_interval_ms: animation_frame_interval_ms,
     }
@@ -4183,22 +4218,42 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_runtime_probe_reports_mcp_and_session_end_claims_independently() {
-        for (mcp_event, session_end, expected_mcp, expected_session_end) in [
+    fn hybrid_runtime_probe_reports_each_claim_independently() {
+        for (
+            mcp_event,
+            termination,
+            session_end,
+            expected_mcp,
+            expected_termination,
+            expected_session_end,
+        ) in [
             (
                 ProbeClaim::Proven,
                 ProbeClaim::Failed,
+                ProbeClaim::Proven,
+                DoctorStatus::Pass,
+                DoctorStatus::Fail,
+                DoctorStatus::Pass,
+            ),
+            (
+                ProbeClaim::Proven,
+                ProbeClaim::Proven,
+                ProbeClaim::Failed,
+                DoctorStatus::Pass,
                 DoctorStatus::Pass,
                 DoctorStatus::Fail,
             ),
             (
                 ProbeClaim::Failed,
                 ProbeClaim::Proven,
+                ProbeClaim::Proven,
                 DoctorStatus::Fail,
+                DoctorStatus::Pass,
                 DoctorStatus::Pass,
             ),
         ] {
-            let checks = hybrid_runtime_probe_checks(mcp_event, session_end, Some(100));
+            let checks =
+                hybrid_runtime_probe_checks(mcp_event, termination, session_end, Some(100));
             assert_eq!(
                 checks
                     .iter()
@@ -4212,6 +4267,13 @@ mod tests {
                     .find(|check| check.id() == "hooks.mcp-event-transport")
                     .map(super::DoctorCheck::status),
                 Some(expected_mcp)
+            );
+            assert_eq!(
+                checks
+                    .iter()
+                    .find(|check| check.id() == "hooks.codex-terminate-before-eof")
+                    .map(super::DoctorCheck::status),
+                Some(expected_termination)
             );
             assert_eq!(
                 checks

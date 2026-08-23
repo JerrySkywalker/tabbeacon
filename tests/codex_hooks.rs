@@ -1576,10 +1576,17 @@ fn doctor_runtime_probe_models_codex_0149_terminate_before_eof_and_proves_sessio
     );
     assert!(report.check("hooks.runtime-probe").is_some_and(|check| {
         check.summary().contains("MCP_EVENT_TRANSPORT_PROVEN")
+            && check
+                .summary()
+                .contains("CODEX_0149_TERMINATE_BEFORE_EOF_REPRODUCED")
             && check.summary().contains("REAL_SESSION_END_CLEANUP_PROVEN")
     }));
     assert_eq!(
         report.check_status("hooks.mcp-event-transport"),
+        Some(DoctorStatus::Pass)
+    );
+    assert_eq!(
+        report.check_status("hooks.codex-terminate-before-eof"),
         Some(DoctorStatus::Pass)
     );
     assert_eq!(
