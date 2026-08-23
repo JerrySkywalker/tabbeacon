@@ -45,8 +45,12 @@ const RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
 // The MCP probe owns one fresh stdio server plus an immutable worker image,
 // then models Codex 0.149 terminating that server before transport close. It
 // proves the independent command SessionEnd cleanup in the same isolated state.
-// This is diagnostic setup work, not the synchronous normal-event budget.
-const MCP_ACTIVITY_RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+// These are diagnostic phase bounds, not Hook-runtime budgets: the release
+// performance probe separately enforces the one-second declaration and p99
+// contract under representative warm and c8 load.
+const MCP_ACTIVITY_RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const MCP_TERMINATION_RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+const SESSION_END_CLEANUP_RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_PROBE_EVENT: &str = "UserPromptSubmit";
 const HOOK_EVENTS: [&str; 11] = [
     "PreToolUse",
@@ -2240,7 +2244,7 @@ fn hybrid_runtime_probe_checks(
         ),
         ProbeClaim::TimedOut => fail(
             "hooks.session-end-cleanup",
-            "REAL_SESSION_END_CLEANUP_TIMEOUT: the independent SessionEnd command exceeded its 900 ms diagnostic bound",
+            "REAL_SESSION_END_CLEANUP_TIMEOUT: the independent SessionEnd command did not settle within the bounded cleanup diagnostic; timeout and p99 remain separately enforced by the exact transport measurement",
         ),
     };
     let aggregate = if mcp_event == ProbeClaim::Proven && session_end == ProbeClaim::Proven {
@@ -2599,10 +2603,13 @@ fn run_windows_mcp_hook_runtime_probe(
     // lease is the property this probe is intended to prove.
     let mcp_terminated_before_eof = child.kill().is_ok();
     drop(stdin);
+    let termination_deadline = Instant::now() + MCP_TERMINATION_RUNTIME_PROBE_TIMEOUT;
     let mcp_terminated = loop {
         match child.try_wait() {
             Ok(Some(_)) => break true,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            Ok(None) if Instant::now() < termination_deadline => {
+                thread::sleep(Duration::from_millis(5));
+            }
             Ok(None) => {
                 let _ = child.kill();
                 break false;
@@ -2664,7 +2671,7 @@ fn run_windows_mcp_hook_runtime_probe(
         })
     });
     let session_end_exited = session_end.as_mut().and_then(|child| {
-        let deadline = Instant::now() + RUNTIME_PROBE_TIMEOUT;
+        let deadline = Instant::now() + SESSION_END_CLEANUP_RUNTIME_PROBE_TIMEOUT;
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => break Some(status.success()),
