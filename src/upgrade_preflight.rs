@@ -1313,19 +1313,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn bounded_observer_output_keeps_small_successful_output() {
-        let powershell = system_path("WindowsPowerShell\\v1.0\\powershell.exe")
-            .expect("Windows PowerShell exists");
-        let mut command = Command::new(powershell);
-        command.args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "[Console]::Out.Write('[]')",
-        ]);
+        let command_shell = system_path("cmd.exe").expect("Windows command shell exists");
+        let mut command = Command::new(command_shell);
+        command.args(["/d", "/s", "/c", "echo []"]);
         assert_eq!(
             bounded_command_output(command, Duration::from_secs(5)).expect("small output succeeds"),
-            b"[]"
+            b"[]\r\n"
         );
     }
 
