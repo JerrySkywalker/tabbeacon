@@ -23,7 +23,7 @@ use super::{CodexHookEvent, CodexHookRuntime, HookDispatchOutcome};
 pub const MCP_HOOK_SERVER_NAME: &str = "tabbeacon-hook";
 pub const MCP_HOOK_TOOL_NAME: &str = "tabbeacon_hook_event";
 /// Private opt-in receipt used only by the isolated EOF-fallback capability
-/// regression. It never proves that Codex delivered a real SessionEnd.
+/// regression. It never proves that Codex delivered a real `SessionEnd`.
 pub const MCP_RUNTIME_PROBE_RECEIPT_ENV: &str = "TABBEACON_MCP_RUNTIME_PROBE_RECEIPT";
 const MAX_ID_BYTES: usize = 512;
 const MAX_CWD_BYTES: usize = 32 * 1024;
@@ -173,7 +173,7 @@ pub fn hook_input_template(event: CodexHookEvent) -> Option<Value> {
 
 /// A one-session MCP Hook receiver. It has no global listener or cross-session
 /// state: Codex owns the stdio process. EOF can release only this server's
-/// in-memory binding; it is not authoritative SessionEnd delivery.
+/// in-memory binding; it is not authoritative `SessionEnd` delivery.
 #[derive(Debug)]
 pub struct McpHookSession {
     runtime: CodexHookRuntime,

@@ -25,11 +25,11 @@ use super::{
     generation::{CodexGenerationStore, GenerationAdmission, RequestedHandling},
 };
 
-/// Private receipt path used only by the isolated hybrid SessionEnd probe.
+/// Private receipt path used only by the isolated hybrid `SessionEnd` probe.
 /// The receipt contains fixed cleanup facts rather than terminal/title bytes or
 /// Hook content.
 pub(crate) const SESSION_END_PROBE_RECEIPT_ENV: &str = "TABBEACON_SESSION_END_PROBE_RECEIPT";
-/// Required basename for the isolated hybrid SessionEnd receipt.
+/// Required basename for the isolated hybrid `SessionEnd` receipt.
 pub(crate) const SESSION_END_PROBE_RECEIPT_FILE: &str = "session-end-probe.json";
 
 /// Fail-open result for one internal hook invocation.
