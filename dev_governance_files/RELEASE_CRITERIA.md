@@ -67,11 +67,11 @@ source record) and minimally prove a crates.io registry source, not a Git
 revision. `tabbeacon --version`, executable location, and binary existence are
 not sufficient proof.
 
-The cutover and any subsequent `tabbeacon setup codex` reconciliation preserve
-existing Codex configuration ownership, Hook trust, third-party Hooks/MCP
-servers, and user presentation settings. Reconciliation is ownership-aware;
-it must not automatically change trust. Closeout then runs static Doctor and
-the exact hybrid runtime probe.
+After cutover, closeout MUST run `tabbeacon setup codex` as ownership-aware
+reconciliation, preserving existing Codex configuration ownership, Hook trust,
+third-party Hooks/MCP servers, and user presentation settings. Reconciliation
+must not automatically change trust. Closeout then runs static Doctor and the
+exact hybrid runtime probe.
 
 Every public-release closeout receipt reports:
 
