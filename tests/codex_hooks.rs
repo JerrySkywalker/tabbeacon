@@ -679,6 +679,9 @@ fn owned_current_windows_handler_count(hooks: &Value) -> usize {
 
 #[cfg(windows)]
 fn assert_real_hook_direct(executable: &Path, payload: &[u8], local_app_data: &Path) {
+    let _shell_guard = WINDOWS_HOOK_SHELL_SERIALIZER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let child = Command::new(executable)
         .args(["hook", "codex"])
         .env("LOCALAPPDATA", local_app_data)
@@ -711,6 +714,9 @@ fn assert_real_hook_with_local_state_within(
     timeout: Duration,
     stage: &str,
 ) -> Duration {
+    let _shell_guard = WINDOWS_HOOK_SHELL_SERIALIZER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let child = Command::new(executable)
         .args(["hook", "codex"])
         .env("LOCALAPPDATA", local_app_data)
@@ -1397,6 +1403,12 @@ fn prerelease_mcp_manifest_refuses_a_present_malformed_terminal_allow_list_witho
 #[cfg(windows)]
 #[test]
 fn doctor_runtime_probe_executes_the_exact_0149_mcp_stdio_transport() {
+    // The probe starts a real stdio server and a real worker process. Keep its
+    // diagnostic window independent of the parallel test suite's real shell
+    // fixtures; lock acquisition is deliberately outside the measured proof.
+    let _shell_guard = WINDOWS_HOOK_SHELL_SERIALIZER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let root = TestRoot::new("codex-0149-mcp-runtime-probe");
     let codex_home = root.child("codex-home");
     write_hooks_fixture(&codex_home, "0.149.0-observed.json");
