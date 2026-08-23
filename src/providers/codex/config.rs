@@ -2591,20 +2591,20 @@ fn run_windows_mcp_hook_runtime_probe(
     // our stdin handle open during termination so this cannot be mistaken for
     // a successful EOF cleanup. EOF remains a best-effort fallback, not the
     // authoritative SessionEnd boundary.
-    let mcp_terminated_before_eof = if terminate_runtime_probe_tree(child.id()) {
-        true
-    } else {
-        child.kill().is_ok()
-    };
+    // `LocalStdioServerTransport::close()` terminates its owned MCP server
+    // process; it does not terminate TabBeacon's independently spawned
+    // activity worker. Killing the whole tree here would both model the wrong
+    // Codex boundary and race a dying worker's file lock against the real
+    // SessionEnd command. Retaining that worker until SessionEnd revokes its
+    // lease is the property this probe is intended to prove.
+    let mcp_terminated_before_eof = child.kill().is_ok();
     drop(stdin);
     let mcp_terminated = loop {
         match child.try_wait() {
             Ok(Some(_)) => break true,
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
             Ok(None) => {
-                if !terminate_runtime_probe_tree(child.id()) {
-                    let _ = child.kill();
-                }
+                let _ = child.kill();
                 break false;
             }
             Err(_) => break false,
