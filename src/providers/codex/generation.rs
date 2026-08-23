@@ -141,8 +141,7 @@ impl CodexGenerationStore {
             | CodexHookEvent::PermissionRequest
             | CodexHookEvent::PostToolUse
             | CodexHookEvent::PreCompact
-            | CodexHookEvent::PostCompact
-            | CodexHookEvent::Stop => {
+            | CodexHookEvent::PostCompact => {
                 let turn = turn_digest(context)?;
                 let matches_current = state.current_turn.as_deref() == Some(&turn);
                 if matches_current {
@@ -154,6 +153,28 @@ impl CodexGenerationStore {
                     state.generation = state.generation.saturating_add(1);
                     state.current_turn = Some(turn);
                     requested.decision()
+                } else {
+                    AdmissionDecision::RejectStale
+                }
+            }
+            CodexHookEvent::Stop => {
+                let turn = turn_digest(context)?;
+                let matches_current = state.current_turn.as_deref() == Some(&turn);
+                if matches_current {
+                    // A Stop is terminal for its turn. Retiring it before
+                    // returning the admitted generation makes later same-turn
+                    // PreTool/PostTool/compact traffic stale instead of
+                    // allowing it to repaint a completed response.
+                    state.retire_current();
+                    AdmissionDecision::Apply
+                } else if state.current_turn.is_none() && !state.retired_turns.contains(&turn) {
+                    // A lost prompt observation may leave Stop as the first
+                    // event. Admit that one terminal state, then retire it so
+                    // a replay cannot revive the generation.
+                    state.generation = state.generation.saturating_add(1);
+                    state.current_turn = Some(turn);
+                    state.retire_current();
+                    AdmissionDecision::Apply
                 } else {
                     AdmissionDecision::RejectStale
                 }

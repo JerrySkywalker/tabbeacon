@@ -50,33 +50,35 @@ changes, exact backups and an ownership manifest are written below:
 Setup is idempotent. It refuses a TabBeacon-like declaration that it cannot
 prove it owns.
 
-For a shell-safe, whitespace-free native `.exe` path, v0.5.2 emits a compact
-single-token `commandWindows` form: direct native invocation with no shell
-operators or bare `exit` keyword. It is therefore valid for Codex's configured
-Pwsh7, Windows PowerShell, explicit cmd, and empty-shell COMSPEC runners. The
-Hook ingress is itself silent and fail-open for malformed input and runtime
-handling errors. The generic command—and paths outside that narrow path
-grammar—retain the encoded PowerShell compatibility envelope in both fields.
-As with every direct native command, a later missing or unstartable executable
-cannot be converted to exit zero before the process starts; static Doctor marks
-that state unhealthy rather than claiming that a Hook is usable.
+Codex 0.149 uses a different owned transport: one named, session-scoped stdio
+MCP server and ten content-minimal `mcp_tool` lifecycle declarations. Ordinary
+events are calls over the already-connected MCP channel, so they do not start
+Pwsh7, Windows PowerShell, or cmd. The templates carry only event, session,
+turn, CWD, source, and explicit subagent identity fields—never prompt,
+assistant, or tool content. Codex does not admit a `SessionEnd` MCP Hook;
+TabBeacon releases its in-memory binding on MCP EOF and retains bounded stale
+state recovery.
+
+The source-audited 0.147 profile retains the command fallback. For a shell-safe,
+whitespace-free native `.exe` path it emits a compact direct `commandWindows`
+invocation; hostile paths retain the encoded PowerShell compatibility envelope.
+That fallback remains synchronous with its one-second timeout and is silent and
+fail-open after ingress starts.
 
 Static `tabbeacon doctor` deliberately reports the Hook runtime as unproven:
 matching declarations and trust state do not prove that Codex can execute the
-command. `tabbeacon doctor --probe-hook-runtime` runs one manifest-exact
-representative declaration through the COMSPEC fallback, with isolated temporary
-`LOCALAPPDATA`, no terminal session, a 900 ms bound, process-tree cleanup on
-timeout, and a non-sensitive timing marker. The probe never modifies Codex
-configuration or Hook trust. The Codex 0.149 shell-matrix regression separately
-proves the production declaration under configured Pwsh7, Windows PowerShell,
-explicit cmd, and the COMSPEC fallback.
+transport. `tabbeacon doctor --probe-hook-runtime` runs one manifest-exact
+representative declaration in isolated temporary `LOCALAPPDATA` with a 900 ms
+bound. For 0.149 it starts the owned executable directly and proves an MCP
+initialize/tools-call/EOF exchange; for 0.147 it uses the COMSPEC command
+fallback. The probe never modifies Codex configuration or Hook trust.
 An Owner upgrading an existing declaration must still review the generated Hook
 in `/hooks` and approve trust there; TabBeacon never changes Hook trust itself.
 
 ## Orphaned owned-Hook repair
 
 An interrupted Codex upgrade can leave a valid TabBeacon ownership manifest and
-title baseline behind while its exact command Hook groups are absent. Inspect
+title baseline behind while its exact owned Hook groups are absent. Inspect
 that narrow state first:
 
 ```powershell
@@ -105,7 +107,7 @@ tabbeacon repair codex --apply --expected-target-digest <TARGET_DIGEST>
 ```
 
 Apply repeats the ownership preflight and refuses a target digest that changed
-since preview. It appends only the missing exact command groups to `hooks.json`.
+since preview. It appends only the missing exact owned groups to `hooks.json`.
 It never adopts, deletes, rewrites, trusts, disables, or reorders external
 groups; it inserts only new owned JSON fragments, preserving existing
 third-party command and MCP group bytes where the valid known envelope is
@@ -117,8 +119,9 @@ repair still requires the Owner to launch `codex`, review the definitions in
 `/hooks`, and then run `tabbeacon doctor`; TabBeacon never auto-trusts Hooks.
 
 When upgrading to a binary at a new path, run `tabbeacon setup codex` from
-that new binary. TabBeacon migrates exactly the eleven manifest-proven command
-groups and updates its manifest atomically; it never adopts a lookalike hook,
+that new binary. TabBeacon migrates the exact manifest-proven transport (eleven
+command groups for 0.147, or ten MCP groups plus its owned MCP server for 0.149)
+and updates its manifest atomically; it never adopts a lookalike hook,
 an unsafe recorded executable path, or a different Codex configuration root.
 
 ## Presentation configuration
@@ -310,11 +313,10 @@ replacement-access probe without writing bytes to the target.
 The admitted production profiles are `codex-hooks-rust-v0.147.0` and
 `codex-hooks-rust-v0.149.0`, audited from the matching official source tags.
 Both are turn-aware, thread-spawn subagent-aware, and compact-aware. The 0.149
-audit adds `mcp_tool` as an external handler type and refactors Hook runtime
-internals, while retaining TabBeacon's command Hook event set, declaration
-fields, trust-state keys, timeout semantics, and terminal-title ownership.
-TabBeacon reconciles only exact owned command groups and preserves external
-MCP groups unchanged. A newer version never inherits either profile merely
+audit uses `mcp_tool` through TabBeacon's own named session stdio server; the
+server is hidden from the model and has no machine-global daemon lifetime.
+TabBeacon reconciles only its exact owned server and Hook groups, and preserves
+external MCP servers and groups unchanged. A newer version never inherits either profile merely
 because its version number is higher.
 
 ## Operational diagnostics
@@ -396,13 +398,12 @@ become authoritative failed/warning/interrupted states.
 
 ## Fail-open behavior
 
-The admitted command Hook profiles require these hooks to be synchronous, so
-TabBeacon uses the minimum one-second Codex timeout. The Windows command
-uses the encoded compatibility envelope to neutralize a missing or nonzero
-executable for non-fast paths. For the direct fast path, Doctor detects a
-missing executable before it can be invoked. Once the hook ingress starts it
-is silent and always successful: generation, repository, state, or terminal
-output failure loses decoration only; it does not return a Codex block decision.
+The admitted transports are synchronous. The 0.149 MCP handler declares the
+source-audited one-second timeout and has no `async` field; its server always
+returns a non-error empty tool result when normalization, state, or rendering
+degrades. The 0.147 command fallback remains `async=false` with a one-second
+timeout. Neither transport returns a Codex block decision for TabBeacon
+failures; decoration may be lost, but Codex continues.
 
 ## Exact compatibility registry
 

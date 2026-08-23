@@ -80,6 +80,9 @@ pub enum Command {
     },
     /// Receive a fail-open Codex hook payload from stdin.
     Hook { provider: Provider },
+    /// Session-scoped internal MCP Hook transport for admitted Codex profiles.
+    #[command(name = "__mcp-hook-stdio-v1", hide = true)]
+    McpHookStdio,
     /// Manage persisted presentation settings through the existing owner-aware store.
     Config {
         #[command(subcommand)]

@@ -152,6 +152,8 @@ impl HookSourceKind {
 pub enum HookHandlerKind {
     /// A command Hook with its command text redacted.
     Command,
+    /// A session-scoped MCP tool Hook with server and tool text redacted.
+    McpTool,
     /// A provider handler shape that is not supported by the adapter.
     Unsupported,
 }
@@ -162,6 +164,7 @@ impl HookHandlerKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Command => "command",
+            Self::McpTool => "mcp_tool",
             Self::Unsupported => "unsupported",
         }
     }

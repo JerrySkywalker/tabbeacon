@@ -504,14 +504,25 @@ fn canonical_json(value: &Value) -> Value {
 
 fn normalized_codex_hash(event: &str, group: &Value) -> String {
     let handler = &group["hooks"][0];
-    let normalized = json!({
-        "event_name": codex_event_key(event),
-        "hooks": [{
+    let normalized_handler = match handler["type"].as_str() {
+        Some("command") => json!({
             "type": "command",
             "command": handler["commandWindows"],
             "timeout": handler["timeout"],
             "async": handler["async"]
-        }]
+        }),
+        Some("mcp_tool") => json!({
+            "type": "mcp_tool",
+            "server": handler["server"],
+            "tool": handler["tool"],
+            "input": handler["input"],
+            "timeout": handler["timeout"]
+        }),
+        other => panic!("unsupported owned Hook handler type: {other:?}"),
+    };
+    let normalized = json!({
+        "event_name": codex_event_key(event),
+        "hooks": [normalized_handler]
     });
     let bytes = serde_json::to_vec(&canonical_json(&normalized))
         .expect("normalized hook fixture serializes");
@@ -544,39 +555,39 @@ fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
     }
 
     let mut keys = Vec::new();
-    for event in ADMITTED_HOOK_EVENTS {
-        let groups = hooks["hooks"][event]
-            .as_array()
-            .expect("hook event groups are an array");
-        let group_index = groups
-            .iter()
-            .position(|group| {
-                group["hooks"].as_array().is_some_and(|handlers| {
-                    handlers.iter().any(|handler| {
-                        handler["type"] == "command"
-                            && handler["command"].as_str().is_some_and(|command| {
-                                command.starts_with(WINDOWS_POWERSHELL_ENVELOPE_PREFIX)
-                            })
-                            && handler["commandWindows"]
-                                .as_str()
-                                .is_some_and(is_current_windows_hook_command)
-                    })
+    for (event, groups) in hooks["hooks"].as_object().expect("hooks object is present") {
+        let groups = groups.as_array().expect("hook event groups are an array");
+        for (group_index, group) in groups.iter().enumerate() {
+            let owned = group["hooks"].as_array().is_some_and(|handlers| {
+                handlers.iter().any(|handler| {
+                    (handler["type"] == "command"
+                        && handler["command"].as_str().is_some_and(|command| {
+                            command.starts_with(WINDOWS_POWERSHELL_ENVELOPE_PREFIX)
+                        })
+                        && handler["commandWindows"]
+                            .as_str()
+                            .is_some_and(is_current_windows_hook_command))
+                        || (handler["type"] == "mcp_tool"
+                            && handler["server"] == "tabbeacon-hook"
+                            && handler["tool"] == "tabbeacon_hook_event")
                 })
-            })
-            .expect("owned command hook group is present exactly once");
-        let group = &groups[group_index];
-        let key = format!(
-            "{}:{}:{group_index}:0",
-            hooks_path.display(),
-            codex_event_key(event)
-        );
-        let mut trusted = Table::new();
-        trusted.insert("trusted_hash", value(normalized_codex_hash(event, group)));
-        config["hooks"]["state"]
-            .as_table_like_mut()
-            .expect("hook state is a table")
-            .insert(&key, Item::Table(trusted));
-        keys.push(key);
+            });
+            if !owned {
+                continue;
+            }
+            let key = format!(
+                "{}:{}:{group_index}:0",
+                hooks_path.display(),
+                codex_event_key(event)
+            );
+            let mut trusted = Table::new();
+            trusted.insert("trusted_hash", value(normalized_codex_hash(event, group)));
+            config["hooks"]["state"]
+                .as_table_like_mut()
+                .expect("hook state is a table")
+                .insert(&key, Item::Table(trusted));
+            keys.push(key);
+        }
     }
     fs::write(config_path, config.to_string()).expect("trusted config writes");
     keys
@@ -974,6 +985,8 @@ fn source_audited_profiles_are_explicit_and_future_versions_are_not_assumed() {
     assert_eq!(profile_149.lifecycle_events(), profile.lifecycle_events());
     assert_eq!(profile_149.identity(), profile.identity());
     assert_eq!(profile_149.timeout(), profile.timeout());
+    assert!(!profile.uses_mcp_hook_transport());
+    assert!(profile_149.uses_mcp_hook_transport());
     assert_eq!(profile.wire_shape(), profile_149.wire_shape());
     assert_eq!(profile.wire_shape().id(), "codex-command-hooks-wire-v1");
     assert_eq!(profile.wire_shape().root_key(), "hooks");
@@ -989,7 +1002,7 @@ fn source_audited_profiles_are_explicit_and_future_versions_are_not_assumed() {
     assert_eq!(profile.wire_shape().trust_state_field(), "trusted_hash");
     assert_eq!(
         profile_149.reconciliation_note(),
-        "owned-command-hooks;external-mcp-tool-preserved"
+        "owned-mcp-tool-hooks;session-eof-cleanup;external-mcp-preserved"
     );
     assert_eq!(
         CodexCompatibilityRegistry::admitted_profiles(),
@@ -1027,7 +1040,7 @@ fn observed_codex_0149_shape_reconciles_only_exact_owned_declarations() {
         SetupOutcome::InstalledTrustReviewRequired
     );
     let trusted_keys = install_current_codex_trust_state(&codex_home);
-    assert_eq!(trusted_keys.len(), ADMITTED_HOOK_EVENTS.len());
+    assert_eq!(trusted_keys.len(), ADMITTED_HOOK_EVENTS.len() - 1);
 
     let report = integration.doctor();
     assert_eq!(report.compatibility_state().label(), "supported");
@@ -1076,7 +1089,7 @@ fn codex_0149_mcp_extension_is_preserved_during_owned_command_reconciliation() {
     assert_eq!(
         integration
             .setup()
-            .expect("0.149 MCP extension does not block command reconciliation"),
+            .expect("0.149 MCP extension does not block owned MCP reconciliation"),
         SetupOutcome::InstalledTrustReviewRequired
     );
     install_current_codex_trust_state(&codex_home);
@@ -1087,7 +1100,7 @@ fn codex_0149_mcp_extension_is_preserved_during_owned_command_reconciliation() {
     assert_eq!(after["hooks"]["PostToolUse"][0], external_mcp_group);
     assert_eq!(
         after["hooks"]["PostToolUse"][1]["hooks"][0]["type"],
-        "command"
+        "mcp_tool"
     );
     let report = integration.doctor();
     assert!(report.checks().iter().any(|check| {
@@ -1098,6 +1111,136 @@ fn codex_0149_mcp_extension_is_preserved_during_owned_command_reconciliation() {
             .checks()
             .iter()
             .any(|check| { check.id() == "hooks.trust" && check.status() == DoctorStatus::Pass })
+    );
+}
+
+#[test]
+fn codex_0149_owned_mcp_server_preserves_external_servers_and_refuses_name_collision() {
+    let root = TestRoot::new("codex-0149-mcp-server-ownership");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let config_path = codex_home.join("config.toml");
+    let owner_config = concat!(
+        "model = \"gpt-test\"\n\n",
+        "[mcp_servers.owner-audit]\n",
+        "command = \"owner-audit.exe\"\n",
+        "args = [\"--stdio\"]\n\n",
+        "[mcp_servers.owner-audit.env]\n",
+        "OWNER_MODE = \"preserve\"\n"
+    );
+    fs::write(&config_path, owner_config).expect("owner MCP config is written");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+
+    assert_eq!(
+        integration.setup().expect("0.149 owned MCP setup succeeds"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    let installed = fs::read_to_string(&config_path).expect("installed config reads");
+    let installed_config = installed
+        .parse::<DocumentMut>()
+        .expect("installed config parses");
+    let owner_server = installed_config["mcp_servers"]["owner-audit"]
+        .as_table_like()
+        .expect("external MCP server remains a table");
+    assert_eq!(
+        owner_server.get("command").and_then(Item::as_str),
+        Some("owner-audit.exe")
+    );
+    assert_eq!(
+        owner_server
+            .get("env")
+            .and_then(Item::as_table_like)
+            .and_then(|env| env.get("OWNER_MODE"))
+            .and_then(Item::as_str),
+        Some("preserve")
+    );
+    let tabbeacon_server = installed_config["mcp_servers"]["tabbeacon-hook"]
+        .as_table_like()
+        .expect("owned MCP server is configured");
+    let tabbeacon_args = tabbeacon_server
+        .get("args")
+        .and_then(Item::as_array)
+        .expect("owned MCP server args are an array")
+        .iter()
+        .map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect::<Option<Vec<_>>>();
+    assert_eq!(tabbeacon_args, Some(vec!["__mcp-hook-stdio-v1".to_owned()]));
+    assert_eq!(
+        integration
+            .uninstall()
+            .expect("owned MCP server uninstalls"),
+        UninstallOutcome::Removed
+    );
+    let restored = fs::read_to_string(&config_path).expect("restored config reads");
+    assert!(restored.contains("owner-audit.exe"));
+    assert!(restored.contains("OWNER_MODE = \"preserve\""));
+    assert!(!restored.contains("tabbeacon-hook"));
+
+    let collision = TestRoot::new("codex-0149-mcp-server-collision");
+    let collision_home = collision.child("codex-home");
+    write_hooks_fixture(&collision_home, "0.149.0-observed.json");
+    let collision_config = collision_home.join("config.toml");
+    fs::write(
+        &collision_config,
+        "[mcp_servers.tabbeacon-hook]\ncommand = \"owner-server.exe\"\nargs = [\"--stdio\"]\n",
+    )
+    .expect("conflicting external MCP server is written");
+    let before = fs::read(&collision_config).expect("conflicting config reads");
+    let collision_integration =
+        test_integration_with_codex_fixture(&collision, "codex_version_probe_0149.rs");
+    assert!(matches!(
+        collision_integration.setup(),
+        Err(CodexIntegrationError::TabBeaconLikeAmbiguityBlocked)
+    ));
+    assert_eq!(
+        fs::read(&collision_config).expect("conflicting config rereads"),
+        before
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn doctor_runtime_probe_executes_the_exact_0149_mcp_stdio_transport() {
+    let root = TestRoot::new("codex-0149-mcp-runtime-probe");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-observed.json");
+    let integration = CodexIntegration::new(
+        &codex_home,
+        root.child("state"),
+        PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon")),
+    )
+    .with_codex_program(compile_codex_probe_fixture(
+        &root,
+        "codex_version_probe_0149.rs",
+    ));
+    integration.setup().expect("0.149 MCP setup succeeds");
+    install_current_codex_trust_state(&codex_home);
+    let hooks_before = fs::read(codex_home.join("hooks.json")).expect("hooks before probe read");
+    let config_before = fs::read(codex_home.join("config.toml")).expect("config before probe read");
+    let manifest_before =
+        fs::read(root.child("state/integration-v1.json")).expect("manifest before probe read");
+
+    let report = integration.doctor_with_runtime_probe();
+    assert_eq!(
+        report.check_status("hooks.runtime-probe"),
+        Some(DoctorStatus::Pass)
+    );
+    assert!(
+        report
+            .check("hooks.runtime-probe")
+            .is_some_and(|check| { check.summary().contains("bounded direct stdio transport") })
+    );
+    assert_eq!(
+        fs::read(codex_home.join("hooks.json")).expect("hooks after probe read"),
+        hooks_before
+    );
+    assert_eq!(
+        fs::read(codex_home.join("config.toml")).expect("config after probe read"),
+        config_before
+    );
+    assert_eq!(
+        fs::read(root.child("state/integration-v1.json")).expect("manifest after probe read"),
+        manifest_before
     );
 }
 
@@ -1154,7 +1297,7 @@ fn repair_v2_preserves_original_baseline_third_party_groups_and_is_idempotent() 
         .repair(false, None)
         .expect("repair preview is safe");
     assert_eq!(preview.disposition, CodexRepairDisposition::ReadyToApply);
-    assert_eq!(preview.missing_declarations, ADMITTED_HOOK_EVENTS.len());
+    assert_eq!(preview.missing_declarations, ADMITTED_HOOK_EVENTS.len() - 1);
     assert_eq!(preview.schema_version, 2);
     assert_eq!(preview.third_party_groups_preserved, 2);
     assert_eq!(preview.postinstall_third_party_groups_preserved, 0);
@@ -1180,7 +1323,10 @@ fn repair_v2_preserves_original_baseline_third_party_groups_and_is_idempotent() 
         repaired.disposition,
         CodexRepairDisposition::RepairedTrustReviewRequired
     );
-    assert_eq!(repaired.missing_declarations, ADMITTED_HOOK_EVENTS.len());
+    assert_eq!(
+        repaired.missing_declarations,
+        ADMITTED_HOOK_EVENTS.len() - 1
+    );
     assert_eq!(repaired.third_party_groups_preserved, 2);
     assert_eq!(repaired.postinstall_third_party_groups_preserved, 0);
     assert!(repaired.manual_hook_trust_review_required);
@@ -1458,7 +1604,7 @@ fn repair_v2_blocks_a_modified_partial_owned_group() {
     let mut hooks: Value =
         serde_json::from_slice(&fs::read(&hooks_path).expect("installed hooks read"))
             .expect("installed hooks parse");
-    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["async"] = json!(true);
+    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["timeout"] = json!(2);
     fs::write(
         &hooks_path,
         serde_json::to_vec_pretty(&hooks).expect("modified partial group serialize"),
@@ -1782,8 +1928,7 @@ fn future_unknown_declaration_drift_disables_runtime_continuity() {
 
     let mut hooks: Value =
         serde_json::from_slice(&fs::read(&hooks_path).expect("hooks read")).expect("hooks parse");
-    hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = json!("declaration drift");
-    hooks["hooks"]["PreToolUse"][0]["hooks"][0]["commandWindows"] = json!("declaration drift");
+    hooks["hooks"]["PreToolUse"][0]["hooks"][0]["tool"] = json!("declaration-drift");
     fs::write(
         &hooks_path,
         serde_json::to_vec_pretty(&hooks).expect("drifted hooks serialize"),
@@ -1891,8 +2036,7 @@ fn observed_codex_0149_command_drift_is_never_reconciled_or_trusted() {
     let mut hooks: Value =
         serde_json::from_slice(&fs::read(&hooks_path).expect("owned hooks read"))
             .expect("owned hooks parse");
-    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["command"] = json!("external replacement");
-    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["commandWindows"] = json!("external replacement");
+    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["tool"] = json!("external-replacement");
     fs::write(
         &hooks_path,
         serde_json::to_vec_pretty(&hooks).expect("drifted hooks serialize"),

@@ -204,6 +204,10 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Hook {
             provider: Provider::Codex,
         }) => run_codex_hook(),
+        Some(Command::McpHookStdio) => {
+            let _ = tabbeacon::providers::codex::run_stdio_hook_server();
+            ExitCode::SUCCESS
+        }
         Some(Command::Config { command, output }) => {
             config_command(command, output.mode(), output.language.preference())
         }
