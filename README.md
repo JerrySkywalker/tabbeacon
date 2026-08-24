@@ -68,10 +68,10 @@ TabBeacon has two first-class installation channels:
   cargo install tabbeacon --locked
   ```
 
-  To install v0.5.2 exactly after its public release:
+  To install v0.6.0 exactly after its public release:
 
   ```powershell
-  cargo install tabbeacon --version 0.5.2 --locked
+  cargo install tabbeacon --version 0.6.0 --locked
   ```
 
 TabBeacon requires Rust 1.97.1. If your default Rust toolchain is older, use a
@@ -146,7 +146,7 @@ to stdout and keeps the normal doctor exit contract: a failure is nonzero while
 warning and pass are successful. `status --json` remains observational and
 successful even when its nested doctor verdict is a failure.
 
-TabBeacon 0.5.1 adds provider-aware Integrations and `sessions` projections,
+TabBeacon 0.6.0 includes provider-aware Integrations and `sessions` projections,
 Hook Inspector diagnostics, title/naming explainability, and runtime-worker
 upgrade diagnostics. `sessions` remains a read-only projection of
 ephemeral activity leases. Each row contains only a safe workspace alias,
@@ -160,13 +160,17 @@ distinguish configured, not configured, unsupported-version, and configuration
 drift states. Agy session rows contain only the shared workspace alias, provider,
 semantic state, recency, and root-stability facts.
 
+See the [Agy setup guide](docs/agy-setup.md), [v0.6.0 release
+notes](docs/v0.6-release-notes.md), and [v0.5.2 to v0.6.0 upgrade
+guide](docs/v0.6-upgrade.md) for the exact profile and migration boundaries.
+
 ### Rust library target
 
 The published package includes the `tabbeacon` library target used internally
-by the CLI and its tests. TabBeacon v0.5.x is CLI-first and does not promise a
+by the CLI and its tests. TabBeacon v0.6.x is CLI-first and does not promise a
 mature public Rust library API beyond normal SemVer expectations.
 
-## Non-goals for v0.5
+## Non-goals for v0.6
 
 TabBeacon is not a PTY host, session manager, worktree manager, agent orchestrator, prompt router, remote-control service, terminal replacement, or web dashboard.
 
