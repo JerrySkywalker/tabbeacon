@@ -1,6 +1,7 @@
 # Release Criteria
 
-A public v0.3 candidate is releasable only when all applicable conditions below are proved at one exact candidate SHA.
+A public TabBeacon candidate is releasable only when all applicable conditions
+below are proved at one exact candidate SHA.
 
 ## Product
 
@@ -15,7 +16,8 @@ A public v0.3 candidate is releasable only when all applicable conditions below 
 
 - provider-specific event types remain below the normalizer boundary;
 - presentation code consumes typed visual state, not raw provider strings;
-- Codex hooks remain the production v0.3 backend unless a later ADR explicitly promotes another backend;
+- Codex hooks remain the production backend unless a later ADR explicitly
+  promotes another backend;
 - experimental app-server work is not a hidden runtime dependency of the production path.
 
 ## Verification
@@ -33,3 +35,50 @@ A public v0.3 candidate is releasable only when all applicable conditions below 
 - license and notices are present;
 - release notes describe limitations and the Windows Terminal/Codex scope;
 - crates.io publication is intentional, not an accidental consequence of CI.
+
+## Owner official-channel convergence
+
+```text
+OWNER_OFFICIAL_CHANNEL_CONVERGENCE_REQUIRED=true
+OWNER_OFFICIAL_CHANNEL=crates.io
+```
+
+An exact-Git Cargo installation is permitted only for unreleased RC or dogfood
+qualification, for example:
+
+```powershell
+cargo install --git <repo> --rev <exact-sha> --locked --force
+```
+
+It must not remain the normal Owner installation after that version is public.
+For every public release, closeout must converge the Owner dogfood machine to
+the official stable channel. The current Rust CLI channel is crates.io; unless
+another release-policy change deliberately replaces it, the v0.5.2 cutover is
+equivalent to:
+
+```powershell
+rustup run 1.97.1 cargo install tabbeacon --version 0.5.2 --locked --force
+```
+
+Use an explicit Rust 1.97.1 selection whenever the active toolchain is not
+already admitted. The cutover proof must inspect Cargo-owned installation
+metadata (`.crates.toml`, `.crates2.json`, or an equally authoritative Cargo
+source record) and minimally prove a crates.io registry source, not a Git
+revision. `tabbeacon --version`, executable location, and binary existence are
+not sufficient proof.
+
+After cutover, closeout MUST run `tabbeacon setup codex` as ownership-aware
+reconciliation, preserving existing Codex configuration ownership, Hook trust,
+third-party Hooks/MCP servers, and user presentation settings. Reconciliation
+must not automatically change trust. Closeout then runs static Doctor and the
+exact hybrid runtime probe.
+
+Every public-release closeout receipt reports:
+
+```text
+OWNER_INSTALL_SOURCE=<content-minimal-cargo-source-proof>
+OWNER_INSTALL_SOURCE_PROVEN=<true|false>
+OWNER_GIT_REV_INSTALL=false
+OWNER_OFFICIAL_CHANNEL_CUTOVER=<PASS|FAIL|BLOCKED|UNPROVEN>
+OWNER_OFFICIAL_CHANNEL=crates.io
+```
