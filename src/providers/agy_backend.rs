@@ -8,7 +8,8 @@
 
 use std::{
     fmt, fs,
-    io::{self, Write},
+    fs::{File, OpenOptions},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
@@ -20,9 +21,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    activity::{
-        ActivityCoordinator, SessionWorkspaceObservability, record_provider_session_observation,
-    },
+    activity::{SessionWorkspaceObservability, record_provider_session_observation},
     core::{
         AgentEvidence, AgentProvider, AgentSessionKey, AuthoritySet, BackendCapabilities,
         EvidenceAuthority, EvidenceConfidence, EvidenceSource, EvidenceTieBreak, FieldUpdate,
@@ -358,7 +357,6 @@ pub struct AgyTitleRuntime {
     state_root: PathBuf,
     identity_resolver: WorkspaceIdentityResolver,
     renderer: WindowsTerminalRenderer,
-    activity: ActivityCoordinator,
 }
 
 impl AgyTitleRuntime {
@@ -374,7 +372,6 @@ impl AgyTitleRuntime {
                 WindowsTerminalCapabilities::new(false),
                 settings,
             ),
-            activity: ActivityCoordinator::disabled(&state_root),
         }
     }
 
@@ -388,9 +385,7 @@ impl AgyTitleRuntime {
             |_| PresentationSettings::default(),
             |store| store.load_or_default(),
         );
-        let mut runtime = Self::new(&state_root, settings);
-        runtime.activity = ActivityCoordinator::system(&state_root)
-            .unwrap_or_else(|_| ActivityCoordinator::disabled(&state_root));
+        let runtime = Self::new(&state_root, settings);
         runtime.dispatch_to(raw, SystemTime::now())
     }
 
@@ -437,17 +432,6 @@ impl AgyTitleRuntime {
             workspace_observability.clone(),
         );
         record_callback_diagnostics(&self.state_root, raw, true, observed_at);
-        let _ = self.activity.reconcile_with_workspace_observability(
-            &normalized.session_sha256,
-            None,
-            1,
-            normalized.event_sequence,
-            AGY_PROVIDER_ID,
-            workspace.effective_alias.as_str(),
-            &action,
-            self.renderer.settings(),
-            workspace_observability,
-        );
         AgyProductionTitleResponse {
             title,
             outcome: AgyTitleDispatchOutcome::Applied,
@@ -533,6 +517,7 @@ impl AgyBackend {
         observation: AgyNormalizedObservation,
     ) -> AgyEvidenceProjection {
         if matches!(observation.state, AgyBackendState::Admitted)
+            && matches!(observation.source, AgyBackendSource::TitleCallback)
             && observation.production_authority
         {
             AgyEvidenceProjection::Evidence
@@ -701,6 +686,9 @@ impl AgyProductionSetup {
     /// Read-only current compatibility and ownership projection.
     #[must_use]
     pub fn inspect(&self) -> AgyReadinessProjection {
+        if self.validate_paths().is_err() {
+            return readiness(AgyIntegrationReadiness::ConfigurationDrift, None, false);
+        }
         let Ok(version) = self.probe_version() else {
             return readiness(AgyIntegrationReadiness::KnownUnadmitted, None, false);
         };
@@ -747,7 +735,9 @@ impl AgyProductionSetup {
     /// ownership-state drift, and any pre-write byte drift.
     pub fn setup(&self) -> Result<AgyProductionSetupOutcome, AgyProductionSetupError> {
         self.require_admitted_version()?;
+        self.validate_paths()?;
         let _lock = SetupLock::acquire(&self.state_root)?;
+        self.validate_paths()?;
         if let Some(manifest) = self.read_manifest()? {
             return if self.current_matches_owned(&manifest)? {
                 Ok(AgyProductionSetupOutcome::AlreadyConfigured)
@@ -757,14 +747,6 @@ impl AgyProductionSetup {
         }
 
         let before = read_optional_bytes(&self.config_path)?;
-        if self.config_path.exists()
-            && fs::symlink_metadata(&self.config_path)
-                .map_err(|_| AgyProductionSetupError::Io)?
-                .file_type()
-                .is_symlink()
-        {
-            return Err(AgyProductionSetupError::ConfigurationDrift);
-        }
         let mut object = match before.as_deref() {
             Some(bytes) => parse_qualification_object(bytes)
                 .ok_or(AgyProductionSetupError::MalformedConfiguration)?,
@@ -798,10 +780,7 @@ impl AgyProductionSetup {
         fs::create_dir_all(&self.state_root).map_err(|_| AgyProductionSetupError::Io)?;
         atomic_write(&self.backup_path(), &backup)?;
         atomic_write_json(&self.manifest_path(), &manifest)?;
-        if read_optional_bytes(&self.config_path)? != before {
-            return Err(AgyProductionSetupError::ConfigurationDrift);
-        }
-        atomic_write(&self.config_path, &candidate)?;
+        write_optional_if_unchanged(&self.config_path, before.as_deref(), &candidate)?;
         if fs::read(&self.config_path).map_err(|_| AgyProductionSetupError::Io)? != candidate {
             return Err(AgyProductionSetupError::ConfigurationDrift);
         }
@@ -814,11 +793,15 @@ impl AgyProductionSetup {
     ///
     /// Refuses when the callback or any unrelated setting drifted.
     pub fn uninstall(&self) -> Result<AgyProductionSetupOutcome, AgyProductionSetupError> {
+        self.validate_paths()?;
         let _lock = SetupLock::acquire(&self.state_root)?;
+        self.validate_paths()?;
         let Some(manifest) = self.read_manifest()? else {
             return Ok(AgyProductionSetupOutcome::NotInstalled);
         };
-        if !self.current_matches_owned(&manifest)? {
+        let current =
+            fs::read(&self.config_path).map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
+        if !self.bytes_match_owned(&manifest, &current)? {
             return Err(AgyProductionSetupError::ConfigurationDrift);
         }
         let backup = fs::read(self.backup_path())
@@ -827,9 +810,9 @@ impl AgyProductionSetup {
             return Err(AgyProductionSetupError::OwnershipStateInvalid);
         }
         if manifest.original_present {
-            atomic_write(&self.config_path, &backup)?;
+            write_if_unchanged(&self.config_path, &current, &backup)?;
         } else {
-            fs::remove_file(&self.config_path).map_err(|_| AgyProductionSetupError::Io)?;
+            remove_if_unchanged(&self.config_path, &current)?;
         }
         if read_optional_bytes(&self.config_path)? != manifest.original_present.then_some(backup) {
             return Err(AgyProductionSetupError::ConfigurationDrift);
@@ -888,6 +871,16 @@ impl AgyProductionSetup {
         &self,
         manifest: &AgySetupManifest,
     ) -> Result<bool, AgyProductionSetupError> {
+        let current =
+            fs::read(&self.config_path).map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
+        self.bytes_match_owned(manifest, &current)
+    }
+
+    fn bytes_match_owned(
+        &self,
+        manifest: &AgySetupManifest,
+        current: &[u8],
+    ) -> Result<bool, AgyProductionSetupError> {
         if manifest.schema != AGY_SETUP_MANIFEST_SCHEMA
             || manifest.admitted_version != AGY_ADMITTED_VERSION
         {
@@ -898,9 +891,7 @@ impl AgyProductionSetup {
         if sha256_hex(&backup) != manifest.original_sha256 {
             return Err(AgyProductionSetupError::OwnershipStateInvalid);
         }
-        let current =
-            fs::read(&self.config_path).map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
-        let mut current_object = parse_qualification_object(&current)
+        let mut current_object = parse_qualification_object(current)
             .ok_or(AgyProductionSetupError::MalformedConfiguration)?;
         let expected_callback = self.callback_value()?;
         if current_object.remove("title") != Some(expected_callback.clone()) {
@@ -920,6 +911,14 @@ impl AgyProductionSetup {
             Map::new()
         };
         Ok(current_object == original_object)
+    }
+
+    fn validate_paths(&self) -> Result<(), AgyProductionSetupError> {
+        ensure_safe_file_path(&self.config_path)?;
+        ensure_safe_directory_path(&self.state_root)?;
+        ensure_safe_file_path(&self.manifest_path())?;
+        ensure_safe_file_path(&self.backup_path())?;
+        ensure_safe_file_path(&self.executable)
     }
 
     fn read_manifest(&self) -> Result<Option<AgySetupManifest>, AgyProductionSetupError> {
@@ -967,9 +966,12 @@ struct SetupLock {
 
 impl SetupLock {
     fn acquire(root: &Path) -> Result<Self, AgyProductionSetupError> {
+        ensure_safe_directory_path(root)?;
         fs::create_dir_all(root).map_err(|_| AgyProductionSetupError::Io)?;
+        ensure_safe_directory_path(root)?;
         let path = root.join("transaction.lock");
-        fs::OpenOptions::new()
+        ensure_safe_file_path(&path)?;
+        OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
@@ -992,7 +994,148 @@ fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>, AgyProductionSetu
     }
 }
 
+fn ensure_safe_file_path(path: &Path) -> Result<(), AgyProductionSetupError> {
+    let parent = path
+        .parent()
+        .ok_or(AgyProductionSetupError::ConfigurationDrift)?;
+    ensure_safe_ancestors(parent)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.is_file() || metadata_is_link_or_reparse(&metadata) => {
+            Err(AgyProductionSetupError::ConfigurationDrift)
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(AgyProductionSetupError::Io),
+    }
+}
+
+fn ensure_safe_directory_path(path: &Path) -> Result<(), AgyProductionSetupError> {
+    ensure_safe_ancestors(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.is_dir() || metadata_is_link_or_reparse(&metadata) => {
+            Err(AgyProductionSetupError::ConfigurationDrift)
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(AgyProductionSetupError::Io),
+    }
+}
+
+fn ensure_safe_ancestors(path: &Path) -> Result<(), AgyProductionSetupError> {
+    if !path.is_absolute() {
+        return Err(AgyProductionSetupError::ConfigurationDrift);
+    }
+    for ancestor in path.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) if !metadata.is_dir() || metadata_is_link_or_reparse(&metadata) => {
+                return Err(AgyProductionSetupError::ConfigurationDrift);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(_) => return Err(AgyProductionSetupError::Io),
+        }
+    }
+    Ok(())
+}
+
+fn metadata_is_link_or_reparse(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+
+        metadata.file_type().is_symlink() || metadata.file_attributes() & 0x0400 != 0
+    }
+    #[cfg(not(windows))]
+    metadata.file_type().is_symlink()
+}
+
+fn write_optional_if_unchanged(
+    path: &Path,
+    expected_before: Option<&[u8]>,
+    replacement: &[u8],
+) -> Result<(), AgyProductionSetupError> {
+    if let Some(expected) = expected_before {
+        write_if_unchanged(path, expected, replacement)
+    } else {
+        let parent = path
+            .parent()
+            .ok_or(AgyProductionSetupError::ConfigurationDrift)?;
+        fs::create_dir_all(parent).map_err(|_| AgyProductionSetupError::Io)?;
+        ensure_safe_ancestors(parent)?;
+        ensure_safe_file_path(path)?;
+        let mut target = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
+        target
+            .write_all(replacement)
+            .and_then(|()| target.flush())
+            .map_err(|_| AgyProductionSetupError::Io)
+    }
+}
+
+fn write_if_unchanged(
+    path: &Path,
+    expected_before: &[u8],
+    replacement: &[u8],
+) -> Result<(), AgyProductionSetupError> {
+    ensure_safe_file_path(path)?;
+    let mut target = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
+    target
+        .lock()
+        .map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
+    let result = (|| {
+        target
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| AgyProductionSetupError::Io)?;
+        let mut actual_before = Vec::new();
+        target
+            .read_to_end(&mut actual_before)
+            .map_err(|_| AgyProductionSetupError::Io)?;
+        if actual_before != expected_before {
+            return Err(AgyProductionSetupError::ConfigurationDrift);
+        }
+        atomic_write(path, replacement)
+    })();
+    let unlock = File::unlock(&target).map_err(|_| AgyProductionSetupError::Io);
+    result?;
+    unlock
+}
+
+fn remove_if_unchanged(path: &Path, expected_before: &[u8]) -> Result<(), AgyProductionSetupError> {
+    ensure_safe_file_path(path)?;
+    let mut target = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
+    target
+        .lock()
+        .map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
+    target
+        .seek(SeekFrom::Start(0))
+        .map_err(|_| AgyProductionSetupError::Io)?;
+    let mut actual_before = Vec::new();
+    target
+        .read_to_end(&mut actual_before)
+        .map_err(|_| AgyProductionSetupError::Io)?;
+    if actual_before != expected_before {
+        let _ = File::unlock(&target);
+        return Err(AgyProductionSetupError::ConfigurationDrift);
+    }
+    let remove = fs::remove_file(path).map_err(|_| AgyProductionSetupError::Io);
+    let unlock = File::unlock(&target).map_err(|_| AgyProductionSetupError::Io);
+    remove?;
+    unlock
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AgyProductionSetupError> {
+    ensure_safe_file_path(path)?;
     let parent = path.parent().ok_or(AgyProductionSetupError::Io)?;
     fs::create_dir_all(parent).map_err(|_| AgyProductionSetupError::Io)?;
     let mut file = AtomicWriteFile::options()
@@ -1281,11 +1424,12 @@ mod tests {
 
     use super::{
         AGY_ADMITTED_PROFILE_SCHEMA, AGY_ADMITTED_VERSION, AGY_DAILY_COMMAND,
-        AgyAdmissionGateError, AgyBackend, AgyCandidatePresence, AgyCapabilityGate,
-        AgyEvidenceProjection, AgyIntegrationReadiness, AgyNormalizer, AgyOwnedConfigPatch,
-        AgyProductionSetup, AgyProductionSetupError, AgyProductionSetupOutcome,
-        AgySafeRawObservation, AgySetupScope, AgySetupTransaction, AgySetupTransactionError,
-        AgyTitleDispatchOutcome, AgyTitleNormalizer, AgyTitleRuntime,
+        AgyAdmissionGateError, AgyBackend, AgyBackendSource, AgyBackendState, AgyCandidatePresence,
+        AgyCapabilityGate, AgyEvidenceProjection, AgyIntegrationReadiness,
+        AgyNormalizedObservation, AgyNormalizer, AgyOwnedConfigPatch, AgyProductionSetup,
+        AgyProductionSetupError, AgyProductionSetupOutcome, AgySafeRawObservation, AgySetupScope,
+        AgySetupTransaction, AgySetupTransactionError, AgyTitleDispatchOutcome, AgyTitleNormalizer,
+        AgyTitleRuntime,
     };
     use crate::{
         core::{FieldUpdate, Phase},
@@ -1341,6 +1485,27 @@ mod tests {
             AgyEvidenceProjection::Unadmitted
         );
         assert_eq!(AGY_DAILY_COMMAND, "agy");
+    }
+
+    #[test]
+    fn fail_open_backend_rejects_non_title_sources_even_if_marked_authoritative() {
+        let admitted = AgyNormalizedObservation {
+            state: AgyBackendState::Admitted,
+            source: AgyBackendSource::TitleCallback,
+            candidate_fact_count: 1,
+            production_authority: true,
+        };
+        assert_eq!(
+            AgyBackend::default().observe_fail_open(admitted),
+            AgyEvidenceProjection::Evidence
+        );
+        assert_eq!(
+            AgyBackend::default().observe_fail_open(AgyNormalizedObservation {
+                source: AgyBackendSource::Hooks,
+                ..admitted
+            }),
+            AgyEvidenceProjection::Unadmitted
+        );
     }
 
     #[test]
@@ -1490,6 +1655,24 @@ mod tests {
             setup.uninstall(),
             Ok(AgyProductionSetupOutcome::NotInstalled)
         );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn production_setup_restores_an_originally_absent_config() {
+        let root = temp_root("absent");
+        let config = root.join("home/.gemini/antigravity-cli/settings.json");
+        let state = root.join("state");
+        let executable = root.join("tabbeacon.exe");
+        fs::create_dir_all(config.parent().expect("parent")).expect("config parent");
+        fs::write(&executable, b"fixture executable").expect("executable");
+        let setup =
+            AgyProductionSetup::new(&config, &state, &executable, "agy").with_admitted_version();
+
+        assert_eq!(setup.setup(), Ok(AgyProductionSetupOutcome::Installed));
+        assert!(config.is_file());
+        assert_eq!(setup.uninstall(), Ok(AgyProductionSetupOutcome::Removed));
+        assert!(!config.exists());
         fs::remove_dir_all(root).expect("cleanup");
     }
 
