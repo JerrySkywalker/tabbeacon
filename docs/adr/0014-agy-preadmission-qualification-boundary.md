@@ -32,10 +32,14 @@ disposable, content-minimal qualification primitives before G64:
 - an explicit test-only provider-registry projection with unavailable
   capabilities and no title-badge participation.
 
-The ordinary product registry and guided Setup remain Codex-only. No Agy
-configuration, Hook, title command, wrapper, PATH interception, PTY host, or
-daemon is installed. `tabbeacon agy` is an observational qualification CLI,
-not an Agy launcher; normal Agy launch remains literally `agy`.
+The production registry and runtime Sessions remain Codex-only. The
+provider-neutral Integrations catalog may expose a known-unadmitted Agy
+readiness row, and `setup agy` may return the explicit
+`no admitted Agy setup profile` refusal, but neither can register or enable the
+provider. No Agy configuration, Hook, title command, wrapper, PATH
+interception, PTY host, or daemon is installed. `tabbeacon agy` is an
+observational qualification CLI, not an Agy launcher; normal Agy launch
+remains literally `agy`.
 
 Any later runner invocation pins direct native executable identities by absolute
 path and SHA-256, rejects reparse/out-of-root disposable captures, and applies

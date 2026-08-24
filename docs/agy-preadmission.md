@@ -13,9 +13,10 @@ RAW_AGY_CONTENT_PERSISTED=false
 PROJECT_LOCAL_CONFIG=false
 ```
 
-The only production provider remains Codex. An Agy entry can appear in an
-explicit qualification fixture as `unadmitted`; it is not in the ordinary
-provider registry or guided Setup view.
+The only production provider remains Codex. The ordinary Integrations catalog
+now shows Agy as `known + unadmitted`, with qualification available and
+production disabled. It is excluded from registered production IDs, runtime
+Sessions, title badges, and guided Setup apply actions.
 
 ## Read-only audit snapshot (2026-08-22)
 
@@ -55,10 +56,10 @@ production admission claim.
 - a provider-registry constructor for explicit tests that cannot admit Agy or
   give it a title badge.
 
-The ordinary registry continues to contain only Codex. The explicit Agy test
-projection always reports `admission=unadmitted`, unavailable capabilities,
-unavailable Hook inspection, and Owner-present qualification as a manual next
-action.
+The ordinary registry continues to register only Codex for production. Its Agy
+readiness row always reports `admission=unadmitted`, unavailable capabilities,
+unavailable Hook inspection, production disabled, and Owner-present
+qualification as a manual next action.
 
 ## Privacy allow-list
 
@@ -94,6 +95,23 @@ reparse-point, and oversized candidates as refusals only; it has no write path
 and refuses even an unchanged contained candidate while Agy is unadmitted.
 
 ## G64 runbook
+
+The concise prepared Owner workflow is
+[`agy-g64-owner-runbook.md`](agy-g64-owner-runbook.md). It uses the cohesive
+`tabbeacon agy qualification` command family to initialize a disposable
+workspace, run literal `agy --version`, accumulate minimized callback/Hook
+observations, inspect them, compile a separate unreviewed candidate, produce a
+pending review packet, and safely clean the managed workspace.
+
+The callback command is
+`tabbeacon agy qualification __title-callback-v1 --root <qualification-root>`.
+It always emits the plain fallback title and persists only the same typed
+allow-list used by the adversarial recorder. A candidate artifact cannot be
+converted to the private admitted-profile token; the production capability
+gate rejects every profile version until a later real G64 change explicitly
+adds one exact Owner-approved schema version.
+
+### Exact-binary legacy runner details
 
 The runbook is intentionally split at the Owner boundary. The script never
 writes Agy configuration, opens login, invokes a model, starts an interactive

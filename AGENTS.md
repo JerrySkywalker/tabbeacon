@@ -171,3 +171,18 @@ OWNER_ACTION=<none-or-specific>
 ```
 
 Do not require irrelevant fields for ceremony.
+
+## Local Rust build-storage discipline
+
+- Daily agent launch remains literally `codex`.
+- Temporary and non-canonical TabBeacon worktrees route ordinary Cargo artifacts to
+  the admitted shared local target, `V:\build\tabbeacon\codex-target`, instead of
+  accumulating worktree-local targets.
+- The canonical checkout, `V:\src\tabbeacon`, may retain its local HOT target.
+- Goal-specific Cargo targets are forbidden unless technical isolation is explicitly
+  required and documented with `REASON`, `EXPECTED_STORAGE_GB`, `TARGET_PATH`, and
+  `RETENTION_AFTER_GOAL`.
+- Capacity pressure fails safely: never delete repository source, `.git`, worktree
+  roots, or evidence as automatic remediation.
+- Storage governance must not introduce a Codex wrapper, fake `codex.exe`, PATH
+  shadow, PTY host, or global daemon.

@@ -137,6 +137,7 @@ pub enum AgyCapability {
     Phase,
     Attention,
     Approval,
+    Health,
     SessionIdentity,
     WorkspaceRoot,
     BackgroundTasks,
@@ -154,6 +155,7 @@ impl AgyCapability {
             Self::Phase => "phase",
             Self::Attention => "attention",
             Self::Approval => "approval",
+            Self::Health => "health",
             Self::SessionIdentity => "session_identity",
             Self::WorkspaceRoot => "workspace_root",
             Self::BackgroundTasks => "background_tasks",
@@ -201,6 +203,7 @@ impl AgyCapabilityProfile {
             AgyCapability::Phase,
             AgyCapability::Attention,
             AgyCapability::Approval,
+            AgyCapability::Health,
             AgyCapability::SessionIdentity,
             AgyCapability::WorkspaceRoot,
             AgyCapability::BackgroundTasks,
@@ -542,7 +545,7 @@ impl AgyStateRecorder {
 /// `serde_json::Value` normally applies last-key-wins semantics. Qualification
 /// records must fail closed instead: a duplicate could otherwise change one of
 /// the small number of facts that cross the privacy boundary.
-fn parse_qualification_object(payload: &[u8]) -> Option<Map<String, Value>> {
+pub(crate) fn parse_qualification_object(payload: &[u8]) -> Option<Map<String, Value>> {
     let mut validator = serde_json::Deserializer::from_slice(payload);
     DuplicateRejectingValue { depth: 0 }
         .deserialize(&mut validator)

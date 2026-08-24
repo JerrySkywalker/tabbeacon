@@ -64,6 +64,14 @@ fn fake_codex_directory(root: &TestRoot, version: &str) -> PathBuf {
     directory
 }
 
+fn fake_agy_directory(root: &TestRoot) -> PathBuf {
+    let directory = root.child("fake-agy");
+    fs::create_dir_all(&directory).expect("fake Agy directory creates");
+    fs::copy(env!("CARGO_BIN_EXE_tabbeacon"), directory.join("agy.exe"))
+        .expect("fake literal Agy executable copies");
+    directory
+}
+
 fn isolated_command(root: &TestRoot) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tabbeacon"));
     command
@@ -119,6 +127,14 @@ fn init_repository(path: &Path) {
             "fixture",
         ],
     );
+}
+
+fn isolated_command_with_agy(root: &TestRoot, agy_directory: &Path) -> Command {
+    let mut command = isolated_command(root);
+    let path = env::join_paths([agy_directory, inherited_path()])
+        .expect("isolated Agy version-probe PATH joins safely");
+    command.env("PATH", path);
+    command
 }
 
 fn command_with_stdin(mut command: Command, input: &[u8]) -> std::process::Output {
@@ -292,6 +308,164 @@ fn agy_preadmission_payload_recorders_drop_content_and_fail_open() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
+fn agy_qualification_workflow_persists_only_minimized_candidates_and_cleans_safely() {
+    let root = TestRoot::new("agy-qualification-workflow");
+    let qualification = root.child("tabbeacon-agy-qualification-workflow");
+
+    let init = isolated_command(&root)
+        .args(["agy", "qualification", "init", "--root"])
+        .arg(&qualification)
+        .arg("--json")
+        .output()
+        .expect("qualification init starts");
+    assert!(init.status.success());
+    let init: serde_json::Value = serde_json::from_slice(&init.stdout).expect("init JSON");
+    assert_eq!(init["initialized"], true);
+    assert_eq!(init["production_enabled"], false);
+
+    let title = command_with_stdin(
+        {
+            let mut command = isolated_command(&root);
+            command
+                .args(["agy", "qualification", "record-title", "--root"])
+                .arg(&qualification)
+                .arg("--json");
+            command
+        },
+        br#"{
+          "conversation_id":"private-conversation",
+          "agent_state":"working",
+          "workspace":{"current_dir":"C:/private/root","project_dir":"C:/private/root"},
+          "task_count":3,
+          "tool_confirmation_pending":true,
+          "prompt":"private prompt",
+          "assistant":"private assistant",
+          "transcript_path":"C:/private/transcript"
+        }"#,
+    );
+    assert!(title.status.success());
+    let title: serde_json::Value = serde_json::from_slice(&title.stdout).expect("title JSON");
+    assert_eq!(title["disposition"], "observed");
+
+    let hook = command_with_stdin(
+        {
+            let mut command = isolated_command(&root);
+            command
+                .args([
+                    "agy",
+                    "qualification",
+                    "record-hook",
+                    "post-tool-use",
+                    "--root",
+                ])
+                .arg(&qualification)
+                .arg("--json");
+            command
+        },
+        br#"{
+          "conversationId":"private-hook",
+          "workspacePaths":["C:/private/root"],
+          "toolCall":{"args":{"prompt":"private tool argument"}},
+          "error":"private error"
+        }"#,
+    );
+    assert!(hook.status.success());
+
+    let unknown_hook = command_with_stdin(
+        {
+            let mut command = isolated_command(&root);
+            command
+                .args([
+                    "agy",
+                    "qualification",
+                    "__hook-callback-v1",
+                    "FuturePrivateEvent",
+                    "--root",
+                ])
+                .arg(&qualification);
+            command
+        },
+        br#"{"prompt":"unknown private prompt","tool_output":"unknown private output"}"#,
+    );
+    assert!(unknown_hook.status.success());
+    assert!(unknown_hook.stdout.is_empty());
+    assert!(unknown_hook.stderr.is_empty());
+
+    for operation in ["inspect", "profile", "review", "status"] {
+        let output = isolated_command(&root)
+            .args(["agy", "qualification", operation, "--root"])
+            .arg(&qualification)
+            .arg("--json")
+            .output()
+            .expect("qualification operation starts");
+        assert!(output.status.success(), "{operation} succeeds");
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("qualification JSON");
+        assert_eq!(value["provider_enabled"], false, "{operation}");
+    }
+
+    let durable = fs::read_dir(&qualification)
+        .expect("qualification workspace reads")
+        .flat_map(|entry| fs::read(entry.expect("artifact entry").path()).expect("artifact reads"))
+        .collect::<Vec<_>>();
+    let durable = String::from_utf8_lossy(&durable);
+    for forbidden in [
+        "private-conversation",
+        "private-hook",
+        "C:/private",
+        "private prompt",
+        "private assistant",
+        "private tool argument",
+        "private error",
+        "unknown private prompt",
+        "unknown private output",
+        "transcript_path",
+        "toolCall",
+    ] {
+        assert!(!durable.contains(forbidden), "artifact leaked {forbidden}");
+    }
+
+    let clean = isolated_command(&root)
+        .args(["agy", "qualification", "clean", "--confirm", "--root"])
+        .arg(&qualification)
+        .arg("--json")
+        .output()
+        .expect("qualification clean starts");
+    assert!(clean.status.success());
+    assert!(!qualification.exists());
+}
+
+#[test]
+fn agy_direct_probe_invokes_literal_path_search_without_admitting_provider() {
+    let root = TestRoot::new("agy-direct-probe");
+    let qualification = root.child("tabbeacon-agy-qualification-probe");
+    let agy = fake_agy_directory(&root);
+    let init = isolated_command(&root)
+        .args(["agy", "qualification", "init", "--root"])
+        .arg(&qualification)
+        .output()
+        .expect("qualification init starts");
+    assert!(init.status.success());
+
+    let probe = isolated_command_with_agy(&root, &agy)
+        .args(["agy", "qualification", "probe", "--root"])
+        .arg(&qualification)
+        .arg("--json")
+        .output()
+        .expect("direct probe starts");
+    assert!(probe.status.success());
+    let text = String::from_utf8(probe.stdout).expect("probe is UTF-8");
+    let probe: serde_json::Value = serde_json::from_str(&text).expect("probe JSON");
+    assert_eq!(probe["installed"], true);
+    assert_eq!(probe["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(probe["executable_resolution_class"], "literal_path_search");
+    assert_eq!(probe["qualification_admission_state"], "unadmitted");
+    assert_eq!(probe["provider_enabled"], false);
+    assert!(!text.contains(&agy.to_string_lossy().to_string()));
+}
+
+#[test]
 fn agy_adversarial_payloads_cannot_reach_cli_output_or_title_protocol() {
     let root = TestRoot::new("agy-adversarial");
     let duplicate_state = br#"{
@@ -377,7 +551,7 @@ fn agy_adversarial_payloads_cannot_reach_cli_output_or_title_protocol() {
 }
 
 #[test]
-fn ordinary_management_and_setup_surfaces_remain_codex_only() {
+fn ordinary_runtime_remains_codex_only_while_agy_setup_refuses_truthfully() {
     let root = TestRoot::new("agy-isolation");
 
     let setup_help = isolated_command(&root)
@@ -388,7 +562,7 @@ fn ordinary_management_and_setup_surfaces_remain_codex_only() {
     let setup_help = String::from_utf8(setup_help.stdout).expect("setup help is UTF-8");
     assert!(setup_help.contains("Codex integration"));
     assert!(setup_help.contains("codex"));
-    assert!(!setup_help.to_ascii_lowercase().contains("agy"));
+    assert!(setup_help.contains("Agy"));
 
     let sessions = isolated_command(&root)
         .args(["sessions", "--json"])
@@ -415,6 +589,11 @@ fn ordinary_management_and_setup_surfaces_remain_codex_only() {
     assert!(
         !unsupported_setup.status.success(),
         "unadmitted Agy cannot become a normal setup action"
+    );
+    assert!(
+        String::from_utf8(unsupported_setup.stderr)
+            .expect("setup refusal is UTF-8")
+            .contains("no admitted Agy setup profile")
     );
 }
 

@@ -4,5 +4,7 @@
 //! primitives only and cannot enable a provider before `TB-G64` admission.
 
 pub mod agy;
+pub mod agy_backend;
+pub mod agy_qualification;
 pub mod codex;
 pub mod registry;

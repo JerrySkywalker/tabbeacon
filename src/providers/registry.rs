@@ -256,6 +256,14 @@ impl ProviderManualAction {
 }
 
 /// One registered provider's read-only management projection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct ProviderReadiness {
+    pub qualification_available: bool,
+    pub qualification_observations_available: bool,
+    pub production_enabled: bool,
+}
+
+/// One registered provider's read-only management projection.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ProviderIntegrationSnapshot {
     /// Checked, open provider identifier from the registered adapter.
@@ -280,6 +288,8 @@ pub struct ProviderIntegrationSnapshot {
     pub title_participation: CapabilityAvailability,
     /// Explicit manual follow-ups, never automatic actions.
     pub manual_actions: Vec<ProviderManualAction>,
+    /// Qualification and production readiness, separate from installation.
+    pub readiness: ProviderReadiness,
     #[serde(skip)]
     title_badge: &'static str,
 }
@@ -367,12 +377,18 @@ impl ProviderIntegrationSnapshot {
             },
             title_participation: lifecycle,
             manual_actions,
+            readiness: ProviderReadiness {
+                qualification_available: false,
+                qualification_observations_available: false,
+                production_enabled: admission == ProviderAdmissionState::Admitted,
+            },
             title_badge: "C",
         }
     }
 
     fn from_agy_preadmission(profile: AgyCapabilityProfile) -> Self {
         let version = profile.version.observed_version.map(AgyVersion::as_string);
+        let qualification_observations_available = version.is_some();
         let capabilities = profile
             .capabilities
             .into_iter()
@@ -406,6 +422,11 @@ impl ProviderIntegrationSnapshot {
                 ProviderManualAction::InspectCompatibility,
                 ProviderManualAction::OwnerPresentQualification,
             ],
+            readiness: ProviderReadiness {
+                qualification_available: true,
+                qualification_observations_available,
+                production_enabled: false,
+            },
             title_badge: "A",
         }
     }
@@ -420,6 +441,7 @@ fn agy_capability(capability: AgyCapability) -> Option<ProviderCapability> {
         AgyCapability::Phase => ProviderCapability::Phase,
         AgyCapability::Attention => ProviderCapability::Attention,
         AgyCapability::Approval => ProviderCapability::ApprovalQuestion,
+        AgyCapability::Health => ProviderCapability::Health,
         AgyCapability::SessionIdentity => ProviderCapability::SessionIdentity,
         AgyCapability::WorkspaceRoot => ProviderCapability::WorkspaceRootBinding,
         AgyCapability::BackgroundTasks => ProviderCapability::BackgroundTasks,
@@ -479,9 +501,19 @@ impl ProviderRegistry {
         Self {
             schema_version: PROVIDER_REGISTRY_SCHEMA_VERSION,
             read_only: true,
-            providers: vec![ProviderIntegrationSnapshot::from_codex_probe(
-                ProviderProbe::codex(version, profile_supported, installed, hooks_available),
-            )],
+            providers: vec![
+                ProviderIntegrationSnapshot::from_codex_probe(ProviderProbe::codex(
+                    version,
+                    profile_supported,
+                    installed,
+                    hooks_available,
+                )),
+                ProviderIntegrationSnapshot::from_agy_preadmission(
+                    AgyCapabilityProfile::unadmitted(
+                        crate::providers::agy::AgyVersionDiagnostic::from_versions(None, None),
+                    ),
+                ),
+            ],
         }
     }
 
@@ -567,12 +599,15 @@ mod tests {
     use crate::settings::ProviderBadgePolicy;
 
     #[test]
-    fn codex_only_registry_is_deterministic_and_compact() {
+    fn production_registry_is_codex_only_but_exposes_unadmitted_agy_readiness() {
         let registry = ProviderRegistry::codex_observation(Some("0.149.0"), true, true, true);
 
         assert_eq!(registry.registered_ids(), vec!["codex"]);
-        assert_eq!(registry.providers.len(), 1);
+        assert_eq!(registry.providers.len(), 2);
         assert_eq!(registry.providers[0].label, "Codex");
+        assert_eq!(registry.providers[1].label, "Agy");
+        assert!(registry.providers[1].readiness.qualification_available);
+        assert!(!registry.providers[1].readiness.production_enabled);
         assert_eq!(
             registry.providers[0].admission,
             ProviderAdmissionState::Admitted

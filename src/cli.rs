@@ -165,6 +165,8 @@ pub enum Command {
 pub enum SetupCommand {
     /// Install or reconcile the Codex hook declarations.
     Codex,
+    /// Refuse until an Owner-approved Agy setup profile exists.
+    Agy,
 }
 
 /// Explicit ownership-safe repair operations.
@@ -186,6 +188,11 @@ pub enum RepairCommand {
 /// Explicitly pre-admission Agy qualification operations.
 #[derive(Debug, Subcommand)]
 pub enum AgyPreadmissionCommand {
+    /// Run the cohesive disposable G64 qualification workflow.
+    Qualification {
+        #[command(subcommand)]
+        command: AgyQualificationCommand,
+    },
     /// Print the Owner-present G64 qualification plan without running Agy.
     Plan(OutputArgs),
     /// Compare a direct `agy --version` result with the separately audited docs version.
@@ -214,6 +221,104 @@ pub enum AgyPreadmissionCommand {
     /// Internal disposable callback protocol harness: stdout is always one plain fallback title.
     #[command(name = "__title-callback-v1", hide = true)]
     TitleCallback,
+}
+
+/// Disposable Agy qualification workflow.
+#[derive(Debug, Subcommand)]
+pub enum AgyQualificationCommand {
+    /// Show whether a managed disposable qualification workspace exists.
+    Status {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Show the future Owner-present qualification plan without changing state.
+    Plan(OutputArgs),
+    /// Initialize a new disposable managed qualification workspace.
+    Init {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Invoke only literal `agy --version` and record bounded facts.
+    Probe {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Read one title/status JSON payload from stdin and persist only minimized facts.
+    #[command(name = "record-title")]
+    RecordTitle {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Read one Hook JSON payload from stdin and persist only minimized facts.
+    #[command(name = "record-hook")]
+    RecordHook {
+        #[arg(value_enum)]
+        event: AgyHookEventArgument,
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Inspect accumulated minimized observations without showing raw events.
+    Inspect {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Compile a stable unreviewed capability candidate.
+    Profile {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Produce a pending Owner G64 review packet.
+    Review {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Remove only a positively identified managed qualification workspace.
+    Clean {
+        /// Confirm deletion of the managed disposable workspace.
+        #[arg(long)]
+        confirm: bool,
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Protocol callback: record minimized state, then emit one plain fallback title.
+    #[command(name = "__title-callback-v1", hide = true)]
+    TitleCallback {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+    },
+    /// Fail-open Hook callback: unknown events are not parsed or retained as raw payloads.
+    #[command(name = "__hook-callback-v1", hide = true)]
+    HookCallback {
+        event: String,
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+    },
+}
+
+/// Optional explicit disposable root; otherwise user-local `TabBeacon` state is used.
+#[derive(Clone, Debug, Args)]
+pub struct AgyQualificationWorkspaceArgs {
+    /// Absolute disposable root ending in `agy` or `tabbeacon-agy-qualification-*`.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<PathBuf>,
 }
 
 /// Known Agy Hook event spellings offered by the qualification command.
@@ -517,8 +622,9 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::{
-        AgyHookEventArgument, AgyPreadmissionCommand, AliasCommand, Cli, Command,
-        ConvergenceCommand, InterfaceCommand, InterfacePreferenceKey, OutputMode, SetupCommand,
+        AgyHookEventArgument, AgyPreadmissionCommand, AgyQualificationCommand, AliasCommand, Cli,
+        Command, ConvergenceCommand, InterfaceCommand, InterfacePreferenceKey, OutputMode,
+        SetupCommand,
     };
 
     #[test]
@@ -619,6 +725,28 @@ mod tests {
                 event: AgyHookEventArgument::PostToolUse,
                 output,
             } if output.mode() == OutputMode::Plain
+        ));
+
+        let agy_inspect = Cli::try_parse_from([
+            "tabbeacon",
+            "agy",
+            "qualification",
+            "inspect",
+            "--root",
+            "qualification-root",
+            "--json",
+        ])
+        .expect("cohesive Agy qualification command parses");
+        let Command::Agy {
+            command: AgyPreadmissionCommand::Qualification { command },
+        } = agy_inspect.command.expect("Agy command")
+        else {
+            panic!("nested Agy qualification command is typed");
+        };
+        assert!(matches!(
+            command,
+            AgyQualificationCommand::Inspect { output, .. }
+                if output.mode() == OutputMode::Json
         ));
 
         let quick = Cli::try_parse_from(["tabbeacon", "setup", "--quick"])
