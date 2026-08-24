@@ -91,45 +91,7 @@ impl TitleExplanation {
             .collect::<Vec<_>>();
         let provider = observed_provider(&matching_sessions);
         let semantic_phase = observed_phase(&matching_sessions);
-        let stable_root_observed = !matching_sessions.is_empty()
-            && matching_sessions
-                .iter()
-                .all(|session| session.workspace_observability.root_binding_stable);
-        let workspace = workspace.map(|workspace| TitleWorkspaceExplanation {
-            display_hint: workspace.workspace().as_str().to_owned(),
-            identity_class: workspace.identity_class().as_str(),
-            root_binding_source: if stable_root_observed {
-                "provider_session_observation"
-            } else {
-                "current_cli_workspace"
-            },
-            root_binding_status: if stable_root_observed {
-                "stable_workspace_observation"
-            } else {
-                "not_session_correlated"
-            },
-            workspace_mismatch_observation: if matching_sessions
-                .iter()
-                .any(|session| session.workspace_observability.workspace_mismatch_observed)
-            {
-                "observed"
-            } else if stable_root_observed {
-                "not_observed"
-            } else {
-                "not_session_correlated"
-            },
-            automatic_alias: workspace.automatic_alias().as_str().to_owned(),
-            override_alias: workspace
-                .custom_alias()
-                .map(|alias| alias.as_str().to_owned()),
-            effective_alias: workspace.effective_alias().as_str().to_owned(),
-            alias_source: if workspace.custom_alias().is_some() {
-                "override"
-            } else {
-                "automatic"
-            },
-            naming_policy: workspace.policy_version().to_owned(),
-        });
+        let workspace = workspace.map(|workspace| explain_workspace(workspace, &matching_sessions));
         let (title_owner, activity_channel, provider_badge_policy, provider_badge_value) =
             presentation.map_or_else(
                 || {
@@ -205,6 +167,52 @@ impl TitleExplanation {
             provider_badge_policy,
             provider_badge_value,
         }
+    }
+}
+
+fn explain_workspace(
+    workspace: &WorkspaceAliasInspection,
+    matching_sessions: &[&crate::activity::SessionOverview],
+) -> TitleWorkspaceExplanation {
+    let stable_root_observed = !matching_sessions.is_empty()
+        && matching_sessions
+            .iter()
+            .all(|session| session.workspace_observability.root_binding_stable);
+    let workspace_mismatch_observation = if matching_sessions
+        .iter()
+        .any(|session| session.workspace_observability.workspace_mismatch_observed)
+    {
+        "observed"
+    } else if stable_root_observed {
+        "not_observed"
+    } else {
+        "not_session_correlated"
+    };
+    TitleWorkspaceExplanation {
+        display_hint: workspace.workspace().as_str().to_owned(),
+        identity_class: workspace.identity_class().as_str(),
+        root_binding_source: if stable_root_observed {
+            "provider_session_observation"
+        } else {
+            "current_cli_workspace"
+        },
+        root_binding_status: if stable_root_observed {
+            "stable_workspace_observation"
+        } else {
+            "not_session_correlated"
+        },
+        workspace_mismatch_observation,
+        automatic_alias: workspace.automatic_alias().as_str().to_owned(),
+        override_alias: workspace
+            .custom_alias()
+            .map(|alias| alias.as_str().to_owned()),
+        effective_alias: workspace.effective_alias().as_str().to_owned(),
+        alias_source: if workspace.custom_alias().is_some() {
+            "override"
+        } else {
+            "automatic"
+        },
+        naming_policy: workspace.policy_version().to_owned(),
     }
 }
 

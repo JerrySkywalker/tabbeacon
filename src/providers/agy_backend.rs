@@ -496,8 +496,7 @@ impl AgyRootAnchorStore {
         let unlock = File::unlock(&lock);
         match (result, unlock) {
             (Ok(value), Ok(())) => Ok(value),
-            (Err(error), _) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
         }
     }
 }
@@ -608,21 +607,17 @@ impl AgyTitleRuntime {
                     return fallback_title(AgyTitleDispatchOutcome::DegradedWorkspaceIdentity);
                 };
                 let workspace_identity_sha256 = sha256_hex(workspace.identity.as_str().as_bytes());
-                match self.root_anchors.bind_if_absent(
+                let Ok(selection) = self.root_anchors.bind_if_absent(
                     &normalized.session_sha256,
                     &workspace_identity_sha256,
                     &workspace_location_sha256,
                     &workspace.effective_alias,
                     observed_unix_seconds,
-                ) {
-                    Ok(selection) => selection,
-                    Err(_) => {
-                        record_callback_diagnostics(&self.state_root, raw, false, observed_at);
-                        return fallback_title(
-                            AgyTitleDispatchOutcome::DegradedRootWorkspaceAnchor,
-                        );
-                    }
-                }
+                ) else {
+                    record_callback_diagnostics(&self.state_root, raw, false, observed_at);
+                    return fallback_title(AgyTitleDispatchOutcome::DegradedRootWorkspaceAnchor);
+                };
+                selection
             }
             Err(_) => {
                 record_callback_diagnostics(&self.state_root, raw, false, observed_at);
@@ -962,7 +957,7 @@ impl AgyProductionSetup {
                     Some(version),
                     true,
                 ),
-                Ok(true) | Ok(false) | Err(_) => readiness(
+                Ok(true | false) | Err(_) => readiness(
                     AgyIntegrationReadiness::ConfigurationDrift,
                     Some(version),
                     false,

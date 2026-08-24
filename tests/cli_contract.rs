@@ -892,7 +892,10 @@ fn alias_read_only_surfaces_are_locale_safe_private_and_non_mutating() {
         "machine title explanation must not depend on Human locale"
     );
     assert_eq!(title_json_en["schema"], "tabbeacon-title-explanation-v1");
-    assert_eq!(title_json_en["provider"], "codex");
+    assert_eq!(
+        title_json_en["provider"], "not_session_correlated",
+        "multi-provider title explanation must not invent a provider without workspace evidence"
+    );
     assert_eq!(
         title_json_en["workspace"]["root_binding_status"], "not_session_correlated",
         "read-only CLI must not claim a native-session correlation"
