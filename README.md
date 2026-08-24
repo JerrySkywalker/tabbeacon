@@ -11,7 +11,7 @@ The project is intentionally narrow: it keeps the user's existing terminal and a
 - **Fail open:** if TabBeacon is absent or broken, Codex must remain usable.
 - **Offline-first identity:** repository naming must not require GitHub or network access.
 - **Provider-neutral core:** Codex, Claude, OpenCode, and future agents are adapters beneath one evidence/state model.
-- **Terminal-native presentation:** v0.5 targets Windows Terminal using terminal control sequences rather than replacing the PTY or terminal UI.
+- **Terminal-native presentation:** v0.6 targets Windows Terminal using terminal control sequences rather than replacing the PTY or terminal UI.
 - **Machine-verifiable UI:** title, animation, and color behavior must eventually be covered by visual CI.
 
 ## Current status
@@ -54,7 +54,7 @@ The Codex-first product is intentionally limited to:
 - global Codex integration with no change to the `codex` launch command;
 - autonomous functional and visual verification.
 
-Claude and OpenCode support are architectural extension points, not part of the v0.5 Codex-first release.
+Claude and OpenCode support are architectural extension points, not part of the v0.6 multi-provider release.
 
 ## Installation
 
