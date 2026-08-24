@@ -72,9 +72,9 @@ pub enum Command {
         #[command(subcommand)]
         command: ConvergenceCommand,
     },
-    /// Remove only the owned Codex integration declarations.
+    /// Remove only the selected provider's exact owned integration declarations.
     Uninstall {
-        provider: Provider,
+        provider: UninstallProvider,
         #[command(flatten)]
         output: HumanOutputArgs,
     },
@@ -165,7 +165,7 @@ pub enum Command {
 pub enum SetupCommand {
     /// Install or reconcile the Codex hook declarations.
     Codex,
-    /// Refuse until an Owner-approved Agy setup profile exists.
+    /// Install or reconcile the admitted Agy title callback.
     Agy,
 }
 
@@ -502,10 +502,17 @@ pub struct UpgradePreflightArgs {
     pub output: OutputArgs,
 }
 
-/// Codex is the only production provider admitted in this train.
+/// Providers that expose the Codex Hook wire contract.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum Provider {
     Codex,
+}
+
+/// Providers with an ownership-safe uninstall implementation.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum UninstallProvider {
+    Codex,
+    Agy,
 }
 
 /// Windows Terminal title-policy operations.
@@ -807,6 +814,16 @@ mod tests {
             panic!("uninstall output is typed");
         };
         assert_eq!(output.mode(), OutputMode::Plain);
+
+        let agy_uninstall = Cli::try_parse_from(["tabbeacon", "uninstall", "agy", "--plain"])
+            .expect("Agy uninstall parses");
+        assert!(matches!(
+            agy_uninstall.command,
+            Some(Command::Uninstall {
+                provider: super::UninstallProvider::Agy,
+                ..
+            })
+        ));
     }
 
     #[test]

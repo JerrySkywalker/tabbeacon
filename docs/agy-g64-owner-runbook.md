@@ -1,7 +1,10 @@
 # Agy G64 Owner fast runbook
 
-This runbook collects minimized qualification facts only. It does not admit or
-enable Agy. Normal daily launch remains literally `agy`.
+This runbook collects minimized qualification facts only. The Owner-present
+2026-08-24 run admitted exact Agy 1.1.19 through the structured title callback;
+ADR 0015 records the frozen production profile. Re-running this qualification
+workflow does not itself admit or enable another version. Normal daily launch
+remains literally `agy`.
 
 ```powershell
 $tabbeacon = '<exact candidate tabbeacon.exe>'

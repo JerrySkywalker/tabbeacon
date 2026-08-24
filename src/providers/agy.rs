@@ -57,6 +57,14 @@ pub struct AgyVersion {
 }
 
 impl AgyVersion {
+    pub(crate) const fn from_parts(major: u16, minor: u16, patch: u16) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+        }
+    }
+
     /// Parses an exact `major.minor.patch` version without retaining source text.
     #[must_use]
     pub fn parse(input: &str) -> Option<Self> {

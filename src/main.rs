@@ -15,7 +15,7 @@ use tabbeacon::cli::{
     AgyPreadmissionCommand, AgyQualificationCommand, AgyQualificationWorkspaceArgs, AliasCommand,
     Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, ExplainCommand, HumanOutputArgs,
     InterfaceCommand, InterfacePreferenceKey, OutputMode, PreviewArgs, Provider, RepairCommand,
-    SetupCommand, TitlePolicyCommand, UpgradePreflightArgs,
+    SetupCommand, TitlePolicyCommand, UninstallProvider, UpgradePreflightArgs,
 };
 use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_hook_runtime_probe,
@@ -33,10 +33,11 @@ use tabbeacon::human_presentation::{
 use tabbeacon::management::ManagementSnapshot;
 use tabbeacon::providers::agy::{
     AgyHookRecord, AgyHookRecorder, AgyInputDisposition, AgyQualificationPlan, AgyStateRecord,
-    AgyStateRecorder, AgyTitleCallbackHarness, AgyVersionDiagnostic,
-    MAX_AGY_QUALIFICATION_INPUT_BYTES,
+    AgyStateRecorder, AgyVersionDiagnostic, MAX_AGY_QUALIFICATION_INPUT_BYTES,
 };
-use tabbeacon::providers::agy_backend::AgyProductionSetup;
+use tabbeacon::providers::agy_backend::{
+    AgyProductionSetup, AgyProductionSetupOutcome, AgyTitleRuntime,
+};
 use tabbeacon::providers::agy_qualification::{
     AgyCandidateEvidenceState, AgyQualificationInspection, AgyQualificationWorkspace,
     AgyQualificationWorkspaceError, probe_direct_agy_version, qualification_callback_fallback,
@@ -166,7 +167,7 @@ fn dispatch(cli: Cli) -> ExitCode {
             command: Some(SetupCommand::Agy),
             output,
             ..
-        }) => setup_agy_refusal(output.mode()),
+        }) => setup_agy(output.mode()),
         Some(Command::Repair {
             command:
                 RepairCommand::Codex {
@@ -208,9 +209,13 @@ fn dispatch(cli: Cli) -> ExitCode {
             } => convergence_verify(&matrix, &expected_head),
         },
         Some(Command::Uninstall {
-            provider: Provider::Codex,
+            provider: UninstallProvider::Codex,
             output,
         }) => uninstall_codex(output.mode()),
+        Some(Command::Uninstall {
+            provider: UninstallProvider::Agy,
+            output,
+        }) => uninstall_agy(output.mode()),
         Some(Command::Hook {
             provider: Provider::Codex,
         }) => run_codex_hook(),
@@ -973,18 +978,55 @@ fn setup_codex(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> 
     }
 }
 
-fn setup_agy_refusal(output_mode: OutputMode) -> ExitCode {
-    let error = AgyProductionSetup::preview().expect_err("Agy setup remains unadmitted");
+fn setup_agy(output_mode: OutputMode) -> ExitCode {
+    let setup = match AgyProductionSetup::from_environment() {
+        Ok(setup) => setup,
+        Err(error) => return print_agy_setup_error(error, output_mode),
+    };
+    match setup.setup() {
+        Ok(outcome) => print_agy_setup_outcome(outcome, output_mode),
+        Err(error) => print_agy_setup_error(error, output_mode),
+    }
+}
+
+fn print_agy_setup_outcome(
+    outcome: AgyProductionSetupOutcome,
+    output_mode: OutputMode,
+) -> ExitCode {
+    let value = match outcome {
+        AgyProductionSetupOutcome::Installed => "installed",
+        AgyProductionSetupOutcome::AlreadyConfigured => "already_configured",
+        AgyProductionSetupOutcome::Removed => "removed",
+        AgyProductionSetupOutcome::NotInstalled => "not_installed",
+    };
     match output_mode {
         OutputMode::Json => println!(
-            "{{\"provider\":\"agy\",\"setup\":\"unavailable\",\"reason\":\"no_admitted_agy_setup_profile\",\"provider_enabled\":false}}"
+            "{}",
+            serde_json::json!({"provider":"agy","setup":value,"provider_enabled":true})
         ),
         OutputMode::Plain => {
-            println!("AGY_SETUP=UNAVAILABLE");
-            println!("REASON=NO_ADMITTED_AGY_SETUP_PROFILE");
-            println!("AGY_PROVIDER_ENABLED=false");
+            println!("AGY_SETUP={}", value.to_ascii_uppercase());
+            println!("AGY_PROVIDER_ENABLED=true");
         }
-        OutputMode::Human => eprintln!("Agy setup unavailable: {error}."),
+        OutputMode::Human => println!("Agy setup: {value}."),
+    }
+    ExitCode::SUCCESS
+}
+
+fn print_agy_setup_error(
+    error: tabbeacon::providers::agy_backend::AgyProductionSetupError,
+    output_mode: OutputMode,
+) -> ExitCode {
+    match output_mode {
+        OutputMode::Json => println!(
+            "{}",
+            serde_json::json!({"provider":"agy","setup":"failed","reason":error})
+        ),
+        OutputMode::Plain => {
+            println!("AGY_SETUP=FAILED");
+            println!("REASON={error}");
+        }
+        OutputMode::Human => eprintln!("Agy setup failed: {error}."),
     }
     ExitCode::FAILURE
 }
@@ -1417,8 +1459,13 @@ fn doctor(
         (false, true) => collect_operational_diagnostics_with_hook_runtime_probe(true),
         (false, false) => collect_operational_diagnostics(),
     };
+    let integrations = provider_registry(&report);
     if output_mode == OutputMode::Json {
-        return match serde_json::to_string(&report.doctor) {
+        let mut value = serde_json::to_value(&report.doctor).unwrap_or_default();
+        if let Some(object) = value.as_object_mut() {
+            object.insert("providers".to_owned(), serde_json::json!(integrations));
+        }
+        return match serde_json::to_string(&value) {
             Ok(json) => {
                 println!("{json}");
                 if report.doctor.is_failure() {
@@ -1434,6 +1481,7 @@ fn doctor(
         for line in human_doctor_lines(&report.doctor) {
             println!("{line}");
         }
+        print_provider_registry_plain(&integrations);
     } else {
         let snapshot = ManagementSnapshot::from_diagnostics(&report);
         let presentation = human_runtime_presentation(language);
@@ -1446,6 +1494,7 @@ fn doctor(
             ),
             presentation.color,
         );
+        print_provider_registry_human(&integrations);
     }
     if report.doctor.is_failure() {
         ExitCode::FAILURE
@@ -1456,8 +1505,13 @@ fn doctor(
 
 fn status(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
     let report = collect_operational_diagnostics();
+    let integrations = provider_registry(&report);
     if output_mode == OutputMode::Json {
-        return match serde_json::to_string(&report) {
+        let mut value = serde_json::to_value(&report).unwrap_or_default();
+        if let Some(object) = value.as_object_mut() {
+            object.insert("providers".to_owned(), serde_json::json!(integrations));
+        }
+        return match serde_json::to_string(&value) {
             Ok(json) => {
                 println!("{json}");
                 ExitCode::SUCCESS
@@ -1469,6 +1523,7 @@ fn status(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitC
         for line in human_status_lines(&report) {
             println!("{line}");
         }
+        print_provider_registry_plain(&integrations);
     } else {
         let snapshot = ManagementSnapshot::from_diagnostics(&report);
         let presentation = human_runtime_presentation(language);
@@ -1476,8 +1531,35 @@ fn status(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitC
             render_human_status(&report, &snapshot, presentation.locale, terminal_width()),
             presentation.color,
         );
+        print_provider_registry_human(&integrations);
     }
     ExitCode::SUCCESS
+}
+
+fn provider_registry(report: &tabbeacon::diagnostics::OperationalDiagnostics) -> ProviderRegistry {
+    let hooks = CodexIntegration::from_environment()
+        .map(|integration| integration.hook_inventory())
+        .unwrap_or_default();
+    ProviderRegistry::from_diagnostics(report, &hooks)
+}
+
+fn print_provider_registry_plain(registry: &ProviderRegistry) {
+    for provider in &registry.providers {
+        println!(
+            "PROVIDER_{}={}",
+            provider.id.as_str().to_ascii_uppercase(),
+            provider.configuration_state.to_ascii_uppercase()
+        );
+    }
+}
+
+fn print_provider_registry_human(registry: &ProviderRegistry) {
+    for provider in &registry.providers {
+        println!(
+            "{} integration: {}.",
+            provider.label, provider.configuration_state
+        );
+    }
 }
 
 fn sessions(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
@@ -1503,8 +1585,9 @@ fn sessions(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> Exi
             let alias = serde_json::to_string(&session.workspace_alias)
                 .unwrap_or_else(|_| "\"unavailable\"".to_owned());
             println!(
-                "SESSION={}|workspace_alias={}|semantic_state={}|age_seconds={}|recency={}|worker_health={}",
+                "SESSION={}|provider={}|workspace_alias={}|semantic_state={}|age_seconds={}|recency={}|worker_health={}",
                 index + 1,
+                session.provider,
                 alias,
                 session.semantic_state,
                 session.age_seconds,
@@ -1640,8 +1723,8 @@ fn agy_preadmission(command: AgyPreadmissionCommand) -> ExitCode {
         }
         AgyPreadmissionCommand::TitleCallback => {
             let input = read_agy_qualification_stdin();
-            let response = AgyTitleCallbackHarness::respond(&input.payload);
-            println!("{}", response.fallback_title);
+            let response = AgyTitleRuntime::dispatch_system(&input.payload);
+            println!("{}", response.title);
             ExitCode::SUCCESS
         }
     }
@@ -2323,8 +2406,9 @@ fn sessions_document(report: &tabbeacon::activity::SessionsOverview) -> HumanDoc
         for session in &report.sessions {
             section = section.with_message(HumanMessage::plain(
                 HumanText::literal(format!(
-                    "{} — {} — {}s — {}",
+                    "{} — {} — {} — {}s — {}",
                     session.workspace_alias,
+                    session.provider,
                     session.semantic_state,
                     session.age_seconds,
                     session.worker_health.as_str().replace('_', " "),
@@ -2507,6 +2591,21 @@ fn uninstall_codex(output_mode: OutputMode) -> ExitCode {
             output_mode,
             Some(InterfaceLanguage::EnUs),
         ),
+    }
+}
+
+fn uninstall_agy(output_mode: OutputMode) -> ExitCode {
+    let setup = match AgyProductionSetup::from_environment() {
+        Ok(setup) => setup,
+        Err(error) => return print_agy_setup_error(error, output_mode),
+    };
+    match setup.uninstall() {
+        Ok(
+            outcome
+            @ (AgyProductionSetupOutcome::Removed | AgyProductionSetupOutcome::NotInstalled),
+        ) => print_agy_setup_outcome(outcome, output_mode),
+        Ok(_) => unreachable!("uninstall returns only removed or not-installed"),
+        Err(error) => print_agy_setup_error(error, output_mode),
     }
 }
 

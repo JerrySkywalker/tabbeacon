@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted for pre-admission infrastructure only. This ADR does not admit Agy as
-a production provider and does not complete `TB-G64`.
+Superseded for production admission by ADR 0015. Its qualification privacy and
+temporary-mutation boundaries remain normative.
 
 ## Context
 

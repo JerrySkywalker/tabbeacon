@@ -551,7 +551,7 @@ fn agy_adversarial_payloads_cannot_reach_cli_output_or_title_protocol() {
 }
 
 #[test]
-fn ordinary_runtime_remains_codex_only_while_agy_setup_refuses_truthfully() {
+fn ordinary_runtime_reports_truthful_agy_probe_and_setup_state() {
     let root = TestRoot::new("agy-isolation");
 
     let setup_help = isolated_command(&root)
@@ -580,21 +580,38 @@ fn ordinary_runtime_remains_codex_only_while_agy_setup_refuses_truthfully() {
     let status: serde_json::Value = serde_json::from_slice(&status.stdout).expect("status is JSON");
     assert!(status["codex"].is_object());
     assert!(status.get("agy").is_none());
-    assert!(status.get("providers").is_none());
+    assert!(status["providers"]["providers"].is_array());
+    let agy = status["providers"]["providers"]
+        .as_array()
+        .expect("provider rows")
+        .iter()
+        .find(|provider| provider["id"] == "agy")
+        .expect("Agy registry row");
+    let configuration_state = agy["configuration_state"]
+        .as_str()
+        .expect("Agy configuration state");
+    assert!(matches!(
+        configuration_state,
+        "known_unadmitted" | "supported_not_configured" | "unsupported_version"
+    ));
+    assert_eq!(agy["readiness"]["production_enabled"], false);
 
     let unsupported_setup = isolated_command(&root)
         .args(["setup", "agy"])
         .output()
         .expect("unsupported setup invocation starts");
-    assert!(
-        !unsupported_setup.status.success(),
-        "unadmitted Agy cannot become a normal setup action"
-    );
-    assert!(
-        String::from_utf8(unsupported_setup.stderr)
-            .expect("setup refusal is UTF-8")
-            .contains("no admitted Agy setup profile")
-    );
+    if configuration_state == "supported_not_configured" {
+        assert!(unsupported_setup.status.success());
+        assert!(
+            root.child("user-profile/.gemini/antigravity-cli/settings.json")
+                .exists()
+        );
+    } else {
+        assert!(
+            !unsupported_setup.status.success(),
+            "Agy setup requires an exact admitted local probe"
+        );
+    }
 }
 
 #[test]

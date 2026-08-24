@@ -2,9 +2,9 @@
 //!
 //! A provider identifier alone never grants support.  This registry contains
 //! only adapters registered by the product and projects their admitted
-//! observation evidence into a bounded management model. v0.5.1 registers
-//! Codex for production. Explicit qualification callers may add an unadmitted
-//! Agy candidate without making it part of the ordinary product view.
+//! observation evidence into a bounded management model. Codex uses Hooks;
+//! exact Agy 1.1.19 uses its G64-admitted structured title callback. Other Agy
+//! versions remain known but unadmitted.
 
 use std::fmt;
 
@@ -16,6 +16,7 @@ use crate::{
     providers::agy::{
         AGY_PROVIDER_ID, AgyCapability, AgyCapabilityAvailability, AgyCapabilityProfile, AgyVersion,
     },
+    providers::agy_backend::{AgyIntegrationReadiness, AgyProductionSetup, AgyReadinessProjection},
     settings::ProviderBadgePolicy,
 };
 
@@ -278,6 +279,8 @@ pub struct ProviderIntegrationSnapshot {
     pub version: Option<String>,
     /// Production admission is never inferred from a newer version.
     pub admission: ProviderAdmissionState,
+    /// Stable compatibility/configuration state for management surfaces.
+    pub configuration_state: &'static str,
     /// Registered observation backend, not a raw command/configuration value.
     pub observation_backend: &'static str,
     /// Hook inspection state; future non-Hook providers can be not applicable.
@@ -330,6 +333,13 @@ impl ProviderIntegrationSnapshot {
             installed: probe.installed,
             version: probe.version,
             admission,
+            configuration_state: if admission == ProviderAdmissionState::Unknown {
+                "unsupported_version"
+            } else if probe.installed {
+                "supported_configured"
+            } else {
+                "supported_not_configured"
+            },
             observation_backend: "codex-hooks",
             hooks,
             capability_profile: ProviderCapabilityProfile {
@@ -414,6 +424,7 @@ impl ProviderIntegrationSnapshot {
             installed: false,
             version,
             admission: ProviderAdmissionState::Unadmitted,
+            configuration_state: "known_unadmitted",
             observation_backend: "unadmitted",
             hooks: ProviderHookState::Unavailable,
             capability_profile: ProviderCapabilityProfile { capabilities },
@@ -426,6 +437,124 @@ impl ProviderIntegrationSnapshot {
                 qualification_available: true,
                 qualification_observations_available,
                 production_enabled: false,
+            },
+            title_badge: "A",
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn from_agy_readiness(readiness: AgyReadinessProjection) -> Self {
+        let admission = match readiness.state {
+            AgyIntegrationReadiness::SupportedConfigured
+            | AgyIntegrationReadiness::SupportedNotConfigured
+            | AgyIntegrationReadiness::ConfigurationDrift => ProviderAdmissionState::Admitted,
+            AgyIntegrationReadiness::KnownUnadmitted => ProviderAdmissionState::Unadmitted,
+            AgyIntegrationReadiness::UnsupportedVersion => ProviderAdmissionState::Unknown,
+        };
+        let admitted = admission == ProviderAdmissionState::Admitted;
+        let proven = if admitted {
+            CapabilityAvailability::Proven
+        } else {
+            CapabilityAvailability::Unavailable
+        };
+        let installed = readiness.state == AgyIntegrationReadiness::SupportedConfigured;
+        let mut manual_actions = Vec::new();
+        match readiness.state {
+            AgyIntegrationReadiness::KnownUnadmitted => {
+                manual_actions.push(ProviderManualAction::OwnerPresentQualification);
+            }
+            AgyIntegrationReadiness::UnsupportedVersion
+            | AgyIntegrationReadiness::ConfigurationDrift => {
+                manual_actions.push(ProviderManualAction::InspectCompatibility);
+            }
+            AgyIntegrationReadiness::SupportedConfigured
+            | AgyIntegrationReadiness::SupportedNotConfigured => {}
+        }
+        Self {
+            id: ProviderId(AGY_PROVIDER_ID.to_owned()),
+            label: "Agy",
+            available: readiness.version.is_some(),
+            installed,
+            version: readiness.version,
+            admission,
+            configuration_state: match readiness.state {
+                AgyIntegrationReadiness::SupportedConfigured => "supported_configured",
+                AgyIntegrationReadiness::SupportedNotConfigured => "supported_not_configured",
+                AgyIntegrationReadiness::KnownUnadmitted => "known_unadmitted",
+                AgyIntegrationReadiness::UnsupportedVersion => "unsupported_version",
+                AgyIntegrationReadiness::ConfigurationDrift => "configuration_drift",
+            },
+            observation_backend: if admitted {
+                "structured_title_callback"
+            } else {
+                "unadmitted"
+            },
+            hooks: ProviderHookState::NotApplicable,
+            capability_profile: ProviderCapabilityProfile {
+                capabilities: vec![
+                    capability(
+                        ProviderCapability::Phase,
+                        proven,
+                        "agent_state_initializing",
+                    ),
+                    capability(
+                        ProviderCapability::Attention,
+                        CapabilityAvailability::Unavailable,
+                        "not_observed",
+                    ),
+                    capability(
+                        ProviderCapability::ApprovalQuestion,
+                        CapabilityAvailability::Unavailable,
+                        "not_observed",
+                    ),
+                    capability(
+                        ProviderCapability::Health,
+                        CapabilityAvailability::Unavailable,
+                        "not_observed",
+                    ),
+                    capability(
+                        ProviderCapability::SessionIdentity,
+                        proven,
+                        "conversation_identity",
+                    ),
+                    capability(
+                        ProviderCapability::WorkspaceRootBinding,
+                        proven,
+                        "equal_current_project_root",
+                    ),
+                    capability(
+                        ProviderCapability::Subagents,
+                        CapabilityAvailability::Unsupported,
+                        "not_claimed",
+                    ),
+                    capability(
+                        ProviderCapability::BackgroundTasks,
+                        CapabilityAvailability::Unavailable,
+                        "not_observed",
+                    ),
+                    capability(
+                        ProviderCapability::TitleOutput,
+                        proven,
+                        "structured_title_callback",
+                    ),
+                    capability(
+                        ProviderCapability::WindowsTerminalPresentation,
+                        CapabilityAvailability::Unavailable,
+                        "not_observed",
+                    ),
+                    capability(
+                        ProviderCapability::HookInspection,
+                        CapabilityAvailability::Unsupported,
+                        "not_required",
+                    ),
+                ],
+            },
+            title_participation: proven,
+            manual_actions,
+            readiness: ProviderReadiness {
+                qualification_available: true,
+                qualification_observations_available: admitted,
+                production_enabled: readiness.production_enabled,
             },
             title_badge: "A",
         }
@@ -479,12 +608,15 @@ impl ProviderRegistry {
     /// Builds the registered-provider view from an existing diagnostic pass.
     #[must_use]
     pub fn from_diagnostics(report: &OperationalDiagnostics, hooks: &HookInventory) -> Self {
-        Self::codex_observation(
+        let registry = Self::codex_observation(
             report.codex.version.as_deref(),
             report.codex.profile_supported,
             report.integration.installed,
             hooks.availability == HookInventoryAvailability::Available,
-        )
+        );
+        AgyProductionSetup::from_environment().map_or(registry.clone(), |setup| {
+            registry.with_agy_readiness(setup.inspect())
+        })
     }
 
     /// Builds the only v0.5.1 production registration from bounded probe facts.
@@ -524,6 +656,22 @@ impl ProviderRegistry {
     #[must_use]
     pub fn with_agy_preadmission(mut self, profile: AgyCapabilityProfile) -> Self {
         let snapshot = ProviderIntegrationSnapshot::from_agy_preadmission(profile);
+        if let Some(existing) = self
+            .providers
+            .iter_mut()
+            .find(|provider| provider.id.as_str() == AGY_PROVIDER_ID)
+        {
+            *existing = snapshot;
+        } else {
+            self.providers.push(snapshot);
+        }
+        self
+    }
+
+    /// Replaces the Agy catalog row with a bounded production environment probe.
+    #[must_use]
+    pub fn with_agy_readiness(mut self, readiness: AgyReadinessProjection) -> Self {
+        let snapshot = ProviderIntegrationSnapshot::from_agy_readiness(readiness);
         if let Some(existing) = self
             .providers
             .iter_mut()
@@ -596,6 +744,7 @@ mod tests {
         ProviderRegistry,
     };
     use crate::providers::agy::{AgyCapabilityProfile, AgyVersionDiagnostic};
+    use crate::providers::agy_backend::{AgyIntegrationReadiness, AgyReadinessProjection};
     use crate::settings::ProviderBadgePolicy;
 
     #[test]
@@ -675,6 +824,41 @@ mod tests {
             None
         );
         assert_eq!(registry.registered_ids(), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn exact_agy_profile_is_registered_without_unproven_capabilities() {
+        let registry = ProviderRegistry::default().with_agy_readiness(AgyReadinessProjection {
+            state: AgyIntegrationReadiness::SupportedConfigured,
+            version: Some("1.1.19".to_owned()),
+            qualification_available: true,
+            qualification_observations_available: true,
+            production_enabled: true,
+        });
+        let agy = registry
+            .providers
+            .iter()
+            .find(|provider| provider.id.as_str() == "agy")
+            .expect("Agy row");
+        assert_eq!(agy.admission, ProviderAdmissionState::Admitted);
+        assert!(agy.installed);
+        assert_eq!(registry.registered_ids(), vec!["agy"]);
+        assert_eq!(
+            registry.title_badge_for("agy", ProviderBadgePolicy::Always),
+            Some("A".to_owned())
+        );
+        for unavailable in [
+            ProviderCapability::Attention,
+            ProviderCapability::ApprovalQuestion,
+            ProviderCapability::Health,
+            ProviderCapability::BackgroundTasks,
+            ProviderCapability::WindowsTerminalPresentation,
+        ] {
+            assert!(agy.capability_profile.capabilities.iter().any(|entry| {
+                entry.capability == unavailable
+                    && entry.availability == CapabilityAvailability::Unavailable
+            }));
+        }
     }
 
     #[test]
