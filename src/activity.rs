@@ -38,6 +38,9 @@ use crate::{
 const LEASE_SCHEMA: &str = "tabbeacon-activity-worker-lease-v1";
 const STATE_DIRECTORY: &str = "activity-worker-v1";
 const LOCK_FILE: &str = "activity-worker.lock";
+const PROVIDER_SESSION_SCHEMA: &str = "tabbeacon-provider-session-observation-v1";
+const PROVIDER_SESSION_DIRECTORY: &str = "provider-session-v1";
+const PROVIDER_SESSION_LOCK_FILE: &str = "provider-session.lock";
 const LEASE_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 /// Normative v0.3 activity-frame target. The worker uses monotonic deadlines
 /// and drops overdue frames rather than accumulating catch-up work.
@@ -256,6 +259,69 @@ pub struct SessionWorkspaceObservability {
     pub active_subagents: u16,
     /// Absent unless a provider proves a background-task count.
     pub background_tasks: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ProviderSessionObservation {
+    schema: String,
+    session_sha256: String,
+    provider: String,
+    workspace_alias: String,
+    semantic_state: String,
+    updated_unix_ms: u64,
+    expires_unix_ms: u64,
+    workspace_observability: SessionWorkspaceObservability,
+}
+
+/// Persists one content-minimal provider observation without launching a
+/// worker or claiming process liveness.
+pub(crate) fn record_provider_session_observation(
+    state_root: &Path,
+    session_sha256: &str,
+    provider: &str,
+    workspace_alias: &str,
+    semantic_state: &str,
+    observed_unix_ms: u64,
+    workspace_observability: SessionWorkspaceObservability,
+) -> io::Result<()> {
+    let observation = ProviderSessionObservation {
+        schema: PROVIDER_SESSION_SCHEMA.to_owned(),
+        session_sha256: session_sha256.to_owned(),
+        provider: provider.to_owned(),
+        workspace_alias: workspace_alias.to_owned(),
+        semantic_state: semantic_state.to_owned(),
+        updated_unix_ms: observed_unix_ms,
+        expires_unix_ms: observed_unix_ms.saturating_add(LEASE_TTL_MS),
+        workspace_observability,
+    };
+    validate_provider_session_observation(&observation)?;
+    let directory = state_root.join(PROVIDER_SESSION_DIRECTORY);
+    reject_symbolic_link(&directory)?;
+    fs::create_dir_all(&directory)?;
+    let lock_path = directory.join(PROVIDER_SESSION_LOCK_FILE);
+    reject_symbolic_link(&lock_path)?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)?;
+    lock.lock()?;
+    let path = directory.join(format!("session-{session_sha256}.json"));
+    reject_symbolic_link(&path)?;
+    let newer_exists = fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ProviderSessionObservation>(&bytes).ok())
+        .is_some_and(|current| current.updated_unix_ms > observed_unix_ms);
+    let result = if newer_exists {
+        Ok(())
+    } else {
+        let bytes = serde_json::to_vec_pretty(&observation)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        atomic_write(&path, &bytes)
+    };
+    File::unlock(&lock)?;
+    result
 }
 
 /// One privacy-preserving row in the read-only sessions view.
@@ -1837,23 +1903,36 @@ fn inspect_active_worker_identities_read_only(
 
 fn inspect_sessions_read_only(state_root: &Path, now: u64) -> SessionsOverview {
     let directory = state_root.join(STATE_DIRECTORY);
-    let metadata = match fs::symlink_metadata(&directory) {
+    let entries = match fs::symlink_metadata(&directory) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
             return SessionsOverview::empty(ActivityLeaseHealth::Unavailable);
         }
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return SessionsOverview::empty(ActivityLeaseHealth::Healthy);
-        }
+        Ok(_) => match fs::read_dir(&directory) {
+            Ok(entries) => Some(entries),
+            Err(_) => return SessionsOverview::empty(ActivityLeaseHealth::Unavailable),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
         Err(_) => return SessionsOverview::empty(ActivityLeaseHealth::Unavailable),
     };
-    if !metadata.is_dir() {
-        return SessionsOverview::empty(ActivityLeaseHealth::Unavailable);
-    }
-    let Ok(entries) = fs::read_dir(&directory) else {
-        return SessionsOverview::empty(ActivityLeaseHealth::Unavailable);
-    };
     let mut overview = SessionsOverview::empty(ActivityLeaseHealth::Healthy);
+    if let Some(entries) = entries {
+        inspect_worker_sessions(entries, now, &mut overview);
+    }
+    inspect_provider_sessions(state_root, now, &mut overview);
+    overview.sessions.sort_by(|left, right| {
+        left.workspace_alias
+            .cmp(&right.workspace_alias)
+            .then(left.provider.cmp(&right.provider))
+            .then(left.semantic_state.cmp(&right.semantic_state))
+            .then(left.age_seconds.cmp(&right.age_seconds))
+    });
+    if overview.stale_sessions > 0 || overview.invalid_leases > 0 {
+        overview.health = ActivityLeaseHealth::Warning;
+    }
+    overview
+}
+
+fn inspect_worker_sessions(entries: fs::ReadDir, now: u64, overview: &mut SessionsOverview) {
     for (index, entry) in entries.enumerate() {
         if index >= MAX_DIAGNOSTIC_LEASE_FILES {
             overview.invalid_leases = overview.invalid_leases.saturating_add(1);
@@ -1864,11 +1943,9 @@ fn inspect_sessions_read_only(state_root: &Path, now: u64) -> SessionsOverview {
             continue;
         };
         let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
         let Some(key_digest) = name
-            .strip_prefix("lease-")
+            .to_str()
+            .and_then(|name| name.strip_prefix("lease-"))
             .and_then(|value| value.strip_suffix(".json"))
         else {
             continue;
@@ -1894,43 +1971,141 @@ fn inspect_sessions_read_only(state_root: &Path, now: u64) -> SessionsOverview {
             overview.invalid_leases = overview.invalid_leases.saturating_add(1);
             continue;
         };
-        if lease.updated_unix_ms > now {
-            overview.invalid_leases = overview.invalid_leases.saturating_add(1);
-            continue;
-        }
         let Some(presentation) = lease.presentation.filter(|_| lease.active) else {
             continue;
         };
-        let age_seconds = now.saturating_sub(lease.updated_unix_ms) / 1_000;
-        let recency = session_recency(age_seconds);
-        let worker_health = if now > lease.expires_unix_ms {
-            overview.stale_sessions = overview.stale_sessions.saturating_add(1);
-            SessionWorkerHealth::StaleLease
-        } else {
-            overview.active_sessions = overview.active_sessions.saturating_add(1);
-            SessionWorkerHealth::RecentlyAuthorized
+        push_session(
+            overview,
+            now,
+            lease.updated_unix_ms,
+            lease.expires_unix_ms,
+            presentation.workspace_alias,
+            presentation.provider,
+            presentation.semantic_state,
+            presentation.workspace_observability,
+        );
+    }
+}
+
+fn inspect_provider_sessions(state_root: &Path, now: u64, overview: &mut SessionsOverview) {
+    let directory = state_root.join(PROVIDER_SESSION_DIRECTORY);
+    let Ok(metadata) = fs::symlink_metadata(&directory) else {
+        return;
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        overview.invalid_leases = overview.invalid_leases.saturating_add(1);
+        return;
+    }
+    let Ok(entries) = fs::read_dir(&directory) else {
+        overview.invalid_leases = overview.invalid_leases.saturating_add(1);
+        return;
+    };
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_DIAGNOSTIC_LEASE_FILES {
+            overview.invalid_leases = overview.invalid_leases.saturating_add(1);
+            break;
+        }
+        let Ok(entry) = entry else {
+            overview.invalid_leases = overview.invalid_leases.saturating_add(1);
+            continue;
         };
-        overview.sessions.push(SessionOverview {
-            workspace_alias: presentation.workspace_alias,
-            provider: presentation.provider,
-            semantic_state: presentation.semantic_state,
-            age_seconds,
-            recency,
-            worker_health,
-            workspace_observability: presentation.workspace_observability,
-        });
+        let name = entry.file_name();
+        let Some(session_sha256) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("session-"))
+            .and_then(|value| value.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        let path = entry.path();
+        let observation = fs::symlink_metadata(&path)
+            .ok()
+            .filter(|metadata| {
+                metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() <= MAX_DIAGNOSTIC_LEASE_BYTES
+            })
+            .and_then(|_| fs::read(&path).ok())
+            .and_then(|bytes| serde_json::from_slice::<ProviderSessionObservation>(&bytes).ok());
+        let Some(observation) = observation.filter(|observation| {
+            observation.session_sha256 == session_sha256
+                && validate_provider_session_observation(observation).is_ok()
+        }) else {
+            overview.invalid_leases = overview.invalid_leases.saturating_add(1);
+            continue;
+        };
+        push_session(
+            overview,
+            now,
+            observation.updated_unix_ms,
+            observation.expires_unix_ms,
+            observation.workspace_alias,
+            observation.provider,
+            observation.semantic_state,
+            observation.workspace_observability,
+        );
     }
-    overview.sessions.sort_by(|left, right| {
-        left.workspace_alias
-            .cmp(&right.workspace_alias)
-            .then(left.provider.cmp(&right.provider))
-            .then(left.semantic_state.cmp(&right.semantic_state))
-            .then(left.age_seconds.cmp(&right.age_seconds))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_session(
+    overview: &mut SessionsOverview,
+    now: u64,
+    updated_unix_ms: u64,
+    expires_unix_ms: u64,
+    workspace_alias: String,
+    provider: String,
+    semantic_state: String,
+    workspace_observability: SessionWorkspaceObservability,
+) {
+    if updated_unix_ms > now {
+        overview.invalid_leases = overview.invalid_leases.saturating_add(1);
+        return;
+    }
+    let age_seconds = now.saturating_sub(updated_unix_ms) / 1_000;
+    let worker_health = if now > expires_unix_ms {
+        overview.stale_sessions = overview.stale_sessions.saturating_add(1);
+        SessionWorkerHealth::StaleLease
+    } else {
+        overview.active_sessions = overview.active_sessions.saturating_add(1);
+        SessionWorkerHealth::RecentlyAuthorized
+    };
+    overview.sessions.push(SessionOverview {
+        workspace_alias,
+        provider,
+        semantic_state,
+        age_seconds,
+        recency: session_recency(age_seconds),
+        worker_health,
+        workspace_observability,
     });
-    if overview.stale_sessions > 0 || overview.invalid_leases > 0 {
-        overview.health = ActivityLeaseHealth::Warning;
+}
+
+fn validate_provider_session_observation(
+    observation: &ProviderSessionObservation,
+) -> io::Result<()> {
+    if observation.schema != PROVIDER_SESSION_SCHEMA
+        || !is_sha256(&observation.session_sha256)
+        || observation.provider != "agy"
+        || !matches!(observation.semantic_state.as_str(), "ready" | "working")
+        || RepositoryAlias::new(observation.workspace_alias.clone()).is_err()
+        || observation.updated_unix_ms > observation.expires_unix_ms
+        || observation
+            .expires_unix_ms
+            .saturating_sub(observation.updated_unix_ms)
+            > LEASE_TTL_MS
+        || observation.workspace_observability.active_subagents != 0
+        || observation
+            .workspace_observability
+            .background_tasks
+            .is_some()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "provider session observation is incompatible or unsafe",
+        ));
     }
-    overview
+    Ok(())
 }
 
 fn session_recency(age_seconds: u64) -> SessionRecency {
@@ -1954,7 +2129,7 @@ fn validate_lease(lease: &WorkerLease) -> io::Result<()> {
             presentation.semantic_state.as_str(),
             "working" | "result-ready" | "approval"
         ) && presentation.spinner().is_some()
-            && presentation.provider == "codex"
+            && matches!(presentation.provider.as_str(), "codex" | "agy")
             && RepositoryAlias::new(presentation.workspace_alias.clone()).is_ok()
     });
     if lease.schema != LEASE_SCHEMA
@@ -2351,11 +2526,13 @@ mod tests {
     use super::{
         ActivityCoordinator, ActivityExecution, ActivityLeaseHealth, ActivityLeaseStore,
         ActivityRender, CleanupObserverAction, LeaseTransition, SESSIONS_SCHEMA_VERSION,
-        STATIC_ATTENTION_LEASE_TTL_MS, TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation,
-        WorkerProcessLiveness, cleanup_identity_recheck_due, cleanup_observer_action,
-        cleanup_observer_poll_ms, command_output_with_timeout, inspect_activity_leases_read_only,
-        inspect_sessions_read_only, next_animation_frame_deadline, normalized_windows_path,
-        system_powershell_path, tasklist_output_reports_absence,
+        STATIC_ATTENTION_LEASE_TTL_MS, SessionWorkspaceObservability, TARGET_FRAME_INTERVAL_MS,
+        WorkerKey, WorkerPresentation, WorkerProcessLiveness, cleanup_identity_recheck_due,
+        cleanup_observer_action, cleanup_observer_poll_ms, command_output_with_timeout,
+        inspect_activity_leases_read_only, inspect_sessions_read_only,
+        next_animation_frame_deadline, normalized_windows_path,
+        record_provider_session_observation, system_powershell_path,
+        tasklist_output_reports_absence,
     };
     use crate::{
         core::{Attention, Health, Phase},
@@ -2632,6 +2809,83 @@ mod tests {
         assert!(text.contains("\"semantic_state\": \"working\""));
         assert!(text.contains("\"spinner_preset\": \"braille\""));
         assert!(text.contains("\"workspace_alias\": \"OWH\""));
+    }
+
+    #[test]
+    fn admitted_agy_provider_is_visible_without_native_identity_content() {
+        let root = TestRoot::new("agy-provider");
+        record_provider_session_observation(
+            &root.0,
+            &digest('a'),
+            "agy",
+            "AGY",
+            "working",
+            1_000,
+            SessionWorkspaceObservability {
+                root_binding_stable: true,
+                workspace_mismatch_observed: false,
+                active_subagents: 0,
+                background_tasks: None,
+            },
+        )
+        .expect("Agy observation publishes");
+        let overview = inspect_sessions_read_only(&root.0, 1_001);
+        assert_eq!(overview.sessions.len(), 1);
+        assert_eq!(overview.sessions[0].provider, "agy");
+        assert_eq!(overview.sessions[0].workspace_alias, "AGY");
+        let serialized = serde_json::to_string(&overview).expect("sessions serialize");
+        assert!(!serialized.contains(&digest('a')));
+    }
+
+    #[test]
+    fn agy_ready_updates_its_own_row_and_foreign_provider_cannot_cross_namespace() {
+        let root = TestRoot::new("agy-provider-namespace");
+        let session = digest('b');
+        let observability = SessionWorkspaceObservability {
+            root_binding_stable: true,
+            workspace_mismatch_observed: false,
+            active_subagents: 0,
+            background_tasks: None,
+        };
+        record_provider_session_observation(
+            &root.0,
+            &session,
+            "agy",
+            "AGY",
+            "working",
+            1_000,
+            observability.clone(),
+        )
+        .expect("working observation publishes");
+        assert!(
+            record_provider_session_observation(
+                &root.0,
+                &session,
+                "codex",
+                "CODEX",
+                "working",
+                1_001,
+                observability.clone(),
+            )
+            .is_err(),
+            "Codex cannot write the Agy-only provider-session namespace"
+        );
+        record_provider_session_observation(
+            &root.0,
+            &session,
+            "agy",
+            "AGY",
+            "ready",
+            1_002,
+            observability,
+        )
+        .expect("ready observation updates the same Agy row");
+
+        let overview = inspect_sessions_read_only(&root.0, 1_003);
+        assert_eq!(overview.sessions.len(), 1);
+        assert_eq!(overview.sessions[0].provider, "agy");
+        assert_eq!(overview.sessions[0].semantic_state, "ready");
+        assert_eq!(overview.sessions[0].workspace_alias, "AGY");
     }
 
     #[test]

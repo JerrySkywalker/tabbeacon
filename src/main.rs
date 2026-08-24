@@ -12,10 +12,10 @@ use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 use dialoguer::{Confirm, Select};
 use tabbeacon::cli::{
-    AgyPreadmissionCommand, AliasCommand, Cli, Command, ConfigCommand, ConvergenceCommand,
-    DoctorArgs, ExplainCommand, HumanOutputArgs, InterfaceCommand, InterfacePreferenceKey,
-    OutputMode, PreviewArgs, Provider, RepairCommand, SetupCommand, TitlePolicyCommand,
-    UpgradePreflightArgs,
+    AgyPreadmissionCommand, AgyQualificationCommand, AgyQualificationWorkspaceArgs, AliasCommand,
+    Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, ExplainCommand, HumanOutputArgs,
+    InterfaceCommand, InterfacePreferenceKey, OutputMode, PreviewArgs, Provider, RepairCommand,
+    SetupCommand, TitlePolicyCommand, UninstallProvider, UpgradePreflightArgs,
 };
 use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_hook_runtime_probe,
@@ -33,8 +33,14 @@ use tabbeacon::human_presentation::{
 use tabbeacon::management::ManagementSnapshot;
 use tabbeacon::providers::agy::{
     AgyHookRecord, AgyHookRecorder, AgyInputDisposition, AgyQualificationPlan, AgyStateRecord,
-    AgyStateRecorder, AgyTitleCallbackHarness, AgyVersionDiagnostic,
-    MAX_AGY_QUALIFICATION_INPUT_BYTES,
+    AgyStateRecorder, AgyVersionDiagnostic, MAX_AGY_QUALIFICATION_INPUT_BYTES,
+};
+use tabbeacon::providers::agy_backend::{
+    AgyProductionSetup, AgyProductionSetupOutcome, AgyTitleRuntime,
+};
+use tabbeacon::providers::agy_qualification::{
+    AgyCandidateEvidenceState, AgyQualificationInspection, AgyQualificationWorkspace,
+    AgyQualificationWorkspaceError, probe_direct_agy_version, qualification_callback_fallback,
 };
 use tabbeacon::providers::codex::{
     CodexHookRuntime, CodexIntegration, CodexRepairDisposition, CodexRepairReport, SetupOutcome,
@@ -157,6 +163,11 @@ fn dispatch(cli: Cli) -> ExitCode {
             output,
             ..
         }) => setup_codex(output.mode(), output.language.preference()),
+        Some(Command::Setup {
+            command: Some(SetupCommand::Agy),
+            output,
+            ..
+        }) => setup_agy(output.mode()),
         Some(Command::Repair {
             command:
                 RepairCommand::Codex {
@@ -198,9 +209,13 @@ fn dispatch(cli: Cli) -> ExitCode {
             } => convergence_verify(&matrix, &expected_head),
         },
         Some(Command::Uninstall {
-            provider: Provider::Codex,
+            provider: UninstallProvider::Codex,
             output,
         }) => uninstall_codex(output.mode()),
+        Some(Command::Uninstall {
+            provider: UninstallProvider::Agy,
+            output,
+        }) => uninstall_agy(output.mode()),
         Some(Command::Hook {
             provider: Provider::Codex,
         }) => run_codex_hook(),
@@ -963,6 +978,59 @@ fn setup_codex(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> 
     }
 }
 
+fn setup_agy(output_mode: OutputMode) -> ExitCode {
+    let setup = match AgyProductionSetup::from_environment() {
+        Ok(setup) => setup,
+        Err(error) => return print_agy_setup_error(error, output_mode),
+    };
+    match setup.setup() {
+        Ok(outcome) => print_agy_setup_outcome(outcome, output_mode),
+        Err(error) => print_agy_setup_error(error, output_mode),
+    }
+}
+
+fn print_agy_setup_outcome(
+    outcome: AgyProductionSetupOutcome,
+    output_mode: OutputMode,
+) -> ExitCode {
+    let value = match outcome {
+        AgyProductionSetupOutcome::Installed => "installed",
+        AgyProductionSetupOutcome::AlreadyConfigured => "already_configured",
+        AgyProductionSetupOutcome::Removed => "removed",
+        AgyProductionSetupOutcome::NotInstalled => "not_installed",
+    };
+    match output_mode {
+        OutputMode::Json => println!(
+            "{}",
+            serde_json::json!({"provider":"agy","setup":value,"provider_enabled":true})
+        ),
+        OutputMode::Plain => {
+            println!("AGY_SETUP={}", value.to_ascii_uppercase());
+            println!("AGY_PROVIDER_ENABLED=true");
+        }
+        OutputMode::Human => println!("Agy setup: {value}."),
+    }
+    ExitCode::SUCCESS
+}
+
+fn print_agy_setup_error(
+    error: tabbeacon::providers::agy_backend::AgyProductionSetupError,
+    output_mode: OutputMode,
+) -> ExitCode {
+    match output_mode {
+        OutputMode::Json => println!(
+            "{}",
+            serde_json::json!({"provider":"agy","setup":"failed","reason":error})
+        ),
+        OutputMode::Plain => {
+            println!("AGY_SETUP=FAILED");
+            println!("REASON={error}");
+        }
+        OutputMode::Human => eprintln!("Agy setup failed: {error}."),
+    }
+    ExitCode::FAILURE
+}
+
 fn repair_codex(
     apply: bool,
     expected_target_digest: Option<&str>,
@@ -1391,8 +1459,13 @@ fn doctor(
         (false, true) => collect_operational_diagnostics_with_hook_runtime_probe(true),
         (false, false) => collect_operational_diagnostics(),
     };
+    let integrations = provider_registry(&report);
     if output_mode == OutputMode::Json {
-        return match serde_json::to_string(&report.doctor) {
+        let mut value = serde_json::to_value(&report.doctor).unwrap_or_default();
+        if let Some(object) = value.as_object_mut() {
+            object.insert("providers".to_owned(), serde_json::json!(integrations));
+        }
+        return match serde_json::to_string(&value) {
             Ok(json) => {
                 println!("{json}");
                 if report.doctor.is_failure() {
@@ -1408,6 +1481,7 @@ fn doctor(
         for line in human_doctor_lines(&report.doctor) {
             println!("{line}");
         }
+        print_provider_registry_plain(&integrations);
     } else {
         let snapshot = ManagementSnapshot::from_diagnostics(&report);
         let presentation = human_runtime_presentation(language);
@@ -1420,6 +1494,7 @@ fn doctor(
             ),
             presentation.color,
         );
+        print_provider_registry_human(&integrations);
     }
     if report.doctor.is_failure() {
         ExitCode::FAILURE
@@ -1430,8 +1505,13 @@ fn doctor(
 
 fn status(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
     let report = collect_operational_diagnostics();
+    let integrations = provider_registry(&report);
     if output_mode == OutputMode::Json {
-        return match serde_json::to_string(&report) {
+        let mut value = serde_json::to_value(&report).unwrap_or_default();
+        if let Some(object) = value.as_object_mut() {
+            object.insert("providers".to_owned(), serde_json::json!(integrations));
+        }
+        return match serde_json::to_string(&value) {
             Ok(json) => {
                 println!("{json}");
                 ExitCode::SUCCESS
@@ -1443,6 +1523,7 @@ fn status(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitC
         for line in human_status_lines(&report) {
             println!("{line}");
         }
+        print_provider_registry_plain(&integrations);
     } else {
         let snapshot = ManagementSnapshot::from_diagnostics(&report);
         let presentation = human_runtime_presentation(language);
@@ -1450,8 +1531,35 @@ fn status(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitC
             render_human_status(&report, &snapshot, presentation.locale, terminal_width()),
             presentation.color,
         );
+        print_provider_registry_human(&integrations);
     }
     ExitCode::SUCCESS
+}
+
+fn provider_registry(report: &tabbeacon::diagnostics::OperationalDiagnostics) -> ProviderRegistry {
+    let hooks = CodexIntegration::from_environment()
+        .map(|integration| integration.hook_inventory())
+        .unwrap_or_default();
+    ProviderRegistry::from_diagnostics(report, &hooks)
+}
+
+fn print_provider_registry_plain(registry: &ProviderRegistry) {
+    for provider in &registry.providers {
+        println!(
+            "PROVIDER_{}={}",
+            provider.id.as_str().to_ascii_uppercase(),
+            provider.configuration_state.to_ascii_uppercase()
+        );
+    }
+}
+
+fn print_provider_registry_human(registry: &ProviderRegistry) {
+    for provider in &registry.providers {
+        println!(
+            "{} integration: {}.",
+            provider.label, provider.configuration_state
+        );
+    }
 }
 
 fn sessions(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
@@ -1477,8 +1585,9 @@ fn sessions(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> Exi
             let alias = serde_json::to_string(&session.workspace_alias)
                 .unwrap_or_else(|_| "\"unavailable\"".to_owned());
             println!(
-                "SESSION={}|workspace_alias={}|semantic_state={}|age_seconds={}|recency={}|worker_health={}",
+                "SESSION={}|provider={}|workspace_alias={}|semantic_state={}|age_seconds={}|recency={}|worker_health={}",
                 index + 1,
+                session.provider,
                 alias,
                 session.semantic_state,
                 session.age_seconds,
@@ -1523,6 +1632,7 @@ fn hooks(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCo
 
 fn agy_preadmission(command: AgyPreadmissionCommand) -> ExitCode {
     match command {
+        AgyPreadmissionCommand::Qualification { command } => agy_qualification(command),
         AgyPreadmissionCommand::Plan(output) => {
             let plan = AgyQualificationPlan::default();
             match output.mode() {
@@ -1613,8 +1723,399 @@ fn agy_preadmission(command: AgyPreadmissionCommand) -> ExitCode {
         }
         AgyPreadmissionCommand::TitleCallback => {
             let input = read_agy_qualification_stdin();
-            let response = AgyTitleCallbackHarness::respond(&input.payload);
-            println!("{}", response.fallback_title);
+            let response = AgyTitleRuntime::dispatch_system(&input.payload);
+            println!("{}", response.title);
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+// Keeping the complete command-to-output contract adjacent makes the
+// qualification hard gate auditable as one exhaustive dispatcher.
+#[allow(clippy::too_many_lines)]
+fn agy_qualification(command: AgyQualificationCommand) -> ExitCode {
+    match command {
+        AgyQualificationCommand::Status { workspace, output } => {
+            let workspace = match agy_qualification_workspace(workspace) {
+                Ok(workspace) => workspace,
+                Err(error) => return agy_qualification_error(error),
+            };
+            match workspace.status() {
+                Ok(status) => match output.mode() {
+                    OutputMode::Json => print_agy_json(&status),
+                    OutputMode::Plain => {
+                        println!("AGY_QUALIFICATION_INITIALIZED={}", status.initialized);
+                        println!("AGY_QUALIFICATION_TITLE_SAMPLES={}", status.title_samples);
+                        println!("AGY_QUALIFICATION_HOOK_SAMPLES={}", status.hook_samples);
+                        println!("AGY_PROVIDER_ENABLED=false");
+                        ExitCode::SUCCESS
+                    }
+                    OutputMode::Human => {
+                        println!(
+                            "Agy qualification workspace: {}.",
+                            if status.initialized {
+                                "initialized"
+                            } else {
+                                "not initialized"
+                            }
+                        );
+                        println!(
+                            "Minimized observations: {} title, {} Hook; production disabled.",
+                            status.title_samples, status.hook_samples
+                        );
+                        ExitCode::SUCCESS
+                    }
+                },
+                Err(error) => agy_qualification_error(error),
+            }
+        }
+        AgyQualificationCommand::Plan(output) => match output.mode() {
+            OutputMode::Json => print_agy_json(&AgyQualificationPlan::default()),
+            OutputMode::Plain => {
+                println!("AGY_QUALIFICATION_WORKFLOW=AVAILABLE");
+                println!("DIRECT_VERSION_COMMAND=agy --version");
+                println!(
+                    "TITLE_CALLBACK_COMMAND=tabbeacon agy qualification __title-callback-v1 --root <qualification-root>"
+                );
+                println!("OWNER_APPROVAL_REQUIRED_BEFORE_AGY_CONFIG=true");
+                println!("AGY_PROVIDER_ENABLED=false");
+                ExitCode::SUCCESS
+            }
+            OutputMode::Human => {
+                println!("Agy qualification plan");
+                println!("1. Initialize a disposable qualification workspace.");
+                println!("2. Probe only literal: agy --version");
+                println!(
+                    "3. Owner-approved title callback: tabbeacon agy qualification __title-callback-v1 --root <qualification-root>"
+                );
+                println!(
+                    "4. Record only minimized title/Hook facts, then inspect, profile, review, restore, and clean."
+                );
+                println!("Production admission remains blocked on real Owner G64 approval.");
+                ExitCode::SUCCESS
+            }
+        },
+        AgyQualificationCommand::Init { workspace, output } => {
+            let workspace = match agy_qualification_workspace(workspace) {
+                Ok(workspace) => workspace,
+                Err(error) => return agy_qualification_error(error),
+            };
+            match workspace.initialize() {
+                Ok(status) => match output.mode() {
+                    OutputMode::Json => print_agy_json(&status),
+                    OutputMode::Plain => {
+                        println!("AGY_QUALIFICATION_INITIALIZED=true");
+                        println!("RAW_AGY_CONTENT_PERSISTED=false");
+                        println!("OWNER_AGY_CONFIG_MUTATED=false");
+                        println!("AGY_PROVIDER_ENABLED=false");
+                        ExitCode::SUCCESS
+                    }
+                    OutputMode::Human => {
+                        println!("Initialized a disposable Agy qualification workspace.");
+                        println!("No Agy configuration changed; production remains disabled.");
+                        ExitCode::SUCCESS
+                    }
+                },
+                Err(error) => agy_qualification_error(error),
+            }
+        }
+        AgyQualificationCommand::Probe { workspace, output } => {
+            let workspace = match agy_qualification_workspace(workspace) {
+                Ok(workspace) => workspace,
+                Err(error) => return agy_qualification_error(error),
+            };
+            if let Err(error) = workspace.status().and_then(|status| {
+                status
+                    .initialized
+                    .then_some(())
+                    .ok_or(AgyQualificationWorkspaceError::NotInitialized)
+            }) {
+                return agy_qualification_error(error);
+            }
+            let probe = probe_direct_agy_version();
+            if let Err(error) = workspace.record_version_probe(&probe) {
+                return agy_qualification_error(error);
+            }
+            match output.mode() {
+                OutputMode::Json => print_agy_json(&probe),
+                OutputMode::Plain => {
+                    println!("AGY_INSTALLED={}", probe.installed);
+                    println!(
+                        "AGY_VERSION={}",
+                        probe.version.as_deref().unwrap_or("unavailable")
+                    );
+                    println!("AGY_QUALIFICATION_ADMISSION=unadmitted");
+                    println!("AGY_PROVIDER_ENABLED=false");
+                    ExitCode::SUCCESS
+                }
+                OutputMode::Human => {
+                    println!(
+                        "Agy direct version probe: {}.",
+                        probe.version.as_deref().unwrap_or("unavailable")
+                    );
+                    println!("This observation does not admit or enable the provider.");
+                    ExitCode::SUCCESS
+                }
+            }
+        }
+        AgyQualificationCommand::RecordTitle { workspace, output } => {
+            let workspace = match agy_qualification_workspace(workspace) {
+                Ok(workspace) => workspace,
+                Err(error) => return agy_qualification_error(error),
+            };
+            let input = read_agy_qualification_stdin();
+            match workspace.record_title(&input.state_record()) {
+                Ok(record) => match output.mode() {
+                    OutputMode::Json => print_agy_json(&record),
+                    OutputMode::Plain => {
+                        println!("AGY_TITLE_STATE={}", record.disposition);
+                        println!("RAW_AGY_CONTENT_PERSISTED=false");
+                        println!("AGY_PROVIDER_ENABLED=false");
+                        ExitCode::SUCCESS
+                    }
+                    OutputMode::Human => {
+                        println!(
+                            "Recorded one content-minimal Agy title sample: {}.",
+                            record.disposition
+                        );
+                        ExitCode::SUCCESS
+                    }
+                },
+                Err(error) => agy_qualification_error(error),
+            }
+        }
+        AgyQualificationCommand::RecordHook {
+            event,
+            workspace,
+            output,
+        } => {
+            let workspace = match agy_qualification_workspace(workspace) {
+                Ok(workspace) => workspace,
+                Err(error) => return agy_qualification_error(error),
+            };
+            let input = read_agy_qualification_stdin();
+            match workspace.record_hook(&input.hook_record(event.wire_name())) {
+                Ok(record) => match output.mode() {
+                    OutputMode::Json => print_agy_json(&record),
+                    OutputMode::Plain => {
+                        println!("AGY_HOOK_STATE={}", record.disposition);
+                        println!("RAW_AGY_CONTENT_PERSISTED=false");
+                        println!("AGY_PROVIDER_ENABLED=false");
+                        ExitCode::SUCCESS
+                    }
+                    OutputMode::Human => {
+                        println!(
+                            "Recorded one content-minimal Agy Hook sample: {}.",
+                            record.disposition
+                        );
+                        ExitCode::SUCCESS
+                    }
+                },
+                Err(error) => agy_qualification_error(error),
+            }
+        }
+        AgyQualificationCommand::Inspect { workspace, output } => {
+            let workspace = match agy_qualification_workspace(workspace) {
+                Ok(workspace) => workspace,
+                Err(error) => return agy_qualification_error(error),
+            };
+            match workspace.inspect() {
+                Ok(inspection) => print_agy_qualification_inspection(&inspection, output.mode()),
+                Err(error) => agy_qualification_error(error),
+            }
+        }
+        AgyQualificationCommand::Profile { workspace, output } => {
+            let workspace = match agy_qualification_workspace(workspace) {
+                Ok(workspace) => workspace,
+                Err(error) => return agy_qualification_error(error),
+            };
+            match workspace.compile_candidate() {
+                Ok(candidate) => match output.mode() {
+                    OutputMode::Json => print_agy_json(&candidate),
+                    OutputMode::Plain => {
+                        println!("AGY_CANDIDATE_PROFILE=BUILT");
+                        println!("OWNER_REVIEW_REQUIRED=true");
+                        println!("PRODUCTION_SUPPORTED=false");
+                        println!("AGY_PROVIDER_ENABLED=false");
+                        ExitCode::SUCCESS
+                    }
+                    OutputMode::Human => {
+                        println!("Built an unreviewed Agy capability candidate.");
+                        println!(
+                            "Owner G64 review is still required; production remains disabled."
+                        );
+                        ExitCode::SUCCESS
+                    }
+                },
+                Err(error) => agy_qualification_error(error),
+            }
+        }
+        AgyQualificationCommand::Review { workspace, output } => {
+            let workspace = match agy_qualification_workspace(workspace) {
+                Ok(workspace) => workspace,
+                Err(error) => return agy_qualification_error(error),
+            };
+            match workspace.owner_review_packet() {
+                Ok(packet) => match output.mode() {
+                    OutputMode::Json => print_agy_json(&packet),
+                    OutputMode::Plain => {
+                        println!("AGY_OWNER_REVIEW_PACKET=BUILT");
+                        println!("AGY_OWNER_DECISION=PENDING");
+                        println!("REAL_G64_REQUIRED=true");
+                        println!("AGY_PROVIDER_ENABLED=false");
+                        ExitCode::SUCCESS
+                    }
+                    OutputMode::Human => {
+                        println!("Built the pending Agy Owner review packet.");
+                        println!("It cannot admit or enable Agy without the real G64 gate.");
+                        ExitCode::SUCCESS
+                    }
+                },
+                Err(error) => agy_qualification_error(error),
+            }
+        }
+        AgyQualificationCommand::Clean {
+            confirm,
+            workspace,
+            output,
+        } => {
+            if !confirm {
+                eprintln!("Agy qualification cleanup requires --confirm.");
+                return ExitCode::FAILURE;
+            }
+            let workspace = match agy_qualification_workspace(workspace) {
+                Ok(workspace) => workspace,
+                Err(error) => return agy_qualification_error(error),
+            };
+            match workspace.clean() {
+                Ok(()) => {
+                    match output.mode() {
+                        OutputMode::Json => println!(
+                            "{{\"cleaned\":true,\"provider_enabled\":false,\"owner_config_mutated\":false}}"
+                        ),
+                        OutputMode::Plain => {
+                            println!("AGY_QUALIFICATION_CLEANED=true");
+                            println!("OWNER_AGY_CONFIG_MUTATED=false");
+                        }
+                        OutputMode::Human => {
+                            println!("Removed the managed disposable Agy qualification workspace.");
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(error) => agy_qualification_error(error),
+            }
+        }
+        AgyQualificationCommand::TitleCallback { workspace } => {
+            let input = read_agy_qualification_stdin();
+            if let Ok(workspace) = agy_qualification_workspace(workspace) {
+                let _ = workspace.record_title(&input.state_record());
+            }
+            println!("{}", qualification_callback_fallback());
+            ExitCode::SUCCESS
+        }
+        AgyQualificationCommand::HookCallback { event, workspace } => {
+            let input = read_agy_qualification_stdin();
+            if let Ok(workspace) = agy_qualification_workspace(workspace) {
+                let _ = workspace.record_hook(&input.hook_record(&event));
+            }
+            ExitCode::SUCCESS
+        }
+    }
+}
+
+fn agy_qualification_workspace(
+    arguments: AgyQualificationWorkspaceArgs,
+) -> Result<AgyQualificationWorkspace, AgyQualificationWorkspaceError> {
+    arguments
+        .root
+        .map_or_else(AgyQualificationWorkspace::user_local, |root| {
+            Ok(AgyQualificationWorkspace::new(root))
+        })
+}
+
+fn agy_qualification_error(error: AgyQualificationWorkspaceError) -> ExitCode {
+    eprintln!("Agy qualification: {error}.");
+    ExitCode::FAILURE
+}
+
+fn candidate_evidence_name(state: AgyCandidateEvidenceState) -> &'static str {
+    match state {
+        AgyCandidateEvidenceState::ObservedSupportedCandidate => "observed candidate",
+        AgyCandidateEvidenceState::NotObserved => "not observed",
+        AgyCandidateEvidenceState::Unavailable => "unavailable",
+        AgyCandidateEvidenceState::Ambiguous => "ambiguous",
+        AgyCandidateEvidenceState::RequiresOwnerReview => "requires Owner review",
+    }
+}
+
+fn print_agy_qualification_inspection(
+    inspection: &AgyQualificationInspection,
+    output_mode: OutputMode,
+) -> ExitCode {
+    match output_mode {
+        OutputMode::Json => print_agy_json(inspection),
+        OutputMode::Plain => {
+            println!(
+                "AGY_VERSION={}",
+                inspection
+                    .observed_version
+                    .as_deref()
+                    .unwrap_or("unavailable")
+            );
+            println!(
+                "AGY_SESSION_IDENTITY={}",
+                candidate_evidence_name(inspection.session_identity)
+            );
+            println!(
+                "AGY_WORKSPACE_ROOT={}",
+                candidate_evidence_name(inspection.workspace_root)
+            );
+            println!("AGY_TITLE_SAMPLES={}", inspection.title_samples);
+            println!("AGY_HOOK_SAMPLES={}", inspection.hook_samples);
+            println!("AGY_PRODUCTION_ADMISSION=BLOCKED_OWNER_G64");
+            println!("AGY_PROVIDER_ENABLED=false");
+            ExitCode::SUCCESS
+        }
+        OutputMode::Human => {
+            println!("Agy qualification");
+            println!(
+                "\nVersion\n  observed: {}",
+                inspection
+                    .observed_version
+                    .as_deref()
+                    .unwrap_or("unavailable")
+            );
+            println!(
+                "\nSession identity\n  evidence: {}",
+                candidate_evidence_name(inspection.session_identity)
+            );
+            println!(
+                "\nWorkspace root\n  evidence: {}",
+                candidate_evidence_name(inspection.workspace_root)
+            );
+            println!(
+                "\nLifecycle\n  ready: {}\n  working: {}\n  result-ready: {}\n  approval: {}",
+                candidate_evidence_name(inspection.lifecycle_ready),
+                candidate_evidence_name(inspection.lifecycle_working),
+                candidate_evidence_name(inspection.lifecycle_result_ready),
+                candidate_evidence_name(inspection.approval),
+            );
+            println!(
+                "\nTitle callback\n  protocol samples: {}\n  usable: {}",
+                inspection.title_samples,
+                candidate_evidence_name(inspection.title_callback)
+            );
+            println!(
+                "\nHooks\n  samples: {}\n  usable: {}",
+                inspection.hook_samples,
+                candidate_evidence_name(inspection.hooks)
+            );
+            println!(
+                "\nBackground tasks\n  count evidence: {}",
+                candidate_evidence_name(inspection.background_tasks)
+            );
+            println!("\nProduction admission\n  BLOCKED — Owner G64 approval required");
             ExitCode::SUCCESS
         }
     }
@@ -1905,8 +2406,9 @@ fn sessions_document(report: &tabbeacon::activity::SessionsOverview) -> HumanDoc
         for session in &report.sessions {
             section = section.with_message(HumanMessage::plain(
                 HumanText::literal(format!(
-                    "{} — {} — {}s — {}",
+                    "{} — {} — {} — {}s — {}",
                     session.workspace_alias,
+                    session.provider,
                     session.semantic_state,
                     session.age_seconds,
                     session.worker_health.as_str().replace('_', " "),
@@ -2089,6 +2591,21 @@ fn uninstall_codex(output_mode: OutputMode) -> ExitCode {
             output_mode,
             Some(InterfaceLanguage::EnUs),
         ),
+    }
+}
+
+fn uninstall_agy(output_mode: OutputMode) -> ExitCode {
+    let setup = match AgyProductionSetup::from_environment() {
+        Ok(setup) => setup,
+        Err(error) => return print_agy_setup_error(error, output_mode),
+    };
+    match setup.uninstall() {
+        Ok(
+            outcome
+            @ (AgyProductionSetupOutcome::Removed | AgyProductionSetupOutcome::NotInstalled),
+        ) => print_agy_setup_outcome(outcome, output_mode),
+        Ok(_) => unreachable!("uninstall returns only removed or not-installed"),
+        Err(error) => print_agy_setup_error(error, output_mode),
     }
 }
 

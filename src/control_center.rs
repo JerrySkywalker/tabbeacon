@@ -1194,17 +1194,33 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
             "fixture did not reach Integration",
         )?;
         draw(&mut session, &app)?;
-        let integrations_visited = app.integrations.providers.len() == 1
-            && app.integrations.providers[0].id.as_str() == "codex"
-            && app.integrations.providers[0].label == "Codex"
-            && app.integrations.providers[0]
-                .capability_profile
-                .capabilities
+        let integrations_visited = app
+            .integrations
+            .providers
+            .iter()
+            .find(|provider| provider.id.as_str() == "codex")
+            .is_some_and(|provider| {
+                provider.label == "Codex"
+                    && provider
+                        .capability_profile
+                        .capabilities
+                        .iter()
+                        .any(|status| {
+                            status.capability
+                                == crate::providers::registry::ProviderCapability::Phase
+                                && status.availability
+                                    == crate::providers::registry::CapabilityAvailability::Proven
+                        })
+            })
+            && app
+                .integrations
+                .providers
                 .iter()
-                .any(|status| {
-                    status.capability == crate::providers::registry::ProviderCapability::Phase
-                        && status.availability
-                            == crate::providers::registry::CapabilityAvailability::Proven
+                .find(|provider| provider.id.as_str() == "agy")
+                .is_some_and(|provider| {
+                    provider.admission.as_str() == "unadmitted"
+                        && provider.readiness.qualification_available
+                        && !provider.readiness.production_enabled
                 });
         invariant(
             integrations_visited,
@@ -2065,7 +2081,7 @@ fn integration_lines(app: &ControlCenterApp) -> String {
                     )
                 })
                 .collect::<Vec<_>>()
-                .join(" · ");
+                .join("\n  ");
             let actions = if provider.manual_actions.is_empty() {
                 catalog(app.locale(), HumanMessageKey::NoAutomatedAction).to_owned()
             } else {
@@ -2077,17 +2093,28 @@ fn integration_lines(app: &ControlCenterApp) -> String {
                     .join(" · ")
             };
             format!(
-                "{} · {}\n{}: {} · {}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}",
+                "{} · {}\n{}: {} · {}: {}\nconfiguration: {}\n{}: {}\n{}: {}\nqualification: {} · production: {}\n{}: {}\n{}: {}",
                 provider.label,
                 provider.id,
                 catalog(app.locale(), HumanMessageKey::Version),
                 version,
                 catalog(app.locale(), HumanMessageKey::Admission),
                 provider.admission.as_str(),
+                provider.configuration_state,
                 catalog(app.locale(), HumanMessageKey::ObservationBackend),
                 provider.observation_backend,
                 catalog(app.locale(), HumanMessageKey::Hooks),
                 provider.hooks.as_str(),
+                if provider.readiness.qualification_available {
+                    "available"
+                } else {
+                    "not applicable"
+                },
+                if provider.readiness.production_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                },
                 catalog(app.locale(), HumanMessageKey::Capabilities),
                 capabilities,
                 catalog(app.locale(), HumanMessageKey::ManualActions),
@@ -2534,17 +2561,26 @@ mod tests {
     }
 
     #[test]
-    fn integrations_screen_is_localized_compact_and_never_invents_an_unregistered_provider() {
+    fn integrations_screen_shows_admitted_agy_configuration_and_capability_limits() {
         let mut app = app().with_interface_preferences(
             InterfacePreferences::default().with_language(InterfaceLanguage::ZhCn),
         );
         let mut snapshot = refresh(app.current(), app.current_interface());
         snapshot.integrations =
-            ProviderRegistry::codex_observation(Some("0.149.0"), true, true, true);
+            ProviderRegistry::codex_observation(Some("0.149.0"), true, true, true)
+                .with_agy_readiness(crate::providers::agy_backend::AgyReadinessProjection {
+                    state:
+                        crate::providers::agy_backend::AgyIntegrationReadiness::SupportedConfigured,
+                    version: Some("1.1.19".to_owned()),
+                    qualification_available: true,
+                    qualification_observations_available: true,
+                    production_enabled: true,
+                });
         app.merge_refresh(snapshot);
         app.screen = Screen::Integration;
 
-        let mut terminal = Terminal::new(TestBackend::new(28, 20)).expect("narrow terminal starts");
+        let mut terminal =
+            Terminal::new(TestBackend::new(120, 80)).expect("integration terminal starts");
         terminal
             .draw(|frame| render(frame, &app))
             .expect("Integrations render");
@@ -2553,7 +2589,12 @@ mod tests {
         assert!(rendered.contains("集成"));
         assert!(rendered.contains("Codex"));
         assert!(rendered.contains("phase"));
-        assert!(!rendered.contains("Agy"));
+        assert!(rendered.contains("Agy"));
+        assert!(rendered.contains("admitted"));
+        assert!(rendered.contains("supported_configured"));
+        assert!(rendered.contains("structured_title_callback"));
+        assert!(rendered.contains("plain_title_protocol"));
+        assert!(rendered.contains("not_applicable"));
         assert!(!rendered.contains("native_session"));
     }
 

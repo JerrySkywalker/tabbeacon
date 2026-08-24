@@ -6,7 +6,8 @@ The project is intentionally narrow: it keeps the user's existing terminal and a
 
 ## Product invariants
 
-- **Zero workflow change:** after one-time setup, daily use remains `codex`.
+- **Zero workflow change:** after one-time setup, daily use remains literal
+  `codex` or `agy`.
 - **Fail open:** if TabBeacon is absent or broken, Codex must remain usable.
 - **Offline-first identity:** repository naming must not require GitHub or network access.
 - **Provider-neutral core:** Codex, Claude, OpenCode, and future agents are adapters beneath one evidence/state model.
@@ -19,7 +20,9 @@ The provider-neutral core, Windows Terminal presentation layer, deterministic
 visual infrastructure, Git and non-Git workspace identity, first Codex hooks
 provider, session-scoped ephemeral title animator, bilingual human-first
 diagnostics, guided setup presets, portable local preferences, and keyboard-only
-live Control Center are implemented. See
+live Control Center are implemented. Exact Agy 1.1.19 is also supported through
+its user-global structured title callback, with a deliberately smaller proven
+capability set than Codex. See
 [`dev_governance_files/ROADMAP.md`](dev_governance_files/ROADMAP.md) and the
 [`Codex hooks integration guide`](docs/codex-hooks.md).
 
@@ -41,7 +44,7 @@ alias stays on the right. Default titles do not append lifecycle prose.
 The Codex-first product is intentionally limited to:
 
 - Windows Terminal;
-- Codex CLI;
+- Codex CLI and exact Agy 1.1.19;
 - pure Rust product code;
 - automatic repository abbreviation;
 - tab title ownership;
@@ -89,7 +92,21 @@ Use `tabbeacon setup --quick` to preview the recommended atomic preset with no
 enum spelling required. Both flows reuse the existing ownership-safe Codex
 setup path. `tabbeacon setup codex` remains available for scripted
 provider-only setup. Complete Codex `/hooks` trust review only when prompted.
-Daily agent use remains literally `codex`, not `tabbeacon codex`.
+Daily Codex use remains literally `codex`, not `tabbeacon codex`.
+
+For Agy 1.1.19, install the ownership-safe user-global title callback with:
+
+```powershell
+tabbeacon setup agy
+```
+
+Daily Agy use then remains literally `agy`. TabBeacon preserves unrelated Agy
+settings, refuses a foreign title owner or configuration drift, and restores
+the original settings bytes on owned uninstall when no unrelated change exists.
+Agy supports plain title identity plus observed Ready/Working lifecycle state.
+Tab color, Windows Terminal progress, animation, approval, result-ready, health,
+and background-task counts are explicitly unsupported or unavailable rather
+than inferred.
 
 For daily interactive management, run `tabbeacon ui` in a terminal. The
 Control Center keeps appearance edits in memory until Apply, supports Revert,
@@ -137,6 +154,11 @@ semantic state, age/recency, and lease-backed worker health. A current lease is
 reported as `recently_authorized`, not as proof that an operating-system process
 is alive. Raw session/turn identifiers, canonical workspace identity, content,
 credentials, process control, and session control are outside this interface.
+
+The v0.6 provider projections include Agy only for exact admitted 1.1.19 and
+distinguish configured, not configured, unsupported-version, and configuration
+drift states. Agy session rows contain only the shared workspace alias, provider,
+semantic state, recency, and root-stability facts.
 
 ### Rust library target
 

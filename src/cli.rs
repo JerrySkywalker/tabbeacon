@@ -16,8 +16,8 @@ use crate::interface_preferences::InterfaceLanguage;
 #[command(
     name = "tabbeacon",
     version,
-    about = "Live identity and status beacons for Codex CLI tabs in Windows Terminal.",
-    after_help = "Common commands:\n  tabbeacon setup codex\n  tabbeacon status --json\n  tabbeacon sessions --json\n  tabbeacon hooks --json\n  tabbeacon doctor --json\n  tabbeacon config show\n  tabbeacon alias show\n  tabbeacon completions powershell"
+    about = "Live identity and status beacons for coding-agent tabs in Windows Terminal.",
+    after_help = "Common commands:\n  tabbeacon setup codex\n  tabbeacon setup agy\n  tabbeacon status --json\n  tabbeacon sessions --json\n  tabbeacon hooks --json\n  tabbeacon doctor --json\n  tabbeacon config show\n  tabbeacon alias show\n  tabbeacon completions powershell"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -72,9 +72,9 @@ pub enum Command {
         #[command(subcommand)]
         command: ConvergenceCommand,
     },
-    /// Remove only the owned Codex integration declarations.
+    /// Remove only the selected provider's exact owned integration declarations.
     Uninstall {
-        provider: Provider,
+        provider: UninstallProvider,
         #[command(flatten)]
         output: HumanOutputArgs,
     },
@@ -165,6 +165,8 @@ pub enum Command {
 pub enum SetupCommand {
     /// Install or reconcile the Codex hook declarations.
     Codex,
+    /// Install or reconcile the admitted Agy title callback.
+    Agy,
 }
 
 /// Explicit ownership-safe repair operations.
@@ -186,6 +188,11 @@ pub enum RepairCommand {
 /// Explicitly pre-admission Agy qualification operations.
 #[derive(Debug, Subcommand)]
 pub enum AgyPreadmissionCommand {
+    /// Run the cohesive disposable G64 qualification workflow.
+    Qualification {
+        #[command(subcommand)]
+        command: AgyQualificationCommand,
+    },
     /// Print the Owner-present G64 qualification plan without running Agy.
     Plan(OutputArgs),
     /// Compare a direct `agy --version` result with the separately audited docs version.
@@ -214,6 +221,104 @@ pub enum AgyPreadmissionCommand {
     /// Internal disposable callback protocol harness: stdout is always one plain fallback title.
     #[command(name = "__title-callback-v1", hide = true)]
     TitleCallback,
+}
+
+/// Disposable Agy qualification workflow.
+#[derive(Debug, Subcommand)]
+pub enum AgyQualificationCommand {
+    /// Show whether a managed disposable qualification workspace exists.
+    Status {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Show the future Owner-present qualification plan without changing state.
+    Plan(OutputArgs),
+    /// Initialize a new disposable managed qualification workspace.
+    Init {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Invoke only literal `agy --version` and record bounded facts.
+    Probe {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Read one title/status JSON payload from stdin and persist only minimized facts.
+    #[command(name = "record-title")]
+    RecordTitle {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Read one Hook JSON payload from stdin and persist only minimized facts.
+    #[command(name = "record-hook")]
+    RecordHook {
+        #[arg(value_enum)]
+        event: AgyHookEventArgument,
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Inspect accumulated minimized observations without showing raw events.
+    Inspect {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Compile a stable unreviewed capability candidate.
+    Profile {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Produce a pending Owner G64 review packet.
+    Review {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Remove only a positively identified managed qualification workspace.
+    Clean {
+        /// Confirm deletion of the managed disposable workspace.
+        #[arg(long)]
+        confirm: bool,
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Protocol callback: record minimized state, then emit one plain fallback title.
+    #[command(name = "__title-callback-v1", hide = true)]
+    TitleCallback {
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+    },
+    /// Fail-open Hook callback: unknown events are not parsed or retained as raw payloads.
+    #[command(name = "__hook-callback-v1", hide = true)]
+    HookCallback {
+        event: String,
+        #[command(flatten)]
+        workspace: AgyQualificationWorkspaceArgs,
+    },
+}
+
+/// Optional explicit disposable root; otherwise user-local `TabBeacon` state is used.
+#[derive(Clone, Debug, Args)]
+pub struct AgyQualificationWorkspaceArgs {
+    /// Absolute disposable root ending in `agy` or `tabbeacon-agy-qualification-*`.
+    #[arg(long, value_name = "PATH")]
+    pub root: Option<PathBuf>,
 }
 
 /// Known Agy Hook event spellings offered by the qualification command.
@@ -397,10 +502,17 @@ pub struct UpgradePreflightArgs {
     pub output: OutputArgs,
 }
 
-/// Codex is the only production provider admitted in this train.
+/// Providers that expose the Codex Hook wire contract.
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum Provider {
     Codex,
+}
+
+/// Providers with an ownership-safe uninstall implementation.
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum UninstallProvider {
+    Codex,
+    Agy,
 }
 
 /// Windows Terminal title-policy operations.
@@ -517,8 +629,9 @@ mod tests {
     use clap::{CommandFactory, Parser};
 
     use super::{
-        AgyHookEventArgument, AgyPreadmissionCommand, AliasCommand, Cli, Command,
-        ConvergenceCommand, InterfaceCommand, InterfacePreferenceKey, OutputMode, SetupCommand,
+        AgyHookEventArgument, AgyPreadmissionCommand, AgyQualificationCommand, AliasCommand, Cli,
+        Command, ConvergenceCommand, InterfaceCommand, InterfacePreferenceKey, OutputMode,
+        SetupCommand,
     };
 
     #[test]
@@ -598,6 +711,17 @@ mod tests {
         };
         assert!(matches!(command, Some(SetupCommand::Codex)));
 
+        let agy_setup = Cli::try_parse_from(["tabbeacon", "setup", "agy", "--plain"])
+            .expect("direct Agy setup parses");
+        let Command::Setup {
+            command, output, ..
+        } = agy_setup.command.expect("Agy setup command")
+        else {
+            panic!("Agy setup command is typed");
+        };
+        assert!(matches!(command, Some(SetupCommand::Agy)));
+        assert_eq!(output.mode(), OutputMode::Plain);
+
         let agy_plan = Cli::try_parse_from(["tabbeacon", "agy", "plan", "--json"])
             .expect("Agy pre-admission plan parses");
         let Command::Agy { command } = agy_plan.command.expect("Agy command") else {
@@ -619,6 +743,28 @@ mod tests {
                 event: AgyHookEventArgument::PostToolUse,
                 output,
             } if output.mode() == OutputMode::Plain
+        ));
+
+        let agy_inspect = Cli::try_parse_from([
+            "tabbeacon",
+            "agy",
+            "qualification",
+            "inspect",
+            "--root",
+            "qualification-root",
+            "--json",
+        ])
+        .expect("cohesive Agy qualification command parses");
+        let Command::Agy {
+            command: AgyPreadmissionCommand::Qualification { command },
+        } = agy_inspect.command.expect("Agy command")
+        else {
+            panic!("nested Agy qualification command is typed");
+        };
+        assert!(matches!(
+            command,
+            AgyQualificationCommand::Inspect { output, .. }
+                if output.mode() == OutputMode::Json
         ));
 
         let quick = Cli::try_parse_from(["tabbeacon", "setup", "--quick"])
@@ -679,6 +825,16 @@ mod tests {
             panic!("uninstall output is typed");
         };
         assert_eq!(output.mode(), OutputMode::Plain);
+
+        let agy_uninstall = Cli::try_parse_from(["tabbeacon", "uninstall", "agy", "--plain"])
+            .expect("Agy uninstall parses");
+        assert!(matches!(
+            agy_uninstall.command,
+            Some(Command::Uninstall {
+                provider: super::UninstallProvider::Agy,
+                ..
+            })
+        ));
     }
 
     #[test]

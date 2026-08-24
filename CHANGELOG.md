@@ -2,6 +2,26 @@
 
 All notable changes to TabBeacon will be documented here.
 
+## [Unreleased]
+
+### Added
+
+- Added the exact Agy 1.1.19 production provider through its supported
+  user-global structured title callback while keeping daily launch literal
+  `agy`.
+- Added content-minimal Agy Ready/Working lifecycle projection, provider-aware
+  Sessions and title explanation, compact `A` provider badges, and a
+  provider-namespaced Root Workspace Anchor.
+
+### Changed
+
+- Agy setup now persists title activation, migrates the earlier owned quoted
+  command declaration, preserves unrelated settings, and refuses callback
+  executable paths that require unsafe shell quoting.
+- Integrations now exposes Agy's admitted callback capabilities and explicitly
+  reports unavailable approval/health/background state plus unsupported direct
+  Windows Terminal presentation.
+
 ## [0.5.2] - 2026-08-23
 
 ### Added
