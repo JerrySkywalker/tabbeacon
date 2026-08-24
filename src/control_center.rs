@@ -2081,7 +2081,7 @@ fn integration_lines(app: &ControlCenterApp) -> String {
                     )
                 })
                 .collect::<Vec<_>>()
-                .join(" · ");
+                .join("\n  ");
             let actions = if provider.manual_actions.is_empty() {
                 catalog(app.locale(), HumanMessageKey::NoAutomatedAction).to_owned()
             } else {
@@ -2093,13 +2093,14 @@ fn integration_lines(app: &ControlCenterApp) -> String {
                     .join(" · ")
             };
             format!(
-                "{} · {}\n{}: {} · {}: {}\n{}: {}\n{}: {}\nqualification: {} · production: {}\n{}: {}\n{}: {}",
+                "{} · {}\n{}: {} · {}: {}\nconfiguration: {}\n{}: {}\n{}: {}\nqualification: {} · production: {}\n{}: {}\n{}: {}",
                 provider.label,
                 provider.id,
                 catalog(app.locale(), HumanMessageKey::Version),
                 version,
                 catalog(app.locale(), HumanMessageKey::Admission),
                 provider.admission.as_str(),
+                provider.configuration_state,
                 catalog(app.locale(), HumanMessageKey::ObservationBackend),
                 provider.observation_backend,
                 catalog(app.locale(), HumanMessageKey::Hooks),
@@ -2560,18 +2561,26 @@ mod tests {
     }
 
     #[test]
-    fn integrations_screen_shows_agy_as_unadmitted_and_disabled() {
+    fn integrations_screen_shows_admitted_agy_configuration_and_capability_limits() {
         let mut app = app().with_interface_preferences(
             InterfacePreferences::default().with_language(InterfaceLanguage::ZhCn),
         );
         let mut snapshot = refresh(app.current(), app.current_interface());
         snapshot.integrations =
-            ProviderRegistry::codex_observation(Some("0.149.0"), true, true, true);
+            ProviderRegistry::codex_observation(Some("0.149.0"), true, true, true)
+                .with_agy_readiness(crate::providers::agy_backend::AgyReadinessProjection {
+                    state:
+                        crate::providers::agy_backend::AgyIntegrationReadiness::SupportedConfigured,
+                    version: Some("1.1.19".to_owned()),
+                    qualification_available: true,
+                    qualification_observations_available: true,
+                    production_enabled: true,
+                });
         app.merge_refresh(snapshot);
         app.screen = Screen::Integration;
 
         let mut terminal =
-            Terminal::new(TestBackend::new(80, 40)).expect("integration terminal starts");
+            Terminal::new(TestBackend::new(120, 80)).expect("integration terminal starts");
         terminal
             .draw(|frame| render(frame, &app))
             .expect("Integrations render");
@@ -2581,7 +2590,11 @@ mod tests {
         assert!(rendered.contains("Codex"));
         assert!(rendered.contains("phase"));
         assert!(rendered.contains("Agy"));
-        assert!(rendered.contains("unadmitted"));
+        assert!(rendered.contains("admitted"));
+        assert!(rendered.contains("supported_configured"));
+        assert!(rendered.contains("structured_title_callback"));
+        assert!(rendered.contains("plain_title_protocol"));
+        assert!(rendered.contains("not_applicable"));
         assert!(!rendered.contains("native_session"));
     }
 

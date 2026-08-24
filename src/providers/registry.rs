@@ -495,7 +495,7 @@ impl ProviderIntegrationSnapshot {
                     capability(
                         ProviderCapability::Phase,
                         proven,
-                        "agent_state_initializing",
+                        "agent_state_idle_working",
                     ),
                     capability(
                         ProviderCapability::Attention,
@@ -539,8 +539,8 @@ impl ProviderIntegrationSnapshot {
                     ),
                     capability(
                         ProviderCapability::WindowsTerminalPresentation,
-                        CapabilityAvailability::Unavailable,
-                        "not_observed",
+                        CapabilityAvailability::Unsupported,
+                        "plain_title_protocol",
                     ),
                     capability(
                         ProviderCapability::HookInspection,
@@ -852,12 +852,43 @@ mod tests {
             ProviderCapability::ApprovalQuestion,
             ProviderCapability::Health,
             ProviderCapability::BackgroundTasks,
-            ProviderCapability::WindowsTerminalPresentation,
         ] {
             assert!(agy.capability_profile.capabilities.iter().any(|entry| {
                 entry.capability == unavailable
                     && entry.availability == CapabilityAvailability::Unavailable
             }));
+        }
+        assert!(agy.capability_profile.capabilities.iter().any(|entry| {
+            entry.capability == ProviderCapability::WindowsTerminalPresentation
+                && entry.availability == CapabilityAvailability::Unsupported
+                && entry.authority == "plain_title_protocol"
+        }));
+    }
+
+    #[test]
+    fn provider_badge_auto_disambiguates_two_admitted_profiles_and_honors_overrides() {
+        let registry = ProviderRegistry::codex_observation(Some("0.149.0"), true, true, true)
+            .with_agy_readiness(AgyReadinessProjection {
+                state: AgyIntegrationReadiness::SupportedConfigured,
+                version: Some("1.1.19".to_owned()),
+                qualification_available: true,
+                qualification_observations_available: true,
+                production_enabled: true,
+            });
+        assert_eq!(registry.registered_ids(), vec!["codex", "agy"]);
+        for (provider, badge) in [("codex", "C"), ("agy", "A")] {
+            assert_eq!(
+                registry.title_badge_for(provider, ProviderBadgePolicy::Auto),
+                Some(badge.to_owned())
+            );
+            assert_eq!(
+                registry.title_badge_for(provider, ProviderBadgePolicy::Always),
+                Some(badge.to_owned())
+            );
+            assert_eq!(
+                registry.title_badge_for(provider, ProviderBadgePolicy::Off),
+                None
+            );
         }
     }
 

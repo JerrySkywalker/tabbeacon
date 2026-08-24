@@ -2087,7 +2087,7 @@ fn validate_provider_session_observation(
     if observation.schema != PROVIDER_SESSION_SCHEMA
         || !is_sha256(&observation.session_sha256)
         || observation.provider != "agy"
-        || observation.semantic_state != "working"
+        || !matches!(observation.semantic_state.as_str(), "ready" | "working")
         || RepositoryAlias::new(observation.workspace_alias.clone()).is_err()
         || observation.updated_unix_ms > observation.expires_unix_ms
         || observation
@@ -2835,6 +2835,57 @@ mod tests {
         assert_eq!(overview.sessions[0].workspace_alias, "AGY");
         let serialized = serde_json::to_string(&overview).expect("sessions serialize");
         assert!(!serialized.contains(&digest('a')));
+    }
+
+    #[test]
+    fn agy_ready_updates_its_own_row_and_foreign_provider_cannot_cross_namespace() {
+        let root = TestRoot::new("agy-provider-namespace");
+        let session = digest('b');
+        let observability = SessionWorkspaceObservability {
+            root_binding_stable: true,
+            workspace_mismatch_observed: false,
+            active_subagents: 0,
+            background_tasks: None,
+        };
+        record_provider_session_observation(
+            &root.0,
+            &session,
+            "agy",
+            "AGY",
+            "working",
+            1_000,
+            observability.clone(),
+        )
+        .expect("working observation publishes");
+        assert!(
+            record_provider_session_observation(
+                &root.0,
+                &session,
+                "codex",
+                "CODEX",
+                "working",
+                1_001,
+                observability.clone(),
+            )
+            .is_err(),
+            "Codex cannot write the Agy-only provider-session namespace"
+        );
+        record_provider_session_observation(
+            &root.0,
+            &session,
+            "agy",
+            "AGY",
+            "ready",
+            1_002,
+            observability,
+        )
+        .expect("ready observation updates the same Agy row");
+
+        let overview = inspect_sessions_read_only(&root.0, 1_003);
+        assert_eq!(overview.sessions.len(), 1);
+        assert_eq!(overview.sessions[0].provider, "agy");
+        assert_eq!(overview.sessions[0].semantic_state, "ready");
+        assert_eq!(overview.sessions[0].workspace_alias, "AGY");
     }
 
     #[test]

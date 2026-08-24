@@ -16,8 +16,8 @@ use crate::interface_preferences::InterfaceLanguage;
 #[command(
     name = "tabbeacon",
     version,
-    about = "Live identity and status beacons for Codex CLI tabs in Windows Terminal.",
-    after_help = "Common commands:\n  tabbeacon setup codex\n  tabbeacon status --json\n  tabbeacon sessions --json\n  tabbeacon hooks --json\n  tabbeacon doctor --json\n  tabbeacon config show\n  tabbeacon alias show\n  tabbeacon completions powershell"
+    about = "Live identity and status beacons for coding-agent tabs in Windows Terminal.",
+    after_help = "Common commands:\n  tabbeacon setup codex\n  tabbeacon setup agy\n  tabbeacon status --json\n  tabbeacon sessions --json\n  tabbeacon hooks --json\n  tabbeacon doctor --json\n  tabbeacon config show\n  tabbeacon alias show\n  tabbeacon completions powershell"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -710,6 +710,17 @@ mod tests {
             panic!("setup command is typed");
         };
         assert!(matches!(command, Some(SetupCommand::Codex)));
+
+        let agy_setup = Cli::try_parse_from(["tabbeacon", "setup", "agy", "--plain"])
+            .expect("direct Agy setup parses");
+        let Command::Setup {
+            command, output, ..
+        } = agy_setup.command.expect("Agy setup command")
+        else {
+            panic!("Agy setup command is typed");
+        };
+        assert!(matches!(command, Some(SetupCommand::Agy)));
+        assert_eq!(output.mode(), OutputMode::Plain);
 
         let agy_plan = Cli::try_parse_from(["tabbeacon", "agy", "plan", "--json"])
             .expect("Agy pre-admission plan parses");

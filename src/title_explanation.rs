@@ -45,7 +45,7 @@ pub struct TitleWorkspaceExplanation {
 pub struct TitleExplanation {
     /// Versioned schema label.
     pub schema: &'static str,
-    /// The only admitted provider in this release train.
+    /// Provider observed for this workspace, or a bounded ambiguity token.
     pub provider: &'static str,
     /// No native session is correlated from this read-only surface.
     pub semantic_phase: &'static str,
@@ -83,12 +83,41 @@ impl TitleExplanation {
         sessions: &SessionsOverview,
         integrations: &ProviderRegistry,
     ) -> Self {
+        let effective_alias = workspace.map(|value| value.effective_alias().as_str());
+        let matching_sessions = sessions
+            .sessions
+            .iter()
+            .filter(|session| effective_alias.is_some_and(|alias| session.workspace_alias == alias))
+            .collect::<Vec<_>>();
+        let provider = observed_provider(&matching_sessions);
+        let semantic_phase = observed_phase(&matching_sessions);
+        let stable_root_observed = !matching_sessions.is_empty()
+            && matching_sessions
+                .iter()
+                .all(|session| session.workspace_observability.root_binding_stable);
         let workspace = workspace.map(|workspace| TitleWorkspaceExplanation {
             display_hint: workspace.workspace().as_str().to_owned(),
             identity_class: workspace.identity_class().as_str(),
-            root_binding_source: "current_cli_workspace",
-            root_binding_status: "not_session_correlated",
-            workspace_mismatch_observation: "not_session_correlated",
+            root_binding_source: if stable_root_observed {
+                "provider_session_observation"
+            } else {
+                "current_cli_workspace"
+            },
+            root_binding_status: if stable_root_observed {
+                "stable_workspace_observation"
+            } else {
+                "not_session_correlated"
+            },
+            workspace_mismatch_observation: if matching_sessions
+                .iter()
+                .any(|session| session.workspace_observability.workspace_mismatch_observed)
+            {
+                "observed"
+            } else if stable_root_observed {
+                "not_observed"
+            } else {
+                "not_session_correlated"
+            },
             automatic_alias: workspace.automatic_alias().as_str().to_owned(),
             override_alias: workspace
                 .custom_alias()
@@ -117,16 +146,24 @@ impl TitleExplanation {
                         settings.activity().as_str().to_owned(),
                         settings.provider_badge().as_str().to_owned(),
                         integrations
-                            .title_badge_for("codex", settings.provider_badge())
+                            .title_badge_for(provider, settings.provider_badge())
                             .unwrap_or_else(|| match settings.provider_badge() {
                                 crate::settings::ProviderBadgePolicy::Off => {
                                     "not_emitted".to_owned()
                                 }
                                 crate::settings::ProviderBadgePolicy::Auto => {
-                                    "not_emitted_single_provider".to_owned()
+                                    if provider == "multiple" {
+                                        "emitted_per_provider".to_owned()
+                                    } else {
+                                        "not_emitted_single_provider".to_owned()
+                                    }
                                 }
                                 crate::settings::ProviderBadgePolicy::Always => {
-                                    "unavailable_unadmitted_provider".to_owned()
+                                    if provider == "multiple" {
+                                        "emitted_per_provider".to_owned()
+                                    } else {
+                                        "unavailable_unadmitted_provider".to_owned()
+                                    }
                                 }
                             }),
                     )
@@ -134,24 +171,74 @@ impl TitleExplanation {
             );
         Self {
             schema: TITLE_EXPLANATION_SCHEMA,
-            provider: "codex",
-            semantic_phase: "not_session_correlated",
-            attention: "not_session_correlated",
+            provider,
+            semantic_phase,
+            attention: "unavailable",
             activity_health: sessions.health.as_str().to_owned(),
             activity_channel,
-            session_correlation: if sessions.active_sessions == 0 {
+            session_correlation: if matching_sessions.is_empty() {
                 "unavailable"
+            } else if provider == "multiple" {
+                "multiple_workspace_observations"
             } else {
-                "not_session_correlated"
+                "workspace_observation_only"
             },
             workspace,
             title_owner,
-            codex_writer_state: diagnostics.title.codex_writer_state.clone(),
-            title_authority: diagnostics.title.authority.as_str().to_owned(),
-            title_conflict: diagnostics.title.conflict_class.as_str().to_owned(),
+            codex_writer_state: if provider == "agy" {
+                "not_applicable".to_owned()
+            } else {
+                diagnostics.title.codex_writer_state.clone()
+            },
+            title_authority: if provider == "agy" {
+                "structured_title_callback".to_owned()
+            } else if provider == "multiple" {
+                "provider_specific".to_owned()
+            } else {
+                diagnostics.title.authority.as_str().to_owned()
+            },
+            title_conflict: if provider == "agy" {
+                "not_applicable".to_owned()
+            } else {
+                diagnostics.title.conflict_class.as_str().to_owned()
+            },
             provider_badge_policy,
             provider_badge_value,
         }
+    }
+}
+
+fn observed_provider(sessions: &[&crate::activity::SessionOverview]) -> &'static str {
+    let mut observed = sessions.iter().map(|session| session.provider.as_str());
+    let Some(first) = observed.next() else {
+        return "not_session_correlated";
+    };
+    if observed.any(|provider| provider != first) {
+        return "multiple";
+    }
+    match first {
+        "agy" => "agy",
+        "codex" => "codex",
+        _ => "unknown",
+    }
+}
+
+fn observed_phase(sessions: &[&crate::activity::SessionOverview]) -> &'static str {
+    let mut observed = sessions
+        .iter()
+        .map(|session| session.semantic_state.as_str());
+    let Some(first) = observed.next() else {
+        return "not_session_correlated";
+    };
+    if observed.any(|phase| phase != first) {
+        return "multiple";
+    }
+    match first {
+        "ready" => "ready",
+        "working" => "working",
+        "result-ready" => "result_ready",
+        "approval" => "approval",
+        _ => "unknown",
     }
 }
 
@@ -173,5 +260,41 @@ impl Default for TitleExplanation {
             provider_badge_policy: "unavailable".to_owned(),
             provider_badge_value: "unavailable".to_owned(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{observed_phase, observed_provider};
+    use crate::activity::{
+        SessionOverview, SessionRecency, SessionWorkerHealth, SessionWorkspaceObservability,
+    };
+
+    fn session(provider: &str, phase: &str) -> SessionOverview {
+        SessionOverview {
+            workspace_alias: "TB".to_owned(),
+            provider: provider.to_owned(),
+            semantic_state: phase.to_owned(),
+            age_seconds: 0,
+            recency: SessionRecency::JustNow,
+            worker_health: SessionWorkerHealth::RecentlyAuthorized,
+            workspace_observability: SessionWorkspaceObservability {
+                root_binding_stable: true,
+                workspace_mismatch_observed: false,
+                active_subagents: 0,
+                background_tasks: None,
+            },
+        }
+    }
+
+    #[test]
+    fn explanation_context_projects_agy_without_native_identity_and_marks_ambiguity() {
+        let agy = session("agy", "ready");
+        assert_eq!(observed_provider(&[&agy]), "agy");
+        assert_eq!(observed_phase(&[&agy]), "ready");
+
+        let codex = session("codex", "working");
+        assert_eq!(observed_provider(&[&agy, &codex]), "multiple");
+        assert_eq!(observed_phase(&[&agy, &codex]), "multiple");
     }
 }

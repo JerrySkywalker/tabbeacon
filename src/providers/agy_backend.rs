@@ -3,8 +3,9 @@
 //! The adapter is intentionally narrower than Agy's title/status payload. G64
 //! admitted exactly Agy 1.1.19, the user-global structured title callback, a
 //! stable conversation identity, an equal current/project workspace root, and
-//! `initializing` as lifecycle authority for [`Phase::Working`]. Content fields
-//! and every unobserved semantic remain outside the production boundary.
+//! the observed `initializing`/`working` -> [`Phase::Working`] plus `idle` ->
+//! [`Phase::Ready`] lifecycle subset. Content fields and every unobserved
+//! semantic remain outside the production boundary.
 
 use std::{
     fmt, fs,
@@ -31,7 +32,8 @@ use crate::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput,
         WindowsTerminalCapabilities, WindowsTerminalRenderer,
     },
-    repo::{StableAliasRegistry, WorkspaceIdentityResolver},
+    providers::registry::ProviderRegistry,
+    repo::{RepositoryAlias, StableAliasRegistry, WorkspaceIdentityResolver},
     settings::{PresentationSettings, PresentationSettingsStore},
 };
 
@@ -239,13 +241,14 @@ pub struct AgyTitleObservation {
     project_root: PathBuf,
     session_sha256: String,
     event_sequence: u64,
+    phase: Phase,
 }
 
 impl fmt::Debug for AgyTitleObservation {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AgyTitleObservation")
-            .field("phase", &Phase::Working)
+            .field("phase", &self.phase)
             .field("root_binding_stable", &true)
             .finish_non_exhaustive()
     }
@@ -282,11 +285,14 @@ impl AgyTitleNormalizer {
             return None;
         }
         let object = parse_qualification_object(raw)?;
-        if object.get("version").and_then(Value::as_str) != Some(AGY_ADMITTED_VERSION)
-            || object.get("agent_state").and_then(Value::as_str) != Some("initializing")
-        {
+        if object.get("version").and_then(Value::as_str) != Some(AGY_ADMITTED_VERSION) {
             return None;
         }
+        let phase = match object.get("agent_state").and_then(Value::as_str) {
+            Some("idle") => Phase::Ready,
+            Some("initializing" | "working") => Phase::Working,
+            Some(_) | None => return None,
+        };
         let native_session = object
             .get("conversation_id")
             .or_else(|| object.get("session_id"))?
@@ -319,7 +325,7 @@ impl AgyTitleNormalizer {
             observed_at,
             tie_break,
             StatePatch {
-                phase: FieldUpdate::Set(Phase::Working),
+                phase: FieldUpdate::Set(phase),
                 attention: FieldUpdate::Unchanged,
                 health: FieldUpdate::Unchanged,
             },
@@ -329,6 +335,7 @@ impl AgyTitleNormalizer {
             project_root: PathBuf::from(project_root),
             session_sha256,
             event_sequence,
+            phase,
         })
     }
 }
@@ -340,7 +347,191 @@ pub enum AgyTitleDispatchOutcome {
     Applied,
     DegradedInput,
     DegradedWorkspaceIdentity,
+    DegradedRootWorkspaceAnchor,
     DegradedStateRoot,
+}
+
+const AGY_ROOT_ANCHOR_SCHEMA: &str = "tabbeacon-agy-root-workspace-anchor-v1";
+const AGY_ROOT_ANCHOR_DIRECTORY: &str = "agy-root-workspace-anchor-v1";
+const AGY_ROOT_ANCHOR_LOCK: &str = "root-workspace-anchor.lock";
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AgyPersistedRootAnchor {
+    schema: String,
+    provider: String,
+    session_sha256: String,
+    workspace_identity_sha256: String,
+    workspace_location_sha256: String,
+    effective_alias: String,
+    workspace_mismatch_observed: bool,
+    updated_unix_seconds: u64,
+}
+
+#[derive(Clone, Debug)]
+struct AgyRootSelection {
+    effective_alias: RepositoryAlias,
+    workspace_mismatch_observed: bool,
+}
+
+#[derive(Clone, Debug)]
+struct AgyRootAnchorStore {
+    directory: PathBuf,
+}
+
+impl AgyRootAnchorStore {
+    fn new(state_root: &Path) -> Self {
+        Self {
+            directory: state_root.join(AGY_ROOT_ANCHOR_DIRECTORY),
+        }
+    }
+
+    fn select_existing(
+        &self,
+        session_sha256: &str,
+        workspace_location_sha256: &str,
+        observed_unix_seconds: u64,
+    ) -> io::Result<Option<AgyRootSelection>> {
+        self.with_anchor(session_sha256, |anchor| {
+            let Some(mut anchor) = anchor else {
+                return Ok((None, None));
+            };
+            validate_agy_root_anchor(&anchor, session_sha256)?;
+            anchor.workspace_mismatch_observed |=
+                anchor.workspace_location_sha256 != workspace_location_sha256;
+            anchor.updated_unix_seconds = observed_unix_seconds;
+            let selection = agy_root_selection(&anchor)?;
+            Ok((Some(anchor), Some(selection)))
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_if_absent(
+        &self,
+        session_sha256: &str,
+        workspace_identity_sha256: &str,
+        workspace_location_sha256: &str,
+        effective_alias: &RepositoryAlias,
+        observed_unix_seconds: u64,
+    ) -> io::Result<AgyRootSelection> {
+        self.with_anchor(session_sha256, |anchor| {
+            if let Some(anchor) = anchor {
+                validate_agy_root_anchor(&anchor, session_sha256)?;
+                let selection = agy_root_selection(&anchor)?;
+                return Ok((Some(anchor), Some(selection)));
+            }
+            let anchor = AgyPersistedRootAnchor {
+                schema: AGY_ROOT_ANCHOR_SCHEMA.to_owned(),
+                provider: AGY_PROVIDER_ID.to_owned(),
+                session_sha256: session_sha256.to_owned(),
+                workspace_identity_sha256: workspace_identity_sha256.to_owned(),
+                workspace_location_sha256: workspace_location_sha256.to_owned(),
+                effective_alias: effective_alias.as_str().to_owned(),
+                workspace_mismatch_observed: false,
+                updated_unix_seconds: observed_unix_seconds,
+            };
+            validate_agy_root_anchor(&anchor, session_sha256)?;
+            let selection = agy_root_selection(&anchor)?;
+            Ok((Some(anchor), Some(selection)))
+        })?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Agy root anchor was not stored"))
+    }
+
+    fn with_anchor<T>(
+        &self,
+        session_sha256: &str,
+        operation: impl FnOnce(
+            Option<AgyPersistedRootAnchor>,
+        ) -> io::Result<(Option<AgyPersistedRootAnchor>, T)>,
+    ) -> io::Result<T> {
+        if !is_sha256(session_sha256) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid Agy session digest",
+            ));
+        }
+        ensure_safe_directory_path(&self.directory).map_err(io::Error::other)?;
+        fs::create_dir_all(&self.directory)?;
+        ensure_safe_directory_path(&self.directory).map_err(io::Error::other)?;
+        let lock_path = self.directory.join(AGY_ROOT_ANCHOR_LOCK);
+        ensure_safe_file_path(&lock_path).map_err(io::Error::other)?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)?;
+        lock.lock()?;
+        let path = self
+            .directory
+            .join(format!("session-{session_sha256}.json"));
+        ensure_safe_file_path(&path).map_err(io::Error::other)?;
+        let current = match fs::read(&path) {
+            Ok(bytes) if bytes.len() <= 4_096 => Some(
+                serde_json::from_slice(&bytes)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+            ),
+            Ok(_) => {
+                let _ = File::unlock(&lock);
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "oversized Agy root anchor",
+                ));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => {
+                let _ = File::unlock(&lock);
+                return Err(error);
+            }
+        };
+        let result = operation(current).and_then(|(updated, result)| {
+            if let Some(updated) = updated {
+                let mut bytes = serde_json::to_vec_pretty(&updated)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                bytes.push(b'\n');
+                atomic_write(&path, &bytes).map_err(io::Error::other)?;
+            }
+            Ok(result)
+        });
+        let unlock = File::unlock(&lock);
+        match (result, unlock) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
+    }
+}
+
+fn agy_root_selection(anchor: &AgyPersistedRootAnchor) -> io::Result<AgyRootSelection> {
+    Ok(AgyRootSelection {
+        effective_alias: RepositoryAlias::new(anchor.effective_alias.clone())
+            .map_err(io::Error::other)?,
+        workspace_mismatch_observed: anchor.workspace_mismatch_observed,
+    })
+}
+
+fn validate_agy_root_anchor(
+    anchor: &AgyPersistedRootAnchor,
+    expected_session_sha256: &str,
+) -> io::Result<()> {
+    if anchor.schema != AGY_ROOT_ANCHOR_SCHEMA
+        || anchor.provider != AGY_PROVIDER_ID
+        || anchor.session_sha256 != expected_session_sha256
+        || !is_sha256(&anchor.session_sha256)
+        || !is_sha256(&anchor.workspace_identity_sha256)
+        || !is_sha256(&anchor.workspace_location_sha256)
+        || RepositoryAlias::new(anchor.effective_alias.clone()).is_err()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid Agy root anchor",
+        ));
+    }
+    Ok(())
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Plain title callback result. No terminal protocol bytes are emitted here.
@@ -356,6 +547,7 @@ pub struct AgyTitleRuntime {
     profile: AgyAdmittedProfile,
     state_root: PathBuf,
     identity_resolver: WorkspaceIdentityResolver,
+    root_anchors: AgyRootAnchorStore,
     renderer: WindowsTerminalRenderer,
 }
 
@@ -368,6 +560,7 @@ impl AgyTitleRuntime {
             profile: frozen_profile(),
             state_root: state_root.clone(),
             identity_resolver: WorkspaceIdentityResolver::new(&state_root),
+            root_anchors: AgyRootAnchorStore::new(&state_root),
             renderer: WindowsTerminalRenderer::with_settings(
                 WindowsTerminalCapabilities::new(false),
                 settings,
@@ -396,17 +589,63 @@ impl AgyTitleRuntime {
             record_callback_diagnostics(&self.state_root, raw, false, observed_at);
             return fallback_title(AgyTitleDispatchOutcome::DegradedInput);
         };
-        let Ok(workspace) = self.identity_resolver.resolve(&normalized.project_root) else {
+        let Ok(workspace_location_sha256) =
+            WorkspaceIdentityResolver::fast_workspace_location_sha256(&normalized.project_root)
+        else {
             record_callback_diagnostics(&self.state_root, raw, false, observed_at);
             return fallback_title(AgyTitleDispatchOutcome::DegradedWorkspaceIdentity);
         };
+        let observed_unix_seconds = normalized.event_sequence / 1_000;
+        let root_selection = match self.root_anchors.select_existing(
+            &normalized.session_sha256,
+            &workspace_location_sha256,
+            observed_unix_seconds,
+        ) {
+            Ok(Some(selection)) => selection,
+            Ok(None) => {
+                let Ok(workspace) = self.identity_resolver.resolve(&normalized.project_root) else {
+                    record_callback_diagnostics(&self.state_root, raw, false, observed_at);
+                    return fallback_title(AgyTitleDispatchOutcome::DegradedWorkspaceIdentity);
+                };
+                let workspace_identity_sha256 = sha256_hex(workspace.identity.as_str().as_bytes());
+                match self.root_anchors.bind_if_absent(
+                    &normalized.session_sha256,
+                    &workspace_identity_sha256,
+                    &workspace_location_sha256,
+                    &workspace.effective_alias,
+                    observed_unix_seconds,
+                ) {
+                    Ok(selection) => selection,
+                    Err(_) => {
+                        record_callback_diagnostics(&self.state_root, raw, false, observed_at);
+                        return fallback_title(
+                            AgyTitleDispatchOutcome::DegradedRootWorkspaceAnchor,
+                        );
+                    }
+                }
+            }
+            Err(_) => {
+                record_callback_diagnostics(&self.state_root, raw, false, observed_at);
+                return fallback_title(AgyTitleDispatchOutcome::DegradedRootWorkspaceAnchor);
+            }
+        };
         let mut reconciler = SessionReconciler::default();
         let snapshot = reconciler.apply(normalized.evidence());
+        let registry = ProviderRegistry::codex_observation(None, true, false, false)
+            .with_agy_readiness(AgyReadinessProjection {
+                state: AgyIntegrationReadiness::SupportedConfigured,
+                version: Some(AGY_ADMITTED_VERSION.to_owned()),
+                qualification_available: true,
+                qualification_observations_available: true,
+                production_enabled: true,
+            });
+        let provider_badge =
+            registry.title_badge_for(AGY_PROVIDER_ID, self.renderer.settings().provider_badge());
         let action = PresentationPolicy::resolve(
             SemanticPresentationInput::from_snapshot_with_provider_badge(
                 &snapshot,
-                workspace.effective_alias.as_str(),
-                Some("A"),
+                root_selection.effective_alias.as_str(),
+                provider_badge.as_deref(),
             ),
         );
         let state = match &action {
@@ -418,7 +657,7 @@ impl AgyTitleRuntime {
             .map_or_else(|| "Agy".to_owned(), |title| title.as_str().to_owned());
         let workspace_observability = SessionWorkspaceObservability {
             root_binding_stable: true,
-            workspace_mismatch_observed: false,
+            workspace_mismatch_observed: root_selection.workspace_mismatch_observed,
             active_subagents: 0,
             background_tasks: None,
         };
@@ -426,8 +665,12 @@ impl AgyTitleRuntime {
             &self.state_root,
             &normalized.session_sha256,
             AGY_PROVIDER_ID,
-            workspace.effective_alias.as_str(),
-            "working",
+            root_selection.effective_alias.as_str(),
+            match normalized.phase {
+                Phase::Ready => "ready",
+                Phase::Working => "working",
+                _ => "unavailable",
+            },
             normalized.event_sequence,
             workspace_observability.clone(),
         );
@@ -581,6 +824,7 @@ pub enum AgyProductionSetupError {
     ForeignTitleOwner,
     ConfigurationDrift,
     OwnershipStateInvalid,
+    UnrepresentableCallbackCommand,
     Io,
 }
 
@@ -594,6 +838,9 @@ impl fmt::Display for AgyProductionSetupError {
             Self::ForeignTitleOwner => "the Agy title callback is owned by another configuration",
             Self::ConfigurationDrift => "Agy configuration drift prevents an ownership-safe change",
             Self::OwnershipStateInvalid => "TabBeacon Agy ownership state is invalid",
+            Self::UnrepresentableCallbackCommand => {
+                "the TabBeacon executable path cannot be represented safely in Agy's title command"
+            }
             Self::Io => "an Agy setup filesystem operation failed",
         })
     }
@@ -623,7 +870,8 @@ struct AgySetupManifest {
     callback_sha256: String,
 }
 
-const AGY_SETUP_MANIFEST_SCHEMA: &str = "tabbeacon-agy-setup-v1";
+const AGY_SETUP_MANIFEST_SCHEMA_V1: &str = "tabbeacon-agy-setup-v1";
+const AGY_SETUP_MANIFEST_SCHEMA: &str = "tabbeacon-agy-setup-v2";
 
 /// Production user-global setup with injectable paths for focused tests.
 #[derive(Clone, Debug)]
@@ -709,12 +957,12 @@ impl AgyProductionSetup {
                 false,
             ),
             Ok(Some(manifest)) => match self.current_matches_owned(&manifest) {
-                Ok(true) => readiness(
+                Ok(true) if manifest.schema == AGY_SETUP_MANIFEST_SCHEMA => readiness(
                     AgyIntegrationReadiness::SupportedConfigured,
                     Some(version),
                     true,
                 ),
-                Ok(false) | Err(_) => readiness(
+                Ok(true) | Ok(false) | Err(_) => readiness(
                     AgyIntegrationReadiness::ConfigurationDrift,
                     Some(version),
                     false,
@@ -740,10 +988,20 @@ impl AgyProductionSetup {
         let _lock = SetupLock::acquire(&self.state_root)?;
         self.validate_paths()?;
         if let Some(manifest) = self.read_manifest()? {
-            return if self.current_matches_owned(&manifest)? {
+            let current = fs::read(&self.config_path)
+                .map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
+            if self
+                .owned_current_without_title(&manifest, &current, false)?
+                .is_none()
+            {
+                return Err(AgyProductionSetupError::ConfigurationDrift);
+            }
+            return if manifest.schema == AGY_SETUP_MANIFEST_SCHEMA_V1 {
+                self.upgrade_owned_manifest(&manifest)
+            } else if self.executable_matches_manifest(&manifest)? {
                 Ok(AgyProductionSetupOutcome::AlreadyConfigured)
             } else {
-                Err(AgyProductionSetupError::ConfigurationDrift)
+                self.refresh_owned_executable(&manifest)
             };
         }
 
@@ -807,7 +1065,7 @@ impl AgyProductionSetup {
         let current =
             fs::read(&self.config_path).map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
         let current_without_title = self
-            .owned_current_without_title(&manifest, &current)?
+            .owned_current_without_title(&manifest, &current, true)?
             .ok_or(AgyProductionSetupError::ConfigurationDrift)?;
         let backup = fs::read(self.backup_path())
             .map_err(|_| AgyProductionSetupError::OwnershipStateInvalid)?;
@@ -876,14 +1134,85 @@ impl AgyProductionSetup {
     }
 
     fn callback_value(&self) -> Result<Value, AgyProductionSetupError> {
+        self.callback_value_for_schema(AGY_SETUP_MANIFEST_SCHEMA)
+    }
+
+    fn callback_value_for_schema(&self, schema: &str) -> Result<Value, AgyProductionSetupError> {
         let executable = self
             .executable
             .to_str()
             .ok_or(AgyProductionSetupError::EnvironmentUnavailable)?;
+        if schema == AGY_SETUP_MANIFEST_SCHEMA_V1 {
+            return Ok(json!({
+                "type": "command",
+                "command": format!("\"{executable}\" agy __title-callback-v1")
+            }));
+        }
+        if schema != AGY_SETUP_MANIFEST_SCHEMA {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
+        if executable.chars().any(|character| {
+            character.is_control()
+                || character.is_whitespace()
+                || matches!(
+                    character,
+                    '"' | '&' | '|' | '<' | '>' | '^' | '%' | '!' | '(' | ')'
+                )
+        }) {
+            return Err(AgyProductionSetupError::UnrepresentableCallbackCommand);
+        }
         Ok(json!({
             "type": "command",
-            "command": format!("\"{executable}\" agy __title-callback-v1")
+            "command": format!("{executable} agy __title-callback-v1"),
+            "enabled": true
         }))
+    }
+
+    fn upgrade_owned_manifest(
+        &self,
+        manifest: &AgySetupManifest,
+    ) -> Result<AgyProductionSetupOutcome, AgyProductionSetupError> {
+        if manifest.schema != AGY_SETUP_MANIFEST_SCHEMA_V1 {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
+        let current =
+            fs::read(&self.config_path).map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
+        let mut object = parse_qualification_object(&current)
+            .ok_or(AgyProductionSetupError::MalformedConfiguration)?;
+        if object.remove("title") != Some(self.callback_value_for_schema(&manifest.schema)?) {
+            return Err(AgyProductionSetupError::ConfigurationDrift);
+        }
+        let callback = self.callback_value()?;
+        object.insert("title".to_owned(), callback.clone());
+        let mut candidate = serde_json::to_vec_pretty(&Value::Object(object))
+            .map_err(|_| AgyProductionSetupError::MalformedConfiguration)?;
+        candidate.push(b'\n');
+
+        let backup = fs::read(self.backup_path())
+            .map_err(|_| AgyProductionSetupError::OwnershipStateInvalid)?;
+        let upgraded = AgySetupManifest {
+            schema: AGY_SETUP_MANIFEST_SCHEMA.to_owned(),
+            admitted_version: AGY_ADMITTED_VERSION.to_owned(),
+            original_present: manifest.original_present,
+            original_sha256: manifest.original_sha256.clone(),
+            applied_sha256: sha256_hex(&candidate),
+            executable_sha256: sha256_hex(
+                &fs::read(&self.executable).map_err(|_| AgyProductionSetupError::Io)?,
+            ),
+            callback_sha256: sha256_hex(
+                &serde_json::to_vec(&callback)
+                    .map_err(|_| AgyProductionSetupError::MalformedConfiguration)?,
+            ),
+        };
+        if sha256_hex(&backup) != upgraded.original_sha256 {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
+        write_if_unchanged(&self.config_path, &current, &candidate)?;
+        atomic_write_json(&self.manifest_path(), &upgraded)?;
+        if !self.current_matches_owned(&upgraded)? {
+            return Err(AgyProductionSetupError::ConfigurationDrift);
+        }
+        Ok(AgyProductionSetupOutcome::Installed)
     }
 
     fn current_matches_owned(
@@ -901,7 +1230,7 @@ impl AgyProductionSetup {
         current: &[u8],
     ) -> Result<bool, AgyProductionSetupError> {
         Ok(self
-            .owned_current_without_title(manifest, current)?
+            .owned_current_without_title(manifest, current, true)?
             .is_some())
     }
 
@@ -909,8 +1238,10 @@ impl AgyProductionSetup {
         &self,
         manifest: &AgySetupManifest,
         current: &[u8],
+        require_current_executable: bool,
     ) -> Result<Option<Map<String, Value>>, AgyProductionSetupError> {
-        if manifest.schema != AGY_SETUP_MANIFEST_SCHEMA
+        if (manifest.schema != AGY_SETUP_MANIFEST_SCHEMA
+            && manifest.schema != AGY_SETUP_MANIFEST_SCHEMA_V1)
             || manifest.admitted_version != AGY_ADMITTED_VERSION
         {
             return Err(AgyProductionSetupError::OwnershipStateInvalid);
@@ -920,16 +1251,23 @@ impl AgyProductionSetup {
         if sha256_hex(&backup) != manifest.original_sha256 {
             return Err(AgyProductionSetupError::OwnershipStateInvalid);
         }
-        if sha256_hex(
-            &fs::read(&self.executable)
-                .map_err(|_| AgyProductionSetupError::OwnershipStateInvalid)?,
-        ) != manifest.executable_sha256
+        if manifest.executable_sha256.len() != 64
+            || !manifest
+                .executable_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
+        if require_current_executable
+            && manifest.schema == AGY_SETUP_MANIFEST_SCHEMA
+            && !self.executable_matches_manifest(manifest)?
         {
             return Err(AgyProductionSetupError::OwnershipStateInvalid);
         }
         let mut current_object = parse_qualification_object(current)
             .ok_or(AgyProductionSetupError::MalformedConfiguration)?;
-        let expected_callback = self.callback_value()?;
+        let expected_callback = self.callback_value_for_schema(&manifest.schema)?;
         if current_object.remove("title") != Some(expected_callback.clone()) {
             return Ok(None);
         }
@@ -957,6 +1295,33 @@ impl AgyProductionSetup {
             return Err(AgyProductionSetupError::OwnershipStateInvalid);
         }
         Ok(Some(current_object))
+    }
+
+    fn executable_matches_manifest(
+        &self,
+        manifest: &AgySetupManifest,
+    ) -> Result<bool, AgyProductionSetupError> {
+        Ok(sha256_hex(
+            &fs::read(&self.executable)
+                .map_err(|_| AgyProductionSetupError::OwnershipStateInvalid)?,
+        ) == manifest.executable_sha256)
+    }
+
+    fn refresh_owned_executable(
+        &self,
+        manifest: &AgySetupManifest,
+    ) -> Result<AgyProductionSetupOutcome, AgyProductionSetupError> {
+        if manifest.schema != AGY_SETUP_MANIFEST_SCHEMA {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
+        let mut refreshed = manifest.clone();
+        refreshed.executable_sha256 =
+            sha256_hex(&fs::read(&self.executable).map_err(|_| AgyProductionSetupError::Io)?);
+        atomic_write_json(&self.manifest_path(), &refreshed)?;
+        if !self.current_matches_owned(&refreshed)? {
+            return Err(AgyProductionSetupError::ConfigurationDrift);
+        }
+        Ok(AgyProductionSetupOutcome::Installed)
     }
 
     fn validate_paths(&self) -> Result<(), AgyProductionSetupError> {
@@ -1464,7 +1829,11 @@ fn replace_exact_path(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf, time::SystemTime};
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{Duration, SystemTime},
+    };
 
     use serde_json::{Value, json};
 
@@ -1480,8 +1849,8 @@ mod tests {
     use crate::{
         core::{FieldUpdate, Phase},
         settings::{
-            ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
-            TitleMode,
+            ActivityMode, PresentationSettings, PresentationTheme, ProviderBadgePolicy,
+            SpinnerPreset, TabColorMode, TitleMode,
         },
     };
 
@@ -1555,7 +1924,7 @@ mod tests {
     }
 
     #[test]
-    fn title_normalizer_maps_only_the_g64_proven_working_state_without_content() {
+    fn title_normalizer_maps_only_the_real_observed_lifecycle_subset_without_content() {
         let root = temp_root("normalizer");
         fs::create_dir_all(&root).expect("workspace");
         let payload = serde_json::to_vec(&json!({
@@ -1585,7 +1954,29 @@ mod tests {
         assert!(!debug.contains("private prompt"));
         assert!(!debug.contains("private@example.invalid"));
 
-        for state in ["idle", "working", "tool_use", "error"] {
+        for (state, phase) in [("idle", Phase::Ready), ("working", Phase::Working)] {
+            let accepted = serde_json::to_vec(&json!({
+                "version": "1.1.19",
+                "agent_state": state,
+                "conversation_id": "session",
+                "workspace": {"current_dir": root, "project_dir": root}
+            }))
+            .expect("payload");
+            assert_eq!(
+                AgyTitleNormalizer::normalize(
+                    super::frozen_profile(),
+                    &accepted,
+                    SystemTime::now(),
+                )
+                .expect("observed state is admitted")
+                .evidence
+                .patch
+                .phase,
+                FieldUpdate::Set(phase)
+            );
+        }
+
+        for state in ["thinking", "tool_use", "error"] {
             let rejected = serde_json::to_vec(&json!({
                 "version": "1.1.19",
                 "agent_state": state,
@@ -1630,7 +2021,20 @@ mod tests {
         let response = runtime.dispatch_to(&payload, SystemTime::UNIX_EPOCH);
         assert_eq!(response.outcome, AgyTitleDispatchOutcome::Applied);
         assert_ne!(response.title, "Agy");
+        assert!(response.title.contains("·A"));
         assert!(!response.title.contains('\u{1b}'));
+        let off_runtime = AgyTitleRuntime::new(
+            root.join("off-state"),
+            settings.with_provider_badge(ProviderBadgePolicy::Off),
+        );
+        let off = off_runtime.dispatch_to(&payload, SystemTime::UNIX_EPOCH);
+        assert!(!off.title.contains("·A"));
+        let always_runtime = AgyTitleRuntime::new(
+            root.join("always-state"),
+            settings.with_provider_badge(ProviderBadgePolicy::Always),
+        );
+        let always = always_runtime.dispatch_to(&payload, SystemTime::UNIX_EPOCH);
+        assert!(always.title.contains("·A"));
         let diagnostics =
             fs::read_to_string(root.join("state/agy-callback-v1/last-observation.json"))
                 .expect("minimized diagnostics");
@@ -1661,6 +2065,106 @@ mod tests {
     }
 
     #[test]
+    fn agy_root_anchor_is_provider_namespaced_and_resists_later_workspace_drift() {
+        let root = temp_root("root-anchor-isolation");
+        let first_workspace = root.join("first-workspace");
+        let second_workspace = root.join("second-workspace");
+        let state = root.join("state");
+        fs::create_dir_all(&first_workspace).expect("first workspace");
+        fs::create_dir_all(&second_workspace).expect("second workspace");
+        let codex_anchor = state
+            .join("codex-root-workspace-anchor-v1")
+            .join("foreign-sentinel.bin");
+        fs::create_dir_all(codex_anchor.parent().expect("codex anchor parent"))
+            .expect("codex anchor directory");
+        fs::write(&codex_anchor, b"codex-owned-sentinel").expect("Codex sentinel");
+        let runtime = AgyTitleRuntime::new(&state, PresentationSettings::default());
+        let payload = |workspace: &std::path::Path| {
+            serde_json::to_vec(&json!({
+                "version": "1.1.19",
+                "agent_state": "working",
+                "conversation_id": "same-private-native-session",
+                "workspace": {"current_dir": workspace, "project_dir": workspace}
+            }))
+            .expect("payload")
+        };
+
+        let first = runtime.dispatch_to(
+            &payload(&first_workspace),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
+        );
+        let second = runtime.dispatch_to(
+            &payload(&second_workspace),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(2_000),
+        );
+        assert_eq!(first.outcome, AgyTitleDispatchOutcome::Applied);
+        assert_eq!(second.outcome, AgyTitleDispatchOutcome::Applied);
+        assert_eq!(
+            first.title, second.title,
+            "later workspace input cannot rebind the root alias"
+        );
+        let shared_alias = crate::repo::WorkspaceIdentityResolver::new(&state)
+            .resolve(&first_workspace)
+            .expect("shared workspace resolver")
+            .effective_alias;
+        assert!(first.title.contains(shared_alias.as_str()));
+        assert_eq!(
+            fs::read(&codex_anchor).expect("Codex sentinel remains"),
+            b"codex-owned-sentinel"
+        );
+
+        let session_sha256 = super::sha256_hex(b"same-private-native-session");
+        let provider_row: Value = serde_json::from_slice(
+            &fs::read(
+                state
+                    .join("provider-session-v1")
+                    .join(format!("session-{session_sha256}.json")),
+            )
+            .expect("Agy provider row"),
+        )
+        .expect("provider row JSON");
+        assert_eq!(provider_row["provider"], "agy");
+        assert_eq!(
+            provider_row["workspace_observability"]["workspace_mismatch_observed"],
+            true
+        );
+        let anchor_text = fs::read_to_string(
+            state
+                .join("agy-root-workspace-anchor-v1")
+                .join(format!("session-{session_sha256}.json")),
+        )
+        .expect("Agy anchor");
+        assert!(!anchor_text.contains(first_workspace.to_string_lossy().as_ref()));
+        assert!(!anchor_text.contains(second_workspace.to_string_lossy().as_ref()));
+        assert!(!anchor_text.contains("same-private-native-session"));
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn agy_plain_callback_never_creates_codex_generation_or_activity_worker_state() {
+        let root = temp_root("no-cross-provider-worker");
+        let workspace = root.join("workspace");
+        let state = root.join("state");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let runtime = AgyTitleRuntime::new(&state, PresentationSettings::default());
+        let payload = serde_json::to_vec(&json!({
+            "version": "1.1.19",
+            "agent_state": "working",
+            "conversation_id": "private-agy-session",
+            "workspace": {"current_dir": workspace, "project_dir": workspace}
+        }))
+        .expect("payload");
+        let response = runtime.dispatch_to(&payload, SystemTime::UNIX_EPOCH);
+        assert_eq!(response.outcome, AgyTitleDispatchOutcome::Applied);
+        assert!(!response.title.contains('\u{1b}'));
+        assert!(!state.join("activity-worker-v1").exists());
+        assert!(!state.join("codex-generation-v1").exists());
+        assert!(!state.join("codex-root-workspace-anchor-v1").exists());
+        assert!(state.join("agy-root-workspace-anchor-v1").is_dir());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
     fn production_setup_preserves_unrelated_values_and_restores_exact_bytes() {
         let root = temp_root("setup");
         let config = root.join("home/.gemini/antigravity-cli/settings.json");
@@ -1670,6 +2174,7 @@ mod tests {
         fs::write(&executable, b"fixture executable").expect("executable");
         let original = br#"{
   "foreign": {"keep": true},
+  "hooks": {"codex-owned-sentinel": true},
   "theme": "owner"
 }
 "#;
@@ -1684,8 +2189,14 @@ mod tests {
         let applied: Value =
             serde_json::from_slice(&fs::read(&config).expect("applied")).expect("applied json");
         assert_eq!(applied["foreign"]["keep"], true);
+        assert_eq!(applied["hooks"]["codex-owned-sentinel"], true);
         assert_eq!(applied["theme"], "owner");
         assert_eq!(applied["title"]["type"], "command");
+        assert_eq!(applied["title"]["enabled"], true);
+        assert_eq!(
+            applied["title"]["command"],
+            format!("{} agy __title-callback-v1", executable.to_string_lossy())
+        );
         assert_eq!(
             setup.setup(),
             Ok(AgyProductionSetupOutcome::AlreadyConfigured)
@@ -1701,6 +2212,89 @@ mod tests {
             setup.uninstall(),
             Ok(AgyProductionSetupOutcome::NotInstalled)
         );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn production_setup_upgrades_owned_quoted_v1_command_and_enables_title() {
+        let root = temp_root("setup-v1-upgrade");
+        let config = root.join("home/.gemini/antigravity-cli/settings.json");
+        let state = root.join("state");
+        let executable = root.join("tabbeacon.exe");
+        fs::create_dir_all(config.parent().expect("parent")).expect("config parent");
+        fs::create_dir_all(&state).expect("state");
+        fs::write(&executable, b"fixture executable").expect("executable");
+        let original = br#"{"foreign":1}"#;
+        fs::write(state.join("original-settings.bin"), original).expect("backup");
+        let setup =
+            AgyProductionSetup::new(&config, &state, &executable, "agy").with_admitted_version();
+        let legacy_callback = setup
+            .callback_value_for_schema(super::AGY_SETUP_MANIFEST_SCHEMA_V1)
+            .expect("legacy callback");
+        let mut legacy_document = serde_json::Map::new();
+        legacy_document.insert("foreign".to_owned(), json!(1));
+        legacy_document.insert("title".to_owned(), legacy_callback.clone());
+        let mut legacy_bytes =
+            serde_json::to_vec_pretty(&Value::Object(legacy_document)).expect("legacy document");
+        legacy_bytes.push(b'\n');
+        fs::write(&config, &legacy_bytes).expect("legacy config");
+        let legacy_manifest = super::AgySetupManifest {
+            schema: super::AGY_SETUP_MANIFEST_SCHEMA_V1.to_owned(),
+            admitted_version: AGY_ADMITTED_VERSION.to_owned(),
+            original_present: true,
+            original_sha256: super::sha256_hex(original),
+            applied_sha256: super::sha256_hex(&legacy_bytes),
+            executable_sha256: super::sha256_hex(b"fixture executable"),
+            callback_sha256: super::sha256_hex(
+                &serde_json::to_vec(&legacy_callback).expect("legacy callback bytes"),
+            ),
+        };
+        fs::write(
+            state.join("setup.json"),
+            serde_json::to_vec_pretty(&legacy_manifest).expect("legacy manifest"),
+        )
+        .expect("write legacy manifest");
+
+        assert_eq!(
+            setup.inspect().state,
+            AgyIntegrationReadiness::ConfigurationDrift
+        );
+        assert_eq!(setup.setup(), Ok(AgyProductionSetupOutcome::Installed));
+        assert_eq!(
+            setup.inspect().state,
+            AgyIntegrationReadiness::SupportedConfigured
+        );
+        let upgraded: Value =
+            serde_json::from_slice(&fs::read(&config).expect("upgraded")).expect("upgraded json");
+        assert_eq!(upgraded["foreign"], 1);
+        assert_eq!(upgraded["title"]["enabled"], true);
+        assert_eq!(
+            upgraded["title"]["command"],
+            format!("{} agy __title-callback-v1", executable.to_string_lossy())
+        );
+        assert_eq!(setup.uninstall(), Ok(AgyProductionSetupOutcome::Removed));
+        assert_eq!(fs::read(&config).expect("restored"), original);
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn production_setup_refuses_callback_paths_requiring_shell_quoting() {
+        let root = temp_root("setup-unsafe-command");
+        let config = root.join("settings.json");
+        let state = root.join("state");
+        let executable = root.join("path with space").join("tabbeacon.exe");
+        fs::create_dir_all(executable.parent().expect("parent")).expect("executable parent");
+        fs::write(&executable, b"fixture executable").expect("executable");
+        fs::write(&config, br#"{"foreign":1}"#).expect("config");
+        let setup =
+            AgyProductionSetup::new(&config, &state, &executable, "agy").with_admitted_version();
+
+        assert_eq!(
+            setup.setup(),
+            Err(AgyProductionSetupError::UnrepresentableCallbackCommand)
+        );
+        assert_eq!(fs::read(&config).expect("unchanged"), br#"{"foreign":1}"#);
+        assert!(!state.join("setup.json").exists());
         fs::remove_dir_all(root).expect("cleanup");
     }
 
@@ -1812,10 +2406,18 @@ mod tests {
                 setup.inspect().state,
                 AgyIntegrationReadiness::ConfigurationDrift
             );
-            assert!(matches!(
-                setup.setup(),
-                Err(AgyProductionSetupError::OwnershipStateInvalid)
-            ));
+            if mutation == "executable_sha256" {
+                assert_eq!(setup.setup(), Ok(AgyProductionSetupOutcome::Installed));
+                assert_eq!(
+                    setup.inspect().state,
+                    AgyIntegrationReadiness::SupportedConfigured
+                );
+            } else {
+                assert!(matches!(
+                    setup.setup(),
+                    Err(AgyProductionSetupError::OwnershipStateInvalid)
+                ));
+            }
             fs::write(&manifest_path, &exact_manifest).expect("restore manifest");
         }
 
