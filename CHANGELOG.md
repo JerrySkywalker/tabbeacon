@@ -4,6 +4,8 @@ All notable changes to TabBeacon will be documented here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-25
+
 ### Added
 
 - Added the exact Agy 1.1.19 production provider through its supported

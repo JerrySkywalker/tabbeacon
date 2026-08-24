@@ -17,6 +17,7 @@ ADRs capture decisions that constrain future implementation.
 - `0012-localized-human-presentation-and-workspace-preferences.md`
 - `0013-reliability-explainability-multi-provider-boundaries.md`
 - `0014-agy-preadmission-qualification-boundary.md`
+- `0015-agy-1-1-19-production-profile.md`
 
 ADR 0009 generalizes the presentation-facing identity from Git repository-only to workspace identity. Existing repository identity remains the Git specialization; ordinary non-Git directories gain a local fallback before production G11.
 
@@ -31,5 +32,9 @@ ADR 0013 defines the v0.5.1/v0.6 boundaries: session-scoped Root Workspace owner
 ADR 0014 constrains pre-admission Agy preparation to disposable,
 content-minimal qualification machinery. Agy remains unavailable to ordinary
 product registration until the later Owner-present G64 admission is accepted.
+
+ADR 0015 freezes the real Agy 1.1.19 production profile: user-global structured
+title callback, content-minimal Ready/Working evidence, ownership-safe setup,
+plain-title presentation, and explicit unsupported capability boundaries.
 
 A later ADR may supersede an earlier decision, but implementation code must not silently reverse one.

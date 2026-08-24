@@ -1,10 +1,10 @@
 [package]
 name = "tabbeacon"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.97.1"
 license = "MIT"
-description = "Live identity and status beacons for Codex CLI tabs in Windows Terminal."
+description = "Live identity and status beacons for coding-agent tabs in Windows Terminal."
 repository = "https://github.com/JerrySkywalker/tabbeacon"
 readme = "README.md"
 keywords = ["terminal", "cli", "windows-terminal", "codex", "developer-tools"]
@@ -26,6 +26,10 @@ include = [
     ".github/workflows/visual-ci.yml",
     ".github/workflows/release-dangling-symlink.yml",
     "docs/codex-hooks.md",
+    "docs/agy-setup.md",
+    "docs/adr/0015-agy-1-1-19-production-profile.md",
+    "docs/v0.6-release-notes.md",
+    "docs/v0.6-upgrade.md",
     "AGENTS.md",
     "dev_governance_files/ROADMAP.md",
     "dev_governance_files/QUALITY_GATES.md",
