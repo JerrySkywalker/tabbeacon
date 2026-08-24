@@ -787,11 +787,15 @@ impl AgyProductionSetup {
         Ok(AgyProductionSetupOutcome::Installed)
     }
 
-    /// Removes exactly the owned title declaration and restores original bytes.
+    /// Removes exactly the owned title declaration.
+    ///
+    /// The original bytes are restored when unrelated settings are unchanged.
+    /// Otherwise the current unrelated settings are preserved semantically and
+    /// only the owned title member is removed.
     ///
     /// # Errors
     ///
-    /// Refuses when the callback or any unrelated setting drifted.
+    /// Refuses when the callback or ownership state drifted.
     pub fn uninstall(&self) -> Result<AgyProductionSetupOutcome, AgyProductionSetupError> {
         self.validate_paths()?;
         let _lock = SetupLock::acquire(&self.state_root)?;
@@ -801,20 +805,34 @@ impl AgyProductionSetup {
         };
         let current =
             fs::read(&self.config_path).map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
-        if !self.bytes_match_owned(&manifest, &current)? {
-            return Err(AgyProductionSetupError::ConfigurationDrift);
-        }
+        let current_without_title = self
+            .owned_current_without_title(&manifest, &current)?
+            .ok_or(AgyProductionSetupError::ConfigurationDrift)?;
         let backup = fs::read(self.backup_path())
             .map_err(|_| AgyProductionSetupError::OwnershipStateInvalid)?;
         if sha256_hex(&backup) != manifest.original_sha256 {
             return Err(AgyProductionSetupError::OwnershipStateInvalid);
         }
-        if manifest.original_present {
-            write_if_unchanged(&self.config_path, &current, &backup)?;
+        let original_without_title = if manifest.original_present {
+            parse_qualification_object(&backup)
+                .ok_or(AgyProductionSetupError::OwnershipStateInvalid)?
+        } else {
+            Map::new()
+        };
+        let desired = if current_without_title == original_without_title {
+            manifest.original_present.then_some(backup)
+        } else {
+            let mut bytes = serde_json::to_vec_pretty(&Value::Object(current_without_title))
+                .map_err(|_| AgyProductionSetupError::MalformedConfiguration)?;
+            bytes.push(b'\n');
+            Some(bytes)
+        };
+        if let Some(bytes) = desired.as_deref() {
+            write_if_unchanged(&self.config_path, &current, bytes)?;
         } else {
             remove_if_unchanged(&self.config_path, &current)?;
         }
-        if read_optional_bytes(&self.config_path)? != manifest.original_present.then_some(backup) {
+        if read_optional_bytes(&self.config_path)? != desired {
             return Err(AgyProductionSetupError::ConfigurationDrift);
         }
         fs::remove_file(self.manifest_path()).map_err(|_| AgyProductionSetupError::Io)?;
@@ -881,6 +899,16 @@ impl AgyProductionSetup {
         manifest: &AgySetupManifest,
         current: &[u8],
     ) -> Result<bool, AgyProductionSetupError> {
+        Ok(self
+            .owned_current_without_title(manifest, current)?
+            .is_some())
+    }
+
+    fn owned_current_without_title(
+        &self,
+        manifest: &AgySetupManifest,
+        current: &[u8],
+    ) -> Result<Option<Map<String, Value>>, AgyProductionSetupError> {
         if manifest.schema != AGY_SETUP_MANIFEST_SCHEMA
             || manifest.admitted_version != AGY_ADMITTED_VERSION
         {
@@ -895,7 +923,7 @@ impl AgyProductionSetup {
             .ok_or(AgyProductionSetupError::MalformedConfiguration)?;
         let expected_callback = self.callback_value()?;
         if current_object.remove("title") != Some(expected_callback.clone()) {
-            return Ok(false);
+            return Ok(None);
         }
         if sha256_hex(
             &serde_json::to_vec(&expected_callback)
@@ -904,13 +932,7 @@ impl AgyProductionSetup {
         {
             return Err(AgyProductionSetupError::OwnershipStateInvalid);
         }
-        let original_object = if manifest.original_present {
-            parse_qualification_object(&backup)
-                .ok_or(AgyProductionSetupError::OwnershipStateInvalid)?
-        } else {
-            Map::new()
-        };
-        Ok(current_object == original_object)
+        Ok(Some(current_object))
     }
 
     fn validate_paths(&self) -> Result<(), AgyProductionSetupError> {
@@ -1677,7 +1699,7 @@ mod tests {
     }
 
     #[test]
-    fn production_setup_refuses_foreign_title_and_unrelated_drift() {
+    fn production_setup_refuses_foreign_title_and_preserves_unrelated_changes() {
         let root = temp_root("drift");
         let config = root.join("settings.json");
         let state = root.join("state");
@@ -1702,6 +1724,27 @@ mod tests {
             serde_json::from_slice(&fs::read(&config).expect("applied")).expect("applied json");
         applied["foreign"] = json!(2);
         fs::write(&config, serde_json::to_vec(&applied).expect("drift bytes")).expect("drift");
+        assert_eq!(
+            setup.inspect().state,
+            AgyIntegrationReadiness::SupportedConfigured
+        );
+        assert_eq!(setup.uninstall(), Ok(AgyProductionSetupOutcome::Removed));
+        let uninstalled: Value = serde_json::from_slice(&fs::read(&config).expect("uninstalled"))
+            .expect("uninstalled json");
+        assert_eq!(uninstalled["foreign"], 2);
+        assert!(uninstalled.get("title").is_none());
+
+        fs::write(&config, br#"{"foreign":1}"#).expect("second clean config");
+        assert_eq!(setup.setup(), Ok(AgyProductionSetupOutcome::Installed));
+        let mut foreign_title: Value =
+            serde_json::from_slice(&fs::read(&config).expect("second applied"))
+                .expect("second applied json");
+        foreign_title["title"]["command"] = json!("foreign");
+        fs::write(
+            &config,
+            serde_json::to_vec(&foreign_title).expect("foreign title bytes"),
+        )
+        .expect("foreign title");
         assert_eq!(
             setup.uninstall(),
             Err(AgyProductionSetupError::ConfigurationDrift)
