@@ -612,6 +612,7 @@ pub enum AgyProductionSetupOutcome {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct AgySetupManifest {
     schema: String,
     admitted_version: String,
@@ -919,6 +920,13 @@ impl AgyProductionSetup {
         if sha256_hex(&backup) != manifest.original_sha256 {
             return Err(AgyProductionSetupError::OwnershipStateInvalid);
         }
+        if sha256_hex(
+            &fs::read(&self.executable)
+                .map_err(|_| AgyProductionSetupError::OwnershipStateInvalid)?,
+        ) != manifest.executable_sha256
+        {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
         let mut current_object = parse_qualification_object(current)
             .ok_or(AgyProductionSetupError::MalformedConfiguration)?;
         let expected_callback = self.callback_value()?;
@@ -930,6 +938,22 @@ impl AgyProductionSetup {
                 .map_err(|_| AgyProductionSetupError::MalformedConfiguration)?,
         ) != manifest.callback_sha256
         {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
+        let mut applied_object = if manifest.original_present {
+            parse_qualification_object(&backup)
+                .ok_or(AgyProductionSetupError::OwnershipStateInvalid)?
+        } else {
+            Map::new()
+        };
+        if applied_object.contains_key("title") {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
+        applied_object.insert("title".to_owned(), expected_callback);
+        let mut applied_bytes = serde_json::to_vec_pretty(&Value::Object(applied_object))
+            .map_err(|_| AgyProductionSetupError::OwnershipStateInvalid)?;
+        applied_bytes.push(b'\n');
+        if sha256_hex(&applied_bytes) != manifest.applied_sha256 {
             return Err(AgyProductionSetupError::OwnershipStateInvalid);
         }
         Ok(Some(current_object))
@@ -1753,6 +1777,49 @@ mod tests {
             setup.inspect().state,
             AgyIntegrationReadiness::ConfigurationDrift
         );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn production_setup_refuses_manifest_digest_and_shape_drift() {
+        let root = temp_root("manifest-drift");
+        let config = root.join("settings.json");
+        let state = root.join("state");
+        let executable = root.join("tabbeacon.exe");
+        fs::create_dir_all(&root).expect("root");
+        fs::write(&executable, b"fixture executable").expect("executable");
+        fs::write(&config, br#"{"foreign":1}"#).expect("config");
+        let setup =
+            AgyProductionSetup::new(&config, &state, &executable, "agy").with_admitted_version();
+        assert_eq!(setup.setup(), Ok(AgyProductionSetupOutcome::Installed));
+
+        let manifest_path = state.join("setup.json");
+        let exact_manifest = fs::read(&manifest_path).expect("manifest");
+        for mutation in ["applied_sha256", "executable_sha256", "unknown"] {
+            let mut document: Value =
+                serde_json::from_slice(&exact_manifest).expect("manifest json");
+            if mutation == "unknown" {
+                document["foreign"] = json!(true);
+            } else {
+                document[mutation] = json!("0".repeat(64));
+            }
+            fs::write(
+                &manifest_path,
+                serde_json::to_vec_pretty(&document).expect("drift manifest"),
+            )
+            .expect("write drift");
+            assert_eq!(
+                setup.inspect().state,
+                AgyIntegrationReadiness::ConfigurationDrift
+            );
+            assert!(matches!(
+                setup.setup(),
+                Err(AgyProductionSetupError::OwnershipStateInvalid)
+            ));
+            fs::write(&manifest_path, &exact_manifest).expect("restore manifest");
+        }
+
+        assert_eq!(setup.uninstall(), Ok(AgyProductionSetupOutcome::Removed));
         fs::remove_dir_all(root).expect("cleanup");
     }
 
