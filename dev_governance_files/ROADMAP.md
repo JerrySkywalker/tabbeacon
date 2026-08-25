@@ -21,6 +21,14 @@ work.
 
 ## Current production baseline
 
+CURRENT_PUBLIC_RELEASE=v0.6.0
+
+The v0.6 production line is complete through public `0.6.0` distribution.
+Historical production evidence remains below; it is retained as the record for
+each release line and does not supersede the current public baseline.
+
+## Historical v0.4 production baseline
+
 The v0.4 production line is complete through public `0.4.0` distribution.
 `TB-G40` through `TB-G46R` are **COMPLETE**. The post-release experimental
 `TB-G45X` read-only Sessions view is also complete on `main`, without changing
