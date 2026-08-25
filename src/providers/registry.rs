@@ -334,7 +334,7 @@ impl ProviderIntegrationSnapshot {
             version: probe.version,
             admission,
             configuration_state: if admission == ProviderAdmissionState::Unknown {
-                "unsupported_version"
+                "capability_unavailable"
             } else if probe.installed {
                 "supported_configured"
             } else {
@@ -774,6 +774,19 @@ mod tests {
             registry.title_badge_for("codex", ProviderBadgePolicy::Off),
             None
         );
+    }
+
+    #[test]
+    fn codex_unproven_state_uses_capability_not_version_wording() {
+        let registry = ProviderRegistry::codex_observation(Some("99.99.99"), false, false, false);
+        let codex = registry
+            .providers
+            .iter()
+            .find(|provider| provider.id.as_str() == "codex")
+            .expect("Codex registry row exists");
+
+        assert_eq!(codex.configuration_state, "capability_unavailable");
+        assert_eq!(codex.admission, ProviderAdmissionState::Unknown);
     }
 
     #[test]
