@@ -15,8 +15,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tabbeacon::providers::codex::{CodexIntegration, SetupOutcome};
+use toml_edit::{Array, DocumentMut, Item, Table, value};
 
 struct TestRoot(PathBuf);
 
@@ -132,14 +133,170 @@ fn install_exact_mcp_fixture(root: &TestRoot) -> PathBuf {
     )
     .with_codex_program(compile_codex_0149_probe(root));
     assert_eq!(
-        integration.setup().expect("isolated 0.149 setup succeeds"),
+        integration
+            .setup()
+            .expect("isolated compatible fresh setup succeeds"),
         SetupOutcome::InstalledTrustReviewRequired
     );
+    install_exact_existing_hybrid(root, &integration);
     assert!(
         integration.mcp_runtime_lease_authority().is_ok(),
         "fixture owns an exact MCP declaration without modifying Hook trust"
     );
     installed
+}
+
+/// Builds only a fixture for a predecessor-owned hybrid declaration. Fresh
+/// compatible setup remains command-only; the fixture is needed here because
+/// the upgrade drain is intentionally applicable only to an already exact MCP
+/// transport.
+fn install_exact_existing_hybrid(root: &TestRoot, integration: &CodexIntegration) {
+    let hooks_path = root.codex_home().join("hooks.json");
+    let state_root = root
+        .local_appdata()
+        .join("TabBeacon")
+        .join("codex-integration");
+    let manifest_path = state_root.join("integration-v1.json");
+    let config_path = root.codex_home().join("config.toml");
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("fresh hooks read"))
+            .expect("fresh hooks parse");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("fresh manifest read"))
+            .expect("fresh manifest parse");
+    let session_end = manifest["hooks"]
+        .as_array()
+        .expect("fresh manifest hooks are an array")
+        .iter()
+        .find(|declaration| declaration["event"] == "SessionEnd")
+        .cloned()
+        .expect("fresh command profile has SessionEnd");
+    for declaration in manifest["hooks"]
+        .as_array()
+        .expect("fresh manifest hooks are an array")
+    {
+        let event = declaration["event"]
+            .as_str()
+            .expect("fresh declaration event is a string");
+        let group = &declaration["group"];
+        hooks["hooks"][event]
+            .as_array_mut()
+            .expect("fresh Hook event is an array")
+            .retain(|candidate| candidate != group);
+    }
+
+    let hybrid = exact_hybrid_declarations(session_end);
+    for declaration in &hybrid {
+        let event = declaration["event"]
+            .as_str()
+            .expect("hybrid event is a string");
+        hooks["hooks"]
+            .as_object_mut()
+            .expect("Hook document root is an object")
+            .entry(event.to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("hybrid Hook event is an array")
+            .push(declaration["group"].clone());
+    }
+    let executable = manifest["executable"].clone();
+    manifest["hooks"] = Value::Array(hybrid);
+    manifest["mcp_server"] = json!({
+        "name": "tabbeacon-hook",
+        "command": executable,
+        "args": ["__mcp-hook-stdio-v1"],
+        "env_vars": ["WT_SESSION"],
+        "omit_tools_from": ["code_mode", "deferred", "direct"]
+    });
+
+    let mut config: DocumentMut = fs::read_to_string(&config_path)
+        .expect("fresh config read")
+        .parse()
+        .expect("fresh config parses");
+    if config.get("mcp_servers").is_none() {
+        config["mcp_servers"] = Item::Table(Table::new());
+    }
+    let mut server = Table::new();
+    server.insert(
+        "command",
+        value(
+            manifest["mcp_server"]["command"]
+                .as_str()
+                .expect("hybrid command is a string"),
+        ),
+    );
+    let mut args = Array::new();
+    args.push("__mcp-hook-stdio-v1");
+    server.insert("args", value(args));
+    let mut env_vars = Array::new();
+    env_vars.push("WT_SESSION");
+    server.insert("env_vars", value(env_vars));
+    let mut omitted = Array::new();
+    omitted.push("code_mode");
+    omitted.push("deferred");
+    omitted.push("direct");
+    server.insert("omit_tools_from", value(omitted));
+    config["mcp_servers"]
+        .as_table_like_mut()
+        .expect("MCP server table is writable")
+        .insert("tabbeacon-hook", Item::Table(server));
+
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("hybrid hooks serialize"),
+    )
+    .expect("hybrid hooks write");
+    fs::write(&config_path, config.to_string()).expect("hybrid config write");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("hybrid manifest serialize"),
+    )
+    .expect("hybrid manifest write");
+    assert!(
+        integration.mcp_runtime_lease_authority().is_ok(),
+        "the fixture must model only an exact manifest-owned MCP transport"
+    );
+}
+
+fn exact_hybrid_declarations(session_end: Value) -> Vec<Value> {
+    let mut declarations = [
+        ("PreToolUse", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
+        ("PermissionRequest", json!({"turn_id":"${turn_id}"})),
+        ("PostToolUse", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
+        ("PreCompact", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
+        ("PostCompact", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
+        ("SessionStart", json!({"cwd":"${cwd}","source":"${source}"})),
+        ("UserPromptSubmit", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
+        (
+            "SubagentStart",
+            json!({"cwd":"${cwd}","turn_id":"${turn_id}","agent_id":"${agent_id}","agent_type":"${agent_type}"}),
+        ),
+        (
+            "SubagentStop",
+            json!({"cwd":"${cwd}","turn_id":"${turn_id}","agent_id":"${agent_id}","agent_type":"${agent_type}"}),
+        ),
+        ("Stop", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
+    ]
+    .into_iter()
+    .map(|(event, mut input)| {
+        input["hook_event_name"] = Value::String(event.to_owned());
+        input["session_id"] = Value::String("${session_id}".to_owned());
+        json!({
+            "event": event,
+            "group": {
+                "hooks": [{
+                    "type": "mcp_tool",
+                    "server": "tabbeacon-hook",
+                    "tool": "tabbeacon_hook_event",
+                    "input": input,
+                    "timeout": 1
+                }]
+            }
+        })
+    })
+    .collect::<Vec<_>>();
+    declarations.push(session_end);
+    declarations
 }
 
 fn spawn_mcp(installed: &Path, root: &TestRoot, codex_home: &Path) -> Child {
