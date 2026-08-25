@@ -36,6 +36,17 @@ metadata and a `TerminalVisualBackend` capability boundary. The production
 capability remains false. The identity, runtime state, and workspace alias
 occupy independent title slots.
 
+Train B merged as PR #83 at `2422949526c01b06dcef6e274bca1861ff0dc671`
+after exact-head hosted CI and the bounded real Windows Terminal proof for
+`d9ad7e090a4e608a903de79dfa9786dbef768d92`.
+
+## Train C research status
+
+Current stock/fork source truth is recorded in `docs/research/`. Stock source
+confirms its internal tab-icon pipeline but no public OSC/action bridge. No
+instrumentation or native backend was shipped; XAML Diagnostics remains an
+unproven, opt-in future research path.
+
 ## Risk vector
 
 ```text
