@@ -209,7 +209,32 @@ fn install_exact_existing_hybrid(root: &TestRoot, integration: &CodexIntegration
         "omit_tools_from": ["code_mode", "deferred", "direct"]
     });
 
-    let mut config: DocumentMut = fs::read_to_string(&config_path)
+    let config = exact_hybrid_config(
+        &config_path,
+        manifest["mcp_server"]["command"]
+            .as_str()
+            .expect("hybrid command is a string"),
+    );
+
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("hybrid hooks serialize"),
+    )
+    .expect("hybrid hooks write");
+    fs::write(&config_path, config).expect("hybrid config write");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("hybrid manifest serialize"),
+    )
+    .expect("hybrid manifest write");
+    assert!(
+        integration.mcp_runtime_lease_authority().is_ok(),
+        "the fixture must model only an exact manifest-owned MCP transport"
+    );
+}
+
+fn exact_hybrid_config(config_path: &Path, command: &str) -> String {
+    let mut config: DocumentMut = fs::read_to_string(config_path)
         .expect("fresh config read")
         .parse()
         .expect("fresh config parses");
@@ -217,14 +242,7 @@ fn install_exact_existing_hybrid(root: &TestRoot, integration: &CodexIntegration
         config["mcp_servers"] = Item::Table(Table::new());
     }
     let mut server = Table::new();
-    server.insert(
-        "command",
-        value(
-            manifest["mcp_server"]["command"]
-                .as_str()
-                .expect("hybrid command is a string"),
-        ),
-    );
+    server.insert("command", value(command));
     let mut args = Array::new();
     args.push("__mcp-hook-stdio-v1");
     server.insert("args", value(args));
@@ -240,22 +258,7 @@ fn install_exact_existing_hybrid(root: &TestRoot, integration: &CodexIntegration
         .as_table_like_mut()
         .expect("MCP server table is writable")
         .insert("tabbeacon-hook", Item::Table(server));
-
-    fs::write(
-        &hooks_path,
-        serde_json::to_vec_pretty(&hooks).expect("hybrid hooks serialize"),
-    )
-    .expect("hybrid hooks write");
-    fs::write(&config_path, config.to_string()).expect("hybrid config write");
-    fs::write(
-        &manifest_path,
-        serde_json::to_vec_pretty(&manifest).expect("hybrid manifest serialize"),
-    )
-    .expect("hybrid manifest write");
-    assert!(
-        integration.mcp_runtime_lease_authority().is_ok(),
-        "the fixture must model only an exact manifest-owned MCP transport"
-    );
+    config.to_string()
 }
 
 fn exact_hybrid_declarations(session_end: Value) -> Vec<Value> {
