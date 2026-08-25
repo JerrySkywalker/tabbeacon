@@ -50,9 +50,18 @@ changes, exact backups and an ownership manifest are written below:
 Setup is idempotent. It refuses a TabBeacon-like declaration that it cannot
 prove it owns.
 
-Codex 0.149 uses a hybrid owned transport: one named, session-scoped stdio MCP
-server, ten content-minimal normal-event `mcp_tool` lifecycle declarations,
-and exactly one TabBeacon-owned `SessionEnd` command declaration. Its tool
+Codex compatibility is local capability-based. `codex --version` remains a
+diagnostic, but version ordering neither grants nor denies support. An enabled
+local Hooks capability permits the conservative command-Hook V1 contract;
+unavailable optional schema discovery is degraded rather than fatal. An
+explicitly absent required capability blocks the affected mutation, while an
+unproven probe preserves a separately exact existing integration without
+rewriting it. See [`CODEX_COMPATIBILITY_V3.md`](CODEX_COMPATIBILITY_V3.md) and
+[`CODEX_CAPABILITY_DISCOVERY.md`](CODEX_CAPABILITY_DISCOVERY.md).
+
+A manifest-proven existing hybrid MCP transport has one named, session-scoped
+stdio MCP server, ten content-minimal normal-event `mcp_tool` lifecycle
+declarations, and exactly one TabBeacon-owned `SessionEnd` command declaration. Its tool
 is explicitly omitted from Codex's direct, deferred, and Code Mode model-facing
 surfaces. The owned server declares exactly `env_vars = ["WT_SESSION"]`.
 Codex clears a local stdio child's inherited environment, so this one
@@ -67,8 +76,8 @@ therefore its synchronous, fail-open command Hook has `timeout = 1` and
 can release only the server's in-memory binding as a best-effort fallback and
 retains bounded stale-state recovery; it is never real SessionEnd proof.
 
-The source-audited 0.147 profile retains the command fallback. For a shell-safe,
-whitespace-free native `.exe` path it emits a compact direct `commandWindows`
+The conservative command-Hook V1 contract is used for fresh compatible setup.
+For a shell-safe, whitespace-free native `.exe` path it emits a compact direct `commandWindows`
 invocation; hostile paths retain the encoded PowerShell compatibility envelope.
 That fallback remains synchronous with its one-second timeout and is silent and
 fail-open after ingress starts.
@@ -96,7 +105,7 @@ it uses the 900 ms COMSPEC command fallback.
 The probe records no prompt, tool, assistant, title, or environment content
 and never modifies Codex configuration or Hook trust.
 
-For an exact-head 0.149 transport measurement, use
+For an exact-head historical hybrid-transport measurement, use
 `scripts/measure-codex-mcp-hybrid-runtime.ps1`. It launches normal events
 directly through the owned stdio server (zero shell processes), measures an
 eight-session warm concurrency distribution, and separately measures the one
@@ -117,8 +126,8 @@ tabbeacon repair codex
 ```
 
 The default is a read-only preview. It is eligible to restore only groups that
-are all of the following: manifest-owned, exact to the current source-audited
-profile, and proven entirely absent from a safe known Hook wire shape. It also
+are all of the following: manifest-owned, exact to the selected
+capability-compatible bounded contract, and proven entirely absent from a safe known Hook wire shape. It also
 requires an exact manifest target and title-ownership baseline. A retained
 non-owned group may be from the verified pre-install backup or may have been
 added later by a third party: it is preserved when it has the admitted Hook
@@ -150,9 +159,9 @@ repair still requires the Owner to launch `codex`, review the definitions in
 `/hooks`, and then run `tabbeacon doctor`; TabBeacon never auto-trusts Hooks.
 
 When upgrading to a binary at a new path, run `tabbeacon setup codex` from
-that new binary. TabBeacon migrates the exact manifest-proven transport (eleven
-command groups for 0.147, or ten MCP groups plus one SessionEnd command and its
-owned MCP server for 0.149)
+that new binary. TabBeacon migrates only the exact manifest-proven transport
+(the conservative command contract, or an existing ten-MCP-plus-one-SessionEnd
+hybrid and its owned MCP server)
 and updates its manifest atomically; it never adopts a lookalike hook,
 an unsafe recorded executable path, or a different Codex configuration root.
 
@@ -289,8 +298,8 @@ After setup:
 
 Doctor reports declaration exactness, currentness, trust review or
 trusted-hash drift, disabled Hooks, title ownership, executable presence,
-version compatibility, the exact Hook profile, and manifest consistency. A
-0.149 report additionally distinguishes a missing or broadened owned
+the diagnostic version, capability compatibility, the bounded Hook contract,
+and manifest consistency. A manifest-proven hybrid report additionally distinguishes a missing or broadened owned
 terminal-binding allow-list from a healthy presentation configuration.
 trusted-hash mismatch does not imply that the Hook declaration itself was
 modified. Declaration presence alone is not reported as active.
@@ -366,7 +375,7 @@ tabbeacon doctor --json
 
 Both JSON documents use stable `schema_version: 1`. `status --json` emits the
 complete operational model: TabBeacon version and binary path, Codex version
-and admitted profile, owned-integration/trust/title state, effective
+and capability-selected contract, owned-integration/trust/title state, effective
 presentation choices, lease-based activity counts, workspace identity health,
 and the nested doctor verdict. `doctor --json` emits that same typed doctor
 projection with its checks, aggregate verdict, and structured warnings and
@@ -383,10 +392,10 @@ are `pass`, `warning`, or `fail`; Hook trust is `active`, `review_required`,
 
 `status --json` and `doctor --json` also expose stable
 `mutation_authority` (`admitted` or `blocked`) and `runtime_continuity`
-(`admitted`, `preserved_unadmitted`, or `unproven`). An unadmitted version is
-always blocked from setup, repair, rewrite, and title reconciliation. Its
+(`admitted`, `preserved_unproven`, or `unproven`). An unproven or incompatible
+required capability is always blocked from setup, repair, rewrite, and title reconciliation. Its
 already-installed runtime may nevertheless remain
-`preserved_unadmitted` only when the ownership manifest, exact declarations,
+`preserved_unproven` only when the ownership manifest, exact declarations,
 trusted hashes, known parseable Hook wire shape, managed executable, and title
 ownership are independently exact. This is a runtime-continuity warning, not a
 new profile admission.
@@ -416,7 +425,7 @@ The hook backend represents only evidence Codex emits directly:
 | `Stop` | result ready |
 | `SessionEnd` | reset |
 
-Turn-scoped root events must match the current admitted `turn_id`.
+Turn-scoped root events must match the current bounded-contract `turn_id`.
 `UserPromptSubmit` opens a new local generation and retires the prior turn;
 stale stop/activity/prompt events cannot overwrite or revive it. Any applicable
 event carrying thread-spawn subagent identity is isolated from root state.
@@ -441,23 +450,21 @@ fail-open command process per session. The 0.147 command fallback remains
 block decision for TabBeacon failures; decoration may be lost, but Codex
 continues.
 
-## Exact compatibility registry
+## Capability compatibility
 
-TabBeacon classifies Codex versions through one offline typed registry. The
-registry currently admits `codex-hooks-rust-v0.147.0` and
-`codex-hooks-rust-v0.149.0`; a numerically newer version never inherits that
-support. Read-only `status` and `doctor` expose `supported`, `experimental`,
-`unknown`, or `unsupported` alongside the admitted profile identifier when one
-exists. `supported` reports `Codex version is source-audited`; an `unknown`
-detected version reports its detected version, `Registry: unknown`, `Hook
-profile: unclassified`, and `Risk: manual review required`.
+TabBeacon classifies local Codex capability evidence, not Codex version
+ordering. `status` and `doctor` expose `full`, `degraded`, `incompatible`, or
+`unproven` alongside a bounded contract identifier when one is available.
+Version is visible only for diagnostics. `Full` and `Degraded` permit the safe
+owned subset after independent ownership checks. `Incompatible` means the
+required local Hooks capability is absent or disabled. `Unproven` means local
+discovery could not complete; it blocks a rewrite but preserves a separately
+exact existing integration.
 
-Unknown, experimental, and unsupported versions are fail-closed for `setup`
-and title reconciliation: no hooks, trust state, title setting, manifest, or
-backup is created or changed. They are also fail-closed for `repair --apply`.
-Safe uninstall remains available only for exact manifest-owned declarations, so
-an owner can remove a previously installed integration without adopting an
-unproven version or Hook shape.
+Neither state adopts a foreign declaration nor automates trust. Safe uninstall
+remains available only for exact manifest-owned declarations, so an owner can
+remove a previously installed integration without adopting an ambiguous Hook
+shape.
 
 `scripts/compare-codex-compatibility.ps1` compares two local source checkouts or two
 Git references over the bounded Hook, identity, lifecycle, timeout, and title-ownership

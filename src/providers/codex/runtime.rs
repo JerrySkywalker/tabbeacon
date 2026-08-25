@@ -298,12 +298,12 @@ impl CodexHookRuntime {
         let started = Instant::now();
         let mut reconciler = SessionReconciler::default();
         let snapshot = reconciler.apply(normalized.evidence());
-        // Hook input contains no current Codex release/profile evidence. Do
-        // not infer admission from an older setup, an owned declaration, or
-        // the normalizer's source profile: a newer CLI can keep delivering
-        // shaped input after it has become unadmitted. The hook path therefore
-        // uses an explicitly unknown registry and withholds an `always` badge
-        // until a future runtime can carry a current, bounded probe result.
+        // Hook input contains no current local capability evidence. Do not
+        // infer provider-badge authority from an older setup, an owned
+        // declaration, or the normalizer's bounded contract. The event path
+        // therefore performs no expensive probe and uses an explicitly unknown
+        // registry, withholding an `always` badge until a current bounded probe
+        // result can be projected safely.
         let runtime_registry = ProviderRegistry::default();
         let provider_badge =
             runtime_registry.title_badge_for("codex", self.renderer.settings().provider_badge());

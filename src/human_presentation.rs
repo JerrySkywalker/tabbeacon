@@ -408,8 +408,8 @@ pub enum HumanMessageKey {
     SetupInstalledNext,
     SetupUpgradedNext,
     SetupAlreadyInstalledNext,
-    CodexVersionSupported,
-    CodexVersionNotAdmitted,
+    CodexCapabilityCompatible,
+    CodexCapabilityUnavailable,
     CodexVersionUnavailable,
     TrustActive,
     TrustReviewRequired,
@@ -638,16 +638,16 @@ fn management_message_key(kind: ManagementTextKind, id: &str) -> Option<HumanMes
         (ManagementTextKind::IssueExplanation, "integration.executable_unavailable") => {
             Some(HumanMessageKey::IssueExecutableUnavailableExplanation)
         }
-        (ManagementTextKind::IssueTitle, "codex.profile_unadmitted") => {
+        (ManagementTextKind::IssueTitle, "codex.capability_incompatible") => {
             Some(HumanMessageKey::IssueCodexProfileUnadmittedTitle)
         }
-        (ManagementTextKind::IssueExplanation, "codex.profile_unadmitted") => {
+        (ManagementTextKind::IssueExplanation, "codex.capability_incompatible") => {
             Some(HumanMessageKey::IssueCodexProfileUnadmittedExplanation)
         }
-        (ManagementTextKind::IssueTitle, "codex.profile_unavailable") => {
+        (ManagementTextKind::IssueTitle, "codex.capability_unproven") => {
             Some(HumanMessageKey::IssueCodexProfileUnavailableTitle)
         }
-        (ManagementTextKind::IssueExplanation, "codex.profile_unavailable") => {
+        (ManagementTextKind::IssueExplanation, "codex.capability_unproven") => {
             Some(HumanMessageKey::IssueCodexProfileUnavailableExplanation)
         }
         (ManagementTextKind::IssueTitle, "hooks.review_required") => {
@@ -727,7 +727,7 @@ fn management_action_message_key(issue_id: &str, action_id: &str) -> Option<Huma
             Some(HumanMessageKey::ActionSetupUpgrade)
         }
         (_, "integration.executable_guidance") => Some(HumanMessageKey::ActionExecutableGuidance),
-        (_, "codex.profile_guidance") => Some(HumanMessageKey::ActionProfileGuidance),
+        (_, "codex.capability_guidance") => Some(HumanMessageKey::ActionProfileGuidance),
         (_, "hooks.review_in_codex") => Some(HumanMessageKey::ActionReviewHooks),
         (_, "terminal.title_policy_repair") => Some(HumanMessageKey::ActionTitleRepair),
         (_, "terminal.title_policy_inspect") => Some(HumanMessageKey::ActionTitleInspect),
@@ -1439,10 +1439,14 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::EnUs, HumanMessageKey::SetupAlreadyInstalledNext) => {
             "Run tabbeacon doctor to verify hook trust and configuration."
         }
-        (ResolvedLocale::EnUs, HumanMessageKey::CodexVersionSupported) => "{0} — Supported",
-        (ResolvedLocale::EnUs, HumanMessageKey::CodexVersionNotAdmitted) => "{0} — Not admitted",
+        (ResolvedLocale::EnUs, HumanMessageKey::CodexCapabilityCompatible) => {
+            "{0} — capability compatible"
+        }
+        (ResolvedLocale::EnUs, HumanMessageKey::CodexCapabilityUnavailable) => {
+            "{0} — capability unproven or incompatible"
+        }
         (ResolvedLocale::EnUs, HumanMessageKey::CodexVersionUnavailable) => {
-            "Unavailable — Not admitted"
+            "Unavailable — capability discovery unavailable"
         }
         (ResolvedLocale::EnUs, HumanMessageKey::TrustReviewRequired) => "review required",
         (ResolvedLocale::EnUs, HumanMessageKey::TrustNotProven) => "not proven",
@@ -1478,7 +1482,7 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
             "TabBeacon integration upgrade required"
         }
         (ResolvedLocale::EnUs, HumanMessageKey::IssueHooksUpgradeRequiredExplanation) => {
-            "Owned Hook declarations do not match the current admitted integration shape."
+            "Owned Hook declarations do not match the current capability-compatible integration shape."
         }
         (ResolvedLocale::EnUs, HumanMessageKey::IssueExecutableUnavailableTitle) => {
             "Managed executable is unavailable"
@@ -1487,16 +1491,16 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
             "The owned Hook integration cannot find the executable it was configured to invoke."
         }
         (ResolvedLocale::EnUs, HumanMessageKey::IssueCodexProfileUnadmittedTitle) => {
-            "Codex profile is not admitted"
+            "Required Codex capability is unavailable"
         }
         (ResolvedLocale::EnUs, HumanMessageKey::IssueCodexProfileUnadmittedExplanation) => {
-            "This detected Codex version has no admitted TabBeacon Hook profile."
+            "Local Codex capability evidence reports that the required Hooks capability is absent or disabled."
         }
         (ResolvedLocale::EnUs, HumanMessageKey::IssueCodexProfileUnavailableTitle) => {
-            "Codex compatibility is unavailable"
+            "Codex capability compatibility is unproven"
         }
         (ResolvedLocale::EnUs, HumanMessageKey::IssueCodexProfileUnavailableExplanation) => {
-            "TabBeacon cannot safely prove an admitted Codex Hook profile."
+            "TabBeacon could not complete local capability discovery safely; version alone is not used as an admission decision."
         }
         (ResolvedLocale::EnUs, HumanMessageKey::IssueHooksReviewRequiredTitle) => {
             "Codex Hook review is required"
@@ -1571,7 +1575,7 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
             "Restore an admitted TabBeacon executable, then inspect status again."
         }
         (ResolvedLocale::EnUs, HumanMessageKey::ActionProfileGuidance) => {
-            "Use a supported Codex version or wait for an explicitly admitted TabBeacon profile; no support is fabricated automatically."
+            "Run tabbeacon doctor after restoring the required local Hooks capability; no configuration is rewritten while compatibility is unproven or incompatible."
         }
         (ResolvedLocale::EnUs, HumanMessageKey::ActionReviewHooks) => {
             "Launch codex, open /hooks, and review the TabBeacon definitions."
@@ -1945,9 +1949,13 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::ZhCn, HumanMessageKey::SetupAlreadyInstalledNext) => {
             "运行 tabbeacon doctor 以检查钩子信任和配置。"
         }
-        (ResolvedLocale::ZhCn, HumanMessageKey::CodexVersionSupported) => "{0} — 已支持",
-        (ResolvedLocale::ZhCn, HumanMessageKey::CodexVersionNotAdmitted) => "{0} — 未准入",
-        (ResolvedLocale::ZhCn, HumanMessageKey::CodexVersionUnavailable) => "不可用 — 未准入",
+        (ResolvedLocale::ZhCn, HumanMessageKey::CodexCapabilityCompatible) => "{0} — 能力兼容",
+        (ResolvedLocale::ZhCn, HumanMessageKey::CodexCapabilityUnavailable) => {
+            "{0} — 能力未证明或不兼容"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::CodexVersionUnavailable) => {
+            "不可用 — 能力探测不可用"
+        }
         (ResolvedLocale::ZhCn, HumanMessageKey::TrustActive) => "已激活",
         (ResolvedLocale::ZhCn, HumanMessageKey::TrustReviewRequired) => "需要审查",
         (ResolvedLocale::ZhCn, HumanMessageKey::TrustNotProven) => "未获证明",
@@ -1977,7 +1985,7 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
             "需要升级 TabBeacon 集成"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::IssueHooksUpgradeRequiredExplanation) => {
-            "受管钩子声明与当前准入的集成形态不一致。"
+            "受管钩子声明与当前能力兼容的集成形态不一致。"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::IssueExecutableUnavailableTitle) => {
             "受管可执行文件不可用"
@@ -1986,16 +1994,16 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
             "受管钩子集成找不到其配置要调用的可执行文件。"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::IssueCodexProfileUnadmittedTitle) => {
-            "Codex 配置档未准入"
+            "所需 Codex 能力不可用"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::IssueCodexProfileUnadmittedExplanation) => {
-            "检测到的 Codex 版本没有准入的 TabBeacon 钩子配置档。"
+            "本地 Codex 能力证据表明所需的 Hooks 能力缺失或已禁用。"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::IssueCodexProfileUnavailableTitle) => {
-            "Codex 兼容性不可用"
+            "Codex 能力兼容性未证明"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::IssueCodexProfileUnavailableExplanation) => {
-            "TabBeacon 无法安全地证明存在已准入的 Codex 钩子配置档。"
+            "TabBeacon 未能安全完成本地能力发现；不会仅凭版本作出准入决定。"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::IssueHooksReviewRequiredTitle) => {
             "需要审查 Codex 钩子"
@@ -2066,7 +2074,7 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
             "恢复已准入的 TabBeacon 可执行文件，然后再次检查状态。"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::ActionProfileGuidance) => {
-            "使用受支持的 Codex 版本，或等待明确准入的 TabBeacon 配置档；不会自动虚构支持。"
+            "恢复所需的本地 Hooks 能力后运行 tabbeacon doctor；能力未证明或不兼容时不会改写配置。"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::ActionReviewHooks) => {
             "启动 codex，打开 /hooks，并审查 TabBeacon 定义。"

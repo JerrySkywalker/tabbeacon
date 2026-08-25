@@ -21,11 +21,11 @@ use tabbeacon::{
     core::{Attention, AuthoritySet, FieldUpdate, Health, Phase, StateAxis},
     hook_inventory::{HookCurrentness, HookInventoryAvailability, HookOwner, HookTrustState},
     providers::codex::{
-        CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookError, CodexHookEvent,
-        CodexHookNormalizer, CodexHookProfile, CodexHookRuntime, CodexIntegration,
-        CodexIntegrationError, CodexMutationAuthority, CodexNormalization, CodexRepairDisposition,
-        CodexRuntimeContinuity, DoctorStatus, HookDispatchOutcome, SetupOutcome,
-        TitleOwnershipOutcome, UninstallOutcome, UnknownEventPolicy,
+        CodexCompatibilityState, CodexHookError, CodexHookEvent, CodexHookNormalizer,
+        CodexHookProfile, CodexHookRuntime, CodexIntegration, CodexIntegrationError,
+        CodexMutationAuthority, CodexNormalization, CodexRepairDisposition, CodexRuntimeContinuity,
+        DoctorStatus, HookDispatchOutcome, SetupOutcome, TitleOwnershipOutcome, UninstallOutcome,
+        UnknownEventPolicy,
     },
     repo::WorkspaceIdentityResolver,
     settings::{
@@ -958,10 +958,9 @@ fn capabilities_are_lifecycle_only_and_provider_neutral() {
 }
 
 #[test]
-fn source_audited_profiles_are_explicit_and_future_versions_are_not_assumed() {
+fn bounded_capability_contracts_are_explicit_and_version_independent() {
     let profile = CodexHookNormalizer::profile();
-    assert_eq!(profile.id(), "codex-hooks-rust-v0.147.0");
-    assert_eq!(profile.version(), (0, 147, 0));
+    assert_eq!(profile.id(), "codex-hooks-command-v1");
     assert_eq!(profile.lifecycle_events().len(), 11);
     assert!(
         profile
@@ -1002,11 +1001,9 @@ fn source_audited_profiles_are_explicit_and_future_versions_are_not_assumed() {
         profile.unknown_event_policy(),
         UnknownEventPolicy::IgnoreFailOpen
     );
-    assert_eq!(CodexHookProfile::for_version((0, 147, 0)), Some(profile));
-    let profile_149 = CodexHookProfile::for_version((0, 149, 0))
-        .expect("source-audited 0.149 fixture has an admitted profile");
-    assert_eq!(profile_149.id(), "codex-hooks-rust-v0.149.0");
-    assert_eq!(profile_149.version(), (0, 149, 0));
+    assert_eq!(CodexHookProfile::command_v1(), profile);
+    let profile_149 = CodexHookProfile::mcp_hybrid_v1();
+    assert_eq!(profile_149.id(), "codex-hooks-mcp-hybrid-v1");
     assert_eq!(profile_149.lifecycle_events(), profile.lifecycle_events());
     assert_eq!(profile_149.identity(), profile.identity());
     assert_eq!(profile_149.timeout(), profile.timeout());
@@ -1029,26 +1026,127 @@ fn source_audited_profiles_are_explicit_and_future_versions_are_not_assumed() {
         profile_149.reconciliation_note(),
         "10-owned-mcp-tool-hooks;1-owned-session-end-command;session-eof-fallback;external-mcp-preserved"
     );
+    assert_eq!(CodexCompatibilityState::Full(profile).label(), "full");
     assert_eq!(
-        CodexCompatibilityRegistry::admitted_profiles(),
-        &[profile, profile_149]
+        CodexCompatibilityState::Degraded(profile).label(),
+        "degraded"
+    );
+    assert_eq!(
+        CodexCompatibilityState::Incompatible.label(),
+        "incompatible"
+    );
+    assert_eq!(CodexCompatibilityState::Unproven.label(), "unproven");
+    assert!(CodexCompatibilityState::Full(profile).is_supported());
+    assert!(CodexCompatibilityState::Degraded(profile).is_supported());
+    assert!(!CodexCompatibilityState::Incompatible.is_supported());
+    assert!(!CodexCompatibilityState::Unproven.is_supported());
+}
+
+#[test]
+fn additive_codex_fields_and_events_are_fail_open() {
+    let root = TestRoot::new("additive-codex-wire");
+    let mut known = hook_payload("UserPromptSubmit", "session-additive", &root.path);
+    known["new_optional_field"] = json!({"nested": ["future"]});
+    assert!(matches!(
+        CodexHookNormalizer
+            .normalize(
+                &serde_json::to_vec(&known).expect("known additive payload serializes"),
+                UNIX_EPOCH,
+            )
+            .expect("known additive payload remains normalizable"),
+        CodexNormalization::Evidence(_)
+    ));
+
+    let unknown = hook_payload("Interrupt", "session-additive", &root.path);
+    assert_eq!(
+        CodexHookNormalizer
+            .normalize(
+                &serde_json::to_vec(&unknown).expect("unknown additive payload serializes"),
+                UNIX_EPOCH,
+            )
+            .expect("unknown additive event is nonfatal"),
+        CodexNormalization::UnsupportedEvent
+    );
+}
+
+#[test]
+fn missing_optional_schema_capability_is_degraded_not_fatal() {
+    let root = TestRoot::new("capability-degraded");
+    let integration = test_integration_with_codex_fixture(&root, "codex_capability_degraded.rs");
+    assert_eq!(
+        integration
+            .setup()
+            .expect("required Hooks capability permits conservative setup"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    let report = integration.doctor();
+    assert_eq!(report.compatibility_state().label(), "degraded");
+    assert_eq!(
+        report.mutation_authority(),
+        CodexMutationAuthority::Admitted
+    );
+    assert_eq!(report.hook_profile(), Some(CodexHookProfile::command_v1()));
+}
+
+#[test]
+fn missing_required_capability_blocks_mutation_without_creating_owner_state() {
+    let root = TestRoot::new("capability-incompatible");
+    let integration = test_integration_with_codex_fixture(&root, "codex_capability_disabled.rs");
+    assert!(matches!(
+        integration.setup(),
+        Err(CodexIntegrationError::CapabilityMutationBlocked)
+    ));
+    assert!(!root.child("state").exists());
+    let report = integration.doctor();
+    assert_eq!(report.compatibility_state().label(), "incompatible");
+    assert_eq!(report.mutation_authority(), CodexMutationAuthority::Blocked);
+}
+
+#[test]
+fn unproven_probe_preserves_existing_exact_runtime_without_mutation_authority() {
+    let root = TestRoot::new("capability-unproven-runtime");
+    let codex_home = root.child("codex-home");
+    let admitted = test_integration(&root);
+    admitted.setup().expect("baseline setup succeeds");
+    install_current_codex_trust_state(&codex_home);
+    let hooks_before = fs::read(codex_home.join("hooks.json")).expect("baseline hooks read");
+
+    let unproven = test_integration_with_codex_fixture(&root, "codex_capability_unproven.rs");
+    let report = unproven.doctor();
+    assert_eq!(report.compatibility_state().label(), "unproven");
+    assert_eq!(report.mutation_authority(), CodexMutationAuthority::Blocked);
+    assert_eq!(
+        report.runtime_continuity(),
+        CodexRuntimeContinuity::PreservedUnproven
     );
     assert!(matches!(
-        CodexCompatibilityRegistry::classify(Some((0, 147, 0))),
-        CodexCompatibilityState::Supported(supported) if supported == profile
-    ));
-    assert!(matches!(
-        CodexCompatibilityRegistry::classify(Some((0, 148, 0))),
-        CodexCompatibilityState::Experimental(entry) if entry.version() == (0, 148, 0)
+        unproven.repair(false, None),
+        Err(CodexIntegrationError::CapabilityMutationBlocked)
     ));
     assert_eq!(
-        CodexCompatibilityRegistry::classify(Some((0, 149, 0))).label(),
-        "supported"
+        fs::read(codex_home.join("hooks.json")).expect("hooks remain untouched"),
+        hooks_before
     );
-    assert_eq!(
-        CodexCompatibilityRegistry::classify(Some((0, 150, 0))).label(),
-        "unknown"
-    );
+}
+
+#[test]
+fn capability_cache_reuses_exact_binary_identity_and_invalidates_after_change() {
+    let root = TestRoot::new("capability-cache");
+    let integration = test_integration(&root);
+    integration
+        .setup()
+        .expect("setup persists cache under the owned state root");
+    let cached = integration.doctor();
+    assert!(cached.checks().iter().any(|check| {
+        check.id() == "codex.hook-profile" && check.summary().contains("cache_hit=true")
+    }));
+
+    let changed = test_integration_with_codex_fixture(&root, "codex_capability_disabled.rs");
+    let invalidated = changed.doctor();
+    assert_eq!(invalidated.compatibility_state().label(), "incompatible");
+    assert!(invalidated.checks().iter().any(|check| {
+        check.id() == "codex.hook-profile" && !check.summary().contains("cache_hit=true")
+    }));
 }
 
 #[test]
@@ -1105,15 +1203,15 @@ fn observed_codex_0149_shape_reconciles_only_exact_owned_declarations() {
     assert_eq!(session_end_command, 1);
 
     let report = integration.doctor();
-    assert_eq!(report.compatibility_state().label(), "supported");
+    assert_eq!(report.compatibility_state().label(), "full");
     assert_eq!(
         report.hook_profile().map(CodexHookProfile::id),
-        Some("codex-hooks-rust-v0.149.0")
+        Some("codex-hooks-mcp-hybrid-v1")
     );
     assert!(report.checks().iter().any(|check| {
         check.id() == "codex.version"
             && check.status() == DoctorStatus::Pass
-            && check.summary() == "Codex version is source-audited"
+            && check.summary().contains("diagnostics only")
     }));
     assert!(report.checks().iter().any(|check| {
         check.id() == "hooks.declarations" && check.status() == DoctorStatus::Pass
@@ -2207,7 +2305,7 @@ fn repair_and_runtime_continuity_reject_a_manifest_with_incoherent_executable() 
 }
 
 #[test]
-fn future_unknown_same_wire_preserves_runtime_but_blocks_all_mutation_authority() {
+fn unseen_newer_same_capabilities_preserves_runtime_and_mutation_authority() {
     let root = TestRoot::new("future-unknown-continuity");
     let codex_home = root.child("codex-home");
     write_hooks_fixture(&codex_home, "0.150.0-same-wire.json");
@@ -2224,14 +2322,17 @@ fn future_unknown_same_wire_preserves_runtime_but_blocks_all_mutation_authority(
     let future = test_integration_with_codex_fixture(&root, "codex_version_probe_future.rs");
 
     let report = future.doctor();
-    assert_eq!(report.compatibility_state().label(), "unknown");
-    assert_eq!(report.mutation_authority(), CodexMutationAuthority::Blocked);
+    assert_eq!(report.compatibility_state().label(), "full");
+    assert_eq!(
+        report.mutation_authority(),
+        CodexMutationAuthority::Admitted
+    );
     assert_eq!(
         report.runtime_continuity(),
-        CodexRuntimeContinuity::PreservedUnadmitted
+        CodexRuntimeContinuity::Admitted
     );
     assert!(report.checks().iter().any(|check| {
-        check.id() == "hooks.currentness" && check.status() == DoctorStatus::Warning
+        check.id() == "hooks.currentness" && check.status() == DoctorStatus::Pass
     }));
     assert!(
         report
@@ -2240,29 +2341,23 @@ fn future_unknown_same_wire_preserves_runtime_but_blocks_all_mutation_authority(
             .any(|check| { check.id() == "hooks.trust" && check.status() == DoctorStatus::Pass })
     );
     assert!(report.checks().iter().any(|check| {
-        check.id() == "codex.runtime-continuity" && check.status() == DoctorStatus::Warning
+        check.id() == "codex.runtime-continuity" && check.status() == DoctorStatus::Pass
     }));
     let inventory = future.hook_inventory();
     assert!(inventory.entries.iter().any(|entry| {
         entry.owner == HookOwner::TabBeacon
             && entry.trust_state == HookTrustState::Trusted
-            && entry.currentness == HookCurrentness::InstalledExactUnadmitted
+            && entry.currentness == HookCurrentness::Current
     }));
-    assert!(matches!(
-        future.setup(),
-        Err(CodexIntegrationError::UnsupportedCodexVersion)
-    ));
-    assert!(matches!(
-        future.repair(true, None),
-        Err(CodexIntegrationError::UnsupportedCodexVersion)
-    ));
     assert_eq!(
-        CodexIntegrationError::UnsupportedCodexVersion.repair_failure_class(),
-        "UNKNOWN_VERSION_MUTATION_BLOCKED"
+        future
+            .setup()
+            .expect("unseen compatible setup remains safe"),
+        SetupOutcome::AlreadyInstalled
     );
     assert!(matches!(
-        future.reconcile_title_ownership(false),
-        Err(CodexIntegrationError::UnsupportedCodexVersion)
+        future.repair(true, None),
+        Err(CodexIntegrationError::RepairPreviewDigestRequired)
     ));
     assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
     assert_eq!(
@@ -2344,40 +2439,43 @@ fn future_unknown_schema_change_disables_runtime_continuity() {
 }
 
 #[test]
-fn unknown_future_codex_versions_are_read_only_and_not_adopted() {
+fn unseen_newer_compatible_codex_installs_without_version_admission() {
     let root = TestRoot::new("codex-unknown-future");
     let codex_home = root.child("codex-home");
     write_hooks_fixture(&codex_home, "0.149.0-observed.json");
     let hooks_before = fs::read(codex_home.join("hooks.json")).expect("fixture hooks read");
     let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_future.rs");
 
-    assert!(matches!(
-        integration.setup(),
-        Err(CodexIntegrationError::UnsupportedCodexVersion)
-    ));
     assert_eq!(
-        fs::read(codex_home.join("hooks.json")).expect("unknown-version hooks reread"),
+        integration
+            .setup()
+            .expect("unseen compatible Codex can install the capability contract"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    assert_ne!(
+        fs::read(codex_home.join("hooks.json")).expect("unseen-version hooks reread"),
         hooks_before
     );
-    assert!(!root.child("state").exists());
+    assert!(root.child("state").exists());
 
     let report = integration.doctor();
-    assert_eq!(report.compatibility_state().label(), "unknown");
-    assert_eq!(report.hook_profile(), None);
-    assert!(report.checks().iter().any(|check| {
-        check.id() == "codex.version"
-            && check.status() == DoctorStatus::Fail
-            && check.summary()
-                == "Detected: Codex 0.150.0; Registry: unknown; Hook profile: unclassified; Risk: manual review required"
-    }));
-    assert!(
-        report
-            .checks()
-            .iter()
-            .any(|check| { check.id() == "hooks.trust" && check.status() == DoctorStatus::Fail })
+    assert_eq!(report.compatibility_state().label(), "full");
+    assert_eq!(
+        report.hook_profile(),
+        Some(CodexHookProfile::mcp_hybrid_v1())
     );
     assert!(report.checks().iter().any(|check| {
-        check.id() == "hooks.currentness" && check.status() == DoctorStatus::Fail
+        check.id() == "codex.version"
+            && check.status() == DoctorStatus::Pass
+            && check.summary().contains("99.99.99")
+    }));
+    assert!(
+        report.checks().iter().any(|check| {
+            check.id() == "hooks.trust" && check.status() == DoctorStatus::Warning
+        })
+    );
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "hooks.currentness" && check.status() == DoctorStatus::Pass
     }));
 }
 

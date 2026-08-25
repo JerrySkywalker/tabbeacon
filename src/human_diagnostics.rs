@@ -406,9 +406,9 @@ fn codex_version_text(report: &OperationalDiagnostics) -> HumanText {
     };
     HumanText::template(
         if report.codex.profile_supported {
-            HumanMessageKey::CodexVersionSupported
+            HumanMessageKey::CodexCapabilityCompatible
         } else {
-            HumanMessageKey::CodexVersionNotAdmitted
+            HumanMessageKey::CodexCapabilityUnavailable
         },
         [version.to_owned()],
     )
@@ -658,13 +658,13 @@ mod tests {
     fn shared_status_actions_remain_present_for_existing_issue_families() {
         let mut report = report();
         report.codex.profile_supported = false;
-        report.codex.profile_state = "experimental".to_owned();
+        report.codex.profile_state = "incompatible".to_owned();
         report.title = title(TitleRemediationState::Available);
         report.activity.worker_state_health = "warning".to_owned();
         let snapshot = ManagementSnapshot::from_diagnostics(&report);
         let output = human_status_lines(&report, &snapshot, 120).join("\n");
 
-        assert!(output.contains("Codex profile is not admitted"));
+        assert!(output.contains("Required Codex capability is unavailable"));
         assert!(output.contains("Windows Terminal title repair is available"));
         assert!(output.contains("Activity worker state needs attention"));
     }

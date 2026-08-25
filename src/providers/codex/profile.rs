@@ -1,4 +1,4 @@
-//! Frozen compatibility facts and exact admission for Codex Hook releases.
+//! Bounded, version-independent Codex Hook capability contracts.
 
 /// Forward-compatibility policy for Hook events outside an admitted profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,11 +237,10 @@ impl TerminalTitleOwnershipSemantics {
     }
 }
 
-/// Frozen compatibility contract for one source-audited Codex Hook release.
+/// Frozen bounded compatibility contract for one Codex Hook wire surface.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CodexHookProfile {
     id: &'static str,
-    version: (u64, u64, u64),
     lifecycle_events: &'static [CodexHookEvent],
     identity: HookIdentitySemantics,
     turn_aware: bool,
@@ -256,22 +255,10 @@ pub struct CodexHookProfile {
 }
 
 impl CodexHookProfile {
-    /// Backward-compatible exact lookup delegated to the authoritative registry.
-    #[must_use]
-    pub fn for_version(version: (u64, u64, u64)) -> Option<Self> {
-        CodexCompatibilityRegistry::classify(Some(version)).supported_profile()
-    }
-
-    /// Stable diagnostic profile identifier.
+    /// Stable capability-contract identifier.
     #[must_use]
     pub const fn id(self) -> &'static str {
         self.id
-    }
-
-    /// Exact admitted release version.
-    #[must_use]
-    pub const fn version(self) -> (u64, u64, u64) {
-        self.version
     }
 
     /// Complete Hook event surface proven for this profile.
@@ -310,14 +297,14 @@ impl CodexHookProfile {
         self.timeout
     }
 
-    /// Whether this exact source-admitted profile uses a session-scoped MCP
+    /// Whether this bounded profile uses a session-scoped MCP
     /// tool transport instead of a command process for normal Hook delivery.
     #[must_use]
     pub const fn uses_mcp_hook_transport(self) -> bool {
         matches!(self.transport, HookTransport::McpTool)
     }
 
-    /// Title ownership behavior of the admitted Codex release.
+    /// Title ownership behavior of the bounded Codex Hook contract.
     #[must_use]
     pub const fn terminal_title_ownership(self) -> TerminalTitleOwnershipSemantics {
         self.terminal_title_ownership
@@ -339,61 +326,6 @@ impl CodexHookProfile {
     #[must_use]
     pub const fn reconciliation_note(self) -> &'static str {
         self.reconciliation_note
-    }
-}
-
-/// A bounded diagnostic record for a version intentionally not admitted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KnownUnadmittedCodexVersion {
-    version: (u64, u64, u64),
-}
-
-impl KnownUnadmittedCodexVersion {
-    /// Version that is deliberately not treated as compatible.
-    #[must_use]
-    pub const fn version(self) -> (u64, u64, u64) {
-        self.version
-    }
-}
-
-/// Exact, offline compatibility classification for the bounded registry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodexCompatibilityState {
-    /// The detected version has an exact source-audited production profile.
-    Supported(CodexHookProfile),
-    /// The detected version is tracked, but its Hook profile is not audited.
-    Experimental(KnownUnadmittedCodexVersion),
-    /// The detected version is not represented in the bounded registry.
-    Unknown,
-    /// The detected version is source-audited but incompatible with this contract.
-    Unsupported(KnownUnadmittedCodexVersion),
-}
-
-impl CodexCompatibilityState {
-    /// Stable diagnostic spelling with no inferred compatibility.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Supported(_) => "supported",
-            Self::Experimental(_) => "experimental",
-            Self::Unknown => "unknown",
-            Self::Unsupported(_) => "unsupported",
-        }
-    }
-
-    /// Exact admitted profile when, and only when, this state is supported.
-    #[must_use]
-    pub const fn supported_profile(self) -> Option<CodexHookProfile> {
-        match self {
-            Self::Supported(profile) => Some(profile),
-            Self::Experimental(_) | Self::Unknown | Self::Unsupported(_) => None,
-        }
-    }
-
-    /// Whether this state authorizes the existing production Hook contract.
-    #[must_use]
-    pub const fn is_supported(self) -> bool {
-        matches!(self, Self::Supported(_))
     }
 }
 
@@ -422,9 +354,8 @@ const RUST_COMMAND_HOOK_WIRE_V1: CodexHookWireShape = CodexHookWireShape {
     trust_state_field: "trusted_hash",
 };
 
-const RUST_V0_147_0_PROFILE: CodexHookProfile = CodexHookProfile {
-    id: "codex-hooks-rust-v0.147.0",
-    version: (0, 147, 0),
+const COMMAND_HOOKS_V1_PROFILE: CodexHookProfile = CodexHookProfile {
+    id: "codex-hooks-command-v1",
     lifecycle_events: &RUST_V0_147_0_EVENTS,
     identity: HookIdentitySemantics {
         session_id_required: true,
@@ -453,9 +384,8 @@ const RUST_V0_147_0_PROFILE: CodexHookProfile = CodexHookProfile {
 // handlers. TabBeacon therefore retains MCP only for normal events and uses
 // one owned command Hook for SessionEnd. All third-party MCP servers remain
 // outside its ownership boundary.
-const RUST_V0_149_0_PROFILE: CodexHookProfile = CodexHookProfile {
-    id: "codex-hooks-rust-v0.149.0",
-    version: (0, 149, 0),
+const MCP_HYBRID_V1_PROFILE: CodexHookProfile = CodexHookProfile {
+    id: "codex-hooks-mcp-hybrid-v1",
     lifecycle_events: &RUST_V0_147_0_EVENTS,
     identity: HookIdentitySemantics {
         session_id_required: true,
@@ -479,60 +409,66 @@ const RUST_V0_149_0_PROFILE: CodexHookProfile = CodexHookProfile {
     reconciliation_note: "10-owned-mcp-tool-hooks;1-owned-session-end-command;session-eof-fallback;external-mcp-preserved",
 };
 
-const ADMITTED_PROFILES: [CodexHookProfile; 2] = [RUST_V0_147_0_PROFILE, RUST_V0_149_0_PROFILE];
-
-// This is a bounded diagnostic marker, not a profile admission or a claim of
-// wire compatibility. It keeps an observed fixture version distinguishable from
-// an entirely unknown version while preserving exact-only support.
-const KNOWN_UNADMITTED: [KnownUnadmittedCodexVersion; 1] = [KnownUnadmittedCodexVersion {
-    version: (0, 148, 0),
-}];
-
-// Reserve a distinct disposition for a version whose incompatible Hook
-// contract is source-audited. Do not add entries here without that evidence.
-const KNOWN_UNSUPPORTED: [KnownUnadmittedCodexVersion; 0] = [];
-
-/// The one authoritative offline registry for Codex Hook compatibility.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct CodexCompatibilityRegistry;
-
-impl CodexCompatibilityRegistry {
-    /// All and only production-admitted profiles.
+impl CodexHookProfile {
+    /// The conservative command-hook contract used for a newly discovered,
+    /// compatible Codex installation. It is independent of release ordering.
     #[must_use]
-    pub const fn admitted_profiles() -> &'static [CodexHookProfile] {
-        &ADMITTED_PROFILES
+    pub const fn command_v1() -> Self {
+        COMMAND_HOOKS_V1_PROFILE
     }
 
-    /// Classifies an observed version without a network lookup or version range.
+    /// The existing hybrid MCP contract. It is selected only for a manifest
+    /// that already proves TabBeacon owns this exact declaration family.
     #[must_use]
-    pub fn classify(version: Option<(u64, u64, u64)>) -> CodexCompatibilityState {
-        let Some(version) = version else {
-            return CodexCompatibilityState::Unknown;
-        };
-        let mut index = 0;
-        while index < ADMITTED_PROFILES.len() {
-            let profile = ADMITTED_PROFILES[index];
-            if profile.version == version {
-                return CodexCompatibilityState::Supported(profile);
-            }
-            index += 1;
+    pub const fn mcp_hybrid_v1() -> Self {
+        MCP_HYBRID_V1_PROFILE
+    }
+}
+
+/// Capability-derived compatibility for the bounded Codex Hook contract.
+///
+/// A Codex version is carried elsewhere as diagnostics only. None of these
+/// variants is selected from version ordering or a version registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexCompatibilityState {
+    /// Required Hook capabilities and an optional local schema fingerprint are
+    /// positively established.
+    Full(CodexHookProfile),
+    /// Required Hooks are established, while an optional enhanced discovery
+    /// surface (such as App Server schema generation) is unavailable.
+    Degraded(CodexHookProfile),
+    /// The installed CLI positively reports that a required Hook capability is
+    /// absent or disabled.
+    Incompatible,
+    /// Discovery failed or did not produce a safe, bounded conclusion.
+    Unproven,
+}
+
+impl CodexCompatibilityState {
+    /// Stable capability-first diagnostic spelling.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Full(_) => "full",
+            Self::Degraded(_) => "degraded",
+            Self::Incompatible => "incompatible",
+            Self::Unproven => "unproven",
         }
-        let mut index = 0;
-        while index < KNOWN_UNADMITTED.len() {
-            let entry = KNOWN_UNADMITTED[index];
-            if entry.version == version {
-                return CodexCompatibilityState::Experimental(entry);
-            }
-            index += 1;
+    }
+
+    /// The safe Hook contract available to setup and repair.
+    #[must_use]
+    pub const fn supported_profile(self) -> Option<CodexHookProfile> {
+        match self {
+            Self::Full(profile) | Self::Degraded(profile) => Some(profile),
+            Self::Incompatible | Self::Unproven => None,
         }
-        let mut index = 0;
-        while index < KNOWN_UNSUPPORTED.len() {
-            let entry = KNOWN_UNSUPPORTED[index];
-            if entry.version == version {
-                return CodexCompatibilityState::Unsupported(entry);
-            }
-            index += 1;
-        }
-        CodexCompatibilityState::Unknown
+    }
+
+    /// Whether the observed capability evidence permits an ownership-gated
+    /// configuration mutation.
+    #[must_use]
+    pub const fn is_supported(self) -> bool {
+        matches!(self, Self::Full(_) | Self::Degraded(_))
     }
 }

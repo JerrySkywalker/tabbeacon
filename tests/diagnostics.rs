@@ -59,9 +59,19 @@ fn fake_codex_directory(root: &TestRoot, version: &str) -> PathBuf {
     fs::create_dir_all(&directory).expect("fake Codex directory creates");
     fs::write(
         directory.join("codex.cmd"),
-        format!("@echo off\r\necho codex-cli {version}\r\n"),
+        format!(
+            "@echo off\r\nif \"%1\"==\"--version\" (echo codex-cli {version} & exit /b 0)\r\nif \"%1\"==\"features\" if \"%2\"==\"list\" (echo hooks stable true & exit /b 0)\r\nif \"%1\"==\"app-server\" if \"%2\"==\"generate-json-schema\" (mkdir \"%4\" 2>nul & echo {{\"hooks\":\"command\"}}>\"%4\\schema.json\" & exit /b 0)\r\nexit /b 2\r\n"
+        ),
     )
     .expect("fake Codex probe writes");
+    directory
+}
+
+fn unavailable_codex_directory(root: &TestRoot) -> PathBuf {
+    let directory = root.child("unavailable-codex");
+    fs::create_dir_all(&directory).expect("unavailable Codex directory creates");
+    fs::write(directory.join("codex.cmd"), "@echo off\r\nexit /b 2\r\n")
+        .expect("unavailable Codex command writes");
     directory
 }
 
@@ -147,7 +157,7 @@ fn status_json_is_structured_private_and_read_only_for_isolated_state() {
     assert_eq!(report["schema_version"], 1);
     assert_eq!(report["codex"]["version"], "0.147.0");
     assert_eq!(report["codex"]["profile_supported"], true);
-    assert_eq!(report["codex"]["profile_state"], "supported");
+    assert_eq!(report["codex"]["profile_state"], "full");
     assert_eq!(report["presentation"]["source"], "default");
     assert_eq!(report["title"]["desired_owner"], "tabbeacon");
     assert_eq!(report["title"]["codex_writer_state"], "unavailable");
@@ -269,38 +279,30 @@ fn explicit_title_policy_repair_is_fixture_scoped_and_passive_inspection_is_read
 }
 
 #[test]
-fn status_distinguishes_missing_and_experimental_codex_without_failing() {
+fn status_distinguishes_missing_and_unseen_compatible_codex_without_failing() {
     let missing_root = TestRoot::new("missing-codex");
-    let missing_shell = missing_root.child("missing-cmd.exe");
+    let unavailable_codex = unavailable_codex_directory(&missing_root);
     let missing = run_cli(
         &missing_root,
         &["status", "--json"],
+        Some(&unavailable_codex),
         None,
-        Some(&missing_shell),
     );
     assert!(missing.status.success(), "status remains observational");
     let missing = json_output(&missing);
     assert!(missing["codex"]["version"].is_null());
     assert_eq!(missing["codex"]["profile_supported"], false);
-    assert_eq!(missing["codex"]["profile_state"], "unknown");
+    assert_eq!(missing["codex"]["profile_state"], "unproven");
 
-    let experimental_root = TestRoot::new("experimental-codex");
-    let fake_codex = fake_codex_directory(&experimental_root, "0.148.0");
-    let experimental = run_cli(
-        &experimental_root,
-        &["status", "--json"],
-        Some(&fake_codex),
-        None,
-    );
-    assert!(
-        experimental.status.success(),
-        "status remains observational"
-    );
-    let experimental = json_output(&experimental);
-    assert_eq!(experimental["codex"]["version"], "0.148.0");
-    assert!(experimental["codex"]["hook_profile"].is_null());
-    assert_eq!(experimental["codex"]["profile_supported"], false);
-    assert_eq!(experimental["codex"]["profile_state"], "experimental");
+    let unseen_root = TestRoot::new("unseen-compatible-codex");
+    let fake_codex = fake_codex_directory(&unseen_root, "99.99.99");
+    let unseen = run_cli(&unseen_root, &["status", "--json"], Some(&fake_codex), None);
+    assert!(unseen.status.success(), "status remains observational");
+    let unseen = json_output(&unseen);
+    assert_eq!(unseen["codex"]["version"], "99.99.99");
+    assert_eq!(unseen["codex"]["hook_profile"], "codex-hooks-command-v1");
+    assert_eq!(unseen["codex"]["profile_supported"], true);
+    assert_eq!(unseen["codex"]["profile_state"], "full");
 }
 
 #[test]

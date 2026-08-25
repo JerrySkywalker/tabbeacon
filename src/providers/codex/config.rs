@@ -32,8 +32,9 @@ use crate::{
 };
 
 use super::{
-    CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookProfile, MCP_HOOK_SERVER_NAME,
-    MCP_HOOK_TOOL_NAME, hook_input_template,
+    CodexCompatibilityState, CodexHookProfile, MCP_HOOK_SERVER_NAME, MCP_HOOK_TOOL_NAME,
+    capability::{CodexCapabilityProbe, probe as probe_capabilities},
+    hook_input_template,
     runtime::{SESSION_END_PROBE_RECEIPT_ENV, SESSION_END_PROBE_RECEIPT_FILE},
 };
 
@@ -65,7 +66,7 @@ const HOOK_EVENTS: [&str; 11] = [
     "SubagentStop",
     "Stop",
 ];
-type ProbedCodexProfile = (String, CodexCompatibilityState);
+type ProbedCodexProfile = CodexCapabilityProbe;
 
 /// Result of a setup invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,18 +79,18 @@ pub enum SetupOutcome {
     AlreadyInstalled,
 }
 
-/// Whether the observed Codex version authorizes a configuration mutation.
+/// Whether locally observed Codex capabilities authorize a configuration mutation.
 ///
 /// This is deliberately independent from [`CodexRuntimeContinuity`]: a known
 /// installed integration may continue to decorate a future Codex runtime
-/// without granting that future version setup, repair, or reconciliation
+/// without granting an unproven capability contract setup, repair, or reconciliation
 /// authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodexMutationAuthority {
-    /// The detected version has an exact source-audited profile.
+    /// Required local capabilities and ownership proof permit mutation.
     Admitted,
-    /// The detected version has no exact source-admitted profile.
+    /// Required local capability evidence is absent or incompatible.
     Blocked,
 }
 
@@ -106,15 +107,16 @@ impl CodexMutationAuthority {
 
 /// Whether an already-installed Hook integration can continue at runtime.
 ///
-/// This describes only the installed, manifest-proven command Hook surface.
-/// It never upgrades an unadmitted version into a source-admitted profile.
+/// This describes only the installed, manifest-proven Hook surface.
+/// It never upgrades an unproven capability probe into mutation authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodexRuntimeContinuity {
-    /// An admitted version has a fully proven installed integration.
+    /// A capability-compatible Codex has a fully proven installed integration.
     Admitted,
-    /// An unadmitted version retains a fully proven known installed wire shape.
-    PreservedUnadmitted,
+    /// Discovery is incomplete, but a fully proven existing integration keeps
+    /// its known wire shape and remains fail-open.
+    PreservedUnproven,
     /// Required installation, wire-shape, trust, or title proof is absent.
     Unproven,
 }
@@ -125,7 +127,7 @@ impl CodexRuntimeContinuity {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Admitted => "admitted",
-            Self::PreservedUnadmitted => "preserved_unadmitted",
+            Self::PreservedUnproven => "preserved_unproven",
             Self::Unproven => "unproven",
         }
     }
@@ -295,19 +297,19 @@ impl CodexDoctorReport {
         self.codex_version.as_deref()
     }
 
-    /// Exact source-audited Hook profile, when the detected version is supported.
+    /// Selected bounded Hook contract, when local capability discovery supports it.
     #[must_use]
     pub const fn hook_profile(&self) -> Option<CodexHookProfile> {
         self.hook_profile
     }
 
-    /// Exact registry classification, including unadmitted and unavailable states.
+    /// Capability-derived classification from local evidence.
     #[must_use]
     pub const fn compatibility_state(&self) -> CodexCompatibilityState {
         self.compatibility_state
     }
 
-    /// Whether this observed version authorizes a setup or reconciliation mutation.
+    /// Whether local capability evidence authorizes an ownership-gated mutation.
     #[must_use]
     pub const fn mutation_authority(&self) -> CodexMutationAuthority {
         self.mutation_authority
@@ -373,8 +375,9 @@ impl CodexDoctorReport {
 pub enum CodexIntegrationError {
     /// A required per-user path could not be derived.
     StateRootUnavailable,
-    /// The detected Codex version has no source-audited Hook profile.
-    UnsupportedCodexVersion,
+    /// Capability discovery did not establish a safe Hook contract for a
+    /// configuration mutation.
+    CapabilityMutationBlocked,
     /// A managed or external file I/O operation failed.
     Io(io::Error),
     /// The existing hooks JSON is not compatible with the current Codex shape.
@@ -411,8 +414,8 @@ impl fmt::Display for CodexIntegrationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::StateRootUnavailable => "a safe per-user integration path is unavailable",
-            Self::UnsupportedCodexVersion => {
-                "the detected Codex version has no source-audited Hook profile"
+            Self::CapabilityMutationBlocked => {
+                "Codex Hook capability evidence does not permit configuration mutation"
             }
             Self::Io(_) => "an integration file operation failed",
             Self::HooksShape => "the Codex hooks file has an unsupported shape",
@@ -456,7 +459,7 @@ impl CodexIntegrationError {
     #[must_use]
     pub const fn repair_failure_class(&self) -> &'static str {
         match self {
-            Self::UnsupportedCodexVersion => "UNKNOWN_VERSION_MUTATION_BLOCKED",
+            Self::CapabilityMutationBlocked => "CAPABILITY_MUTATION_BLOCKED",
             Self::HooksShape => "UNKNOWN_HOOK_WIRE_BLOCKED",
             Self::TabBeaconLikeAmbiguityBlocked => "TABBEACON_LIKE_AMBIGUITY_BLOCKED",
             Self::BaselineDriftBlocked => "BASELINE_DRIFT_BLOCKED",
@@ -569,12 +572,12 @@ impl CodexIntegration {
         &self,
         tabbeacon_owns_title: bool,
     ) -> Result<SetupOutcome, CodexIntegrationError> {
-        // Do not create even TabBeacon's private lock/state root for an
-        // unadmitted version. The same admission is repeated under the lock
-        // immediately before mutation to prevent a version-swap race.
-        self.require_supported_profile()?;
+        // Do not create even TabBeacon's private lock/state root until local
+        // capability evidence establishes a safe contract. The same admission
+        // is repeated under the lock to prevent an executable-swap race.
+        self.require_supported_profile(false)?;
         self.with_lock(|| {
-            let profile = self.require_supported_profile()?;
+            let profile = self.require_supported_profile(true)?;
             self.setup_locked(tabbeacon_owns_title, profile)
         })
     }
@@ -584,7 +587,8 @@ impl CodexIntegration {
     /// A preview is fully read-only. Apply repeats the complete preflight while
     /// holding the integration lock, writes only the Hook file, and deliberately
     /// leaves Codex trust state, the ownership manifest, and title configuration
-    /// unchanged. An unadmitted Codex version cannot use this mutation path.
+    /// unchanged. An unproven or incompatible capability contract cannot use
+    /// this mutation path.
     ///
     /// # Errors
     ///
@@ -596,15 +600,15 @@ impl CodexIntegration {
         expected_target_digest: Option<&str>,
     ) -> Result<CodexRepairReport, CodexIntegrationError> {
         if apply {
-            // Keep an unadmitted repair fully read-only, including TabBeacon's
-            // own state root; repeat the probe under lock before writing.
-            self.require_supported_profile()?;
+            // Keep a blocked repair fully read-only, including TabBeacon's own
+            // state root; repeat the probe under lock before writing.
+            self.require_supported_profile(false)?;
             self.with_lock(|| {
-                let profile = self.require_supported_profile()?;
+                let profile = self.require_supported_profile(true)?;
                 self.repair_locked(profile, true, expected_target_digest)
             })
         } else {
-            let profile = self.require_supported_profile()?;
+            let profile = self.require_supported_profile(false)?;
             self.repair_locked(profile, false, expected_target_digest)
         }
     }
@@ -633,9 +637,9 @@ impl CodexIntegration {
         &self,
         tabbeacon_owns_title: bool,
     ) -> Result<TitleOwnershipOutcome, CodexIntegrationError> {
-        self.require_supported_profile()?;
+        self.require_supported_profile(false)?;
         self.with_lock(|| {
-            self.require_supported_profile()?;
+            self.require_supported_profile(true)?;
             self.reconcile_title_ownership_locked(tabbeacon_owns_title)
         })
     }
@@ -645,17 +649,17 @@ impl CodexIntegration {
     #[allow(clippy::too_many_lines)] // Ordered read-only checks are the public doctor contract.
     pub fn doctor(&self) -> CodexDoctorReport {
         let mut checks = Vec::new();
-        let version = self.probe_codex_version();
-        let codex_version = version.as_ref().map(|(version, _)| version.clone());
-        let compatibility_state = compatibility_state(version.as_ref());
-        let hook_profile = compatibility_state.supported_profile();
+        let capability_probe = self.probe_codex_capabilities(false);
+        let codex_version = capability_probe.version().map(str::to_owned);
+        let compatibility_state = capability_probe.state();
+        let capability_profile = compatibility_state.supported_profile();
         let mutation_authority = if compatibility_state.is_supported() {
             CodexMutationAuthority::Admitted
         } else {
             CodexMutationAuthority::Blocked
         };
-        checks.push(codex_version_check(version.as_ref()));
-        checks.push(codex_profile_check(version.as_ref()));
+        checks.push(codex_version_check(&capability_probe));
+        checks.push(codex_profile_check(&capability_probe));
         let executable_present = self.tabbeacon_executable.is_file();
         checks.push(if executable_present {
             pass("tabbeacon.executable", "managed hook executable exists")
@@ -673,6 +677,7 @@ impl CodexIntegration {
             .is_some_and(Self::manifest_has_known_owned_declarations);
         let owned_hook_count = manifest.as_ref().map(|manifest| manifest.hooks.len());
         let title_owned = manifest.as_ref().map(|manifest| manifest.title_owned);
+        let hook_profile = profile_for_manifest(manifest.as_ref(), capability_profile);
         checks.push(if manifest.is_some() {
             pass(
                 "ownership.manifest",
@@ -792,8 +797,11 @@ impl CodexIntegration {
                 "DECLARATION_MODIFIED: owned hooks are missing, modified, or use an incompatible wire shape",
             )
         });
-        checks.push(match (&manifest, hook_profile) {
-            (Some(manifest), Some(profile)) => match (
+        checks.push(match (&manifest, capability_profile) {
+            (Some(manifest), Some(discovered_profile)) => {
+                let profile = profile_for_manifest(Some(manifest), Some(discovered_profile))
+                    .expect("discovered capability profile is present");
+                match (
                 desired_hooks(&self.tabbeacon_executable, profile),
                 desired_mcp_server(&self.tabbeacon_executable, profile),
             ) {
@@ -812,14 +820,15 @@ impl CodexIntegration {
                     "hooks.currentness",
                     "CURRENTNESS_UNPROVEN: current TabBeacon hook declarations cannot be generated safely",
                 ),
-            },
+                }
+            }
             (Some(_), None) if declarations_exact && known_wire_shape => warning(
                 "hooks.currentness",
-                "CURRENTNESS_MUTATION_BLOCKED: an unadmitted Codex version cannot rewrite the installed declarations",
+                "CURRENTNESS_MUTATION_BLOCKED: local capability discovery is unproven or incompatible, so installed declarations are preserved",
             ),
             (Some(_) | None, None) => fail(
                 "hooks.currentness",
-                "CURRENTNESS_UNPROVEN: Codex hook profile is not source-audited",
+                "CURRENTNESS_UNPROVEN: local capability discovery did not establish a safe Hook contract",
             ),
             (None, Some(_)) => fail(
                 "hooks.currentness",
@@ -868,15 +877,14 @@ impl CodexIntegration {
         checks.push(match mutation_authority {
             CodexMutationAuthority::Admitted => pass(
                 "codex.mutation-authority",
-                "MUTATION_ADMITTED: exact source-audited Codex profile permits setup and repair preflight",
+                "MUTATION_ADMITTED: local capability evidence and separate ownership proof permit setup and repair preflight",
             ),
             CodexMutationAuthority::Blocked => fail(
                 "codex.mutation-authority",
-                "MUTATION_BLOCKED: setup, rewrite, repair, and title reconciliation require an exact source admission",
+                "MUTATION_BLOCKED: setup, rewrite, repair, and title reconciliation require local compatible capability evidence",
             ),
         });
-        let runtime_proven = version.is_some()
-            && executable_present
+        let installed_runtime_proven = executable_present
             && manifest.is_some()
             && manifest_has_known_owned_declarations
             && known_wire_shape
@@ -885,19 +893,22 @@ impl CodexIntegration {
             && mcp_terminal_binding_exact
             && trust_exact
             && title_exact;
-        let runtime_continuity = match (runtime_proven, mutation_authority) {
-            (true, CodexMutationAuthority::Admitted) => CodexRuntimeContinuity::Admitted,
-            (true, CodexMutationAuthority::Blocked) => CodexRuntimeContinuity::PreservedUnadmitted,
+        let runtime_continuity = match (installed_runtime_proven, compatibility_state) {
+            (true, CodexCompatibilityState::Full(_) | CodexCompatibilityState::Degraded(_)) => {
+                CodexRuntimeContinuity::Admitted
+            }
+            (true, CodexCompatibilityState::Unproven) => CodexRuntimeContinuity::PreservedUnproven,
             (false, _) => CodexRuntimeContinuity::Unproven,
+            (true, CodexCompatibilityState::Incompatible) => CodexRuntimeContinuity::Unproven,
         };
         checks.push(match runtime_continuity {
             CodexRuntimeContinuity::Admitted => pass(
                 "codex.runtime-continuity",
-                "RUNTIME_CONTINUITY_ADMITTED: exact installed integration is active on a source-audited Codex profile",
+                "RUNTIME_CONTINUITY_ADMITTED: exact installed integration is active on a capability-compatible Codex runtime",
             ),
-            CodexRuntimeContinuity::PreservedUnadmitted => warning(
+            CodexRuntimeContinuity::PreservedUnproven => warning(
                 "codex.runtime-continuity",
-                "RUNTIME_CONTINUITY_PRESERVED: exact installed Hook declarations remain usable; mutation stays blocked pending source admission",
+                "RUNTIME_CONTINUITY_PRESERVED: exact installed Hook declarations remain usable; mutation stays blocked until capability discovery succeeds",
             ),
             CodexRuntimeContinuity::Unproven
                 if mutation_authority == CodexMutationAuthority::Admitted => warning(
@@ -909,7 +920,7 @@ impl CodexIntegration {
                 "RUNTIME_CONTINUITY_UNPROVEN: installed Hook declarations, trust, title ownership, or known wire shape is not exact",
             ),
         });
-        if runtime_proven {
+        if installed_runtime_proven {
             checks.push(warning(
                 "hooks.runtime-probe",
                 "RUNTIME_PROBE_REQUIRED: static declaration health is not execution proof; run `tabbeacon doctor --probe-hook-runtime`",
@@ -973,10 +984,22 @@ impl CodexIntegration {
             )];
         }
 
-        let Ok(profile) = self.require_supported_profile() else {
+        let Ok(discovered_profile) = self.require_supported_profile(false) else {
             return vec![fail(
                 "hooks.runtime-probe",
-                "RUNTIME_PROBE_BLOCKED: the Codex Hook profile is no longer admitted",
+                "RUNTIME_PROBE_BLOCKED: local capability discovery no longer establishes the Codex Hook contract",
+            )];
+        };
+        let manifest_profile = self
+            .load_manifest()
+            .ok()
+            .flatten()
+            .as_ref()
+            .and_then(|manifest| profile_for_manifest(Some(manifest), Some(discovered_profile)));
+        let Some(profile) = manifest_profile else {
+            return vec![fail(
+                "hooks.runtime-probe",
+                "RUNTIME_PROBE_BLOCKED: the installed transport cannot be selected safely",
             )];
         };
         let Ok(desired) = desired_hooks(&self.tabbeacon_executable, profile) else {
@@ -1097,12 +1120,9 @@ impl CodexIntegration {
             return HookInventory::unavailable();
         }
         let runtime_continuity = self.doctor().runtime_continuity();
-        let profile_is_supported = self
-            .probe_codex_version()
-            .is_some_and(|(_, state)| state.is_supported());
-        let desired = self
-            .probe_codex_version()
-            .and_then(|(_, state)| state.supported_profile())
+        let capability_state = self.probe_codex_capabilities(false).state();
+        let profile_is_supported = capability_state.is_supported();
+        let desired = profile_for_manifest(manifest.as_ref(), capability_state.supported_profile())
             .and_then(|profile| desired_hooks(&self.tabbeacon_executable, profile).ok());
         let Ok(events) = hooks_events(&hooks) else {
             return HookInventory::unavailable();
@@ -1234,10 +1254,12 @@ impl CodexIntegration {
         fs::create_dir_all(&self.codex_home)?;
         reject_symbolic_link(&self.hooks_path())?;
         reject_symbolic_link(&self.config_path())?;
-        let desired_hooks = desired_hooks(&self.tabbeacon_executable, profile)?;
-        let desired_mcp_server = desired_mcp_server(&self.tabbeacon_executable, profile)?;
         if let Some(mut manifest) = self.load_manifest()? {
             self.validate_manifest_scope(&manifest)?;
+            let profile = profile_for_manifest(Some(&manifest), Some(profile))
+                .ok_or(CodexIntegrationError::OwnershipManifest)?;
+            let desired_hooks = desired_hooks(&self.tabbeacon_executable, profile)?;
+            let desired_mcp_server = desired_mcp_server(&self.tabbeacon_executable, profile)?;
             let mut hooks = read_hooks_document(&self.hooks_path())?;
             let mut config = read_config_document(&self.config_path())?;
             locate_owned_hooks(&hooks, &manifest.hooks)
@@ -1287,6 +1309,9 @@ impl CodexIntegration {
             }
             return Ok(SetupOutcome::AlreadyInstalled);
         }
+
+        let desired_hooks = desired_hooks(&self.tabbeacon_executable, profile)?;
+        let desired_mcp_server = desired_mcp_server(&self.tabbeacon_executable, profile)?;
 
         let original_hooks = read_optional_bytes(&self.hooks_path())?;
         let original_config = read_optional_bytes(&self.config_path())?;
@@ -1344,6 +1369,8 @@ impl CodexIntegration {
             .load_manifest()?
             .ok_or(CodexIntegrationError::OwnershipManifest)?;
         self.validate_manifest_scope(&manifest)?;
+        let profile = profile_for_manifest(Some(&manifest), Some(profile))
+            .ok_or(CodexIntegrationError::OwnershipManifest)?;
         let desired = desired_hooks(&self.tabbeacon_executable, profile)?;
         let desired_mcp_server = desired_mcp_server(&self.tabbeacon_executable, profile)?;
         if manifest.hooks != desired
@@ -1423,10 +1450,14 @@ impl CodexIntegration {
         })
     }
 
-    fn require_supported_profile(&self) -> Result<CodexHookProfile, CodexIntegrationError> {
-        self.probe_codex_version()
-            .and_then(|(_, state)| state.supported_profile())
-            .ok_or(CodexIntegrationError::UnsupportedCodexVersion)
+    fn require_supported_profile(
+        &self,
+        persist_cache: bool,
+    ) -> Result<CodexHookProfile, CodexIntegrationError> {
+        self.probe_codex_capabilities(persist_cache)
+            .state()
+            .supported_profile()
+            .ok_or(CodexIntegrationError::CapabilityMutationBlocked)
     }
 
     fn reconcile_title_ownership_locked(
@@ -1861,38 +1892,13 @@ impl CodexIntegration {
         })
     }
 
-    fn probe_codex_version(&self) -> Option<ProbedCodexProfile> {
-        let output = if let Some(program) = &self.codex_program {
-            Command::new(program).arg("--version").output().ok()?
-        } else {
-            default_codex_version_command().output().ok()?
-        };
-        if !output.status.success() {
-            return None;
-        }
-        let stdout = String::from_utf8(output.stdout).ok()?;
-        let version = stdout.split_whitespace().find_map(parse_semver)?;
-        let profile = CodexCompatibilityRegistry::classify(Some(version));
-        Some((
-            format!("{}.{}.{}", version.0, version.1, version.2),
-            profile,
-        ))
+    fn probe_codex_capabilities(&self, persist_cache: bool) -> ProbedCodexProfile {
+        probe_capabilities(
+            self.codex_program.as_deref(),
+            &self.state_root,
+            persist_cache,
+        )
     }
-}
-
-#[cfg(windows)]
-fn default_codex_version_command() -> Command {
-    let shell = env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
-    let mut command = Command::new(shell);
-    command.args(["/D", "/S", "/C", "codex --version"]);
-    command
-}
-
-#[cfg(not(windows))]
-fn default_codex_version_command() -> Command {
-    let mut command = Command::new("codex");
-    command.arg("--version");
-    command
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1971,6 +1977,20 @@ struct IntegrationManifest {
     hooks: Vec<OwnedHook>,
 }
 
+/// Existing MCP-owned integrations retain their proven transport independently
+/// of fresh-install capability discovery. This avoids a discovery upgrade
+/// rewriting trusted owned declarations just because the current conservative
+/// default is command Hooks V1.
+fn profile_for_manifest(
+    manifest: Option<&IntegrationManifest>,
+    discovered: Option<CodexHookProfile>,
+) -> Option<CodexHookProfile> {
+    match manifest {
+        Some(manifest) if manifest.mcp_server.is_some() => Some(CodexHookProfile::mcp_hybrid_v1()),
+        _ => discovered,
+    }
+}
+
 fn desired_hooks(
     executable: &Path,
     profile: CodexHookProfile,
@@ -2027,7 +2047,7 @@ fn desired_mcp_server(
 }
 
 fn mcp_transport_profile() -> Result<CodexHookProfile, CodexIntegrationError> {
-    CodexHookProfile::for_version((0, 149, 0)).ok_or(CodexIntegrationError::OwnershipManifest)
+    Ok(CodexHookProfile::mcp_hybrid_v1())
 }
 
 fn desired_mcp_server_for_manifest(
@@ -2040,8 +2060,8 @@ fn owned_mcp_tool_hooks(
     executable: &Path,
     profile: CodexHookProfile,
 ) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
-    let server = desired_mcp_server(executable, profile)?
-        .ok_or(CodexIntegrationError::UnsupportedCodexVersion)?;
+    let server =
+        desired_mcp_server(executable, profile)?.ok_or(CodexIntegrationError::OwnershipManifest)?;
     Ok(profile
         .lifecycle_events()
         .iter()
@@ -3199,9 +3219,9 @@ fn inventory_currentness(
     {
         HookCurrentness::Current
     } else if !profile_is_supported
-        && runtime_continuity == CodexRuntimeContinuity::PreservedUnadmitted
+        && runtime_continuity == CodexRuntimeContinuity::PreservedUnproven
     {
-        HookCurrentness::InstalledExactUnadmitted
+        HookCurrentness::InstalledExactCapabilityUnproven
     } else if !profile_is_supported {
         HookCurrentness::UnsupportedOrUnavailable
     } else {
@@ -3774,77 +3794,59 @@ fn hook_trust_check(
     }
 }
 
-fn codex_version_check(version: Option<&ProbedCodexProfile>) -> DoctorCheck {
-    match version {
-        Some((_, CodexCompatibilityState::Supported(_))) => {
-            pass("codex.version", "Codex version is source-audited")
-        }
-        Some((version, CodexCompatibilityState::Experimental(_))) => fail(
+fn codex_version_check(probe: &ProbedCodexProfile) -> DoctorCheck {
+    match probe.version() {
+        Some(version) => pass(
             "codex.version",
-            format!("Codex {version} is tracked but hook-profile review is experimental"),
-        ),
-        Some((version, CodexCompatibilityState::Unknown)) => {
-            fail("codex.version", unknown_profile_summary(version))
-        }
-        Some((version, CodexCompatibilityState::Unsupported(_))) => fail(
-            "codex.version",
-            format!("Codex {version} is source-audited as unsupported"),
-        ),
-        None => fail("codex.version", "Codex executable/version is unavailable"),
-    }
-}
-
-fn compatibility_state(version: Option<&ProbedCodexProfile>) -> CodexCompatibilityState {
-    version.map_or(CodexCompatibilityState::Unknown, |(_, state)| *state)
-}
-
-fn codex_profile_check(version: Option<&ProbedCodexProfile>) -> DoctorCheck {
-    match version {
-        Some((_, CodexCompatibilityState::Supported(profile))) => pass(
-            "codex.hook-profile",
             format!(
-                "{}: transport={}; wire={}; events={}; turn-aware={}; agent-aware={}; compact-aware={}; synchronous={}; timeout={}s; title={}; unknown=ignore-fail-open; reconcile={}",
-                profile.id(),
-                if profile.uses_mcp_hook_transport() {
-                    "mcp_tool"
-                } else {
-                    "command"
-                },
-                profile.wire_shape().id(),
-                profile.lifecycle_events().len(),
-                profile.turn_aware(),
-                profile.agent_aware(),
-                profile.compact_aware(),
-                profile.timeout().synchronous_required(),
-                profile.timeout().declaration_timeout_seconds(),
-                profile
-                    .terminal_title_ownership()
-                    .tabbeacon_delegation_key(),
-                profile.reconciliation_note()
+                "Codex {version} observed for diagnostics only; it does not grant or deny compatibility"
             ),
         ),
-        Some((version, CodexCompatibilityState::Experimental(_))) => fail(
-            "codex.hook-profile",
-            format!("Codex {version} has an experimental Hook profile"),
-        ),
-        Some((version, CodexCompatibilityState::Unknown)) => {
-            fail("codex.hook-profile", unknown_profile_summary(version))
-        }
-        Some((version, CodexCompatibilityState::Unsupported(_))) => fail(
-            "codex.hook-profile",
-            format!("Codex {version} is source-audited as unsupported"),
-        ),
-        None => fail(
-            "codex.hook-profile",
-            "Hook profile cannot be classified without a Codex version",
+        None => warning(
+            "codex.version",
+            "Codex version is unavailable; compatibility remains capability-derived",
         ),
     }
 }
 
-fn unknown_profile_summary(version: &str) -> String {
-    format!(
-        "Detected: Codex {version}; Registry: unknown; Hook profile: unclassified; Risk: manual review required"
-    )
+fn codex_profile_check(probe: &ProbedCodexProfile) -> DoctorCheck {
+    match probe.state() {
+        CodexCompatibilityState::Full(profile) | CodexCompatibilityState::Degraded(profile) => {
+            let state = probe.state().label();
+            let schema = probe.schema_fingerprint().unwrap_or("unavailable");
+            pass(
+                "codex.hook-profile",
+                format!(
+                    "CAPABILITY_{state}: {}; transport={}; wire={}; events={}; turn-aware={}; agent-aware={}; compact-aware={}; synchronous={}; timeout={}s; title={}; unknown=ignore-fail-open; cache_hit={}; schema_fingerprint={schema}",
+                    profile.id(),
+                    if profile.uses_mcp_hook_transport() {
+                        "mcp_tool"
+                    } else {
+                        "command"
+                    },
+                    profile.wire_shape().id(),
+                    profile.lifecycle_events().len(),
+                    profile.turn_aware(),
+                    profile.agent_aware(),
+                    profile.compact_aware(),
+                    profile.timeout().synchronous_required(),
+                    profile.timeout().declaration_timeout_seconds(),
+                    profile
+                        .terminal_title_ownership()
+                        .tabbeacon_delegation_key(),
+                    probe.cache_hit(),
+                ),
+            )
+        }
+        CodexCompatibilityState::Incompatible => fail(
+            "codex.hook-profile",
+            "CAPABILITY_INCOMPATIBLE: required local Hooks capability is disabled or absent",
+        ),
+        CodexCompatibilityState::Unproven => warning(
+            "codex.hook-profile",
+            "CAPABILITY_UNPROVEN: local Hooks discovery did not complete; existing exact integration is preserved but mutation is blocked",
+        ),
+    }
 }
 
 fn hook_is_enabled(config: &DocumentMut, key: &str) -> bool {
@@ -3932,15 +3934,6 @@ fn event_key_label(event: &str) -> &'static str {
         "Stop" => "stop",
         _ => "unsupported",
     }
-}
-
-fn parse_semver(value: &str) -> Option<(u64, u64, u64)> {
-    let value = value.trim_start_matches('v');
-    let mut parts = value.split(|character: char| !character.is_ascii_digit());
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
-    Some((major, minor, patch))
 }
 
 fn reject_symbolic_link(path: &Path) -> Result<(), CodexIntegrationError> {
