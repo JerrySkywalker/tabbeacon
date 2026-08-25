@@ -418,7 +418,7 @@ impl CodexHookProfile {
     }
 
     /// The existing hybrid MCP contract. It is selected only for a manifest
-    /// that already proves TabBeacon owns this exact declaration family.
+    /// that already proves `TabBeacon` owns this exact declaration family.
     #[must_use]
     pub const fn mcp_hybrid_v1() -> Self {
         MCP_HYBRID_V1_PROFILE

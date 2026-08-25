@@ -799,27 +799,31 @@ impl CodexIntegration {
         });
         checks.push(match (&manifest, capability_profile) {
             (Some(manifest), Some(discovered_profile)) => {
-                let profile = profile_for_manifest(Some(manifest), Some(discovered_profile))
-                    .expect("discovered capability profile is present");
-                match (
-                desired_hooks(&self.tabbeacon_executable, profile),
-                desired_mcp_server(&self.tabbeacon_executable, profile),
-            ) {
-                (Ok(desired), Ok(desired_mcp))
-                    if desired == manifest.hooks
-                        && desired_mcp == manifest.mcp_server
-                        && mcp_server_exact => pass(
-                    "hooks.currentness",
-                    "CURRENTNESS_CURRENT: owned hook declarations match the current TabBeacon integration",
-                ),
-                (Ok(_), Ok(_)) => fail(
-                    "hooks.currentness",
-                    "CURRENTNESS_STALE: owned hook declarations require a TabBeacon upgrade",
-                ),
-                _ => fail(
-                    "hooks.currentness",
-                    "CURRENTNESS_UNPROVEN: current TabBeacon hook declarations cannot be generated safely",
-                ),
+                match profile_for_manifest(Some(manifest), Some(discovered_profile)) {
+                    Some(profile) => match (
+                        desired_hooks(&self.tabbeacon_executable, profile),
+                        desired_mcp_server(&self.tabbeacon_executable, profile),
+                    ) {
+                        (Ok(desired), Ok(desired_mcp))
+                            if desired == manifest.hooks
+                                && desired_mcp == manifest.mcp_server
+                                && mcp_server_exact => pass(
+                            "hooks.currentness",
+                            "CURRENTNESS_CURRENT: owned hook declarations match the current TabBeacon integration",
+                        ),
+                        (Ok(_), Ok(_)) => fail(
+                            "hooks.currentness",
+                            "CURRENTNESS_STALE: owned hook declarations require a TabBeacon upgrade",
+                        ),
+                        _ => fail(
+                            "hooks.currentness",
+                            "CURRENTNESS_UNPROVEN: current TabBeacon hook declarations cannot be generated safely",
+                        ),
+                    },
+                    None => fail(
+                        "hooks.currentness",
+                        "CURRENTNESS_UNPROVEN: local capability discovery did not select a Hook contract",
+                    ),
                 }
             }
             (Some(_), None) if declarations_exact && known_wire_shape => warning(
@@ -898,8 +902,9 @@ impl CodexIntegration {
                 CodexRuntimeContinuity::Admitted
             }
             (true, CodexCompatibilityState::Unproven) => CodexRuntimeContinuity::PreservedUnproven,
-            (false, _) => CodexRuntimeContinuity::Unproven,
-            (true, CodexCompatibilityState::Incompatible) => CodexRuntimeContinuity::Unproven,
+            (false, _) | (true, CodexCompatibilityState::Incompatible) => {
+                CodexRuntimeContinuity::Unproven
+            }
         };
         checks.push(match runtime_continuity {
             CodexRuntimeContinuity::Admitted => pass(
@@ -2046,14 +2051,14 @@ fn desired_mcp_server(
     }))
 }
 
-fn mcp_transport_profile() -> Result<CodexHookProfile, CodexIntegrationError> {
-    Ok(CodexHookProfile::mcp_hybrid_v1())
+fn mcp_transport_profile() -> CodexHookProfile {
+    CodexHookProfile::mcp_hybrid_v1()
 }
 
 fn desired_mcp_server_for_manifest(
     executable: &Path,
 ) -> Result<Option<OwnedMcpServer>, CodexIntegrationError> {
-    desired_mcp_server(executable, mcp_transport_profile()?)
+    desired_mcp_server(executable, mcp_transport_profile())
 }
 
 fn owned_mcp_tool_hooks(
@@ -2084,7 +2089,7 @@ fn owned_mcp_tool_hooks(
 fn owned_mcp_hook_sets_for_manifest(
     executable: &Path,
 ) -> Result<Vec<Vec<OwnedHook>>, CodexIntegrationError> {
-    let profile = mcp_transport_profile()?;
+    let profile = mcp_transport_profile();
     let legacy = owned_mcp_tool_hooks(executable, profile)?;
     let hybrid = desired_hooks(executable, profile)?;
     Ok(vec![legacy, hybrid])

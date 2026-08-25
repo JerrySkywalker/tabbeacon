@@ -166,20 +166,21 @@ pub(crate) fn probe(
         HookFeature::Unproven => (CodexCompatibilityState::Unproven, None),
     };
 
-    if persist_cache && let Some(identity) = executable_identity {
-        if state_root.is_dir() || fs::create_dir_all(state_root).is_ok() {
-            let record = CapabilityCacheRecord {
-                schema: CACHE_SCHEMA.to_owned(),
-                executable_identity: identity,
-                capability_fingerprint: schema_fingerprint.as_deref().map_or_else(
-                    || "schema:unavailable".to_owned(),
-                    |value| format!("schema:{value}"),
-                ),
-                state: CachedCapabilityState::from_state(state),
-                profile: state.supported_profile().map(CachedProfile::from_profile),
-            };
-            let _ = write_cache(&cache_path, &record);
-        }
+    if persist_cache
+        && let Some(identity) = executable_identity
+        && (state_root.is_dir() || fs::create_dir_all(state_root).is_ok())
+    {
+        let record = CapabilityCacheRecord {
+            schema: CACHE_SCHEMA.to_owned(),
+            executable_identity: identity,
+            capability_fingerprint: schema_fingerprint.as_deref().map_or_else(
+                || "schema:unavailable".to_owned(),
+                |value| format!("schema:{value}"),
+            ),
+            state: CachedCapabilityState::from_state(state),
+            profile: state.supported_profile().map(CachedProfile::from_profile),
+        };
+        let _ = write_cache(&cache_path, &record);
     }
 
     CodexCapabilityProbe {
@@ -234,7 +235,7 @@ fn probe_schema(codex_program: Option<&Path>) -> Option<SchemaEvidence> {
         .status()
         .ok();
     let fingerprint = status
-        .filter(|status| status.success())
+        .filter(std::process::ExitStatus::success)
         .and_then(|_| directory_fingerprint(&root));
     let mcp_hook_transport = fingerprint
         .as_ref()
