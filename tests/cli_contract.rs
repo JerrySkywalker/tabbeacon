@@ -629,14 +629,16 @@ fn output_modes_preserve_machine_json_and_admit_legacy_plain_output() {
     let value: serde_json::Value =
         serde_json::from_slice(&json.stdout).expect("JSON status remains a document");
     assert_eq!(value["schema_version"], 1);
-    if value["codex"]["version"] == "0.149.0" {
-        assert_eq!(value["codex"]["profile_state"], "supported");
-        assert_eq!(value["codex"]["hook_profile"], "codex-hooks-rust-v0.149.0");
-        assert_eq!(
-            value["codex"]["hook_wire_shape"],
-            "codex-command-hooks-wire-v1"
-        );
-    }
+    let capability_state = value["codex"]["profile_state"]
+        .as_str()
+        .expect("Codex capability state is a string");
+    assert!(
+        matches!(
+            capability_state,
+            "full" | "degraded" | "incompatible" | "unproven"
+        ),
+        "Codex compatibility is a capability state, not an exact-version profile: {capability_state}"
+    );
 
     let plain = isolated_command(&root)
         .args(["status", "--plain"])
