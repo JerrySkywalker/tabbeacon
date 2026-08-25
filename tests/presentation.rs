@@ -6,11 +6,11 @@ use tabbeacon::{
     },
     presentation::{
         MAX_TITLE_SCALARS, PresentationAction, PresentationPolicy, Progress, ResetSemantics,
-        SemanticPresentationInput, TabColor, TerminalTitle, TitleIdentity, TitleStatus,
-        WindowsTerminalCapabilities, WindowsTerminalRenderer, presentation_fixture,
-        replay_presentation_fixture,
+        SemanticPresentationInput, TabColor, TerminalTitle, TerminalVisualBackend, TitleIdentity,
+        TitleMarkBackend, TitleStatus, WindowsTerminalCapabilities, WindowsTerminalRenderer,
+        presentation_fixture, replay_presentation_fixture,
     },
-    providers::registry::ProviderRegistry,
+    providers::{registry::ProviderRegistry, visual_identity::ProviderVisualIdentity},
     settings::{
         ActivityMode, PresentationSettings, PresentationTheme, ProviderBadgePolicy, SpinnerPreset,
         TabColorMode, TitleMode,
@@ -581,7 +581,7 @@ fn title_and_activity_ownership_modes_preserve_their_existing_boundaries() {
 }
 
 #[test]
-fn provider_badge_policy_keeps_single_codex_auto_compact_and_bounds_always() {
+fn provider_identity_is_a_distinct_title_slot_and_preserves_workspace_alias() {
     let renderer = WindowsTerminalRenderer::with_settings(
         WindowsTerminalCapabilities::new(false),
         PresentationSettings::default(),
@@ -589,21 +589,23 @@ fn provider_badge_policy_keeps_single_codex_auto_compact_and_bounds_always() {
     let registry = ProviderRegistry::codex_observation(Some("0.149.0"), true, true, true);
     for (policy, expected) in [
         (ProviderBadgePolicy::Auto, "⠋ TB"),
-        (ProviderBadgePolicy::Always, "⠋ TB·C"),
+        (ProviderBadgePolicy::Always, "Codex ⠋ TB"),
         (ProviderBadgePolicy::Off, "⠋ TB"),
     ] {
-        let badge = registry.title_badge_for("codex", policy);
-        let action =
-            PresentationPolicy::resolve(SemanticPresentationInput::new_with_provider_badge(
+        let identity = registry.visual_identity_for("codex", policy);
+        let action = PresentationPolicy::resolve(
+            SemanticPresentationInput::new_with_provider_visual_identity(
                 Phase::Working,
                 Attention::None,
                 Health::Normal,
                 "TB",
-                badge.as_deref(),
-            ));
+                identity,
+            ),
+        );
         let PresentationAction::Apply(state) = action else {
             panic!("working state applies a title");
         };
+        assert_eq!(state.workspace_alias().as_str(), "TB");
         assert_eq!(
             renderer
                 .title_for(&state)
@@ -613,21 +615,128 @@ fn provider_badge_policy_keeps_single_codex_auto_compact_and_bounds_always() {
         );
     }
 
-    let invalid = PresentationPolicy::resolve(SemanticPresentationInput::new_with_provider_badge(
-        Phase::Working,
-        Attention::None,
-        Health::Normal,
-        "TB",
-        Some("bad badge"),
-    ));
-    let PresentationAction::Apply(state) = invalid else {
+    let unknown = PresentationPolicy::resolve(
+        SemanticPresentationInput::new_with_provider_visual_identity(
+            Phase::Working,
+            Attention::None,
+            Health::Normal,
+            "TB",
+            Some(ProviderVisualIdentity::for_provider_id("bad badge")),
+        ),
+    );
+    let PresentationAction::Apply(state) = unknown else {
         panic!("working state applies a title");
     };
     assert_eq!(
         renderer.title_for(&state).unwrap().as_str(),
-        "⠋ TB",
-        "unvalidated provider badges cannot alter a title"
+        "Unknown ⠋ TB",
+        "unknown provider identity has one deterministic safe fallback"
     );
+}
+
+#[test]
+fn provider_visual_identity_is_stable_across_runtime_state_and_isolated_per_pane() {
+    let renderer = TitleMarkBackend::with_settings(
+        WindowsTerminalCapabilities::new(false),
+        PresentationSettings::default(),
+    );
+    let codex_working = PresentationPolicy::resolve(
+        SemanticPresentationInput::new_with_provider_visual_identity(
+            Phase::Working,
+            Attention::None,
+            Health::Normal,
+            "tabbeacon",
+            Some(ProviderVisualIdentity::codex()),
+        ),
+    );
+    let codex_ready = PresentationPolicy::resolve(
+        SemanticPresentationInput::new_with_provider_visual_identity(
+            Phase::Ready,
+            Attention::None,
+            Health::Normal,
+            "tabbeacon",
+            Some(ProviderVisualIdentity::codex()),
+        ),
+    );
+    let agy_working = PresentationPolicy::resolve(
+        SemanticPresentationInput::new_with_provider_visual_identity(
+            Phase::Working,
+            Attention::None,
+            Health::Normal,
+            "tabbeacon",
+            Some(ProviderVisualIdentity::agy()),
+        ),
+    );
+
+    let PresentationAction::Apply(codex_working) = codex_working else {
+        panic!("working Codex applies a title");
+    };
+    let PresentationAction::Apply(codex_ready) = codex_ready else {
+        panic!("ready Codex applies a title");
+    };
+    let PresentationAction::Apply(agy_working) = agy_working else {
+        panic!("working Agy applies a title");
+    };
+
+    assert_eq!(codex_working.workspace_alias().as_str(), "tabbeacon");
+    assert_eq!(codex_ready.workspace_alias().as_str(), "tabbeacon");
+    assert_eq!(agy_working.workspace_alias().as_str(), "tabbeacon");
+    assert_eq!(
+        codex_working
+            .provider_visual_identity()
+            .expect("Codex identity")
+            .accessible_name(),
+        "Codex provider"
+    );
+    assert_eq!(
+        renderer.title_for(&codex_working).unwrap().as_str(),
+        "Codex ⠋ tabbeacon"
+    );
+    assert_eq!(
+        renderer.title_for(&codex_ready).unwrap().as_str(),
+        "Codex ○ tabbeacon"
+    );
+    assert_eq!(
+        renderer.title_for(&agy_working).unwrap().as_str(),
+        "Agy ⠋ tabbeacon"
+    );
+    assert_ne!(
+        codex_working.provider_visual_identity(),
+        agy_working.provider_visual_identity(),
+        "same-workspace panes retain their own provider identity"
+    );
+}
+
+#[test]
+fn titlemark_backend_is_the_native_icon_free_fail_open_fallback() {
+    for theme in [PresentationTheme::Classic, PresentationTheme::MutedDark] {
+        let backend = TitleMarkBackend::with_settings(
+            WindowsTerminalCapabilities::new(true),
+            PresentationSettings::default().with_theme(theme),
+        );
+        let capabilities = backend.visual_capabilities();
+        assert!(capabilities.title_mark_supported());
+        assert!(!capabilities.native_tab_icon_supported());
+        assert!(capabilities.progress_supported());
+        assert!(capabilities.palette_supported());
+
+        let action = PresentationPolicy::resolve(
+            SemanticPresentationInput::new_with_provider_visual_identity(
+                Phase::Ready,
+                Attention::None,
+                Health::Normal,
+                "tabbeacon",
+                Some(ProviderVisualIdentity::for_provider_id("unrecognized")),
+            ),
+        );
+        let PresentationAction::Apply(state) = action else {
+            panic!("ready state applies a title");
+        };
+        assert_eq!(
+            backend.title_for(&state).unwrap().as_str(),
+            "Unknown ○ tabbeacon"
+        );
+    }
 }
 
 #[test]

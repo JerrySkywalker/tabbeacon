@@ -3253,7 +3253,7 @@ fn production_hook_path_applies_each_required_v0_1_channel_combination() {
 }
 
 #[test]
-fn runtime_withholds_always_badge_without_current_provider_admission() {
+fn runtime_uses_fixed_codex_identity_without_capability_admission_inference() {
     let root = TestRoot::new("runtime-provider-admission");
     let repo = root.child("workstation-manager");
     init_repo(
@@ -3273,10 +3273,10 @@ fn runtime_withholds_always_badge_without_current_provider_admission() {
         HookDispatchOutcome::Applied
     );
     let rendered = String::from_utf8(output).expect("terminal bytes are UTF-8");
-    assert!(rendered.contains("○ WORKMANA"));
+    assert!(rendered.contains("Codex ○ WORKMANA"));
     assert!(
-        !rendered.contains("·C"),
-        "runtime must not infer current provider admission from stale setup evidence"
+        !rendered.contains("WORKMANA·"),
+        "provider identity must not be folded into the workspace alias"
     );
 }
 

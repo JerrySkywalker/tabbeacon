@@ -11,8 +11,8 @@ use crate::{
     activity::{ActivityCoordinator, ActivityRender},
     core::SessionReconciler,
     presentation::{
-        PresentationPolicy, SemanticPresentationInput, WindowsTerminalCapabilities,
-        WindowsTerminalRenderer,
+        PresentationPolicy, SemanticPresentationInput, TitleMarkBackend,
+        WindowsTerminalCapabilities,
     },
     providers::registry::ProviderRegistry,
     repo::{StableAliasRegistry, WorkspaceIdentityResolver},
@@ -70,7 +70,7 @@ pub struct CodexHookRuntime {
     identity_resolver: WorkspaceIdentityResolver,
     generation_store: CodexGenerationStore,
     root_workspace_anchors: RootWorkspaceAnchorStore,
-    renderer: WindowsTerminalRenderer,
+    renderer: TitleMarkBackend,
     activity: ActivityCoordinator,
 }
 
@@ -104,7 +104,7 @@ impl CodexHookRuntime {
             identity_resolver: WorkspaceIdentityResolver::new(&state_root),
             generation_store: CodexGenerationStore::new(&state_root),
             root_workspace_anchors: RootWorkspaceAnchorStore::new(&state_root),
-            renderer: WindowsTerminalRenderer::with_settings(
+            renderer: TitleMarkBackend::with_settings(
                 WindowsTerminalCapabilities::new(frame_color_supported),
                 settings,
             ),
@@ -298,20 +298,18 @@ impl CodexHookRuntime {
         let started = Instant::now();
         let mut reconciler = SessionReconciler::default();
         let snapshot = reconciler.apply(normalized.evidence());
-        // Hook input contains no current local capability evidence. Do not
-        // infer provider-badge authority from an older setup, an owned
-        // declaration, or the normalizer's bounded contract. The event path
-        // therefore performs no expensive probe and uses an explicitly unknown
-        // registry, withholding an `always` badge until a current bounded probe
-        // result can be projected safely.
+        // Hook input contains no current local capability evidence. Provider
+        // identity is decorative rather than compatibility authority, so the
+        // runtime can obtain fixed Codex text from the registry without an
+        // expensive probe or any inference about setup/trust authority.
         let runtime_registry = ProviderRegistry::default();
-        let provider_badge =
-            runtime_registry.title_badge_for("codex", self.renderer.settings().provider_badge());
+        let provider_visual_identity = runtime_registry
+            .visual_identity_for("codex", self.renderer.settings().provider_badge());
         let action = PresentationPolicy::resolve(
-            SemanticPresentationInput::from_snapshot_with_provider_badge(
+            SemanticPresentationInput::from_snapshot_with_provider_visual_identity(
                 &snapshot,
                 selection.effective_alias().as_str(),
-                provider_badge.as_deref(),
+                provider_visual_identity,
             ),
         );
         let title_workspace_alias = match &action {

@@ -17,6 +17,7 @@ use crate::{
         AGY_PROVIDER_ID, AgyCapability, AgyCapabilityAvailability, AgyCapabilityProfile, AgyVersion,
     },
     providers::agy_backend::{AgyIntegrationReadiness, AgyProductionSetup, AgyReadinessProjection},
+    providers::visual_identity::ProviderVisualIdentity,
     settings::ProviderBadgePolicy,
 };
 
@@ -728,6 +729,29 @@ impl ProviderRegistry {
         let badge = provider.title_badge();
         (badge.len() == 1 && badge.bytes().all(|byte| byte.is_ascii_uppercase()))
             .then(|| badge.to_owned())
+    }
+
+    /// Resolves fixed provider identity independently from runtime state and
+    /// workspace identity. Existing visibility preferences only decide whether
+    /// the title-mark fallback is emitted; they do not alter the identity.
+    #[must_use]
+    pub fn visual_identity_for(
+        &self,
+        provider_id: &str,
+        policy: ProviderBadgePolicy,
+    ) -> Option<ProviderVisualIdentity> {
+        if policy == ProviderBadgePolicy::Off {
+            return None;
+        }
+        let admitted_count = self
+            .providers
+            .iter()
+            .filter(|provider| provider.admission == ProviderAdmissionState::Admitted)
+            .count();
+        if policy == ProviderBadgePolicy::Auto && admitted_count <= 1 {
+            return None;
+        }
+        Some(ProviderVisualIdentity::for_provider_id(provider_id))
     }
 }
 

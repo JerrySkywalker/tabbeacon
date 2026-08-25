@@ -11,7 +11,7 @@ Start the v0.6.1 train in priority order:
 This goal does not publish any TabBeacon release, change PR #79, or mutate an
 Owner Codex/Agy configuration or Hook trust state.
 
-## Train A candidate status
+## Train A completion
 
 The candidate removes `CodexCompatibilityRegistry` and
 `CodexHookProfile::for_version` from runtime and mutation decisions. It adds
@@ -24,8 +24,17 @@ binary, additive fields and an `Interrupt` event, degraded optional schema
 evidence, missing required capability, probe failure preserving an exact
 runtime, cache hit, and cache invalidation after binary change.
 
-Train A remains a candidate until the exact-head focused suite, repository
-quality gates, hosted CI, and review/merge disposition are recorded.
+Train A merged as PR #82 at `43cd07d6152e0acb99fb1a948cde23b45fbad5ff`
+after hosted exact-head CI passed for
+`59dc531747ed6d74341687102c1bc00a77c4684d`.
+
+## Train B candidate status
+
+Provider Visual Identity v2 introduces fixed, product-owned provider identity
+metadata and a `TerminalVisualBackend` capability boundary. The production
+`TitleMarkBackend` preserves the OSC title fallback while native tab-icon
+capability remains false. The identity, runtime state, and workspace alias
+occupy independent title slots.
 
 ## Risk vector
 
@@ -34,7 +43,7 @@ CODE_CHANGED=true
 PROVIDER_CHANGED=true
 USER_PERSISTENT_CONFIG_CHANGED=true
 SECURITY_OR_PRIVACY_CHANGED=false
-PRESENTATION_CHANGED=false
+PRESENTATION_CHANGED=true
 RELEASE_BOUNDARY=false
 ```
 

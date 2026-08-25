@@ -29,8 +29,8 @@ use crate::{
         Phase, SessionReconciler, StatePatch,
     },
     presentation::{
-        PresentationAction, PresentationPolicy, SemanticPresentationInput,
-        WindowsTerminalCapabilities, WindowsTerminalRenderer,
+        PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleMarkBackend,
+        WindowsTerminalCapabilities,
     },
     providers::registry::ProviderRegistry,
     repo::{RepositoryAlias, StableAliasRegistry, WorkspaceIdentityResolver},
@@ -547,7 +547,7 @@ pub struct AgyTitleRuntime {
     state_root: PathBuf,
     identity_resolver: WorkspaceIdentityResolver,
     root_anchors: AgyRootAnchorStore,
-    renderer: WindowsTerminalRenderer,
+    renderer: TitleMarkBackend,
 }
 
 impl AgyTitleRuntime {
@@ -560,7 +560,7 @@ impl AgyTitleRuntime {
             state_root: state_root.clone(),
             identity_resolver: WorkspaceIdentityResolver::new(&state_root),
             root_anchors: AgyRootAnchorStore::new(&state_root),
-            renderer: WindowsTerminalRenderer::with_settings(
+            renderer: TitleMarkBackend::with_settings(
                 WindowsTerminalCapabilities::new(false),
                 settings,
             ),
@@ -634,13 +634,13 @@ impl AgyTitleRuntime {
                 qualification_observations_available: true,
                 production_enabled: true,
             });
-        let provider_badge =
-            registry.title_badge_for(AGY_PROVIDER_ID, self.renderer.settings().provider_badge());
+        let provider_visual_identity = registry
+            .visual_identity_for(AGY_PROVIDER_ID, self.renderer.settings().provider_badge());
         let action = PresentationPolicy::resolve(
-            SemanticPresentationInput::from_snapshot_with_provider_badge(
+            SemanticPresentationInput::from_snapshot_with_provider_visual_identity(
                 &snapshot,
                 root_selection.effective_alias.as_str(),
-                provider_badge.as_deref(),
+                provider_visual_identity,
             ),
         );
         let state = match &action {
@@ -2016,20 +2016,20 @@ mod tests {
         let response = runtime.dispatch_to(&payload, SystemTime::UNIX_EPOCH);
         assert_eq!(response.outcome, AgyTitleDispatchOutcome::Applied);
         assert_ne!(response.title, "Agy");
-        assert!(response.title.contains("·A"));
+        assert!(response.title.starts_with("Agy "));
         assert!(!response.title.contains('\u{1b}'));
         let off_runtime = AgyTitleRuntime::new(
             root.join("off-state"),
             settings.with_provider_badge(ProviderBadgePolicy::Off),
         );
         let off = off_runtime.dispatch_to(&payload, SystemTime::UNIX_EPOCH);
-        assert!(!off.title.contains("·A"));
+        assert!(!off.title.starts_with("Agy "));
         let always_runtime = AgyTitleRuntime::new(
             root.join("always-state"),
             settings.with_provider_badge(ProviderBadgePolicy::Always),
         );
         let always = always_runtime.dispatch_to(&payload, SystemTime::UNIX_EPOCH);
-        assert!(always.title.contains("·A"));
+        assert!(always.title.starts_with("Agy "));
         let diagnostics =
             fs::read_to_string(root.join("state/agy-callback-v1/last-observation.json"))
                 .expect("minimized diagnostics");
