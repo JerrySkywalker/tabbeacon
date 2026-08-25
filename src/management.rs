@@ -308,7 +308,7 @@ fn project_installation(
             "hooks.integration_upgrade_required",
             HealthSeverity::Warning,
             "TabBeacon integration upgrade required",
-            "Owned hook declarations do not match the current admitted integration shape.",
+            "Owned hook declarations do not match the current capability-compatible integration shape.",
             Some(action(
                 "integration.setup_codex",
                 "Upgrade Codex integration",
@@ -344,15 +344,15 @@ fn project_profile(
         return;
     }
     let (id, title, explanation) = match report.codex.profile_state.as_str() {
-        "experimental" => (
-            "codex.profile_unadmitted",
-            "Codex profile is not admitted",
-            "This detected Codex version has no admitted TabBeacon hook profile.",
+        "incompatible" => (
+            "codex.capability_incompatible",
+            "Required Codex capability is unavailable",
+            "Local Codex capability evidence reports that the required Hooks capability is absent or disabled.",
         ),
         _ => (
-            "codex.profile_unavailable",
-            "Codex compatibility is unavailable",
-            "TabBeacon cannot safely prove an admitted Codex hook profile.",
+            "codex.capability_unproven",
+            "Codex capability compatibility is unproven",
+            "TabBeacon could not complete local capability discovery safely; version alone is not used as an admission decision.",
         ),
     };
     add_issue(
@@ -363,9 +363,9 @@ fn project_profile(
         title,
         explanation,
         Some(action(
-            "codex.profile_guidance",
-            "Use an admitted Codex profile",
-            "Use a supported Codex version or wait for an explicitly admitted TabBeacon profile; no support is fabricated automatically.",
+            "codex.capability_guidance",
+            "Inspect local Codex capability evidence",
+            "Run tabbeacon doctor after restoring the required local Hooks capability; no configuration is rewritten while compatibility is unproven or incompatible.",
             ActionSafety::UnsupportedAutomation,
         )),
     );
@@ -817,7 +817,7 @@ mod tests {
         let mut report = report();
         add_check(&mut report, "hooks.currentness", DiagnosticStatus::Fail);
         report.codex.profile_supported = false;
-        report.codex.profile_state = "experimental".to_owned();
+        report.codex.profile_state = "incompatible".to_owned();
         report.title = title(TitleRemediationState::Available);
 
         let snapshot = ManagementSnapshot::from_diagnostics(&report);
@@ -830,7 +830,7 @@ mod tests {
             ActionSafety::OwnerExplicitRequired
         );
         assert_eq!(
-            issue(&snapshot, "codex.profile_unadmitted")
+            issue(&snapshot, "codex.capability_incompatible")
                 .remediation
                 .as_ref()
                 .expect("profile action")

@@ -2,6 +2,15 @@
 
 Roadmap IDs are stable governance identifiers. `X` suffixes denote experimental work that does not block the adjacent production release unless promoted by a later decision.
 
+## v0.6.1 forward-compatibility start
+
+`TB-V061-12H-FORWARD-COMPAT-VISUAL-001` begins the non-release v0.6.1 train.
+Its first candidate replaces exact Codex version admission with local capability
+compatibility while preserving ownership-safe setup, manual Hook trust, and the
+literal `codex` daily command. Provider Visual Identity v2 and Windows Terminal
+native-icon research remain ordered follow-on work; no v0.6.1 publication is
+authorized by this planning/status entry.
+
 ## Current production baseline
 
 The v0.4 production line is complete through public `0.4.0` distribution.

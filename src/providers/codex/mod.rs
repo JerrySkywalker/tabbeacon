@@ -4,6 +4,7 @@
 //! exposed to the core reconciler.
 
 mod anchor;
+mod capability;
 mod config;
 mod generation;
 mod mcp;
@@ -20,9 +21,9 @@ pub use mcp::{
     hook_input_template, run_stdio_hook_server,
 };
 pub use profile::{
-    CodexCompatibilityRegistry, CodexCompatibilityState, CodexHookEvent, CodexHookProfile,
-    CodexHookWireShape, HookIdentitySemantics, HookTimeoutSemantics, KnownUnadmittedCodexVersion,
-    TerminalTitleOwnershipSemantics, UnknownEventPolicy,
+    CodexCompatibilityState, CodexHookEvent, CodexHookProfile, CodexHookWireShape,
+    HookIdentitySemantics, HookTimeoutSemantics, TerminalTitleOwnershipSemantics,
+    UnknownEventPolicy,
 };
 pub use runtime::{CodexHookRuntime, HookDispatchOutcome};
 
@@ -178,10 +179,10 @@ impl std::error::Error for CodexHookError {}
 pub struct CodexHookNormalizer;
 
 impl CodexHookNormalizer {
-    /// Returns the exact release profile implemented by this normalizer.
+    /// Returns the conservative bounded contract implemented by this normalizer.
     #[must_use]
     pub fn profile() -> CodexHookProfile {
-        CodexCompatibilityRegistry::admitted_profiles()[0]
+        CodexHookProfile::command_v1()
     }
 
     /// Declares exactly the semantic axes and authority available from hooks.

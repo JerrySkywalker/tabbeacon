@@ -117,8 +117,10 @@ The core consumes normalized evidence and must not depend on provider-specific e
 Provider backends declare their capabilities and evidence authority. Heuristics must not
 masquerade as authoritative state.
 
-A newer Codex version does not inherit support from an admitted version merely because
-its version number is greater.
+Codex version ordering neither grants nor denies support. Compatibility is
+admitted from positively established local protocol/capability evidence.
+Unknown/newer versions with compatible capabilities remain supported; actual
+missing or incompatible required capabilities remain fail-safe.
 
 ## 9. Visual changes
 

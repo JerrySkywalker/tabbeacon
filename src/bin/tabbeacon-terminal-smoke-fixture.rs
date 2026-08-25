@@ -17,6 +17,8 @@ use tabbeacon::{
 };
 
 const FIXTURE_CODEX_VERSION_PROBE_ARGUMENT: &str = "--version";
+const FIXTURE_CODEX_FEATURES_ARGUMENTS: [&str; 2] = ["features", "list"];
+const FIXTURE_CODEX_SCHEMA_ARGUMENTS: [&str; 3] = ["app-server", "generate-json-schema", "--out"];
 
 fn fixture_hook_inventory() -> Result<HookInventory, String> {
     let nonce = SystemTime::now()
@@ -61,11 +63,34 @@ fn fixture_hook_inventory() -> Result<HookInventory, String> {
 
 #[allow(clippy::too_many_lines)] // The durable smoke receipt stays in one auditable fixture entry point.
 fn main() -> ExitCode {
-    if env::args().nth(1).as_deref() == Some(FIXTURE_CODEX_VERSION_PROBE_ARGUMENT) {
-        // Keep the adapter proof on the exact admitted Codex profile without
-        // consulting any Owner configuration or executable.
+    let arguments = env::args().skip(1).collect::<Vec<_>>();
+    if arguments.as_slice() == [FIXTURE_CODEX_VERSION_PROBE_ARGUMENT] {
+        // Version is fixture diagnostics only. The actual compatibility proof
+        // remains the local capability contract below.
         println!("codex-cli 0.147.0");
         return ExitCode::SUCCESS;
+    }
+    if arguments.as_slice() == FIXTURE_CODEX_FEATURES_ARGUMENTS {
+        println!("hooks stable true");
+        return ExitCode::SUCCESS;
+    }
+    if arguments.len() == 4
+        && arguments[..3]
+            .iter()
+            .map(String::as_str)
+            .eq(FIXTURE_CODEX_SCHEMA_ARGUMENTS)
+    {
+        let output_root = std::path::Path::new(&arguments[3]);
+        if fs::create_dir_all(output_root).is_ok()
+            && fs::write(
+                output_root.join("fixture-schema.json"),
+                br#"{"hooks":"command"}"#,
+            )
+            .is_ok()
+        {
+            return ExitCode::SUCCESS;
+        }
+        return ExitCode::FAILURE;
     }
     if std::env::var_os("WT_SESSION").is_none()
         || !std::io::stdin().is_terminal()
