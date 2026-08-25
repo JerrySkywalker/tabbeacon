@@ -17,6 +17,7 @@ pub mod human_output;
 pub mod human_presentation;
 pub mod interface_preferences;
 pub mod management;
+pub(crate) mod mcp_runtime_lease;
 pub mod presentation;
 pub mod providers;
 pub mod repo;

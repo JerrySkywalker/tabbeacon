@@ -1,0 +1,13 @@
+use std::env;
+
+fn main() {
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    match args.as_slice() {
+        [flag] if flag == "--version" => println!("codex-cli 99.99.99"),
+        [features, list] if features == "features" && list == "list" => {
+            println!("experiments stable true");
+            println!("future_additive_feature beta false");
+        }
+        _ => std::process::exit(2),
+    }
+}

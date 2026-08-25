@@ -13,19 +13,41 @@ use std::{
 };
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use std::{
+    io::Read,
+    os::windows::process::CommandExt,
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
 
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::activity::{
     ActiveWorkerLeaseIdentity, ActiveWorkerLeaseInspection, ActivityLeaseHealth,
     inspect_system_active_worker_identities,
 };
+use crate::mcp_runtime_lease::{
+    McpExecutableIdentity, McpLeaseInspection, executable_identity,
+    inspect_system_mcp_runtime_leases, remove_system_mcp_runtime_lease,
+};
 use crate::worker_runtime::WorkerRuntimeStore;
 
 /// Stable JSON schema version for upgrade preflight output.
-pub const UPGRADE_PREFLIGHT_SCHEMA_VERSION: u32 = 2;
+pub const UPGRADE_PREFLIGHT_SCHEMA_VERSION: u32 = 3;
+
+#[cfg(windows)]
+// Windows PowerShell process startup is host-dependent (and may take several
+// seconds even with `-NoProfile`). This remains a finite release-tooling
+// boundary, not a Hook-path timer; an unavailable observation still fails
+// closed rather than assuming there are no package locks.
+const PROCESS_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(45);
+#[cfg(windows)]
+const PROCESS_TERMINATION_TIMEOUT: Duration = Duration::from_secs(50);
+#[cfg(windows)]
+const MAX_PROCESS_OBSERVATION_STDOUT_BYTES: u64 = 512 * 1024;
 
 /// Which local executable the preflight inspected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -55,12 +77,15 @@ impl UpgradeTargetSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpgradeReplaceability {
-    /// An explicit drain probe opened the target for replacement without changing it.
+    /// An explicit drain left no external process that can block replacement.
     Ready,
     /// No `TabBeacon` process using the target executable remains after observation.
     NoKnownTabBeaconLock,
     /// A matching process or operating-system sharing rule currently blocks replacement.
     Blocked,
+    /// Only currently proven package-installed `TabBeacon` MCP children block replacement.
+    #[serde(rename = "blocked_by_owned_tabbeacon_mcp")]
+    BlockedByOwnedTabBeaconMcp,
     /// Process or filesystem inspection could not establish a safe answer.
     Unavailable,
 }
@@ -71,9 +96,22 @@ impl UpgradeReplaceability {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Ready => "ready",
-            Self::NoKnownTabBeaconLock => "no_known_tabbeacon_lock",
+            Self::NoKnownTabBeaconLock => "no_known_tab_beacon_lock",
             Self::Blocked => "blocked",
+            Self::BlockedByOwnedTabBeaconMcp => "blocked_by_owned_tabbeacon_mcp",
             Self::Unavailable => "unavailable",
+        }
+    }
+
+    /// Precise predecessor spelling retained only for machine consumers that
+    /// used the formerly divergent plain-output field.
+    #[must_use]
+    pub const fn compatibility_alias(self) -> Option<&'static str> {
+        match self {
+            Self::NoKnownTabBeaconLock => Some("no_known_tabbeacon_lock"),
+            Self::Ready | Self::Blocked | Self::BlockedByOwnedTabBeaconMcp | Self::Unavailable => {
+                None
+            }
         }
     }
 }
@@ -104,7 +142,18 @@ impl UpgradeProcessInspection {
 #[serde(rename_all = "snake_case")]
 pub enum UpgradeWorkerOwnership {
     /// The exact internal worker arguments matched one valid active local lease.
+    #[serde(rename = "proved_tabbeacon_worker")]
     ProvedTabBeaconWorker,
+    /// An exact MCP stdio command matched one fresh, manifest-authorized
+    /// process lease, creation time, canonical path hash, and executable hash.
+    #[serde(rename = "proved_tabbeacon_mcp")]
+    ProvedTabBeaconMcp,
+    /// A matching lease was expired, corrupt, duplicated, or otherwise unable
+    /// to authorize the current process.
+    StaleOrInvalidLease,
+    /// A lease named the PID but did not match its creation-time or executable
+    /// identity, so PID reuse or executable replacement was detected.
+    ProcessIdentityMismatch,
     /// The process must be preserved because ownership was not proven.
     UnownedOrAmbiguous,
 }
@@ -115,7 +164,38 @@ impl UpgradeWorkerOwnership {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ProvedTabBeaconWorker => "proved_tabbeacon_worker",
+            Self::ProvedTabBeaconMcp => "proved_tabbeacon_mcp",
+            Self::StaleOrInvalidLease => "stale_or_invalid_lease",
+            Self::ProcessIdentityMismatch => "process_identity_mismatch",
             Self::UnownedOrAmbiguous => "unowned_or_ambiguous",
+        }
+    }
+
+    const fn is_drainable(self) -> bool {
+        matches!(self, Self::ProvedTabBeaconWorker | Self::ProvedTabBeaconMcp)
+    }
+}
+
+/// Bounded semantic kind of a process using the package executable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpgradeProcessKind {
+    /// Existing immutable-runtime activity worker command.
+    ActivityWorker,
+    /// Long-lived session-scoped Codex MCP stdio server.
+    McpStdioServer,
+    /// Any other process using the target executable.
+    Unknown,
+}
+
+impl UpgradeProcessKind {
+    /// Stable machine-oriented spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ActivityWorker => "activity_worker",
+            Self::McpStdioServer => "mcp_stdio_server",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -158,6 +238,12 @@ impl UpgradeDrainDisposition {
 pub struct UpgradeWorkerDiagnostic {
     /// Windows process identifier. It is display-only and is never persisted.
     pub process_id: u32,
+    /// Creation-time binding used only for the immediate drain recheck.  It is
+    /// deliberately not part of any human or machine output.
+    #[serde(skip)]
+    creation_ticks: u64,
+    /// Bounded process purpose inferred only for ownership evaluation.
+    pub kind: UpgradeProcessKind,
     /// Whether the exact worker identity was proven from a current local lease.
     pub ownership: UpgradeWorkerOwnership,
     /// Explicit-drain decision for this process.
@@ -232,6 +318,8 @@ pub struct UpgradePreflight {
     pub process_inspection: UpgradeProcessInspection,
     /// Whether lease state was sufficiently healthy to prove a worker target.
     pub worker_lease_health: String,
+    /// Whether MCP lease state was sufficiently healthy for an MCP proof.
+    pub mcp_lease_health: String,
     /// Content-minimal runtime-image ownership state.
     pub runtime_images: UpgradeRuntimeImageState,
     /// Current replacement disposition after an optional explicit drain.
@@ -242,6 +330,8 @@ pub struct UpgradePreflight {
     pub drain_requested: bool,
     /// Count of processes stopped after a fresh ownership recheck.
     pub drained_owned_workers: usize,
+    /// Count of exact package MCP children stopped after a fresh proof recheck.
+    pub drained_owned_mcp_children: usize,
     /// Command safety and privacy invariants.
     pub boundaries: UpgradePreflightBoundaries,
 }
@@ -256,12 +346,27 @@ impl UpgradePreflight {
             .count()
     }
 
+    /// Number of currently listed package MCP children with a full ownership proof.
+    #[must_use]
+    pub fn proved_owned_mcp_count(&self) -> usize {
+        self.workers
+            .iter()
+            .filter(|worker| worker.ownership == UpgradeWorkerOwnership::ProvedTabBeaconMcp)
+            .count()
+    }
+
     /// Number of listed processes that are intentionally preserved.
     #[must_use]
     pub fn ambiguous_process_count(&self) -> usize {
         self.workers
             .iter()
-            .filter(|worker| worker.ownership == UpgradeWorkerOwnership::UnownedOrAmbiguous)
+            .filter(|worker| {
+                !matches!(
+                    worker.ownership,
+                    UpgradeWorkerOwnership::ProvedTabBeaconWorker
+                        | UpgradeWorkerOwnership::ProvedTabBeaconMcp
+                )
+            })
             .count()
     }
 }
@@ -269,13 +374,19 @@ impl UpgradePreflight {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ObservedProcess {
     process_id: u32,
+    creation_ticks: u64,
     command_line: String,
+    // This is transient process-observation input, never report output. A
+    // normalized canonical path digest lets the Rust side select the exact
+    // package image without retaining a raw executable path.
+    image_path_sha256: Option<String>,
 }
 
 trait UpgradeProcessInspector {
     fn matching_processes(&mut self, target: &Path) -> Result<Vec<ObservedProcess>, ()>;
+    fn fresh_mcp_leases(&mut self) -> McpLeaseInspection;
     fn probe_replaceability(&mut self, target: &Path) -> UpgradeReplaceability;
-    fn terminate_proved_worker(&mut self, process_id: u32) -> Result<(), ()>;
+    fn terminate_proved_process(&mut self, process: &ObservedProcess) -> Result<(), ()>;
 }
 
 /// Inspects the installed Cargo executable when available, otherwise the current
@@ -285,27 +396,33 @@ pub fn inspect_system_upgrade_preflight(drain_requested: bool) -> UpgradePreflig
     let current_executable = env::current_exe().ok();
     let (target, target_source) = select_upgrade_target(current_executable.as_deref());
     let leases = inspect_system_active_worker_identities();
+    let mcp_leases = inspect_system_mcp_runtime_leases();
     let state_root = crate::repo::StableAliasRegistry::default_state_root().ok();
     let runtime_images = runtime_image_state(state_root.as_deref(), &leases);
-    let mut inspector = SystemUpgradeProcessInspector;
+    let mut inspector = SystemUpgradeProcessInspector {
+        include_activity_worker_commands: leases.health == ActivityLeaseHealth::Healthy
+            && !leases.identities.is_empty(),
+    };
     inspect_with_inspector(
         &mut inspector,
         current_executable.as_deref(),
         target.as_deref(),
         target_source,
         &leases,
+        &mcp_leases,
         runtime_images,
         drain_requested,
     )
 }
 
-#[allow(clippy::too_many_lines)] // Ownership rechecks and final replacement state stay in one auditable flow.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // Ownership rechecks and final replacement state stay in one auditable flow.
 fn inspect_with_inspector(
     inspector: &mut impl UpgradeProcessInspector,
     current_executable: Option<&Path>,
     target: Option<&Path>,
     target_source: UpgradeTargetSource,
     leases: &ActiveWorkerLeaseInspection,
+    mcp_leases: &McpLeaseInspection,
     runtime_images: UpgradeRuntimeImageState,
     drain_requested: bool,
 ) -> UpgradePreflight {
@@ -324,11 +441,13 @@ fn inspect_with_inspector(
             target_source,
             process_inspection: UpgradeProcessInspection::Unavailable,
             worker_lease_health: leases.health.as_str().to_owned(),
+            mcp_lease_health: mcp_leases.health.as_str().to_owned(),
             runtime_images,
             replaceability: UpgradeReplaceability::Unavailable,
             workers: Vec::new(),
             drain_requested,
             drained_owned_workers: 0,
+            drained_owned_mcp_children: 0,
             boundaries,
         };
     };
@@ -344,49 +463,109 @@ fn inspect_with_inspector(
             target_source,
             process_inspection: UpgradeProcessInspection::Unavailable,
             worker_lease_health: leases.health.as_str().to_owned(),
+            mcp_lease_health: mcp_leases.health.as_str().to_owned(),
             runtime_images,
             replaceability: UpgradeReplaceability::Unavailable,
             workers: Vec::new(),
             drain_requested,
             drained_owned_workers: 0,
+            drained_owned_mcp_children: 0,
             boundaries,
         };
     };
 
+    let target_identity = executable_identity(target);
     let mut workers = classify_processes(
         &initial_processes,
         current_process_id,
         leases,
+        mcp_leases,
+        target_identity.as_ref(),
         drain_requested,
     );
     let mut drained_owned_workers = 0_usize;
+    let mut drained_owned_mcp_children = 0_usize;
     if drain_requested {
         for worker in &mut workers {
-            if worker.ownership != UpgradeWorkerOwnership::ProvedTabBeaconWorker {
+            if !worker.ownership.is_drainable() {
                 worker.drain = UpgradeDrainDisposition::PreservedAmbiguous;
                 continue;
             }
+            // Recompute the canonical path/content identity for every
+            // mutation. A replacement, reparse change, or unreadable target
+            // between inspection and drain is an authority failure, never a
+            // reason to terminate a process by a stale observation.
+            let Some(rechecked_target_identity) = executable_identity(target) else {
+                worker.drain = UpgradeDrainDisposition::RefusedAtRecheck;
+                continue;
+            };
+            let rechecked_mcp_leases = inspector.fresh_mcp_leases();
             let rechecked = inspector
                 .matching_processes(target)
                 .ok()
-                .map(|processes| classify_processes(&processes, current_process_id, leases, true));
-            let still_proved = rechecked.as_ref().is_some_and(|processes| {
-                processes.iter().any(|candidate| {
-                    candidate.process_id == worker.process_id
-                        && candidate.ownership == UpgradeWorkerOwnership::ProvedTabBeaconWorker
-                })
-            });
-            if !still_proved {
-                worker.drain = UpgradeDrainDisposition::RefusedAtRecheck;
-            } else if inspector.terminate_proved_worker(worker.process_id).is_ok() {
-                worker.drain = UpgradeDrainDisposition::Drained;
-                drained_owned_workers = drained_owned_workers.saturating_add(1);
+                .and_then(|processes| {
+                    let still_proved = classify_processes(
+                        &processes,
+                        current_process_id,
+                        leases,
+                        &rechecked_mcp_leases,
+                        Some(&rechecked_target_identity),
+                        true,
+                    )
+                    .into_iter()
+                    .any(|candidate| {
+                        candidate.process_id == worker.process_id
+                            && candidate.creation_ticks == worker.creation_ticks
+                            && candidate.kind == worker.kind
+                            && candidate.ownership == worker.ownership
+                    });
+                    still_proved.then(|| {
+                        processes.into_iter().find(|process| {
+                            process.process_id == worker.process_id
+                                && process.creation_ticks == worker.creation_ticks
+                        })
+                    })?
+                });
+            if let Some(process) = rechecked {
+                // Bind the observed process to an image identity sampled
+                // immediately before the OS mutation as well. The two reads
+                // must agree; any replacement or reparse/content drift while
+                // performing the recheck fails closed.
+                if executable_identity(target).as_ref() != Some(&rechecked_target_identity) {
+                    worker.drain = UpgradeDrainDisposition::RefusedAtRecheck;
+                    continue;
+                }
+                if inspector.terminate_proved_process(&process).is_ok() {
+                    worker.drain = UpgradeDrainDisposition::Drained;
+                    match worker.kind {
+                        UpgradeProcessKind::ActivityWorker => {
+                            drained_owned_workers = drained_owned_workers.saturating_add(1);
+                        }
+                        UpgradeProcessKind::McpStdioServer => {
+                            drained_owned_mcp_children =
+                                drained_owned_mcp_children.saturating_add(1);
+                            let _ = remove_system_mcp_runtime_lease(
+                                process.process_id,
+                                process.creation_ticks,
+                                &rechecked_target_identity,
+                            );
+                        }
+                        UpgradeProcessKind::Unknown => {}
+                    }
+                } else {
+                    worker.drain = UpgradeDrainDisposition::Failed;
+                }
             } else {
-                worker.drain = UpgradeDrainDisposition::Failed;
+                worker.drain = UpgradeDrainDisposition::RefusedAtRecheck;
             }
         }
     }
 
+    let final_target_identity = if drain_requested {
+        executable_identity(target)
+    } else {
+        target_identity
+    };
     let final_processes = if drain_requested {
         inspector.matching_processes(target).ok()
     } else {
@@ -395,7 +574,14 @@ fn inspect_with_inspector(
     let (process_inspection, final_workers, replaceability) = match final_processes {
         Some(processes) => {
             let mut final_workers = if drain_requested {
-                classify_processes(&processes, current_process_id, leases, true)
+                classify_processes(
+                    &processes,
+                    current_process_id,
+                    leases,
+                    &inspector.fresh_mcp_leases(),
+                    final_target_identity.as_ref(),
+                    true,
+                )
             } else {
                 workers.clone()
             };
@@ -412,10 +598,26 @@ fn inspect_with_inspector(
             }
             let replaceability = if final_workers.is_empty() {
                 if drain_requested {
-                    inspector.probe_replaceability(target)
+                    // The normal command is itself executed from the Cargo
+                    // package target. Windows correctly refuses a write-open
+                    // while *this* short-lived preflight process maps it, but
+                    // that self-map ends before Cargo starts. Once all other
+                    // exact observations are gone, report the post-exit
+                    // replacement state rather than falsely treating this
+                    // diagnostic process as an external lock.
+                    if current_executable.is_some_and(|current| same_file(current, target)) {
+                        UpgradeReplaceability::Ready
+                    } else {
+                        inspector.probe_replaceability(target)
+                    }
                 } else {
                     UpgradeReplaceability::NoKnownTabBeaconLock
                 }
+            } else if final_workers.iter().all(|worker| {
+                worker.kind == UpgradeProcessKind::McpStdioServer
+                    && worker.ownership == UpgradeWorkerOwnership::ProvedTabBeaconMcp
+            }) {
+                UpgradeReplaceability::BlockedByOwnedTabBeaconMcp
             } else {
                 UpgradeReplaceability::Blocked
             };
@@ -440,11 +642,13 @@ fn inspect_with_inspector(
         target_source,
         process_inspection,
         worker_lease_health: leases.health.as_str().to_owned(),
+        mcp_lease_health: mcp_leases.health.as_str().to_owned(),
         runtime_images,
         replaceability,
         workers: final_workers,
         drain_requested,
         drained_owned_workers,
+        drained_owned_mcp_children,
         boundaries,
     }
 }
@@ -497,6 +701,8 @@ fn classify_processes(
     processes: &[ObservedProcess],
     current_process_id: u32,
     leases: &ActiveWorkerLeaseInspection,
+    mcp_leases: &McpLeaseInspection,
+    target_identity: Option<&McpExecutableIdentity>,
     drain_requested: bool,
 ) -> Vec<UpgradeWorkerDiagnostic> {
     let lease_state_is_healthy = leases.health == ActivityLeaseHealth::Healthy;
@@ -504,27 +710,33 @@ fn classify_processes(
         .iter()
         .filter(|process| process.process_id != 0 && process.process_id != current_process_id)
         .map(|process| {
-            let proved = lease_state_is_healthy
+            let worker_proved = lease_state_is_healthy
                 && leases
                     .identities
                     .iter()
                     .any(|identity| worker_command_matches(&process.command_line, identity));
-            let ownership = if proved {
+            let mcp_ownership = mcp_ownership(process, mcp_leases, target_identity);
+            let kind = if worker_proved || process.command_line.contains("__activity-worker-v1") {
+                UpgradeProcessKind::ActivityWorker
+            } else if mcp_ownership != UpgradeWorkerOwnership::UnownedOrAmbiguous {
+                UpgradeProcessKind::McpStdioServer
+            } else {
+                UpgradeProcessKind::Unknown
+            };
+            let ownership = if worker_proved {
                 UpgradeWorkerOwnership::ProvedTabBeaconWorker
             } else {
-                UpgradeWorkerOwnership::UnownedOrAmbiguous
+                mcp_ownership
             };
             let drain = match (drain_requested, ownership) {
                 (false, _) => UpgradeDrainDisposition::NotRequested,
-                (true, UpgradeWorkerOwnership::ProvedTabBeaconWorker) => {
-                    UpgradeDrainDisposition::Eligible
-                }
-                (true, UpgradeWorkerOwnership::UnownedOrAmbiguous) => {
-                    UpgradeDrainDisposition::PreservedAmbiguous
-                }
+                (true, ownership) if ownership.is_drainable() => UpgradeDrainDisposition::Eligible,
+                (true, _) => UpgradeDrainDisposition::PreservedAmbiguous,
             };
             UpgradeWorkerDiagnostic {
                 process_id: process.process_id,
+                creation_ticks: process.creation_ticks,
+                kind,
                 ownership,
                 drain,
             }
@@ -532,6 +744,36 @@ fn classify_processes(
         .collect::<Vec<_>>();
     result.sort_by_key(|worker| worker.process_id);
     result
+}
+
+fn mcp_ownership(
+    process: &ObservedProcess,
+    leases: &McpLeaseInspection,
+    target: Option<&McpExecutableIdentity>,
+) -> UpgradeWorkerOwnership {
+    if leases
+        .stale_or_invalid_process_ids
+        .contains(&process.process_id)
+    {
+        return UpgradeWorkerOwnership::StaleOrInvalidLease;
+    }
+    let Some(target) = target else {
+        return UpgradeWorkerOwnership::UnownedOrAmbiguous;
+    };
+    let Some(lease) = leases
+        .identities
+        .iter()
+        .find(|lease| lease.process_id == process.process_id)
+    else {
+        return UpgradeWorkerOwnership::UnownedOrAmbiguous;
+    };
+    if lease.creation_ticks != process.creation_ticks
+        || lease.executable_path_sha256 != target.path_sha256
+        || lease.executable_sha256 != target.content_sha256
+    {
+        return UpgradeWorkerOwnership::ProcessIdentityMismatch;
+    }
+    UpgradeWorkerOwnership::ProvedTabBeaconMcp
 }
 
 fn worker_command_matches(command_line: &str, identity: &ActiveWorkerLeaseIdentity) -> bool {
@@ -584,15 +826,32 @@ fn normalized_path(path: &Path) -> Option<String> {
     })
 }
 
+fn same_file(left: &Path, right: &Path) -> bool {
+    matches!(
+        (normalized_path(left), normalized_path(right)),
+        (Some(left), Some(right)) if left == right
+    )
+}
+
 fn display_path(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-struct SystemUpgradeProcessInspector;
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+struct SystemUpgradeProcessInspector {
+    include_activity_worker_commands: bool,
+}
 
 impl UpgradeProcessInspector for SystemUpgradeProcessInspector {
     fn matching_processes(&mut self, target: &Path) -> Result<Vec<ObservedProcess>, ()> {
-        system_matching_processes(target)
+        system_matching_processes(target, self.include_activity_worker_commands)
+    }
+
+    fn fresh_mcp_leases(&mut self) -> McpLeaseInspection {
+        inspect_system_mcp_runtime_leases()
     }
 
     fn probe_replaceability(&mut self, target: &Path) -> UpgradeReplaceability {
@@ -605,39 +864,151 @@ impl UpgradeProcessInspector for SystemUpgradeProcessInspector {
             })
     }
 
-    fn terminate_proved_worker(&mut self, process_id: u32) -> Result<(), ()> {
+    fn terminate_proved_process(&mut self, process: &ObservedProcess) -> Result<(), ()> {
         #[cfg(windows)]
         {
-            let Some(taskkill) = system_path("taskkill.exe") else {
+            let Some(powershell) = system_path("WindowsPowerShell\\v1.0\\powershell.exe") else {
                 return Err(());
             };
-            let mut command = Command::new(taskkill);
+            let script = r"
+$expected = [Int64]$env:TABBEACON_UPGRADE_EXPECTED_CREATION_TICKS
+$process = [Diagnostics.Process]::GetProcessById([int]$env:TABBEACON_UPGRADE_PROCESS_ID)
+try {
+  if ($process.StartTime.ToUniversalTime().Ticks -ne $expected) { exit 2 }
+  if ($process.HasExited) { exit 0 }
+  $process.Kill()
+  if (-not $process.WaitForExit(5000)) { exit 3 }
+  exit 0
+} finally {
+  $process.Dispose()
+}
+";
+            let mut command = Command::new(powershell);
             command
-                .args(["/PID", &process_id.to_string(), "/F"])
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    script,
+                ])
+                .env(
+                    "TABBEACON_UPGRADE_PROCESS_ID",
+                    process.process_id.to_string(),
+                )
+                .env(
+                    "TABBEACON_UPGRADE_EXPECTED_CREATION_TICKS",
+                    process.creation_ticks.to_string(),
+                )
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .creation_flags(0x0800_0000);
-            command
-                .status()
-                .map_err(|_| ())
-                .and_then(|status| if status.success() { Ok(()) } else { Err(()) })
+            bounded_command_output(command, PROCESS_TERMINATION_TIMEOUT).map(|_| ())
         }
         #[cfg(not(windows))]
         {
-            let _ = process_id;
+            let _ = process;
             Err(())
         }
     }
 }
 
 #[cfg(windows)]
-fn system_matching_processes(target: &Path) -> Result<Vec<ObservedProcess>, ()> {
+fn system_matching_processes(
+    target: &Path,
+    include_activity_worker_commands: bool,
+) -> Result<Vec<ObservedProcess>, ()> {
     let target = normalized_path(target).ok_or(())?;
     let powershell = system_path("WindowsPowerShell\\v1.0\\powershell.exe").ok_or(())?;
-    let script = r"
+    // The default release-tool observation emits only a canonical-image digest,
+    // PID, and creation time. The WMI query is constrained by the process name
+    // before inspecting any path, so it cannot walk unrelated process images
+    // on a busy Owner host. The name is an observation filter only; MCP proof
+    // remains independent from it and from untrusted command text.
+    let script = r#"
+$rows = [System.Collections.Generic.List[object]]::new()
+Get-CimInstance -ClassName Win32_Process -Filter "Name = 'tabbeacon.exe'" -ErrorAction Stop |
+  Select-Object -First 64 |
+  ForEach-Object {
+    if (-not [string]::IsNullOrWhiteSpace($_.ExecutablePath)) {
+      $canonicalPath = ([IO.Path]::GetFullPath($_.ExecutablePath).Replace('\','/').ToLowerInvariant()).Replace('//?/','')
+      $sha256 = [Security.Cryptography.SHA256]::Create()
+      try {
+        $pathHash = ([BitConverter]::ToString($sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonicalPath))).Replace('-', '')).ToLowerInvariant()
+      } finally {
+        $sha256.Dispose()
+      }
+      $process = [Diagnostics.Process]::GetProcessById([int]$_.ProcessId)
+      try {
+        $created = $process.StartTime.ToUniversalTime().Ticks
+      } finally {
+        $process.Dispose()
+      }
+      [void]$rows.Add([pscustomobject]@{
+        process_id = [uint32]$_.ProcessId
+        creation_ticks = [Int64]$created
+        command_line = ''
+        image_path_sha256 = $pathHash
+      })
+    }
+  }
+if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress }
+"#;
+    let mut command = Command::new(&powershell);
+    command
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(0x0800_0000);
+    let output = bounded_command_output(command, PROCESS_OBSERVATION_TIMEOUT)?;
+    let output = String::from_utf8(output).map_err(|_| ())?;
+    let target_hash = sha256_hex(target.as_bytes());
+    let mut matching = parse_processes(&output)?
+        .into_iter()
+        .filter(|process| process.image_path_sha256.as_deref() == Some(target_hash.as_str()))
+        .collect::<Vec<_>>();
+    if matching.len() > 64 {
+        return Err(());
+    }
+    if !include_activity_worker_commands || matching.is_empty() {
+        return Ok(matching);
+    }
+
+    // Activity-worker ownership predates MCP leases and depends on its bounded
+    // internal argument proof. Retrieve that raw string only when a current
+    // activity lease could make it useful; it is transient and never exposed
+    // by the report. Failure preserves MCP observations but leaves activity
+    // candidates unproved rather than widening termination authority.
+    let Ok(commands) = system_activity_worker_command_lines(&powershell, &target) else {
+        return Ok(matching);
+    };
+    for process in &mut matching {
+        if let Some(command) = commands.iter().find(|candidate| {
+            candidate.process_id == process.process_id
+                && candidate.creation_ticks == process.creation_ticks
+                && candidate.image_path_sha256 == process.image_path_sha256
+        }) {
+            process.command_line = command.command_line.clone();
+        }
+    }
+    Ok(matching)
+}
+
+#[cfg(windows)]
+fn system_activity_worker_command_lines(
+    powershell: &Path,
+    target: &str,
+) -> Result<Vec<ObservedProcess>, ()> {
+    let script = r#"
 $target = $env:TABBEACON_UPGRADE_TARGET
-Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
+$rows = [System.Collections.Generic.List[object]]::new()
+Get-CimInstance -ClassName Win32_Process -Filter "Name = 'tabbeacon.exe'" -ErrorAction Stop |
   Where-Object {
     -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
     (([IO.Path]::GetFullPath($_.ExecutablePath).Replace('\','/').ToLowerInvariant()).Replace('//?/','') -eq $target)
@@ -646,11 +1017,30 @@ Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
   ForEach-Object {
     $line = [string]$_.CommandLine
     if ($line.Length -gt 4096) { $line = $line.Substring(0, 4096) }
-    [pscustomobject]@{ process_id = [uint32]$_.ProcessId; command_line = $line }
-  } |
-  ConvertTo-Json -Compress
-";
-    let output = Command::new(powershell)
+    $canonicalPath = ([IO.Path]::GetFullPath($_.ExecutablePath).Replace('\','/').ToLowerInvariant()).Replace('//?/','')
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+      $pathHash = ([BitConverter]::ToString($sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($canonicalPath))).Replace('-', '')).ToLowerInvariant()
+    } finally {
+      $sha256.Dispose()
+    }
+    $process = [Diagnostics.Process]::GetProcessById([int]$_.ProcessId)
+    try {
+      $created = $process.StartTime.ToUniversalTime().Ticks
+    } finally {
+      $process.Dispose()
+    }
+    [void]$rows.Add([pscustomobject]@{
+      process_id = [uint32]$_.ProcessId
+      creation_ticks = [Int64]$created
+      command_line = $line
+      image_path_sha256 = $pathHash
+    })
+  }
+if ($rows.Count -eq 0) { '[]' } else { $rows | ConvertTo-Json -Compress }
+"#;
+    let mut command = Command::new(powershell);
+    command
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -661,19 +1051,10 @@ Get-CimInstance -ClassName Win32_Process -ErrorAction Stop |
         .env("TABBEACON_UPGRADE_TARGET", target)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(0x0800_0000)
-        .output()
-        .map_err(|_| ())?;
-    if !output.status.success() {
-        return Err(());
-    }
-    let output = String::from_utf8(output.stdout).map_err(|_| ())?;
+        .creation_flags(0x0800_0000);
+    let output = bounded_command_output(command, PROCESS_OBSERVATION_TIMEOUT)?;
+    let output = String::from_utf8(output).map_err(|_| ())?;
     parse_processes(&output)
-}
-
-#[cfg(not(windows))]
-fn system_matching_processes(_target: &Path) -> Result<Vec<ObservedProcess>, ()> {
-    Err(())
 }
 
 #[cfg(windows)]
@@ -682,6 +1063,62 @@ fn system_path(suffix: &str) -> Option<PathBuf> {
         .join("System32")
         .join(suffix);
     path.is_file().then_some(path)
+}
+
+#[cfg(windows)]
+fn bounded_command_output(mut command: Command, timeout: Duration) -> Result<Vec<u8>, ()> {
+    command.stdout(Stdio::piped());
+    let mut child = command.spawn().map_err(|_| ())?;
+    let mut stdout = child.stdout.take().ok_or(())?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let _reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let result = stdout
+            .by_ref()
+            .take(MAX_PROCESS_OBSERVATION_STDOUT_BYTES.saturating_add(1))
+            .read_to_end(&mut output)
+            .map(|_| output);
+        let _ = sender.send(result);
+    });
+    let deadline = Instant::now().checked_add(timeout).ok_or(())?;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(());
+            }
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(());
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .unwrap_or(Duration::ZERO);
+    let output = receiver
+        .recv_timeout(remaining)
+        .map_err(|_| ())?
+        .map_err(|_| ())?;
+    if !status.success()
+        || output.len() > usize::try_from(MAX_PROCESS_OBSERVATION_STDOUT_BYTES).map_err(|_| ())?
+    {
+        return Err(());
+    }
+    Ok(output)
+}
+
+#[cfg(not(windows))]
+fn system_matching_processes(
+    _target: &Path,
+    _include_activity_worker_commands: bool,
+) -> Result<Vec<ObservedProcess>, ()> {
+    Err(())
 }
 
 fn parse_processes(output: &str) -> Result<Vec<ObservedProcess>, ()> {
@@ -695,7 +1132,7 @@ fn parse_processes(output: &str) -> Result<Vec<ObservedProcess>, ()> {
         Value::Object(_) => vec![value],
         _ => return Err(()),
     };
-    if values.len() > 64 {
+    if values.len() > 512 {
         return Err(());
     }
     let mut processes = Vec::with_capacity(values.len());
@@ -712,9 +1149,21 @@ fn parse_processes(output: &str) -> Result<Vec<ObservedProcess>, ()> {
             .filter(|command_line| command_line.len() <= 4096)
             .ok_or(())?
             .to_owned();
+        let creation_ticks = value
+            .get("creation_ticks")
+            .and_then(Value::as_u64)
+            .filter(|ticks| *ticks >= 621_355_968_000_000_000)
+            .ok_or(())?;
+        let image_path_sha256 = value
+            .get("image_path_sha256")
+            .and_then(Value::as_str)
+            .filter(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(str::to_owned);
         processes.push(ObservedProcess {
             process_id,
+            creation_ticks,
             command_line,
+            image_path_sha256,
         });
     }
     processes.sort_by_key(|process| process.process_id);
@@ -729,12 +1178,47 @@ fn parse_processes(output: &str) -> Result<Vec<ObservedProcess>, ()> {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs, path::PathBuf};
+
     use super::*;
 
-    #[derive(Default)]
+    struct TestRoot(PathBuf);
+
+    impl TestRoot {
+        fn new(name: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "tabbeacon-upgrade-preflight-{name}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("test clock is after epoch")
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&path).expect("isolated test root creates");
+            Self(path)
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     struct FakeInspector {
         processes: Vec<ObservedProcess>,
         stopped: Vec<u32>,
+        mcp_leases: McpLeaseInspection,
+    }
+
+    impl Default for FakeInspector {
+        fn default() -> Self {
+            Self {
+                processes: Vec::new(),
+                stopped: Vec::new(),
+                mcp_leases: mcp_leases(),
+            }
+        }
     }
 
     impl UpgradeProcessInspector for FakeInspector {
@@ -742,15 +1226,55 @@ mod tests {
             Ok(self.processes.clone())
         }
 
+        fn fresh_mcp_leases(&mut self) -> McpLeaseInspection {
+            self.mcp_leases.clone()
+        }
+
         fn probe_replaceability(&mut self, _target: &Path) -> UpgradeReplaceability {
             UpgradeReplaceability::Ready
         }
 
-        fn terminate_proved_worker(&mut self, process_id: u32) -> Result<(), ()> {
-            self.stopped.push(process_id);
+        fn terminate_proved_process(&mut self, process: &ObservedProcess) -> Result<(), ()> {
+            let exists = self.processes.iter().any(|candidate| {
+                candidate.process_id == process.process_id
+                    && candidate.creation_ticks == process.creation_ticks
+            });
+            if !exists {
+                return Err(());
+            }
+            self.stopped.push(process.process_id);
             self.processes
-                .retain(|process| process.process_id != process_id);
+                .retain(|candidate| candidate.process_id != process.process_id);
             Ok(())
+        }
+    }
+
+    struct TargetChangingInspector {
+        inner: FakeInspector,
+        target: PathBuf,
+        changed: bool,
+    }
+
+    impl UpgradeProcessInspector for TargetChangingInspector {
+        fn matching_processes(&mut self, target: &Path) -> Result<Vec<ObservedProcess>, ()> {
+            self.inner.matching_processes(target)
+        }
+
+        fn fresh_mcp_leases(&mut self) -> McpLeaseInspection {
+            if !self.changed {
+                fs::write(&self.target, b"replacement package executable")
+                    .expect("fixture target replacement writes");
+                self.changed = true;
+            }
+            self.inner.fresh_mcp_leases()
+        }
+
+        fn probe_replaceability(&mut self, target: &Path) -> UpgradeReplaceability {
+            self.inner.probe_replaceability(target)
+        }
+
+        fn terminate_proved_process(&mut self, process: &ObservedProcess) -> Result<(), ()> {
+            self.inner.terminate_proved_process(process)
         }
     }
 
@@ -776,24 +1300,58 @@ mod tests {
         }
     }
 
+    fn mcp_leases() -> McpLeaseInspection {
+        use crate::mcp_runtime_lease::McpLeaseHealth;
+
+        McpLeaseInspection {
+            health: McpLeaseHealth::Healthy,
+            identities: Vec::new(),
+            stale_or_invalid_process_ids: std::collections::BTreeSet::new(),
+        }
+    }
+
+    fn mcp_lease_for(
+        process_id: u32,
+        creation_ticks: u64,
+        target: &McpExecutableIdentity,
+    ) -> McpLeaseInspection {
+        use crate::mcp_runtime_lease::{McpLeaseHealth, McpLeaseIdentity};
+
+        McpLeaseInspection {
+            health: McpLeaseHealth::Healthy,
+            identities: vec![McpLeaseIdentity {
+                process_id,
+                creation_ticks,
+                executable_path_sha256: target.path_sha256.clone(),
+                executable_sha256: target.content_sha256.clone(),
+                generation: "b".repeat(64),
+            }],
+            stale_or_invalid_process_ids: std::collections::BTreeSet::new(),
+        }
+    }
+
+    fn observed(process_id: u32, command_line: impl Into<String>) -> ObservedProcess {
+        ObservedProcess {
+            process_id,
+            creation_ticks: 638_000_000_000_000_000_u64.saturating_add(u64::from(process_id)),
+            command_line: command_line.into(),
+            image_path_sha256: None,
+        }
+    }
+
     #[test]
     fn default_preflight_is_read_only_and_preserves_ambiguous_processes() {
         let target = PathBuf::from("C:/Users/test/.cargo/bin/tabbeacon.exe");
         let mut inspector = FakeInspector {
             processes: vec![
-                ObservedProcess {
-                    process_id: 41,
-                    command_line: format!(
-                        "tabbeacon.exe __activity-worker-v1 {} 7 3",
-                        "a".repeat(64)
-                    ),
-                },
-                ObservedProcess {
-                    process_id: 42,
-                    command_line: "tabbeacon.exe status".to_owned(),
-                },
+                observed(
+                    41,
+                    format!("tabbeacon.exe __activity-worker-v1 {} 7 3", "a".repeat(64)),
+                ),
+                observed(42, "tabbeacon.exe status"),
             ],
             stopped: Vec::new(),
+            mcp_leases: mcp_leases(),
         };
 
         let report = inspect_with_inspector(
@@ -802,6 +1360,7 @@ mod tests {
             Some(&target),
             UpgradeTargetSource::InstalledCargoBinary,
             &identities(),
+            &mcp_leases(),
             runtime_images(),
             false,
         );
@@ -821,22 +1380,19 @@ mod tests {
 
     #[test]
     fn explicit_drain_rechecks_and_stops_only_the_proved_worker() {
-        let target = PathBuf::from("C:/Users/test/.cargo/bin/tabbeacon.exe");
+        let root = TestRoot::new("activity-worker-drain");
+        let target = root.0.join("tabbeacon.exe");
+        fs::write(&target, b"exact package executable").expect("fixture executable writes");
         let mut inspector = FakeInspector {
             processes: vec![
-                ObservedProcess {
-                    process_id: 51,
-                    command_line: format!(
-                        "tabbeacon.exe __activity-worker-v1 {} 7 3",
-                        "a".repeat(64)
-                    ),
-                },
-                ObservedProcess {
-                    process_id: 52,
-                    command_line: "tabbeacon.exe __activity-cleanup-observer-v1 51".to_owned(),
-                },
+                observed(
+                    51,
+                    format!("tabbeacon.exe __activity-worker-v1 {} 7 3", "a".repeat(64)),
+                ),
+                observed(52, "tabbeacon.exe __activity-cleanup-observer-v1 51"),
             ],
             stopped: Vec::new(),
+            mcp_leases: mcp_leases(),
         };
 
         let report = inspect_with_inspector(
@@ -845,6 +1401,7 @@ mod tests {
             Some(&target),
             UpgradeTargetSource::InstalledCargoBinary,
             &identities(),
+            &mcp_leases(),
             runtime_images(),
             true,
         );
@@ -858,13 +1415,16 @@ mod tests {
 
     #[test]
     fn preflight_after_an_owned_drain_reports_replaceable_target() {
-        let target = PathBuf::from("C:/Users/test/.cargo/bin/tabbeacon.exe");
+        let root = TestRoot::new("activity-worker-replaceable");
+        let target = root.0.join("tabbeacon.exe");
+        fs::write(&target, b"exact package executable").expect("fixture executable writes");
         let mut inspector = FakeInspector {
-            processes: vec![ObservedProcess {
-                process_id: 61,
-                command_line: format!("tabbeacon.exe __activity-worker-v1 {} 7 3", "a".repeat(64)),
-            }],
+            processes: vec![observed(
+                61,
+                format!("tabbeacon.exe __activity-worker-v1 {} 7 3", "a".repeat(64)),
+            )],
             stopped: Vec::new(),
+            mcp_leases: mcp_leases(),
         };
 
         let report = inspect_with_inspector(
@@ -873,6 +1433,7 @@ mod tests {
             Some(&target),
             UpgradeTargetSource::InstalledCargoBinary,
             &identities(),
+            &mcp_leases(),
             runtime_images(),
             true,
         );
@@ -893,6 +1454,7 @@ mod tests {
             Some(&target),
             UpgradeTargetSource::InstalledCargoBinary,
             &identities(),
+            &mcp_leases(),
             runtime_images(),
             false,
         );
@@ -913,6 +1475,147 @@ mod tests {
             parse_processes(" ").expect("empty output is valid"),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn exact_mcp_lease_is_drained_but_ambiguous_and_identity_mismatched_processes_are_preserved() {
+        let root = TestRoot::new("mcp-drain");
+        let target = root.0.join("tabbeacon.exe");
+        std::fs::write(&target, b"exact package executable").expect("fixture executable writes");
+        let target_identity = executable_identity(&target).expect("fixture identity resolves");
+        // MCP proof intentionally does not depend on a command line. The
+        // validated runtime lease is its internal-entrypoint proof.
+        let process = observed(71, "");
+        let lease = mcp_lease_for(process.process_id, process.creation_ticks, &target_identity);
+        let mut default_inspector = FakeInspector {
+            processes: vec![process.clone()],
+            stopped: Vec::new(),
+            mcp_leases: lease.clone(),
+        };
+        let default_report = inspect_with_inspector(
+            &mut default_inspector,
+            None,
+            Some(&target),
+            UpgradeTargetSource::InstalledCargoBinary,
+            &identities(),
+            &lease,
+            runtime_images(),
+            false,
+        );
+        assert_eq!(default_report.proved_owned_mcp_count(), 1);
+        assert_eq!(
+            default_report.replaceability,
+            UpgradeReplaceability::BlockedByOwnedTabBeaconMcp
+        );
+        assert!(default_inspector.stopped.is_empty());
+
+        let mut drain_inspector = FakeInspector {
+            processes: vec![process.clone()],
+            stopped: Vec::new(),
+            mcp_leases: lease.clone(),
+        };
+        let drained = inspect_with_inspector(
+            &mut drain_inspector,
+            None,
+            Some(&target),
+            UpgradeTargetSource::InstalledCargoBinary,
+            &identities(),
+            &lease,
+            runtime_images(),
+            true,
+        );
+        assert_eq!(drain_inspector.stopped, vec![71]);
+        assert_eq!(drained.drained_owned_mcp_children, 1);
+        assert_eq!(drained.replaceability, UpgradeReplaceability::Ready);
+
+        let mut stale = lease.clone();
+        stale
+            .stale_or_invalid_process_ids
+            .insert(process.process_id);
+        assert_eq!(
+            mcp_ownership(&process, &stale, Some(&target_identity)),
+            UpgradeWorkerOwnership::StaleOrInvalidLease
+        );
+        let mut mismatched = process.clone();
+        mismatched.creation_ticks = mismatched.creation_ticks.saturating_add(1);
+        assert_eq!(
+            mcp_ownership(&mismatched, &lease, Some(&target_identity)),
+            UpgradeWorkerOwnership::ProcessIdentityMismatch
+        );
+        let altered = McpExecutableIdentity {
+            path_sha256: target_identity.path_sha256.clone(),
+            content_sha256: "c".repeat(64),
+        };
+        assert_eq!(
+            mcp_ownership(&process, &lease, Some(&altered)),
+            UpgradeWorkerOwnership::ProcessIdentityMismatch
+        );
+    }
+
+    #[test]
+    fn drain_refuses_when_the_package_identity_changes_during_its_recheck() {
+        let root = TestRoot::new("mcp-target-race");
+        let target = root.0.join("tabbeacon.exe");
+        fs::write(&target, b"exact package executable").expect("fixture executable writes");
+        let target_identity = executable_identity(&target).expect("fixture identity resolves");
+        let process = observed(73, "");
+        let lease = mcp_lease_for(process.process_id, process.creation_ticks, &target_identity);
+        let mut inspector = TargetChangingInspector {
+            inner: FakeInspector {
+                processes: vec![process],
+                stopped: Vec::new(),
+                mcp_leases: lease.clone(),
+            },
+            target: target.clone(),
+            changed: false,
+        };
+
+        let report = inspect_with_inspector(
+            &mut inspector,
+            None,
+            Some(&target),
+            UpgradeTargetSource::InstalledCargoBinary,
+            &identities(),
+            &lease,
+            runtime_images(),
+            true,
+        );
+
+        assert!(inspector.inner.stopped.is_empty());
+        assert_eq!(report.drained_owned_mcp_children, 0);
+        assert_eq!(
+            report.workers[0].drain,
+            UpgradeDrainDisposition::RefusedAtRecheck
+        );
+    }
+
+    #[test]
+    fn replaceability_machine_spellings_cannot_diverge_from_json() {
+        for replaceability in [
+            UpgradeReplaceability::Ready,
+            UpgradeReplaceability::NoKnownTabBeaconLock,
+            UpgradeReplaceability::Blocked,
+            UpgradeReplaceability::BlockedByOwnedTabBeaconMcp,
+            UpgradeReplaceability::Unavailable,
+        ] {
+            let json = serde_json::to_value(replaceability).expect("enum serializes");
+            assert_eq!(json.as_str(), Some(replaceability.as_str()));
+        }
+        assert_eq!(
+            UpgradeReplaceability::NoKnownTabBeaconLock.compatibility_alias(),
+            Some("no_known_tabbeacon_lock")
+        );
+        assert_eq!(UpgradeReplaceability::Ready.compatibility_alias(), None);
+        for ownership in [
+            UpgradeWorkerOwnership::ProvedTabBeaconWorker,
+            UpgradeWorkerOwnership::ProvedTabBeaconMcp,
+            UpgradeWorkerOwnership::StaleOrInvalidLease,
+            UpgradeWorkerOwnership::ProcessIdentityMismatch,
+            UpgradeWorkerOwnership::UnownedOrAmbiguous,
+        ] {
+            let json = serde_json::to_value(ownership).expect("enum serializes");
+            assert_eq!(json.as_str(), Some(ownership.as_str()));
+        }
     }
 
     #[test]

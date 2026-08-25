@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 
 use super::{CodexCompatibilityState, CodexHookProfile};
 
-const CACHE_SCHEMA: &str = "tabbeacon-codex-capability-v1";
+const CACHE_SCHEMA: &str = "tabbeacon-codex-capability-v2";
 const CACHE_FILE: &str = "capability-v1.json";
 
 /// Content-minimal result of a local Codex capability probe.
@@ -62,7 +62,6 @@ struct CapabilityCacheRecord {
     executable_identity: String,
     capability_fingerprint: String,
     state: CachedCapabilityState,
-    profile: Option<CachedProfile>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,30 +71,6 @@ enum CachedCapabilityState {
     Degraded,
     Incompatible,
     Unproven,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum CachedProfile {
-    CommandV1,
-    McpHybridV1,
-}
-
-impl CachedProfile {
-    const fn from_profile(profile: CodexHookProfile) -> Self {
-        if profile.uses_mcp_hook_transport() {
-            Self::McpHybridV1
-        } else {
-            Self::CommandV1
-        }
-    }
-
-    const fn into_profile(self) -> CodexHookProfile {
-        match self {
-            Self::CommandV1 => CodexHookProfile::command_v1(),
-            Self::McpHybridV1 => CodexHookProfile::mcp_hybrid_v1(),
-        }
-    }
 }
 
 impl CachedCapabilityState {
@@ -108,11 +83,13 @@ impl CachedCapabilityState {
         }
     }
 
-    fn into_state(self, profile: Option<CachedProfile>) -> CodexCompatibilityState {
-        let profile = profile.unwrap_or(CachedProfile::CommandV1).into_profile();
+    fn into_state(self) -> CodexCompatibilityState {
         match self {
-            Self::Full => CodexCompatibilityState::Full(profile),
-            Self::Degraded => CodexCompatibilityState::Degraded(profile),
+            // Capability discovery authorizes only the conservative command
+            // transport. An existing exact hybrid transport is selected from
+            // the separately validated ownership manifest, never a cache.
+            Self::Full => CodexCompatibilityState::Full(CodexHookProfile::command_v1()),
+            Self::Degraded => CodexCompatibilityState::Degraded(CodexHookProfile::command_v1()),
             Self::Incompatible => CodexCompatibilityState::Incompatible,
             Self::Unproven => CodexCompatibilityState::Unproven,
         }
@@ -137,7 +114,7 @@ pub(crate) fn probe(
     {
         return CodexCapabilityProbe {
             version,
-            state: record.state.into_state(record.profile),
+            state: record.state.into_state(),
             cache_hit: true,
             schema_fingerprint: record
                 .capability_fingerprint
@@ -150,11 +127,10 @@ pub(crate) fn probe(
     let (state, schema_fingerprint) = match hook_feature {
         HookFeature::Enabled => match probe_schema(codex_program) {
             Some(schema) => (
-                CodexCompatibilityState::Full(if schema.mcp_hook_transport {
-                    CodexHookProfile::mcp_hybrid_v1()
-                } else {
-                    CodexHookProfile::command_v1()
-                }),
+                // A generated schema is diagnostic-only. In particular, an
+                // unrelated `mcp_tool` string does not positively establish
+                // the actual Hook MCP declaration contract.
+                CodexCompatibilityState::Full(CodexHookProfile::command_v1()),
                 Some(schema.fingerprint),
             ),
             None => (
@@ -178,7 +154,6 @@ pub(crate) fn probe(
                 |value| format!("schema:{value}"),
             ),
             state: CachedCapabilityState::from_state(state),
-            profile: state.supported_profile().map(CachedProfile::from_profile),
         };
         let _ = write_cache(&cache_path, &record);
     }
@@ -219,12 +194,13 @@ fn probe_hook_feature(codex_program: Option<&Path>) -> HookFeature {
             _ => HookFeature::Unproven,
         };
     }
-    HookFeature::Disabled
+    // A missing row says nothing about whether Hooks have graduated from a
+    // feature flag. Only an explicit `hooks … false` is negative evidence.
+    HookFeature::Unproven
 }
 
 struct SchemaEvidence {
     fingerprint: String,
-    mcp_hook_transport: bool,
 }
 
 fn probe_schema(codex_program: Option<&Path>) -> Option<SchemaEvidence> {
@@ -237,14 +213,8 @@ fn probe_schema(codex_program: Option<&Path>) -> Option<SchemaEvidence> {
     let fingerprint = status
         .filter(std::process::ExitStatus::success)
         .and_then(|_| directory_fingerprint(&root));
-    let mcp_hook_transport = fingerprint
-        .as_ref()
-        .is_some_and(|_| directory_contains(&root, b"mcp_tool"));
     let _ = fs::remove_dir_all(&root);
-    fingerprint.map(|fingerprint| SchemaEvidence {
-        fingerprint,
-        mcp_hook_transport,
-    })
+    fingerprint.map(|fingerprint| SchemaEvidence { fingerprint })
 }
 
 fn temporary_schema_root() -> Option<PathBuf> {
@@ -273,17 +243,6 @@ fn directory_fingerprint(root: &Path) -> Option<String> {
         digest.update(fs::read(root.join(file)).ok()?);
     }
     Some(format!("sha256:{:x}", digest.finalize()))
-}
-
-fn directory_contains(root: &Path, needle: &[u8]) -> bool {
-    let mut files = Vec::new();
-    collect_files(root, root, &mut files).is_some_and(|()| {
-        files.into_iter().any(|file| {
-            fs::read(root.join(file))
-                .ok()
-                .is_some_and(|bytes| bytes.windows(needle.len()).any(|window| window == needle))
-        })
-    })
 }
 
 fn collect_files(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Option<()> {

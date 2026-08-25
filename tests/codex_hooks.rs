@@ -202,6 +202,143 @@ fn test_integration_with_codex_fixture(root: &TestRoot, fixture: &str) -> CodexI
         .with_codex_program(codex_probe)
 }
 
+/// Installs the conservative fresh profile, then rewrites only the test
+/// fixture into the exact legacy hybrid declaration emitted by the admitted
+/// predecessor. This models an integration that already exists on disk; it
+/// must never be used to make fresh capability discovery choose MCP.
+fn install_exact_existing_hybrid(integration: &CodexIntegration, root: &TestRoot) {
+    integration
+        .setup()
+        .expect("conservative fresh setup establishes the owned test state");
+
+    let hooks_path = root.child("codex-home/hooks.json");
+    let manifest_path = root.child("state/integration-v1.json");
+    let config_path = root.child("codex-home/config.toml");
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("fresh hooks read"))
+            .expect("fresh hooks parse");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("fresh manifest read"))
+            .expect("fresh manifest parse");
+    let session_end = manifest["hooks"]
+        .as_array()
+        .expect("fresh manifest hooks are an array")
+        .iter()
+        .find(|declaration| declaration["event"] == "SessionEnd")
+        .cloned()
+        .expect("fresh command profile has SessionEnd");
+    remove_exact_manifest_owned_declarations(&mut hooks, &manifest);
+
+    let mut hybrid = exact_hybrid_declarations(session_end);
+    for declaration in &hybrid {
+        let event = declaration["event"]
+            .as_str()
+            .expect("hybrid event is a string");
+        hooks["hooks"]
+            .as_object_mut()
+            .expect("known Hook document has an object root")
+            .entry(event.to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("known Hook event is an array")
+            .push(declaration["group"].clone());
+    }
+    let executable = manifest["executable"].clone();
+    manifest["hooks"] = Value::Array(std::mem::take(&mut hybrid));
+    manifest["mcp_server"] = json!({
+        "name": "tabbeacon-hook",
+        "command": executable,
+        "args": ["__mcp-hook-stdio-v1"],
+        "env_vars": ["WT_SESSION"],
+        "omit_tools_from": ["code_mode", "deferred", "direct"]
+    });
+
+    let mut config: DocumentMut = fs::read_to_string(&config_path)
+        .expect("fresh config read")
+        .parse()
+        .expect("fresh config parses");
+    if config.get("mcp_servers").is_none() {
+        config["mcp_servers"] = Item::Table(Table::new());
+    }
+    let mut server = Table::new();
+    server.insert(
+        "command",
+        value(
+            manifest["mcp_server"]["command"]
+                .as_str()
+                .expect("hybrid server command is a string"),
+        ),
+    );
+    let mut args = Array::new();
+    args.push("__mcp-hook-stdio-v1");
+    server.insert("args", value(args));
+    let mut env_vars = Array::new();
+    env_vars.push("WT_SESSION");
+    server.insert("env_vars", value(env_vars));
+    let mut omitted = Array::new();
+    omitted.push("code_mode");
+    omitted.push("deferred");
+    omitted.push("direct");
+    server.insert("omit_tools_from", value(omitted));
+    config["mcp_servers"]
+        .as_table_like_mut()
+        .expect("MCP server table is writable")
+        .insert("tabbeacon-hook", Item::Table(server));
+
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("hybrid hooks serialize"),
+    )
+    .expect("hybrid hooks write");
+    fs::write(&config_path, config.to_string()).expect("hybrid config write");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("hybrid manifest serialize"),
+    )
+    .expect("hybrid manifest write");
+}
+
+fn exact_hybrid_declarations(session_end: Value) -> Vec<Value> {
+    let mut declarations = [
+        ("PreToolUse", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
+        ("PermissionRequest", json!({"turn_id":"${turn_id}"})),
+        ("PostToolUse", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
+        ("PreCompact", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
+        ("PostCompact", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
+        ("SessionStart", json!({"cwd":"${cwd}","source":"${source}"})),
+        ("UserPromptSubmit", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
+        (
+            "SubagentStart",
+            json!({"cwd":"${cwd}","turn_id":"${turn_id}","agent_id":"${agent_id}","agent_type":"${agent_type}"}),
+        ),
+        (
+            "SubagentStop",
+            json!({"cwd":"${cwd}","turn_id":"${turn_id}","agent_id":"${agent_id}","agent_type":"${agent_type}"}),
+        ),
+        ("Stop", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
+    ]
+    .into_iter()
+    .map(|(event, mut input)| {
+        input["hook_event_name"] = Value::String(event.to_owned());
+        input["session_id"] = Value::String("${session_id}".to_owned());
+        json!({
+            "event": event,
+            "group": {
+                "hooks": [{
+                    "type": "mcp_tool",
+                    "server": "tabbeacon-hook",
+                    "tool": "tabbeacon_hook_event",
+                    "input": input,
+                    "timeout": 1
+                }]
+            }
+        })
+    })
+    .collect::<Vec<_>>();
+    declarations.push(session_end);
+    declarations
+}
+
 fn compile_codex_probe(root: &TestRoot) -> PathBuf {
     compile_codex_probe_fixture(root, "codex_version_probe.rs")
 }
@@ -1103,6 +1240,56 @@ fn missing_required_capability_blocks_mutation_without_creating_owner_state() {
 }
 
 #[test]
+fn missing_hooks_feature_row_is_unproven_and_creates_no_owner_state() {
+    let root = TestRoot::new("capability-no-hooks-row");
+    let integration =
+        test_integration_with_codex_fixture(&root, "codex_capability_no_hooks_row.rs");
+    assert!(matches!(
+        integration.setup(),
+        Err(CodexIntegrationError::CapabilityMutationBlocked)
+    ));
+    assert!(!root.child("state").exists());
+    let report = integration.doctor();
+    assert_eq!(report.compatibility_state().label(), "unproven");
+    assert_eq!(report.mutation_authority(), CodexMutationAuthority::Blocked);
+}
+
+#[test]
+fn unavailable_features_command_is_unproven_and_creates_no_owner_state() {
+    let root = TestRoot::new("capability-command-unavailable");
+    let integration = test_integration_with_codex_fixture(&root, "codex_capability_unproven.rs");
+    assert!(matches!(
+        integration.setup(),
+        Err(CodexIntegrationError::CapabilityMutationBlocked)
+    ));
+    assert!(!root.child("state").exists());
+    let report = integration.doctor();
+    assert_eq!(report.compatibility_state().label(), "unproven");
+    assert_eq!(report.mutation_authority(), CodexMutationAuthority::Blocked);
+}
+
+#[test]
+fn additive_features_and_unrelated_mcp_schema_text_keep_fresh_setup_command_only() {
+    let root = TestRoot::new("capability-additive-schema");
+    let integration =
+        test_integration_with_codex_fixture(&root, "codex_capability_additive_features.rs");
+    assert_eq!(
+        integration
+            .setup()
+            .expect("positive Hooks evidence admits conservative setup"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    let report = integration.doctor();
+    assert_eq!(report.compatibility_state().label(), "full");
+    assert_eq!(report.hook_profile(), Some(CodexHookProfile::command_v1()));
+    let hooks = fs::read_to_string(root.child("codex-home/hooks.json")).expect("fresh hooks read");
+    let config =
+        fs::read_to_string(root.child("codex-home/config.toml")).expect("fresh config read");
+    assert!(!hooks.contains("\"mcp_tool\""));
+    assert!(!config.contains("tabbeacon-hook"));
+}
+
+#[test]
 fn unproven_probe_preserves_existing_exact_runtime_without_mutation_authority() {
     let root = TestRoot::new("capability-unproven-runtime");
     let codex_home = root.child("codex-home");
@@ -1150,18 +1337,55 @@ fn capability_cache_reuses_exact_binary_identity_and_invalidates_after_change() 
 }
 
 #[test]
+fn schema_fingerprint_change_invalidates_the_cache_without_changing_transport() {
+    let root = TestRoot::new("capability-schema-fingerprint-change");
+    let first = test_integration(&root);
+    first.setup().expect("initial setup succeeds");
+    let changed = test_integration_with_codex_fixture(&root, "codex_capability_schema_changed.rs");
+    let report = changed.doctor();
+    assert_eq!(report.compatibility_state().label(), "full");
+    assert_eq!(report.hook_profile(), Some(CodexHookProfile::command_v1()));
+    assert!(report.checks().iter().any(|check| {
+        check.id() == "codex.hook-profile" && !check.summary().contains("cache_hit=true")
+    }));
+}
+
+#[test]
+fn exact_existing_hybrid_is_preserved_when_current_capability_probe_is_unproven() {
+    let root = TestRoot::new("capability-existing-hybrid-unproven");
+    let codex_home = root.child("codex-home");
+    let admitted = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    install_exact_existing_hybrid(&admitted, &root);
+    install_current_codex_trust_state(&codex_home);
+    let hooks_before = fs::read(codex_home.join("hooks.json")).expect("hybrid hooks read");
+    let unproven = test_integration_with_codex_fixture(&root, "codex_capability_unproven.rs");
+    let report = unproven.doctor();
+    assert_eq!(report.compatibility_state().label(), "unproven");
+    assert_eq!(
+        report.hook_profile(),
+        Some(CodexHookProfile::mcp_hybrid_v1())
+    );
+    assert_eq!(
+        report.runtime_continuity(),
+        CodexRuntimeContinuity::PreservedUnproven
+    );
+    assert!(matches!(
+        unproven.setup(),
+        Err(CodexIntegrationError::CapabilityMutationBlocked)
+    ));
+    assert_eq!(
+        fs::read(codex_home.join("hooks.json")).expect("hybrid hooks reread"),
+        hooks_before
+    );
+}
+
+#[test]
 fn observed_codex_0149_shape_reconciles_only_exact_owned_declarations() {
     let root = TestRoot::new("codex-0149-observed-shape");
     let codex_home = root.child("codex-home");
     write_hooks_fixture(&codex_home, "0.149.0-observed.json");
     let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
-
-    assert_eq!(
-        integration
-            .setup()
-            .expect("0.149 setup is safe for an audited shape"),
-        SetupOutcome::InstalledTrustReviewRequired
-    );
+    install_exact_existing_hybrid(&integration, &root);
     let trusted_keys = install_current_codex_trust_state(&codex_home);
     assert_eq!(trusted_keys.len(), ADMITTED_HOOK_EVENTS.len());
 
@@ -1239,7 +1463,7 @@ fn codex_0149_session_end_upgrade_preserves_ten_mcp_groups_and_trust() {
     let root = TestRoot::new("codex-0149-session-end-upgrade");
     let codex_home = root.child("codex-home");
     let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
-    integration.setup().expect("hybrid setup installs");
+    install_exact_existing_hybrid(&integration, &root);
 
     // Reconstruct the admitted 0.149 predecessor: ten exact mcp_tool hooks,
     // its MCP server/WT_SESSION binding, and no command SessionEnd boundary.
@@ -1348,12 +1572,7 @@ fn codex_0149_mcp_extension_is_preserved_during_owned_command_reconciliation() {
         .expect("MCP fixture parses");
     let external_mcp_group = before["hooks"]["PostToolUse"][0].clone();
 
-    assert_eq!(
-        integration
-            .setup()
-            .expect("0.149 MCP extension does not block owned MCP reconciliation"),
-        SetupOutcome::InstalledTrustReviewRequired
-    );
+    install_exact_existing_hybrid(&integration, &root);
     install_current_codex_trust_state(&codex_home);
 
     let after: Value =
@@ -1393,10 +1612,7 @@ fn codex_0149_owned_mcp_server_preserves_external_servers_and_refuses_name_colli
     fs::write(&config_path, owner_config).expect("owner MCP config is written");
     let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
 
-    assert_eq!(
-        integration.setup().expect("0.149 owned MCP setup succeeds"),
-        SetupOutcome::InstalledTrustReviewRequired
-    );
+    install_exact_existing_hybrid(&integration, &root);
     let installed = fs::read_to_string(&config_path).expect("installed config reads");
     let installed_config = installed
         .parse::<DocumentMut>()
@@ -1461,14 +1677,23 @@ fn codex_0149_owned_mcp_server_preserves_external_servers_and_refuses_name_colli
     let before = fs::read(&collision_config).expect("conflicting config reads");
     let collision_integration =
         test_integration_with_codex_fixture(&collision, "codex_version_probe_0149.rs");
-    assert!(matches!(
-        collision_integration.setup(),
-        Err(CodexIntegrationError::TabBeaconLikeAmbiguityBlocked)
-    ));
     assert_eq!(
-        fs::read(&collision_config).expect("conflicting config rereads"),
-        before
+        collision_integration
+            .setup()
+            .expect("fresh conservative setup does not claim an external MCP server"),
+        SetupOutcome::InstalledTrustReviewRequired
     );
+    let before_server = String::from_utf8(before)
+        .expect("conflicting config is UTF-8")
+        .parse::<DocumentMut>()
+        .expect("conflicting config parses")["mcp_servers"]["tabbeacon-hook"]
+        .to_string();
+    let after_server = fs::read_to_string(&collision_config)
+        .expect("fresh config rereads")
+        .parse::<DocumentMut>()
+        .expect("fresh config parses")["mcp_servers"]["tabbeacon-hook"]
+        .to_string();
+    assert_eq!(after_server, before_server);
 }
 
 #[test]
@@ -1477,7 +1702,7 @@ fn codex_0149_owned_mcp_server_forwards_only_the_terminal_session() {
     let codex_home = root.child("codex-home");
     write_hooks_fixture(&codex_home, "0.149.0-observed.json");
     let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
-    integration.setup().expect("0.149 owned MCP setup succeeds");
+    install_exact_existing_hybrid(&integration, &root);
 
     let config: DocumentMut = fs::read_to_string(codex_home.join("config.toml"))
         .expect("installed config reads")
@@ -1495,6 +1720,24 @@ fn codex_0149_owned_mcp_server_forwards_only_the_terminal_session() {
         Some(vec!["WT_SESSION"]),
         "the owned MCP child forwards only the terminal session binding"
     );
+    assert!(
+        integration.mcp_runtime_lease_authority().is_ok(),
+        "only the exact manifest-owned MCP declaration may register an upgrade lease"
+    );
+
+    let mut modified = config;
+    let mut modified_args = Array::new();
+    modified_args.push("unexpected-stdio-entrypoint");
+    modified["mcp_servers"]["tabbeacon-hook"]
+        .as_table_like_mut()
+        .expect("owned MCP server table")
+        .insert("args", value(modified_args));
+    fs::write(codex_home.join("config.toml"), modified.to_string())
+        .expect("modified owned MCP config writes");
+    assert!(
+        integration.mcp_runtime_lease_authority().is_err(),
+        "a modified MCP declaration must never authorize a new upgrade lease"
+    );
 }
 
 #[test]
@@ -1505,7 +1748,7 @@ fn prerelease_mcp_manifest_without_visibility_or_terminal_forwarding_upgrades_ex
     let config_path = codex_home.join("config.toml");
     let manifest_path = root.child("state/integration-v1.json");
     let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
-    integration.setup().expect("initial MCP setup succeeds");
+    install_exact_existing_hybrid(&integration, &root);
     let hooks_before = fs::read(codex_home.join("hooks.json")).expect("installed hooks read");
     install_current_codex_trust_state(&codex_home);
 
@@ -1572,9 +1815,12 @@ fn prerelease_mcp_manifest_without_visibility_or_terminal_forwarding_upgrades_ex
         .collect::<Option<Vec<_>>>();
     assert_eq!(forwarded, Some(vec!["WT_SESSION"]));
     assert_eq!(
-        fs::read(codex_home.join("hooks.json")).expect("upgraded hooks read"),
-        hooks_before,
-        "MCP environment reconciliation must not rewrite exact Hook declarations"
+        serde_json::from_slice::<Value>(
+            &fs::read(codex_home.join("hooks.json")).expect("upgraded hooks read")
+        )
+        .expect("upgraded hooks parse"),
+        serde_json::from_slice::<Value>(&hooks_before).expect("original hooks parse"),
+        "MCP environment reconciliation must preserve exact Hook declarations"
     );
     assert_eq!(
         upgraded["hooks"]["state"].to_string(),
@@ -1595,7 +1841,7 @@ fn prerelease_mcp_manifest_refuses_a_present_malformed_terminal_allow_list_witho
     let config_path = codex_home.join("config.toml");
     let manifest_path = root.child("state/integration-v1.json");
     let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
-    integration.setup().expect("initial MCP setup succeeds");
+    install_exact_existing_hybrid(&integration, &root);
 
     let mut malformed_config: DocumentMut = fs::read_to_string(&config_path)
         .expect("installed config reads")
@@ -1658,7 +1904,7 @@ fn doctor_runtime_probe_models_codex_0149_terminate_before_eof_and_proves_sessio
         &root,
         "codex_version_probe_0149.rs",
     ));
-    integration.setup().expect("0.149 MCP setup succeeds");
+    install_exact_existing_hybrid(&integration, &root);
     install_current_codex_trust_state(&codex_home);
     let hooks_before = fs::read(codex_home.join("hooks.json")).expect("hooks before probe read");
     let config_before = fs::read(codex_home.join("config.toml")).expect("config before probe read");
@@ -2460,10 +2706,7 @@ fn unseen_newer_compatible_codex_installs_without_version_admission() {
 
     let report = integration.doctor();
     assert_eq!(report.compatibility_state().label(), "full");
-    assert_eq!(
-        report.hook_profile(),
-        Some(CodexHookProfile::mcp_hybrid_v1())
-    );
+    assert_eq!(report.hook_profile(), Some(CodexHookProfile::command_v1()));
     assert!(report.checks().iter().any(|check| {
         check.id() == "codex.version"
             && check.status() == DoctorStatus::Pass
