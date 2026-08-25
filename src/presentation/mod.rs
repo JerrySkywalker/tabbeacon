@@ -6,6 +6,7 @@
 
 use crate::{
     core::{Attention, Health, Phase, SessionSnapshot},
+    providers::visual_identity::ProviderVisualIdentity,
     settings::{ActivityMode, PresentationSettings, PresentationTheme, TabColorMode, TitleMode},
 };
 
@@ -33,7 +34,7 @@ pub struct SemanticPresentationInput<'a> {
     attention: Attention,
     health: Health,
     workspace_alias: &'a str,
-    provider_badge: Option<&'a str>,
+    provider_visual_identity: Option<ProviderVisualIdentity>,
 }
 
 impl<'a> SemanticPresentationInput<'a> {
@@ -50,28 +51,28 @@ impl<'a> SemanticPresentationInput<'a> {
             attention,
             health,
             workspace_alias,
-            provider_badge: None,
+            provider_visual_identity: None,
         }
     }
 
-    /// Creates semantic input with a caller-validated provider title badge.
+    /// Creates semantic input with fixed provider visual identity metadata.
     ///
-    /// Invalid badges are ignored by the policy; this preserves title safety
-    /// even if a future adapter passes malformed presentation metadata.
+    /// The provider slot stays separate from the workspace alias and the
+    /// mutable runtime state; identity comes only from the product registry.
     #[must_use]
-    pub const fn new_with_provider_badge(
+    pub const fn new_with_provider_visual_identity(
         phase: Phase,
         attention: Attention,
         health: Health,
         workspace_alias: &'a str,
-        provider_badge: Option<&'a str>,
+        provider_visual_identity: Option<ProviderVisualIdentity>,
     ) -> Self {
         Self {
             phase,
             attention,
             health,
             workspace_alias,
-            provider_badge,
+            provider_visual_identity,
         }
     }
 
@@ -86,19 +87,19 @@ impl<'a> SemanticPresentationInput<'a> {
         )
     }
 
-    /// Extracts a session snapshot with an optional provider badge.
+    /// Extracts a session snapshot with optional fixed provider identity.
     #[must_use]
-    pub fn from_snapshot_with_provider_badge(
+    pub fn from_snapshot_with_provider_visual_identity(
         snapshot: &SessionSnapshot,
         workspace_alias: &'a str,
-        provider_badge: Option<&'a str>,
+        provider_visual_identity: Option<ProviderVisualIdentity>,
     ) -> Self {
-        Self::new_with_provider_badge(
+        Self::new_with_provider_visual_identity(
             snapshot.phase(),
             snapshot.attention(),
             snapshot.health(),
             workspace_alias,
-            provider_badge,
+            provider_visual_identity,
         )
     }
 
@@ -132,10 +133,10 @@ impl<'a> SemanticPresentationInput<'a> {
         self.workspace_alias()
     }
 
-    /// Optional bounded provider badge requested for the title identity.
+    /// Optional provider identity requested for the independent title slot.
     #[must_use]
-    pub const fn provider_badge(self) -> Option<&'a str> {
-        self.provider_badge
+    pub const fn provider_visual_identity(self) -> Option<ProviderVisualIdentity> {
+        self.provider_visual_identity
     }
 }
 
@@ -318,6 +319,7 @@ pub enum Progress {
 /// Fully typed visual state that can be applied to a terminal backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisualState {
+    provider_visual_identity: Option<ProviderVisualIdentity>,
     workspace_alias: TitleIdentity,
     title_status: TitleStatus,
     tab_color: TabColor,
@@ -335,6 +337,7 @@ impl VisualState {
         progress: Progress,
     ) -> Self {
         Self {
+            provider_visual_identity: None,
             workspace_alias,
             title_status,
             tab_color,
@@ -343,8 +346,31 @@ impl VisualState {
         }
     }
 
-    const fn reset(workspace_alias: TitleIdentity) -> Self {
+    /// Creates visual state with an independent provider identity slot.
+    #[must_use]
+    pub const fn new_with_provider_visual_identity(
+        provider_visual_identity: Option<ProviderVisualIdentity>,
+        workspace_alias: TitleIdentity,
+        title_status: TitleStatus,
+        tab_color: TabColor,
+        progress: Progress,
+    ) -> Self {
         Self {
+            provider_visual_identity,
+            workspace_alias,
+            title_status,
+            tab_color,
+            progress,
+            reset_semantics: ResetSemantics::NoReset,
+        }
+    }
+
+    const fn reset(
+        provider_visual_identity: Option<ProviderVisualIdentity>,
+        workspace_alias: TitleIdentity,
+    ) -> Self {
+        Self {
+            provider_visual_identity,
             workspace_alias,
             title_status: TitleStatus::Ready,
             tab_color: TabColor::Default,
@@ -357,6 +383,12 @@ impl VisualState {
     #[must_use]
     pub const fn workspace_alias(&self) -> &TitleIdentity {
         &self.workspace_alias
+    }
+
+    /// Returns the identity slot without coupling it to runtime or workspace state.
+    #[must_use]
+    pub const fn provider_visual_identity(&self) -> Option<ProviderVisualIdentity> {
+        self.provider_visual_identity
     }
 
     /// Returns the workspace alias using the v0.1 compatibility name.
@@ -416,16 +448,12 @@ impl PresentationPolicy {
     /// Resolves semantic input according to the normative G02 precedence order.
     #[must_use]
     pub fn resolve(input: SemanticPresentationInput<'_>) -> PresentationAction {
-        let provider_badge = input.provider_badge().filter(|badge| {
-            badge.len() == 1 && badge.bytes().all(|byte| byte.is_ascii_uppercase())
-        });
-        let workspace_alias = provider_badge.map_or_else(
-            || TitleIdentity::new(input.workspace_alias()),
-            |badge| TitleIdentity::new(&format!("{}·{badge}", input.workspace_alias())),
-        );
+        let provider_visual_identity = input.provider_visual_identity();
+        let workspace_alias = TitleIdentity::new(input.workspace_alias());
 
         if input.health() == Health::Failed {
-            return PresentationAction::Apply(VisualState::new(
+            return PresentationAction::Apply(VisualState::new_with_provider_visual_identity(
+                provider_visual_identity,
                 workspace_alias,
                 TitleStatus::Failed,
                 TabColor::Failed,
@@ -433,7 +461,8 @@ impl PresentationPolicy {
             ));
         }
         if input.health() == Health::Interrupted {
-            return PresentationAction::Apply(VisualState::new(
+            return PresentationAction::Apply(VisualState::new_with_provider_visual_identity(
+                provider_visual_identity,
                 workspace_alias,
                 TitleStatus::Interrupted,
                 TabColor::Interrupted,
@@ -446,7 +475,8 @@ impl PresentationPolicy {
             } else {
                 Progress::Warning
             };
-            return PresentationAction::Apply(VisualState::new(
+            return PresentationAction::Apply(VisualState::new_with_provider_visual_identity(
+                provider_visual_identity,
                 workspace_alias,
                 TitleStatus::Warning,
                 TabColor::Warning,
@@ -454,7 +484,8 @@ impl PresentationPolicy {
             ));
         }
         if input.attention() == Attention::Approval {
-            return PresentationAction::Apply(VisualState::new(
+            return PresentationAction::Apply(VisualState::new_with_provider_visual_identity(
+                provider_visual_identity,
                 workspace_alias,
                 TitleStatus::Approval,
                 TabColor::Approval,
@@ -462,7 +493,8 @@ impl PresentationPolicy {
             ));
         }
         if input.attention() == Attention::Question {
-            return PresentationAction::Apply(VisualState::new(
+            return PresentationAction::Apply(VisualState::new_with_provider_visual_identity(
+                provider_visual_identity,
                 workspace_alias,
                 TitleStatus::Question,
                 TabColor::Question,
@@ -470,7 +502,8 @@ impl PresentationPolicy {
             ));
         }
         if input.attention() == Attention::ResultReady {
-            return PresentationAction::Apply(VisualState::new(
+            return PresentationAction::Apply(VisualState::new_with_provider_visual_identity(
+                provider_visual_identity,
                 workspace_alias,
                 TitleStatus::ResultReady,
                 TabColor::ResultReady,
@@ -478,7 +511,8 @@ impl PresentationPolicy {
             ));
         }
         if input.phase() == Phase::Working {
-            return PresentationAction::Apply(VisualState::new(
+            return PresentationAction::Apply(VisualState::new_with_provider_visual_identity(
+                provider_visual_identity,
                 workspace_alias,
                 TitleStatus::Working,
                 TabColor::Working,
@@ -486,10 +520,14 @@ impl PresentationPolicy {
             ));
         }
         if input.phase() == Phase::Ended {
-            return PresentationAction::Reset(VisualState::reset(workspace_alias));
+            return PresentationAction::Reset(VisualState::reset(
+                provider_visual_identity,
+                workspace_alias,
+            ));
         }
 
-        PresentationAction::Apply(VisualState::new(
+        PresentationAction::Apply(VisualState::new_with_provider_visual_identity(
+            provider_visual_identity,
             workspace_alias,
             TitleStatus::Ready,
             TabColor::Default,
@@ -661,6 +699,164 @@ impl WindowsTerminalRenderer {
     #[must_use]
     pub const fn uses_progress_animation(self) -> bool {
         self.settings.activity().uses_windows_terminal_ring()
+    }
+}
+
+/// Terminal decoration capabilities negotiated independently from provider identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TerminalVisualCapabilities {
+    title_mark: bool,
+    native_tab_icon: NativeTabIconCapability,
+    progress: bool,
+    palette: bool,
+}
+
+/// Native tab-icon support established by a concrete terminal backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NativeTabIconCapability {
+    /// No safe native tab-icon transport has been established.
+    Unavailable,
+    /// The backend has independently established safe native icon support.
+    Supported,
+}
+
+impl TerminalVisualCapabilities {
+    /// Creates an explicit terminal decoration capability set.
+    #[must_use]
+    pub const fn new(
+        title_mark: bool,
+        native_tab_icon: NativeTabIconCapability,
+        progress: bool,
+        palette: bool,
+    ) -> Self {
+        Self {
+            title_mark,
+            native_tab_icon,
+            progress,
+            palette,
+        }
+    }
+
+    /// Whether a backend can render the textual provider identity fallback.
+    #[must_use]
+    pub const fn title_mark_supported(self) -> bool {
+        self.title_mark
+    }
+
+    /// Whether a backend has a proven native tab-icon path.
+    #[must_use]
+    pub const fn native_tab_icon_supported(self) -> bool {
+        matches!(self.native_tab_icon, NativeTabIconCapability::Supported)
+    }
+
+    /// Whether the terminal can receive progress decoration.
+    #[must_use]
+    pub const fn progress_supported(self) -> bool {
+        self.progress
+    }
+
+    /// Whether the terminal can receive palette/frame decoration.
+    #[must_use]
+    pub const fn palette_supported(self) -> bool {
+        self.palette
+    }
+}
+
+/// Provider-neutral terminal decoration boundary.
+///
+/// A provider supplies only [`ProviderVisualIdentity`]; this backend decides
+/// whether a native icon is usable. Backend failure is decorative only: normal
+/// agent execution and the title-mark fallback remain fail-open.
+pub trait TerminalVisualBackend {
+    /// Capability result for the concrete terminal backend.
+    fn visual_capabilities(&self) -> TerminalVisualCapabilities;
+}
+
+/// Production terminal backend: safe OSC title mark plus existing progress and palette output.
+///
+/// It deliberately reports no native icon capability. Future Windows Terminal
+/// experimental backends must implement [`TerminalVisualBackend`] separately
+/// and prove exact-tab targeting before they can opt in.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TitleMarkBackend {
+    renderer: WindowsTerminalRenderer,
+}
+
+impl TitleMarkBackend {
+    /// Creates the production backend with default presentation settings.
+    #[must_use]
+    pub const fn new(capabilities: WindowsTerminalCapabilities) -> Self {
+        Self {
+            renderer: WindowsTerminalRenderer::new(capabilities),
+        }
+    }
+
+    /// Creates the production backend with explicit presentation settings.
+    #[must_use]
+    pub const fn with_settings(
+        capabilities: WindowsTerminalCapabilities,
+        settings: PresentationSettings,
+    ) -> Self {
+        Self {
+            renderer: WindowsTerminalRenderer::with_settings(capabilities, settings),
+        }
+    }
+
+    /// Returns the typed presentation settings used by the backend.
+    #[must_use]
+    pub const fn settings(self) -> PresentationSettings {
+        self.renderer.settings()
+    }
+
+    /// Renders title, progress, and palette using the stable OSC fallback.
+    #[must_use]
+    pub fn render(&self, action: &PresentationAction) -> Vec<u8> {
+        self.renderer.render(action)
+    }
+
+    /// Renders progress and palette without disturbing a title worker.
+    #[must_use]
+    pub fn render_without_title(&self, action: &PresentationAction) -> Vec<u8> {
+        self.renderer.render_without_title(action)
+    }
+
+    /// Resolves the stable text title without emitting terminal bytes.
+    #[must_use]
+    pub fn title_for(&self, state: &VisualState) -> Option<TerminalTitle> {
+        self.renderer.title_for(state)
+    }
+
+    /// Resolves one deterministic title-spinner frame.
+    #[must_use]
+    pub fn title_for_spinner_frame(
+        &self,
+        state: &VisualState,
+        frame_index: usize,
+    ) -> Option<TerminalTitle> {
+        self.renderer.title_for_spinner_frame(state, frame_index)
+    }
+
+    /// Encodes one title-spinner frame only.
+    #[must_use]
+    pub fn render_title_spinner_frame(&self, state: &VisualState, frame_index: usize) -> Vec<u8> {
+        self.renderer.render_title_spinner_frame(state, frame_index)
+    }
+
+    /// Whether the backend uses the Windows Terminal progress animation path.
+    #[must_use]
+    pub const fn uses_progress_animation(self) -> bool {
+        self.renderer.uses_progress_animation()
+    }
+}
+
+impl TerminalVisualBackend for TitleMarkBackend {
+    fn visual_capabilities(&self) -> TerminalVisualCapabilities {
+        TerminalVisualCapabilities::new(
+            true,
+            NativeTabIconCapability::Unavailable,
+            true,
+            self.renderer.capabilities().frame_color_supported(),
+        )
     }
 }
 
@@ -882,11 +1078,20 @@ fn configured_title(
         TitleStatus::Interrupted => INTERRUPTED_STATUS_SLOT,
         TitleStatus::Failed => FAILED_STATUS_SLOT,
     };
+    let provider_text = state
+        .provider_visual_identity()
+        .map(ProviderVisualIdentity::text_fallback);
     let mut title = String::with_capacity(
-        status_slot.len()
+        provider_text.map_or(0, |value| {
+            value.len() + STATUS_IDENTITY_SEPARATOR.len_utf8()
+        }) + status_slot.len()
             + STATUS_IDENTITY_SEPARATOR.len_utf8()
             + state.workspace_alias().as_str().len(),
     );
+    if let Some(provider_text) = provider_text {
+        title.push_str(provider_text);
+        title.push(STATUS_IDENTITY_SEPARATOR);
+    }
     title.push_str(status_slot);
     title.push(STATUS_IDENTITY_SEPARATOR);
     title.push_str(state.workspace_alias().as_str());

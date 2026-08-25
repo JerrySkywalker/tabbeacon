@@ -11,6 +11,10 @@ literal `codex` daily command. Provider Visual Identity v2 and Windows Terminal
 native-icon research remain ordered follow-on work; no v0.6.1 publication is
 authorized by this planning/status entry.
 
+Train A merged as PR #82 at `43cd07d6152e0acb99fb1a948cde23b45fbad5ff`.
+Provider Visual Identity v2 is the active non-release follow-on; its stable
+title-mark backend remains independent from native tab-icon feasibility.
+
 ## Current production baseline
 
 The v0.4 production line is complete through public `0.4.0` distribution.
