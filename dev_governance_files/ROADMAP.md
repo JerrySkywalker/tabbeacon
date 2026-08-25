@@ -14,6 +14,10 @@ authorized by this planning/status entry.
 Train A merged as PR #82 at `43cd07d6152e0acb99fb1a948cde23b45fbad5ff`.
 Provider Visual Identity v2 is the active non-release follow-on; its stable
 title-mark backend remains independent from native tab-icon feasibility.
+Train B merged as PR #83 at `2422949526c01b06dcef6e274bca1861ff0dc671`.
+The following native-icon source-truth research confirms no stock public
+native-icon bridge; it does not enable experimental instrumentation or release
+work.
 
 ## Current production baseline
 
