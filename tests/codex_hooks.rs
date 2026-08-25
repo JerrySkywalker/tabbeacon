@@ -1255,6 +1255,20 @@ fn missing_hooks_feature_row_is_unproven_and_creates_no_owner_state() {
 }
 
 #[test]
+fn unavailable_features_command_is_unproven_and_creates_no_owner_state() {
+    let root = TestRoot::new("capability-command-unavailable");
+    let integration = test_integration_with_codex_fixture(&root, "codex_capability_unproven.rs");
+    assert!(matches!(
+        integration.setup(),
+        Err(CodexIntegrationError::CapabilityMutationBlocked)
+    ));
+    assert!(!root.child("state").exists());
+    let report = integration.doctor();
+    assert_eq!(report.compatibility_state().label(), "unproven");
+    assert_eq!(report.mutation_authority(), CodexMutationAuthority::Blocked);
+}
+
+#[test]
 fn additive_features_and_unrelated_mcp_schema_text_keep_fresh_setup_command_only() {
     let root = TestRoot::new("capability-additive-schema");
     let integration =
