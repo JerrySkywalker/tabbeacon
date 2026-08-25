@@ -82,8 +82,11 @@ fn main() -> ExitCode {
     {
         let output_root = std::path::Path::new(&arguments[3]);
         if fs::create_dir_all(output_root).is_ok()
-            && fs::write(output_root.join("fixture-schema.json"), br#"{"hooks":"command"}"#)
-                .is_ok()
+            && fs::write(
+                output_root.join("fixture-schema.json"),
+                br#"{"hooks":"command"}"#,
+            )
+            .is_ok()
         {
             return ExitCode::SUCCESS;
         }
