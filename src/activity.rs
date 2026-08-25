@@ -27,6 +27,7 @@ use crate::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleStatus,
         WindowsTerminalCapabilities, WindowsTerminalRenderer,
     },
+    providers::visual_identity::ProviderVisualIdentity,
     repo::RepositoryAlias,
     settings::{
         ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
@@ -541,6 +542,12 @@ pub struct WorkerPresentation {
     /// Stable provider ID, defaulted for leases produced before G62.
     #[serde(default = "default_worker_provider")]
     provider: String,
+    /// Bounded visibility fact selected by the originating presentation action.
+    ///
+    /// Leases written before provider visual identity keep the conservative
+    /// false default: a worker must never infer visibility from a provider ID.
+    #[serde(default)]
+    provider_identity_visible: bool,
     semantic_state: String,
     spinner_preset: String,
     #[serde(default)]
@@ -555,6 +562,7 @@ impl WorkerPresentation {
             "codex",
             workspace_alias,
             spinner,
+            false,
             SessionWorkspaceObservability::default(),
         )
     }
@@ -563,11 +571,13 @@ impl WorkerPresentation {
         provider: &str,
         workspace_alias: &str,
         spinner: SpinnerPreset,
+        provider_identity_visible: bool,
         workspace_observability: SessionWorkspaceObservability,
     ) -> Self {
         Self {
             workspace_alias: workspace_alias.to_owned(),
             provider: provider.to_owned(),
+            provider_identity_visible,
             semantic_state: "working".to_owned(),
             spinner_preset: spinner.as_str().to_owned(),
             workspace_observability,
@@ -583,6 +593,7 @@ impl WorkerPresentation {
             "codex",
             workspace_alias,
             spinner,
+            false,
             SessionWorkspaceObservability::default(),
         )
     }
@@ -591,11 +602,13 @@ impl WorkerPresentation {
         provider: &str,
         workspace_alias: &str,
         spinner: SpinnerPreset,
+        provider_identity_visible: bool,
         workspace_observability: SessionWorkspaceObservability,
     ) -> Self {
         Self {
             workspace_alias: workspace_alias.to_owned(),
             provider: provider.to_owned(),
+            provider_identity_visible,
             semantic_state: "result-ready".to_owned(),
             spinner_preset: spinner.as_str().to_owned(),
             workspace_observability,
@@ -611,6 +624,7 @@ impl WorkerPresentation {
             "codex",
             workspace_alias,
             spinner,
+            false,
             SessionWorkspaceObservability::default(),
         )
     }
@@ -619,11 +633,13 @@ impl WorkerPresentation {
         provider: &str,
         workspace_alias: &str,
         spinner: SpinnerPreset,
+        provider_identity_visible: bool,
         workspace_observability: SessionWorkspaceObservability,
     ) -> Self {
         Self {
             workspace_alias: workspace_alias.to_owned(),
             provider: provider.to_owned(),
+            provider_identity_visible,
             semantic_state: "approval".to_owned(),
             spinner_preset: spinner.as_str().to_owned(),
             workspace_observability,
@@ -641,6 +657,63 @@ impl WorkerPresentation {
             "approval" => Some((Phase::WaitingUser, Attention::Approval)),
             _ => None,
         }
+    }
+
+    fn from_action(
+        provider: &str,
+        workspace_alias: &str,
+        action: &PresentationAction,
+        settings: PresentationSettings,
+        workspace_observability: SessionWorkspaceObservability,
+    ) -> Option<Self> {
+        if settings.title() != TitleMode::TabBeacon {
+            return None;
+        }
+        let state = match action {
+            PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
+        };
+        let provider_identity_visible = state.provider_visual_identity().is_some();
+        match state.title_status() {
+            TitleStatus::Working if settings.activity().uses_worker_animation() => {
+                Some(Self::working_with_workspace_observability(
+                    provider,
+                    workspace_alias,
+                    settings.spinner(),
+                    provider_identity_visible,
+                    workspace_observability,
+                ))
+            }
+            TitleStatus::ResultReady => Some(Self::result_ready_with_workspace_observability(
+                provider,
+                workspace_alias,
+                settings.spinner(),
+                provider_identity_visible,
+                workspace_observability,
+            )),
+            TitleStatus::Approval => Some(Self::approval_with_workspace_observability(
+                provider,
+                workspace_alias,
+                settings.spinner(),
+                provider_identity_visible,
+                workspace_observability,
+            )),
+            _ => None,
+        }
+    }
+
+    fn presentation_action(&self, phase: Phase, attention: Attention) -> PresentationAction {
+        let provider_visual_identity = self
+            .provider_identity_visible
+            .then(|| ProviderVisualIdentity::for_provider_id(&self.provider));
+        PresentationPolicy::resolve(
+            SemanticPresentationInput::new_with_provider_visual_identity(
+                phase,
+                attention,
+                Health::Normal,
+                &self.workspace_alias,
+                provider_visual_identity,
+            ),
+        )
     }
 
     fn lease_ttl_ms(&self) -> u64 {
@@ -784,42 +857,13 @@ impl ActivityCoordinator {
             generation,
             terminal_binding_sha256,
         );
-        let title_status = match action {
-            PresentationAction::Apply(state) | PresentationAction::Reset(state) => {
-                state.title_status()
-            }
-        };
-        let worker_presentation = if settings.title() == TitleMode::TabBeacon {
-            match title_status {
-                TitleStatus::Working if settings.activity().uses_worker_animation() => {
-                    Some(WorkerPresentation::working_with_workspace_observability(
-                        provider,
-                        workspace_alias,
-                        settings.spinner(),
-                        workspace_observability.clone(),
-                    ))
-                }
-                TitleStatus::ResultReady => Some(
-                    WorkerPresentation::result_ready_with_workspace_observability(
-                        provider,
-                        workspace_alias,
-                        settings.spinner(),
-                        workspace_observability.clone(),
-                    ),
-                ),
-                TitleStatus::Approval => {
-                    Some(WorkerPresentation::approval_with_workspace_observability(
-                        provider,
-                        workspace_alias,
-                        settings.spinner(),
-                        workspace_observability,
-                    ))
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
+        let worker_presentation = WorkerPresentation::from_action(
+            provider,
+            workspace_alias,
+            action,
+            settings,
+            workspace_observability,
+        );
         let now = unix_ms();
         if let Some(presentation) = worker_presentation {
             match self.store.refresh_runtime_backed_active_if_current(
@@ -1575,12 +1619,7 @@ impl ActivityLeaseStore {
             WindowsTerminalCapabilities::new(false),
             settings,
         );
-        let action = PresentationPolicy::resolve(SemanticPresentationInput::new(
-            phase,
-            attention,
-            Health::Normal,
-            &presentation.workspace_alias,
-        ));
+        let action = presentation.presentation_action(phase, attention);
         let state = match &action {
             PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
         };
@@ -2536,7 +2575,11 @@ mod tests {
     };
     use crate::{
         core::{Attention, Health, Phase},
-        presentation::{PresentationPolicy, SemanticPresentationInput},
+        presentation::{
+            PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleStatus,
+            WindowsTerminalCapabilities, WindowsTerminalRenderer,
+        },
+        providers::visual_identity::ProviderVisualIdentity,
         settings::{
             ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
             TitleMode,
@@ -2580,6 +2623,174 @@ mod tests {
 
     fn presentation() -> WorkerPresentation {
         WorkerPresentation::working("OWH", SpinnerPreset::Braille)
+    }
+
+    fn rendered_worker_title(presentation: &WorkerPresentation) -> String {
+        let (phase, attention) = presentation
+            .semantic_input()
+            .expect("fixture presentation has a supported semantic state");
+        let action = presentation.presentation_action(phase, attention);
+        let state = match action {
+            PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
+        };
+        let renderer = WindowsTerminalRenderer::with_settings(
+            WindowsTerminalCapabilities::new(false),
+            PresentationSettings::new(
+                TitleMode::TabBeacon,
+                TabColorMode::Off,
+                ActivityMode::TitleSpinner,
+                SpinnerPreset::Braille,
+                PresentationTheme::MutedDark,
+            ),
+        );
+        String::from_utf8(renderer.render_title_spinner_frame(&state, 0))
+            .expect("worker title frame is UTF-8")
+    }
+
+    fn reconstructed_worker_state(
+        presentation: &WorkerPresentation,
+    ) -> crate::presentation::VisualState {
+        let (phase, attention) = presentation
+            .semantic_input()
+            .expect("fixture presentation has a supported semantic state");
+        match presentation.presentation_action(phase, attention) {
+            PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
+        }
+    }
+
+    fn source_action(
+        phase: Phase,
+        attention: Attention,
+        provider_visual_identity: Option<ProviderVisualIdentity>,
+    ) -> PresentationAction {
+        PresentationPolicy::resolve(
+            SemanticPresentationInput::new_with_provider_visual_identity(
+                phase,
+                attention,
+                Health::Normal,
+                "OWH",
+                provider_visual_identity,
+            ),
+        )
+    }
+
+    fn worker_settings() -> PresentationSettings {
+        PresentationSettings::new(
+            TitleMode::TabBeacon,
+            TabColorMode::Off,
+            ActivityMode::TitleSpinner,
+            SpinnerPreset::Braille,
+            PresentationTheme::MutedDark,
+        )
+    }
+
+    fn worker_from_source_action(
+        provider: &str,
+        action: &PresentationAction,
+    ) -> WorkerPresentation {
+        WorkerPresentation::from_action(
+            provider,
+            "OWH",
+            action,
+            worker_settings(),
+            SessionWorkspaceObservability::default(),
+        )
+        .expect("source action needs a worker lease")
+    }
+
+    #[test]
+    fn worker_reconstruction_retains_codex_provider_visibility() {
+        let source = source_action(
+            Phase::Working,
+            Attention::None,
+            Some(ProviderVisualIdentity::codex()),
+        );
+        let presentation = worker_from_source_action("codex", &source);
+
+        assert!(presentation.provider_identity_visible);
+        assert!(
+            rendered_worker_title(&presentation).contains("Codex"),
+            "the worker must reconstruct the originating provider identity"
+        );
+    }
+
+    #[test]
+    fn static_worker_reconstruction_retains_codex_provider_visibility() {
+        for (attention, expected_status) in [
+            (Attention::ResultReady, TitleStatus::ResultReady),
+            (Attention::Approval, TitleStatus::Approval),
+        ] {
+            let source = source_action(
+                Phase::WaitingUser,
+                attention,
+                Some(ProviderVisualIdentity::codex()),
+            );
+            let presentation = worker_from_source_action("codex", &source);
+            let state = reconstructed_worker_state(&presentation);
+
+            assert!(presentation.provider_identity_visible);
+            assert_eq!(state.title_status(), expected_status);
+            assert!(rendered_worker_title(&presentation).contains("Codex"));
+        }
+    }
+
+    #[test]
+    fn worker_reconstruction_does_not_infer_identity_when_provider_badge_is_off() {
+        let source = source_action(Phase::Working, Attention::None, None);
+        let presentation = worker_from_source_action("codex", &source);
+
+        assert!(!presentation.provider_identity_visible);
+        assert!(!rendered_worker_title(&presentation).contains("Codex"));
+    }
+
+    #[test]
+    fn legacy_worker_lease_defaults_provider_identity_visibility_conservatively() {
+        let source = source_action(
+            Phase::Working,
+            Attention::None,
+            Some(ProviderVisualIdentity::codex()),
+        );
+        let presentation = worker_from_source_action("codex", &source);
+        let mut legacy_value = serde_json::to_value(presentation).expect("fixture serializes");
+        legacy_value
+            .as_object_mut()
+            .expect("serialized worker presentation is an object")
+            .remove("provider_identity_visible");
+        let legacy: WorkerPresentation =
+            serde_json::from_value(legacy_value).expect("legacy worker presentation deserializes");
+
+        assert!(!legacy.provider_identity_visible);
+        assert!(!rendered_worker_title(&legacy).contains("Codex"));
+    }
+
+    #[test]
+    fn worker_provider_transition_keeps_runtime_and_workspace_independent() {
+        let codex = worker_from_source_action(
+            "codex",
+            &source_action(
+                Phase::WaitingUser,
+                Attention::ResultReady,
+                Some(ProviderVisualIdentity::codex()),
+            ),
+        );
+        let agy = worker_from_source_action(
+            "agy",
+            &source_action(
+                Phase::WaitingUser,
+                Attention::ResultReady,
+                Some(ProviderVisualIdentity::agy()),
+            ),
+        );
+        let codex_state = reconstructed_worker_state(&codex);
+        let agy_state = reconstructed_worker_state(&agy);
+
+        assert_eq!(codex_state.title_status(), agy_state.title_status());
+        assert_eq!(codex_state.tab_color(), agy_state.tab_color());
+        assert_eq!(codex_state.progress(), agy_state.progress());
+        assert_eq!(codex_state.workspace_alias().as_str(), "OWH");
+        assert_eq!(agy_state.workspace_alias().as_str(), "OWH");
+        assert!(rendered_worker_title(&codex).contains("Codex"));
+        assert!(rendered_worker_title(&agy).contains("Agy"));
     }
 
     #[test]
