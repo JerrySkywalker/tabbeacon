@@ -58,7 +58,9 @@ fn fake_codex_directory(root: &TestRoot, version: &str) -> PathBuf {
     fs::create_dir_all(&directory).expect("fake Codex directory creates");
     fs::write(
         directory.join("codex.cmd"),
-        format!("@echo off\r\necho codex-cli {version}\r\n"),
+        format!(
+            "@echo off\r\nif \"%1\"==\"--version\" (echo codex-cli {version} & exit /b 0)\r\nif \"%1\"==\"features\" if \"%2\"==\"list\" (echo hooks stable true & exit /b 0)\r\nif \"%1\"==\"app-server\" if \"%2\"==\"generate-json-schema\" (mkdir \"%4\" 2>nul & echo {{\"hooks\":\"command\"}}>\"%4\\schema.json\" & exit /b 0)\r\nexit /b 2\r\n"
+        ),
     )
     .expect("fake Codex version probe writes");
     directory
