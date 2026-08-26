@@ -1408,7 +1408,17 @@ impl CodexIntegration {
     }
 
     fn prepare_worker_runtime_image(&self) -> Result<(), CodexIntegrationError> {
-        WorkerRuntimeStore::new(&self.state_root).publish(&self.tabbeacon_executable)?;
+        // Hook dispatch deliberately keeps activity leases under the stable
+        // repository-identity root, not the Codex declaration manifest root.
+        // These roots are siblings beneath the same per-user TabBeacon
+        // directory in production.  Keep that relationship explicit here so
+        // setup prewarms the exact image that a later one-shot Hook will use.
+        let worker_state_root = self
+            .state_root
+            .parent()
+            .map(|root| root.join("repository-identity"))
+            .ok_or(CodexIntegrationError::StateRootUnavailable)?;
+        WorkerRuntimeStore::new(worker_state_root).publish(&self.tabbeacon_executable)?;
         Ok(())
     }
 

@@ -947,7 +947,12 @@ impl ActivityCoordinator {
                         },
                     ) {
                         PublishedWorkerStartup::Started => {
-                            self.store.collect_unused_runtime_images(&runtime_store);
+                            // Runtime-image collection is retention-only.  It
+                            // re-enumerates state and hashes image files, so it
+                            // must not delay the first one-second Hook frame.
+                            // Setup prewarms the current immutable image;
+                            // orphaned images remain safely retained until an
+                            // explicit maintenance path collects them.
                             // Process creation establishes only that the worker
                             // was requested. It does not establish that it has
                             // opened the console or rendered its first frame.

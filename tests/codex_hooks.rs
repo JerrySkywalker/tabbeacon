@@ -3719,7 +3719,7 @@ animations = false
     );
     assert!(
         root.child(&format!(
-            "state/runtime/worker-images/{source_hash}/tabbeacon-worker.exe"
+            "repository-identity/runtime/worker-images/{source_hash}/tabbeacon-worker.exe"
         ))
         .is_file(),
         "setup must materialize the exact immutable worker image before the first Hook"
