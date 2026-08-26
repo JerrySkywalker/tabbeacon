@@ -3671,6 +3671,27 @@ fn non_git_runtime_and_remaining_failures_stay_fail_open() {
     );
 }
 
+fn assert_setup_prewarms_exact_worker_image(root: &TestRoot) {
+    let source_hash = format!(
+        "{:x}",
+        Sha256::digest(
+            fs::read(root.child(if cfg!(windows) {
+                "bin/tabbeacon.exe"
+            } else {
+                "bin/tabbeacon"
+            }))
+            .expect("managed executable reads")
+        )
+    );
+    assert!(
+        root.child(&format!(
+            "repository-identity/runtime/worker-images/{source_hash}/tabbeacon-worker.exe"
+        ))
+        .is_file(),
+        "setup must materialize the exact immutable worker image before the first Hook"
+    );
+}
+
 #[test]
 fn setup_is_idempotent_preserves_unrelated_config_and_uninstalls_exactly_owned_parts() {
     let root = TestRoot::new("config-roundtrip");
@@ -3706,24 +3727,7 @@ animations = false
         integration.setup().expect("setup succeeds"),
         SetupOutcome::InstalledTrustReviewRequired
     );
-    let source_hash = format!(
-        "{:x}",
-        Sha256::digest(
-            fs::read(root.child(if cfg!(windows) {
-                "bin/tabbeacon.exe"
-            } else {
-                "bin/tabbeacon"
-            }))
-            .expect("managed executable reads")
-        )
-    );
-    assert!(
-        root.child(&format!(
-            "repository-identity/runtime/worker-images/{source_hash}/tabbeacon-worker.exe"
-        ))
-        .is_file(),
-        "setup must materialize the exact immutable worker image before the first Hook"
-    );
+    assert_setup_prewarms_exact_worker_image(&root);
     let installed_hooks = fs::read(codex_home.join("hooks.json")).expect("installed hooks read");
     let installed_config = fs::read(codex_home.join("config.toml")).expect("installed config read");
     let manifest = fs::read(root.child("state/integration-v1.json")).expect("manifest reads");
