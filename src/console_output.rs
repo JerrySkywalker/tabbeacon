@@ -3,8 +3,9 @@
 //! Hook stdin/stdout can be redirected by the provider, so the production
 //! path writes terminal bytes through `CONOUT$`. On legacy Windows console code
 //! pages, writing UTF-8 title bytes through that handle corrupts braille and
-//! status glyphs. This adapter sends the renderer's typed OSC-0 title through
-//! the Unicode console-title API, while preserving all non-title VT bytes.
+//! status glyphs. This adapter sends the renderer's typed OSC-0 title as UTF-16
+//! through the already-enabled VT console path, while preserving all non-title
+//! VT bytes.
 
 use std::{
     fs::File,
@@ -12,16 +13,25 @@ use std::{
 };
 
 #[cfg(windows)]
-use std::{fs::OpenOptions, io::Error};
+use std::{
+    fs::OpenOptions,
+    io::Error,
+    os::windows::io::{AsRawHandle, RawHandle},
+};
 
 #[cfg(windows)]
-use windows::{Win32::System::Console::SetConsoleTitleW, core::HSTRING};
+use windows::Win32::{
+    Foundation::HANDLE,
+    System::Console::{
+        CONSOLE_MODE, ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, WriteConsoleW,
+    },
+};
 
 const TITLE_PREFIX: &[u8] = b"\x1b]0;";
 const STRING_TERMINATOR: &[u8] = b"\x1b\\";
 
 /// An owned terminal-output sink that routes renderer title frames through the
-/// Windows Unicode title channel.
+/// Windows Unicode VT title channel.
 #[derive(Debug)]
 pub struct OwnedConsole {
     output: File,
@@ -38,12 +48,16 @@ impl OwnedConsole {
     }
 
     fn drain_pending(&mut self, final_flush: bool) -> io::Result<()> {
+        #[cfg(windows)]
+        let title_output = self.output.as_raw_handle();
+        #[cfg(not(windows))]
+        let title_output = ();
         let output = &mut self.output;
         drain_title_sequences(
             &mut self.pending,
             final_flush,
             &mut |bytes| output.write_all(bytes),
-            &mut set_owned_console_title,
+            &mut |title| write_owned_terminal_title_vt(title_output, title),
         )
     }
 }
@@ -73,6 +87,7 @@ impl Write for OwnedConsole {
 #[cfg(windows)]
 pub fn open_owned_console() -> io::Result<OwnedConsole> {
     OpenOptions::new()
+        .read(true)
         .write(true)
         .open("CONOUT$")
         .map(OwnedConsole::new)
@@ -156,31 +171,60 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+fn owned_terminal_title_sequence(title: &str) -> String {
+    format!("\x1b]0;{title}\x1b\\")
+}
+
 #[cfg(windows)]
-fn set_owned_console_title(title: &str) -> io::Result<()> {
-    // SAFETY: `HSTRING` owns a terminated UTF-16 buffer for the duration of
-    // this synchronous Win32 call. The call has no pointer aliasing, handle,
-    // or lifetime transfer beyond that buffer.
+fn write_owned_terminal_title_vt(output: RawHandle, title: &str) -> io::Result<()> {
+    let handle = HANDLE(output);
+    let mut mode = CONSOLE_MODE(0);
     #[allow(unsafe_code)]
     unsafe {
-        SetConsoleTitleW(&HSTRING::from(title)).map_err(Error::from)
+        GetConsoleMode(handle, &raw mut mode).map_err(Error::from)?;
     }
+    if mode.0 & ENABLE_VIRTUAL_TERMINAL_PROCESSING.0 == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "owned console does not already enable virtual-terminal processing",
+        ));
+    }
+
+    let sequence = owned_terminal_title_sequence(title);
+    let wide: Vec<u16> = sequence.encode_utf16().collect();
+    let mut written = 0;
+    // SAFETY: `wide` owns the UTF-16 data for this synchronous write. `handle`
+    // is borrowed from `OwnedConsole::output` and remains valid for this call.
+    #[allow(unsafe_code)]
+    unsafe {
+        WriteConsoleW(handle, &wide, Some(&raw mut written), None).map_err(Error::from)?;
+    }
+    if written != u32::try_from(wide.len()).unwrap_or(u32::MAX) {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            "owned console wrote an incomplete terminal-title sequence",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(not(windows))]
-fn set_owned_console_title(_title: &str) -> io::Result<()> {
+fn write_owned_terminal_title_vt(_output: (), _title: &str) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "owned Windows console title output is unavailable",
+        "owned Windows terminal title output is unavailable",
     ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::drain_title_sequences;
+    use super::{
+        STRING_TERMINATOR, TITLE_PREFIX, drain_title_sequences, owned_terminal_title_sequence,
+    };
+    use crate::presentation::{MAX_TITLE_SCALARS, TerminalTitle};
 
     #[test]
-    fn title_sequences_use_unicode_title_channel_and_preserve_other_vt_bytes() {
+    fn title_sequences_use_unicode_wide_vt_channel_and_preserve_other_vt_bytes() {
         let mut pending = b"\x1b]0;\xE2\xA0\x8B WORK\x1b\\\x1b]9;4;3;0\x1b\\".to_vec();
         let mut titles = Vec::new();
         let mut passthrough = Vec::new();
@@ -244,5 +288,46 @@ mod tests {
         assert_eq!(titles, ["⠋ WORK"]);
         assert!(passthrough.is_empty());
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn unicode_title_vt_uses_one_admitted_osc_envelope() {
+        assert_eq!(
+            owned_terminal_title_sequence("Codex ⠋ OWH"),
+            "\x1b]0;Codex ⠋ OWH\x1b\\"
+        );
+    }
+
+    #[test]
+    fn title_sanitization_stays_bounded_before_wide_vt_transport() {
+        let title = TerminalTitle::new(&("界".repeat(MAX_TITLE_SCALARS + 1) + "\u{0007}"));
+        assert_eq!(title.as_str().chars().count(), MAX_TITLE_SCALARS);
+        assert!(!title.as_str().chars().any(char::is_control));
+        let sequence = owned_terminal_title_sequence(title.as_str());
+        assert!(sequence.as_bytes().starts_with(TITLE_PREFIX));
+        assert!(sequence.as_bytes().ends_with(STRING_TERMINATOR));
+    }
+
+    #[test]
+    fn short_lived_hook_title_must_not_use_process_scoped_setconsole_title() {
+        let mut pending = b"\x1b]0;Codex \xE2\xA0\x8B OWH\x1b\\".to_vec();
+        let mut titles = Vec::new();
+        let mut passthrough = Vec::new();
+        drain_title_sequences(
+            &mut pending,
+            true,
+            &mut |bytes| {
+                passthrough.extend_from_slice(bytes);
+                Ok(())
+            },
+            &mut |title| {
+                titles.push(owned_terminal_title_sequence(title));
+                Ok(())
+            },
+        )
+        .expect("the title is emitted through its admitted OSC envelope");
+
+        assert_eq!(titles, ["\x1b]0;Codex ⠋ OWH\x1b\\"]);
+        assert!(passthrough.is_empty());
     }
 }

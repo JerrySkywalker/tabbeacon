@@ -753,6 +753,38 @@ pub(crate) enum ActivityRender {
     Suppress,
 }
 
+/// Bounded outcome of the asynchronous worker handoff after a lease is
+/// published. None of these outcomes may suppress the originating Hook title:
+/// spawn success is not worker-render readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishedWorkerStartup {
+    Started,
+    WorkerSpawnFailed,
+    CleanupObserverFailed,
+}
+
+impl PublishedWorkerStartup {
+    const fn hook_render(self) -> ActivityRender {
+        let _ = self;
+        ActivityRender::Full
+    }
+}
+
+fn start_published_worker(
+    spawn: impl FnOnce() -> io::Result<u32>,
+    observe: impl FnOnce(u32) -> io::Result<()>,
+) -> PublishedWorkerStartup {
+    match spawn() {
+        Ok(worker_pid) if observe(worker_pid).is_ok() => PublishedWorkerStartup::Started,
+        Ok(_) => PublishedWorkerStartup::CleanupObserverFailed,
+        Err(_) => PublishedWorkerStartup::WorkerSpawnFailed,
+    }
+}
+
+const fn already_active_worker_render() -> ActivityRender {
+    ActivityRender::WithoutTitle
+}
+
 #[derive(Debug, Clone)]
 enum ActivityExecution {
     Disabled,
@@ -875,7 +907,7 @@ impl ActivityCoordinator {
             ) {
                 Ok(Some(LeaseTransition::Stale)) => return ActivityRender::Suppress,
                 Ok(Some(LeaseTransition::AlreadyActive)) => {
-                    return ActivityRender::WithoutTitle;
+                    return already_active_worker_render();
                 }
                 Ok(None) => {}
                 Ok(Some(LeaseTransition::Published { .. } | LeaseTransition::Stopped { .. })) => {
@@ -901,30 +933,40 @@ impl ActivityCoordinator {
             };
             match transition {
                 LeaseTransition::Stale => ActivityRender::Suppress,
-                LeaseTransition::AlreadyActive => ActivityRender::WithoutTitle,
+                LeaseTransition::AlreadyActive => already_active_worker_render(),
                 LeaseTransition::Published { lease, .. } => {
                     // Publishing this lease atomically revokes the predecessor.
                     // It is safe to start the successor immediately because
                     // every worker validates the current lease before writing;
                     // waiting for the old worker's exit would consume most of
                     // the synchronous one-second Hook budget.
-                    if let Ok(worker_pid) = spawn_worker(&runtime_image.executable, &lease) {
-                        if spawn_cleanup_observer(&runtime_image.executable, &lease, worker_pid)
-                            .is_ok()
-                        {
+                    match start_published_worker(
+                        || spawn_worker(&runtime_image.executable, &lease),
+                        |worker_pid| {
+                            spawn_cleanup_observer(&runtime_image.executable, &lease, worker_pid)
+                        },
+                    ) {
+                        PublishedWorkerStartup::Started => {
                             self.store.collect_unused_runtime_images(&runtime_store);
-                            ActivityRender::WithoutTitle
-                        } else {
+                            // Process creation establishes only that the worker
+                            // was requested. It does not establish that it has
+                            // opened the console or rendered its first frame.
+                            // Keep this Hook's complete frame authoritative
+                            // until a later event observes the active lease.
+                            PublishedWorkerStartup::Started.hook_render()
+                        }
+                        PublishedWorkerStartup::CleanupObserverFailed => {
                             // A console-attached worker can be terminated with its
                             // terminal. Without the detached observer, leaving the
                             // lease active would suppress future presentation, so
                             // fail open to the static one-shot rendering instead.
                             let _ = self.store.deactivate_if_owned(&lease, unix_ms());
-                            ActivityRender::Full
+                            PublishedWorkerStartup::CleanupObserverFailed.hook_render()
                         }
-                    } else {
-                        let _ = self.store.deactivate_if_owned(&lease, unix_ms());
-                        ActivityRender::Full
+                        PublishedWorkerStartup::WorkerSpawnFailed => {
+                            let _ = self.store.deactivate_if_owned(&lease, unix_ms());
+                            PublishedWorkerStartup::WorkerSpawnFailed.hook_render()
+                        }
                     }
                 }
                 LeaseTransition::Stopped { .. } => {
@@ -2527,7 +2569,7 @@ fn reject_symbolic_link(path: &Path) -> io::Result<()> {
 fn open_owned_console(probe_enabled: bool) -> io::Result<Box<dyn Write>> {
     if probe_enabled {
         // A test process can inherit a syntactically open CONOUT$ handle that
-        // still rejects SetConsoleTitleW because its host is noninteractive.
+        // still rejects a direct console-title API because its host is noninteractive.
         // Route the isolated probe's already-rendered bytes to NUL instead:
         // this proves the worker's real write/flush/cadence path without
         // persisting a title or conflating test-host UI ownership with the
@@ -2564,13 +2606,13 @@ mod tests {
 
     use super::{
         ActivityCoordinator, ActivityExecution, ActivityLeaseHealth, ActivityLeaseStore,
-        ActivityRender, CleanupObserverAction, LeaseTransition, SESSIONS_SCHEMA_VERSION,
-        STATIC_ATTENTION_LEASE_TTL_MS, SessionWorkspaceObservability, TARGET_FRAME_INTERVAL_MS,
-        WorkerKey, WorkerPresentation, WorkerProcessLiveness, cleanup_identity_recheck_due,
-        cleanup_observer_action, cleanup_observer_poll_ms, command_output_with_timeout,
-        inspect_activity_leases_read_only, inspect_sessions_read_only,
-        next_animation_frame_deadline, normalized_windows_path,
-        record_provider_session_observation, system_powershell_path,
+        ActivityRender, CleanupObserverAction, LeaseTransition, PublishedWorkerStartup,
+        SESSIONS_SCHEMA_VERSION, STATIC_ATTENTION_LEASE_TTL_MS, SessionWorkspaceObservability,
+        TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation, WorkerProcessLiveness,
+        already_active_worker_render, cleanup_identity_recheck_due, cleanup_observer_action,
+        cleanup_observer_poll_ms, command_output_with_timeout, inspect_activity_leases_read_only,
+        inspect_sessions_read_only, next_animation_frame_deadline, normalized_windows_path,
+        record_provider_session_observation, start_published_worker, system_powershell_path,
         tasklist_output_reports_absence,
     };
     use crate::{
@@ -3991,6 +4033,77 @@ mod tests {
                 .is_none(),
             "runtime publication must finish before an active lease is written"
         );
+    }
+
+    #[test]
+    fn published_worker_leaves_the_hook_owned_full_provider_title_before_animation() {
+        let startup = start_published_worker(
+            || Ok(17),
+            |worker_pid| {
+                assert_eq!(worker_pid, 17);
+                Ok(())
+            },
+        );
+        assert_eq!(startup, PublishedWorkerStartup::Started);
+        assert_eq!(
+            startup.hook_render(),
+            ActivityRender::Full,
+            "a spawned worker is not yet proof that it rendered a title frame"
+        );
+
+        let action = source_action(
+            Phase::Working,
+            Attention::None,
+            Some(ProviderVisualIdentity::codex()),
+        );
+        let settings = worker_settings();
+        let renderer = WindowsTerminalRenderer::with_settings(
+            WindowsTerminalCapabilities::new(false),
+            settings,
+        );
+        let title = String::from_utf8(renderer.render(&action)).expect("renderer output is UTF-8");
+        assert!(title.contains("Codex"));
+        assert!(title.contains("OWH"));
+    }
+
+    #[test]
+    fn already_active_worker_keeps_its_animation_without_resetting_the_title() {
+        assert_eq!(
+            already_active_worker_render(),
+            ActivityRender::WithoutTitle,
+            "an already active worker continues its animation without resetting the first frame"
+        );
+    }
+
+    #[test]
+    fn worker_startup_failures_leave_the_hook_with_a_full_render() {
+        let worker_spawn_failure = start_published_worker(
+            || {
+                Err(std::io::Error::other(
+                    "owned worker fixture refuses to spawn",
+                ))
+            },
+            |_| panic!("the observer is not attempted after a worker spawn failure"),
+        );
+        assert_eq!(
+            worker_spawn_failure,
+            PublishedWorkerStartup::WorkerSpawnFailed
+        );
+        assert_eq!(worker_spawn_failure.hook_render(), ActivityRender::Full);
+
+        let observer_failure = start_published_worker(
+            || Ok(17),
+            |_| {
+                Err(std::io::Error::other(
+                    "owned observer fixture refuses to spawn",
+                ))
+            },
+        );
+        assert_eq!(
+            observer_failure,
+            PublishedWorkerStartup::CleanupObserverFailed
+        );
+        assert_eq!(observer_failure.hook_render(), ActivityRender::Full);
     }
 
     #[test]
