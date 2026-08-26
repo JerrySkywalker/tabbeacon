@@ -760,7 +760,6 @@ pub(crate) enum ActivityRender {
 enum PublishedWorkerStartup {
     Started,
     WorkerSpawnFailed,
-    CleanupObserverFailed,
 }
 
 impl PublishedWorkerStartup {
@@ -770,13 +769,9 @@ impl PublishedWorkerStartup {
     }
 }
 
-fn start_published_worker(
-    spawn: impl FnOnce() -> io::Result<u32>,
-    observe: impl FnOnce(u32) -> io::Result<()>,
-) -> PublishedWorkerStartup {
+fn start_published_worker(spawn: impl FnOnce() -> io::Result<u32>) -> PublishedWorkerStartup {
     match spawn() {
-        Ok(worker_pid) if observe(worker_pid).is_ok() => PublishedWorkerStartup::Started,
-        Ok(_) => PublishedWorkerStartup::CleanupObserverFailed,
+        Ok(_) => PublishedWorkerStartup::Started,
         Err(_) => PublishedWorkerStartup::WorkerSpawnFailed,
     }
 }
@@ -940,12 +935,8 @@ impl ActivityCoordinator {
                     // every worker validates the current lease before writing;
                     // waiting for the old worker's exit would consume most of
                     // the synchronous one-second Hook budget.
-                    match start_published_worker(
-                        || spawn_worker(&runtime_image.executable, &lease),
-                        |worker_pid| {
-                            spawn_cleanup_observer(&runtime_image.executable, &lease, worker_pid)
-                        },
-                    ) {
+                    match start_published_worker(|| spawn_worker(&runtime_image.executable, &lease))
+                    {
                         PublishedWorkerStartup::Started => {
                             // Runtime-image collection is retention-only.  It
                             // re-enumerates state and hashes image files, so it
@@ -959,14 +950,6 @@ impl ActivityCoordinator {
                             // Keep this Hook's complete frame authoritative
                             // until a later event observes the active lease.
                             PublishedWorkerStartup::Started.hook_render()
-                        }
-                        PublishedWorkerStartup::CleanupObserverFailed => {
-                            // A console-attached worker can be terminated with its
-                            // terminal. Without the detached observer, leaving the
-                            // lease active would suppress future presentation, so
-                            // fail open to the static one-shot rendering instead.
-                            let _ = self.store.deactivate_if_owned(&lease, unix_ms());
-                            PublishedWorkerStartup::CleanupObserverFailed.hook_render()
                         }
                         PublishedWorkerStartup::WorkerSpawnFailed => {
                             let _ = self.store.deactivate_if_owned(&lease, unix_ms());
@@ -1057,9 +1040,9 @@ pub fn run_activity_worker_system(key_digest: &str, generation: u64, revision: u
         return;
     };
     let ActivityExecution::System {
+        executable,
         owner_sha256,
         terminal_binding_sha256,
-        ..
     } = coordinator.execution
     else {
         return;
@@ -1073,6 +1056,7 @@ pub fn run_activity_worker_system(key_digest: &str, generation: u64, revision: u
         revision,
         &owner_sha256,
         &terminal_binding_sha256,
+        &executable,
     );
 }
 
@@ -1627,6 +1611,7 @@ impl ActivityLeaseStore {
         revision: u64,
         owner_sha256: &str,
         terminal_binding_sha256: &str,
+        executable: &Path,
     ) {
         let ownership = WorkerOwnership {
             key_sha256: key_digest.to_owned(),
@@ -1655,6 +1640,17 @@ impl ActivityLeaseStore {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
             return;
         };
+        // The command Hook has already left a complete persistent frame. Do
+        // not make that one-second path synchronously create a second process
+        // merely to observe this worker. Once this verified runtime image has
+        // opened the inherited console, it can establish its own exact cleanup
+        // observer before it takes title ownership. A failure leaves the
+        // Hook's full frame intact and deactivates this lease without writing a
+        // worker frame.
+        if spawn_cleanup_observer(executable, &initial, std::process::id()).is_err() {
+            let _ = self.deactivate_if_owned(&initial, unix_ms());
+            return;
+        }
         let settings = PresentationSettings::new(
             TitleMode::TabBeacon,
             TabColorMode::Off,
@@ -4042,13 +4038,7 @@ mod tests {
 
     #[test]
     fn published_worker_leaves_the_hook_owned_full_provider_title_before_animation() {
-        let startup = start_published_worker(
-            || Ok(17),
-            |worker_pid| {
-                assert_eq!(worker_pid, 17);
-                Ok(())
-            },
-        );
+        let startup = start_published_worker(|| Ok(17));
         assert_eq!(startup, PublishedWorkerStartup::Started);
         assert_eq!(
             startup.hook_render(),
@@ -4082,33 +4072,22 @@ mod tests {
 
     #[test]
     fn worker_startup_failures_leave_the_hook_with_a_full_render() {
-        let worker_spawn_failure = start_published_worker(
-            || {
-                Err(std::io::Error::other(
-                    "owned worker fixture refuses to spawn",
-                ))
-            },
-            |_| panic!("the observer is not attempted after a worker spawn failure"),
-        );
+        let worker_spawn_failure = start_published_worker(|| {
+            Err(std::io::Error::other(
+                "owned worker fixture refuses to spawn",
+            ))
+        });
         assert_eq!(
             worker_spawn_failure,
             PublishedWorkerStartup::WorkerSpawnFailed
         );
         assert_eq!(worker_spawn_failure.hook_render(), ActivityRender::Full);
 
-        let observer_failure = start_published_worker(
-            || Ok(17),
-            |_| {
-                Err(std::io::Error::other(
-                    "owned observer fixture refuses to spawn",
-                ))
-            },
-        );
         assert_eq!(
-            observer_failure,
-            PublishedWorkerStartup::CleanupObserverFailed
+            PublishedWorkerStartup::Started.hook_render(),
+            ActivityRender::Full,
+            "a later worker-side observer failure cannot retract the originating Hook frame"
         );
-        assert_eq!(observer_failure.hook_render(), ActivityRender::Full);
     }
 
     #[test]
