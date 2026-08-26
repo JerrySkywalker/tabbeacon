@@ -15,7 +15,7 @@ use std::{
 };
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use std::os::windows::{ffi::OsStrExt, process::CommandExt};
 
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
@@ -60,6 +60,8 @@ pub const ACTIVITY_WORKER_PROBE_STARTED_FILE: &str = "activity-worker-probe-star
 /// Required basename for the non-content process-entry marker used by the
 /// isolated MCP activity probe.
 pub const ACTIVITY_WORKER_PROBE_PROCESS_FILE: &str = "activity-worker-probe-process.json";
+/// Required basename for the content-minimal cleanup-observer process marker.
+pub const ACTIVITY_OBSERVER_PROBE_PROCESS_FILE: &str = "activity-observer-probe-process.json";
 // The worker renders at 100 ms, but cleanup is a bounded recovery path. A
 // five-second native presence poll avoids turning every active Codex tab into
 // a recurring PowerShell/CIM process under multi-session load.
@@ -1061,7 +1063,15 @@ pub fn run_activity_worker_system(key_digest: &str, generation: u64, revision: u
 }
 
 fn record_activity_worker_probe_process_entry() {
-    let Some(path) = activity_worker_probe_path(ACTIVITY_WORKER_PROBE_PROCESS_FILE) else {
+    record_activity_probe_process_entry(ACTIVITY_WORKER_PROBE_PROCESS_FILE, "worker");
+}
+
+fn record_activity_observer_probe_process_entry() {
+    record_activity_probe_process_entry(ACTIVITY_OBSERVER_PROBE_PROCESS_FILE, "observer");
+}
+
+fn record_activity_probe_process_entry(file_name: &str, role: &str) {
+    let Some(path) = activity_worker_probe_path(file_name) else {
         return;
     };
     let Ok(file) = OpenOptions::new().write(true).create_new(true).open(path) else {
@@ -1071,9 +1081,49 @@ fn record_activity_worker_probe_process_entry() {
         file,
         &serde_json::json!({
             "schema": "tabbeacon-activity-worker-probe-v1",
-            "worker_process_entered": true,
+            "role": role,
+            "worker_process_entered": role == "worker",
+            "stdin_class": standard_handle_class(StandardHandle::Input),
+            "stdout_class": standard_handle_class(StandardHandle::Output),
+            "stderr_class": standard_handle_class(StandardHandle::Error),
         }),
     );
+}
+
+#[derive(Clone, Copy)]
+enum StandardHandle {
+    Input,
+    Output,
+    Error,
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn standard_handle_class(handle: StandardHandle) -> &'static str {
+    use windows::Win32::{
+        Storage::FileSystem::{FILE_TYPE_CHAR, FILE_TYPE_DISK, FILE_TYPE_PIPE, GetFileType},
+        System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE},
+    };
+
+    let identifier = match handle {
+        StandardHandle::Input => STD_INPUT_HANDLE,
+        StandardHandle::Output => STD_OUTPUT_HANDLE,
+        StandardHandle::Error => STD_ERROR_HANDLE,
+    };
+    let Ok(handle) = (unsafe { GetStdHandle(identifier) }) else {
+        return "UNKNOWN";
+    };
+    match unsafe { GetFileType(handle) } {
+        FILE_TYPE_PIPE => "PIPE",
+        FILE_TYPE_CHAR => "CHAR",
+        FILE_TYPE_DISK => "DISK",
+        _ => "UNKNOWN",
+    }
+}
+
+#[cfg(not(windows))]
+fn standard_handle_class(_handle: StandardHandle) -> &'static str {
+    "UNKNOWN"
 }
 
 fn activity_worker_probe_path(file_name: &str) -> Option<PathBuf> {
@@ -1097,6 +1147,7 @@ pub fn run_activity_cleanup_observer_system(
     owner_sha256: &str,
     expected_executable: &str,
 ) {
+    record_activity_observer_probe_process_entry();
     if worker_pid == 0
         || !is_sha256(key_digest)
         || !is_sha256(owner_sha256)
@@ -2242,6 +2293,7 @@ fn validate_lease(lease: &WorkerLease) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
     Command::new(executable)
         .args([
@@ -2255,6 +2307,190 @@ fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
         .stderr(Stdio::null())
         .spawn()
         .map(|child| child.id())
+}
+
+#[cfg(windows)]
+struct OwnedWorkerHandle(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for OwnedWorkerHandle {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+#[cfg(windows)]
+struct WorkerAttributeList {
+    pointer: windows::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST,
+    _storage: Vec<usize>,
+}
+
+#[cfg(windows)]
+impl Drop for WorkerAttributeList {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        unsafe {
+            windows::Win32::System::Threading::DeleteProcThreadAttributeList(self.pointer);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_io_error(error: windows::core::Error) -> io::Error {
+    io::Error::other(error)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn open_inheritable_nul(access: u32) -> io::Result<OwnedWorkerHandle> {
+    use std::{mem, ptr};
+
+    use windows::Win32::{
+        Security::SECURITY_ATTRIBUTES,
+        Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        },
+    };
+
+    let security = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(mem::size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(u32::MAX),
+        lpSecurityDescriptor: ptr::null_mut(),
+        bInheritHandle: true.into(),
+    };
+    unsafe {
+        CreateFileW(
+            windows::core::w!("NUL"),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            Some(&raw const security),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    }
+    .map(OwnedWorkerHandle)
+    .map_err(windows_io_error)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn worker_attribute_list(
+    handles: &[windows::Win32::Foundation::HANDLE],
+) -> io::Result<WorkerAttributeList> {
+    use std::{ffi::c_void, mem};
+
+    use windows::Win32::System::Threading::{
+        DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+        LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, UpdateProcThreadAttribute,
+    };
+
+    let mut bytes = 0_usize;
+    let _ = unsafe { InitializeProcThreadAttributeList(None, 1, None, &raw mut bytes) };
+    if bytes == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let words = bytes.div_ceil(mem::size_of::<usize>());
+    let mut storage = vec![0_usize; words];
+    let pointer = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast::<c_void>());
+    unsafe { InitializeProcThreadAttributeList(Some(pointer), 1, None, &raw mut bytes) }
+        .map_err(windows_io_error)?;
+    if let Err(error) = unsafe {
+        UpdateProcThreadAttribute(
+            pointer,
+            0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+            Some(handles.as_ptr().cast::<c_void>()),
+            mem::size_of_val(handles),
+            None,
+            None,
+        )
+    } {
+        unsafe { DeleteProcThreadAttributeList(pointer) };
+        return Err(windows_io_error(error));
+    }
+    Ok(WorkerAttributeList {
+        pointer,
+        _storage: storage,
+    })
+}
+
+/// Starts a long-lived worker with an explicit standard-handle allowlist.
+///
+/// Rust's Windows `Command` implementation currently calls `CreateProcessW`
+/// with `bInheritHandles=TRUE`. `Stdio::null()` replaces the three standard
+/// handles, but it does not exclude other inheritable handles already present
+/// in the Hook process (notably the command runner's redirected pipe ends).
+/// A `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` preserves explicit NUL stdio without
+/// allowing those ambient handles to keep Codex's output pipes open.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
+    use std::mem;
+
+    use windows::{
+        Win32::{
+            Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE},
+            System::Threading::{
+                CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
+                PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+            },
+        },
+        core::{PCWSTR, PWSTR},
+    };
+
+    let stdin = open_inheritable_nul(GENERIC_READ.0)?;
+    let output = open_inheritable_nul(GENERIC_WRITE.0)?;
+    let inherited_handles = [stdin.0, output.0];
+    let attributes = worker_attribute_list(&inherited_handles)?;
+
+    let mut application = executable.as_os_str().encode_wide().collect::<Vec<_>>();
+    if application.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "worker executable contains an embedded NUL",
+        ));
+    }
+    application.push(0);
+    let mut command_line = Vec::new();
+    command_line.push(u16::from(b'"'));
+    command_line.extend(executable.as_os_str().encode_wide());
+    command_line.extend(
+        format!(
+            "\" __activity-worker-v1 {} {} {}",
+            lease.key_sha256, lease.generation, lease.revision
+        )
+        .encode_utf16(),
+    );
+    command_line.push(0);
+
+    let mut startup = STARTUPINFOEXW::default();
+    startup.StartupInfo.cb = u32::try_from(mem::size_of::<STARTUPINFOEXW>()).unwrap_or(u32::MAX);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = stdin.0;
+    startup.StartupInfo.hStdOutput = output.0;
+    startup.StartupInfo.hStdError = output.0;
+    startup.lpAttributeList = attributes.pointer;
+    let mut process_information = PROCESS_INFORMATION::default();
+    unsafe {
+        CreateProcessW(
+            PCWSTR(application.as_ptr()),
+            Some(PWSTR(command_line.as_mut_ptr())),
+            None,
+            None,
+            true,
+            CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+            None,
+            PCWSTR::null(),
+            &raw const startup.StartupInfo,
+            &raw mut process_information,
+        )
+    }
+    .map_err(windows_io_error)?;
+    let process_id = process_information.dwProcessId;
+    let _ = unsafe { CloseHandle(process_information.hThread) };
+    let _ = unsafe { CloseHandle(process_information.hProcess) };
+    Ok(process_id)
 }
 
 fn spawn_cleanup_observer(
