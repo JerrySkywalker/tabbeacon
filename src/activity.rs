@@ -1803,6 +1803,7 @@ impl ActivityLeaseStore {
             .map_or_else(|_| (BTreeSet::new(), false), |images| (images, true))
     }
 
+    #[cfg(test)]
     fn active_runtime_images_for_gc_locked(&self) -> io::Result<BTreeSet<String>> {
         let mut active_images = BTreeSet::new();
         let mut lease_files = 0_usize;
@@ -1842,6 +1843,7 @@ impl ActivityLeaseStore {
         Ok(active_images)
     }
 
+    #[cfg(test)]
     fn collect_unused_runtime_images(&self, runtime_store: &WorkerRuntimeStore) {
         let _ = self.with_lock(|| {
             let (active_images, ownership_proven) = self
