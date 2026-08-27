@@ -7,6 +7,7 @@ mod anchor;
 mod capability;
 mod config;
 mod generation;
+mod hsip;
 mod mcp;
 mod profile;
 mod runtime;

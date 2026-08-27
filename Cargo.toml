@@ -80,6 +80,14 @@ uiautomation = "0.25.0"
 win-screenshot = "4.0.14"
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_Threading"] }
 
+[target.'cfg(unix)'.dependencies]
+socket2 = "0.6.5"
+
+[dev-dependencies]
+# Windows-only test peer for the native local-pipe compatibility regression.
+# It is not part of TabBeacon's packaged dependency graph.
+interprocess = "2.4.3"
+
 [lints.rust]
 # Reviewed Windows Unicode-title and atomic-replace calls are locally allowed;
 # all other unsafe code remains denied.

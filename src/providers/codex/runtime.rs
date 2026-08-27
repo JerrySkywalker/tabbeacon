@@ -23,6 +23,7 @@ use super::{
     CodexHookNormalizer, CodexNormalization,
     anchor::{RootWorkspaceAnchorStore, RootWorkspaceBindingSource, RootWorkspaceSelection},
     generation::{CodexGenerationStore, GenerationAdmission, RequestedHandling},
+    hsip::CooperativeInvocation,
 };
 
 /// Private receipt path used only by the isolated hybrid `SessionEnd` probe.
@@ -190,6 +191,7 @@ impl CodexHookRuntime {
             &mut console,
             timing,
             session_end_probe,
+            true,
         )
     }
 
@@ -208,7 +210,36 @@ impl CodexHookRuntime {
     ) -> HookDispatchOutcome {
         let mut timing = HookTimingCapture::disabled();
         let mut session_end_probe = None;
-        self.dispatch_to_with_timing(raw, observed_at, sink, &mut timing, &mut session_end_probe)
+        self.dispatch_to_with_timing(
+            raw,
+            observed_at,
+            sink,
+            &mut timing,
+            &mut session_end_probe,
+            true,
+        )
+    }
+
+    /// Runs the same reducer for an internal recovery action that is not an
+    /// externally delivered Codex Hook. In particular, MCP EOF cleanup is a
+    /// bounded `TabBeacon` fallback and must never become cooperative evidence.
+    #[must_use]
+    pub(crate) fn dispatch_to_without_hsip(
+        &self,
+        raw: &[u8],
+        observed_at: SystemTime,
+        sink: &mut impl Write,
+    ) -> HookDispatchOutcome {
+        let mut timing = HookTimingCapture::disabled();
+        let mut session_end_probe = None;
+        self.dispatch_to_with_timing(
+            raw,
+            observed_at,
+            sink,
+            &mut timing,
+            &mut session_end_probe,
+            false,
+        )
     }
 
     #[allow(clippy::too_many_lines)]
@@ -219,6 +250,7 @@ impl CodexHookRuntime {
         sink: &mut impl Write,
         timing: &mut HookTimingCapture,
         session_end_probe: &mut Option<SessionEndProbeCapture>,
+        observe_hsip: bool,
     ) -> HookDispatchOutcome {
         let observed_at_unix_seconds = observed_at
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -229,6 +261,22 @@ impl CodexHookRuntime {
             return HookDispatchOutcome::DegradedInput;
         };
         timing.record("normalization", started);
+        let started = Instant::now();
+        let observation = if observe_hsip {
+            match &normalized {
+                CodexNormalization::Evidence(value) => {
+                    CooperativeInvocation::start(value.context())
+                }
+                CodexNormalization::PreserveCurrentState(context)
+                | CodexNormalization::IgnoreSubagent(context) => {
+                    CooperativeInvocation::start(context)
+                }
+                CodexNormalization::UnsupportedEvent => None,
+            }
+        } else {
+            None
+        };
+        timing.record("cooperative_observation", started);
 
         let started = Instant::now();
         let (normalized, admitted) = match normalized {
@@ -239,16 +287,24 @@ impl CodexHookRuntime {
                 {
                     Ok(GenerationAdmission::Apply(admitted)) => (normalized, admitted),
                     Ok(GenerationAdmission::RejectStale) => {
-                        return HookDispatchOutcome::RejectedStaleGeneration;
+                        return finish_observation(
+                            observation,
+                            HookDispatchOutcome::RejectedStaleGeneration,
+                        );
                     }
                     Ok(GenerationAdmission::Preserve) => {
                         unreachable!("apply handling cannot produce preserve admission")
                     }
-                    Err(_) => return HookDispatchOutcome::DegradedGenerationState,
+                    Err(_) => {
+                        return finish_observation(
+                            observation,
+                            HookDispatchOutcome::DegradedGenerationState,
+                        );
+                    }
                 }
             }
             CodexNormalization::PreserveCurrentState(context) => {
-                return match self
+                let outcome = match self
                     .generation_store
                     .admit(&context, RequestedHandling::Preserve)
                 {
@@ -261,6 +317,7 @@ impl CodexHookRuntime {
                     }
                     Err(_) => HookDispatchOutcome::DegradedGenerationState,
                 };
+                return finish_observation(observation, outcome);
             }
             CodexNormalization::IgnoreSubagent(context) => {
                 // Explicit lifecycle events contribute only a bounded count;
@@ -271,10 +328,10 @@ impl CodexHookRuntime {
                         .root_workspace_anchors
                         .observe_subagent(&context, observed_at_unix_seconds);
                 }
-                return HookDispatchOutcome::IgnoredSubagent;
+                return finish_observation(observation, HookDispatchOutcome::IgnoredSubagent);
             }
             CodexNormalization::UnsupportedEvent => {
-                return HookDispatchOutcome::IgnoredUnsupported;
+                return finish_observation(observation, HookDispatchOutcome::IgnoredUnsupported);
             }
         };
         timing.record("generation_admission", started);
@@ -287,10 +344,16 @@ impl CodexHookRuntime {
         ) {
             Ok(selection) => selection,
             Err(AnchorSelectionError::Workspace) => {
-                return HookDispatchOutcome::DegradedWorkspaceIdentity;
+                return finish_observation(
+                    observation,
+                    HookDispatchOutcome::DegradedWorkspaceIdentity,
+                );
             }
             Err(AnchorSelectionError::Anchor) => {
-                return HookDispatchOutcome::DegradedRootWorkspaceAnchor;
+                return finish_observation(
+                    observation,
+                    HookDispatchOutcome::DegradedRootWorkspaceAnchor,
+                );
             }
         };
         timing.record("workspace_anchor", started);
@@ -353,7 +416,10 @@ impl CodexHookRuntime {
             .is_err()
         {
             timing.record("terminal_write", started);
-            return HookDispatchOutcome::DegradedPresentationOutput;
+            return finish_observation(
+                observation,
+                HookDispatchOutcome::DegradedPresentationOutput,
+            );
         }
         timing.record("terminal_write", started);
         if normalized.context().event() == super::CodexHookEvent::SessionEnd
@@ -361,7 +427,7 @@ impl CodexHookRuntime {
         {
             probe.record(&bytes, matches!(render, ActivityRender::Full));
         }
-        HookDispatchOutcome::Applied
+        finish_observation(observation, HookDispatchOutcome::Applied)
     }
 
     fn root_workspace_selection(
@@ -484,6 +550,16 @@ impl CodexHookRuntime {
             )
             .map_err(|_| AnchorSelectionError::Anchor)
     }
+}
+
+fn finish_observation(
+    observation: Option<CooperativeInvocation>,
+    outcome: HookDispatchOutcome,
+) -> HookDispatchOutcome {
+    if let Some(observation) = observation {
+        observation.finish(outcome);
+    }
+    outcome
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

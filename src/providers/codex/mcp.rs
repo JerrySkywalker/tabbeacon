@@ -251,7 +251,10 @@ impl McpHookSession {
             "cwd": binding.cwd,
         });
         let raw = serde_json::to_vec(&payload).ok()?;
-        Some(self.runtime.dispatch_to(&raw, observed_at, sink))
+        Some(
+            self.runtime
+                .dispatch_to_without_hsip(&raw, observed_at, sink),
+        )
     }
 
     fn payload_for(&mut self, input: McpHookInput) -> Option<Vec<u8>> {
