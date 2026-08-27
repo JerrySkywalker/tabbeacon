@@ -329,11 +329,24 @@ const fn reparse_point(_metadata: &std::fs::Metadata) -> bool {
 
 fn producer() -> Option<Producer> {
     let cache = PRODUCER.get_or_init(|| Mutex::new(None));
+    cached_or_create(cache, Producer::for_default_root)
+}
+
+/// Retain only a validated producer.  Caching a missing state root would make a
+/// long-lived MCP process permanently blind if `HookStat` starts after `TabBeacon`.
+/// An unavailable observer is retried on a later hook invocation; it is still
+/// strictly fail-open for the invocation that observed the gap.
+fn cached_or_create<F>(cache: &Mutex<Option<Producer>>, create: F) -> Option<Producer>
+where
+    F: FnOnce() -> Option<Producer>,
+{
     let mut cache = cache.try_lock().ok()?;
-    if cache.is_none() {
-        *cache = Producer::for_default_root();
+    if let Some(producer) = cache.as_ref() {
+        return Some(producer.clone());
     }
-    cache.clone()
+    let producer = create()?;
+    *cache = Some(producer.clone());
+    Some(producer)
 }
 
 fn hookstat_data_root() -> Option<PathBuf> {
@@ -559,6 +572,25 @@ mod tests {
         assert!(validate_ack_header(&oversized).is_ok());
     }
 
+    #[test]
+    fn absent_broker_is_not_cached_across_later_hook_invocations() {
+        let cache = Mutex::new(None);
+        assert!(cached_or_create(&cache, || None).is_none());
+
+        let expected = Producer {
+            endpoint: Endpoint {
+                #[cfg(unix)]
+                root: PathBuf::from("fixture-state-root"),
+                identifier: "fixture-endpoint".to_owned(),
+            },
+            connection: Arc::new(Mutex::new(None)),
+        };
+        let observed = cached_or_create(&cache, || Some(expected.clone()))
+            .expect("later HookStat availability must be retried");
+        assert_eq!(observed.endpoint.identifier, "fixture-endpoint");
+        assert!(cached_or_create(&cache, || None).is_some());
+    }
+
     #[cfg(windows)]
     #[test]
     fn native_named_pipe_client_delivers_start_and_complete_to_a_hookstat_peer() {
@@ -656,6 +688,22 @@ mod tests {
         std::fs::create_dir_all(&local_app_data).unwrap();
         unsafe { std::env::set_var("LOCALAPPDATA", &local_app_data) };
         let hookstat_root = local_app_data.join("HookStat");
+        let raw = serde_json::to_vec(&serde_json::json!({
+            "hook_event_name": "UserPromptSubmit",
+            "session_id": "system-session",
+            "turn_id": "system-turn",
+            "cwd": directory,
+            "model": "fixture",
+            "permission_mode": "default",
+            "transcript_path": null,
+        }))
+        .unwrap();
+        // The first call proves that a missing optional observer does not
+        // interfere.  The next call must retry rather than cache that miss.
+        assert_eq!(
+            CodexHookRuntime::dispatch_system(&raw),
+            HookDispatchOutcome::Applied
+        );
         let child = ExternalBroker(
             std::process::Command::new(broker)
                 .args(["--state-root", hookstat_root.to_str().unwrap()])
@@ -669,16 +717,6 @@ mod tests {
         }
         thread::sleep(Duration::from_millis(50));
 
-        let raw = serde_json::to_vec(&serde_json::json!({
-            "hook_event_name": "UserPromptSubmit",
-            "session_id": "system-session",
-            "turn_id": "system-turn",
-            "cwd": directory,
-            "model": "fixture",
-            "permission_mode": "default",
-            "transcript_path": null,
-        }))
-        .unwrap();
         assert_eq!(
             CodexHookRuntime::dispatch_system(&raw),
             HookDispatchOutcome::Applied
