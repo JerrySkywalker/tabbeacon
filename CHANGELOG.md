@@ -4,6 +4,31 @@ All notable changes to TabBeacon will be documented here.
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-08-27
+
+### Added
+
+- Added capability-based Codex Hook admission: local explicit Hook capability
+  and schema evidence select the conservative `codex-hooks-command-v1` profile
+  without treating a Codex version string as mutation authority.
+- Added Provider Visual Identity v2 propagation through activity workers, with
+  independent provider, runtime, and workspace title slots.
+- Added OS-level Windows regression coverage for ambient inherited pipe handles
+  and descendant redirected-stream EOF closure.
+
+### Changed
+
+- Switched persistent Windows title output to Unicode-wide VT transport and
+  kept `SetConsoleTitleW` outside the normal title path.
+- Preserved the originating Hook's first complete title frame for a newly
+  published worker; already-active workers render without replacing that title.
+- Restricted Windows worker and observer handle inheritance with
+  `PROC_THREAD_ATTRIBUTE_HANDLE_LIST`. Explicit NUL-backed standard streams
+  remain, while unrelated inheritable Codex redirected-pipe handles are not
+  passed to descendants.
+- Retained synchronous, fail-open command Hooks with a one-second timeout and
+  manual Codex `/hooks` trust. Daily launch remains literal `codex`.
+
 ## [0.6.0] - 2026-08-25
 
 ### Added
