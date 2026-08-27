@@ -18,6 +18,9 @@ ADRs capture decisions that constrain future implementation.
 - `0013-reliability-explainability-multi-provider-boundaries.md`
 - `0014-agy-preadmission-qualification-boundary.md`
 - `0015-agy-1-1-19-production-profile.md`
+- `0016-codex-capability-compatibility.md`
+- `0017-provider-visual-identity-v2.md`
+- `0018-native-tab-icon-feasibility-no-go.md`
 
 ADR 0009 generalizes the presentation-facing identity from Git repository-only to workspace identity. Existing repository identity remains the Git specialization; ordinary non-Git directories gain a local fallback before production G11.
 
@@ -36,5 +39,9 @@ product registration until the later Owner-present G64 admission is accepted.
 ADR 0015 freezes the real Agy 1.1.19 production profile: user-global structured
 title callback, content-minimal Ready/Working evidence, ownership-safe setup,
 plain-title presentation, and explicit unsupported capability boundaries.
+
+ADR 0018 records the v0.7 Native Tab Icon `NO_GO`: the documented XAML
+Diagnostics API is process-scoped and this host could not prove a newly created
+Terminal process separate from active Owner/development terminals.
 
 A later ADR may supersede an earlier decision, but implementation code must not silently reverse one.
