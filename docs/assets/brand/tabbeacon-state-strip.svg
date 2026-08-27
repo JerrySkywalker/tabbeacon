@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 96" role="img" aria-labelledby="title desc">
+  <title id="title">TabBeacon semantic state strip</title>
+  <desc id="desc">Five compact tab-and-beacon tokens for neutral, working, ready, attention, and question states.</desc>
+  <g transform="translate(0 8)"><path fill="#53657E" d="M8 14a12 12 0 0 1 12-12h29l10 10h45a12 12 0 0 1 12 12v48a12 12 0 0 1-12 12H20A12 12 0 0 1 8 72V14Z"/><circle cx="80" cy="48" r="9" fill="#C7D2E3"/></g>
+  <g transform="translate(130 8)"><path fill="#1F6E92" d="M8 14a12 12 0 0 1 12-12h29l10 10h45a12 12 0 0 1 12 12v48a12 12 0 0 1-12 12H20A12 12 0 0 1 8 72V14Z"/><circle cx="80" cy="48" r="9" fill="#39D9F2"/><path fill="none" stroke="#80E5F4" stroke-linecap="round" stroke-width="5" d="M98 35a19 19 0 0 1 0 26"/></g>
+  <g transform="translate(260 8)"><path fill="#277356" d="M8 14a12 12 0 0 1 12-12h29l10 10h45a12 12 0 0 1 12 12v48a12 12 0 0 1-12 12H20A12 12 0 0 1 8 72V14Z"/><circle cx="80" cy="48" r="9" fill="#6DD6B1"/></g>
+  <g transform="translate(390 8)"><path fill="#8A6423" d="M8 14a12 12 0 0 1 12-12h29l10 10h45a12 12 0 0 1 12 12v48a12 12 0 0 1-12 12H20A12 12 0 0 1 8 72V14Z"/><circle cx="80" cy="48" r="9" fill="#F5C86B"/></g>
+  <g transform="translate(520 8)"><path fill="#8C3E55" d="M8 14a12 12 0 0 1 12-12h29l10 10h45a12 12 0 0 1 12 12v48a12 12 0 0 1-12 12H20A12 12 0 0 1 8 72V14Z"/><circle cx="80" cy="48" r="9" fill="#EE7893"/></g>
+</svg>

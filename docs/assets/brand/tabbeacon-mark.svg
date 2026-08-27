@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">TabBeacon mark</title>
+  <desc id="desc">A terminal-tab silhouette with a beacon point and restrained signal arcs.</desc>
+  <path fill="#14213D" d="M40 58c0-11 9-20 20-20h61l17 18h58c11 0 20 9 20 20v105c0 11-9 20-20 20H60c-11 0-20-9-20-20V58Z"/>
+  <path fill="#20345A" d="M40 82h176v24H40z"/>
+  <path fill="#39D9F2" d="M65 108h69v16H65z"/>
+  <path fill="#80C7FF" d="m65 147 27 18-27 18z"/>
+  <circle cx="167" cy="139" r="15" fill="#39D9F2"/>
+  <circle cx="167" cy="139" r="5" fill="#14213D"/>
+  <path fill="none" stroke="#39D9F2" stroke-linecap="round" stroke-width="10" d="M195 111a40 40 0 0 1 0 56"/>
+  <path fill="none" stroke="#80C7FF" stroke-linecap="round" stroke-width="8" d="M211 94a65 65 0 0 1 0 90"/>
+</svg>

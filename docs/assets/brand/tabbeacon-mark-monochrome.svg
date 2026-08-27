@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">TabBeacon monochrome mark</title>
+  <desc id="desc">A single-color terminal-tab silhouette with a beacon point and signal arcs.</desc>
+  <path fill="currentColor" d="M40 58c0-11 9-20 20-20h61l17 18h58c11 0 20 9 20 20v105c0 11-9 20-20 20H60c-11 0-20-9-20-20V58Zm25 50v16h69v-16H65Zm0 39v36l27-18-27-18Zm102-23c-8 0-15 7-15 15s7 15 15 15 15-7 15-15-7-15-15-15Zm28-13a40 40 0 0 1 0 56l7 8a51 51 0 0 0 0-72l-7 8Zm16-17a65 65 0 0 1 0 90l7 8a76 76 0 0 0 0-106l-7 8Z"/>
+</svg>

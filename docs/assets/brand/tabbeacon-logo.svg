@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 180" role="img" aria-labelledby="title desc">
+  <title id="title">TabBeacon logo</title>
+  <desc id="desc">The TabBeacon mark beside an original vector wordmark.</desc>
+  <g transform="translate(8 8) scale(.64)">
+    <path fill="#14213D" d="M40 58c0-11 9-20 20-20h61l17 18h58c11 0 20 9 20 20v105c0 11-9 20-20 20H60c-11 0-20-9-20-20V58Z"/>
+    <path fill="#20345A" d="M40 82h176v24H40z"/>
+    <path fill="#39D9F2" d="M65 108h69v16H65z"/>
+    <path fill="#80C7FF" d="m65 147 27 18-27 18z"/>
+    <circle cx="167" cy="139" r="15" fill="#39D9F2"/>
+    <circle cx="167" cy="139" r="5" fill="#14213D"/>
+    <path fill="none" stroke="#39D9F2" stroke-linecap="round" stroke-width="10" d="M195 111a40 40 0 0 1 0 56"/>
+    <path fill="none" stroke="#80C7FF" stroke-linecap="round" stroke-width="8" d="M211 94a65 65 0 0 1 0 90"/>
+  </g>
+  <g fill="#14213D">
+    <path d="M190 43h60v16h-21v77h-18V59h-21z"/>
+    <path fill-rule="evenodd" d="M271 63h19l28 73h-19l-5-15h-28l-5 15h-19l29-73Zm9 22-9 22h18l-9-22Z"/>
+    <path fill-rule="evenodd" d="M328 43h43c18 0 28 10 28 25 0 8-4 15-11 19 10 3 15 11 15 21 0 17-12 28-31 28h-44V43Zm18 16v21h22c8 0 13-4 13-11s-5-10-13-10h-22Zm0 36v25h24c9 0 15-5 15-13s-6-12-15-12h-24Z"/>
+    <path fill-rule="evenodd" d="M425 43h43c18 0 28 10 28 25 0 8-4 15-11 19 10 3 15 11 15 21 0 17-12 28-31 28h-44V43Zm18 16v21h22c8 0 13-4 13-11s-5-10-13-10h-22Zm0 36v25h24c9 0 15-5 15-13s-6-12-15-12h-24Z"/>
+    <path fill-rule="evenodd" d="M509 43h58v16h-40v21h36v16h-36v24h41v16h-59V43Z"/>
+    <path d="M581 43h20l34 58V43h18v93h-19l-35-59v59h-18z"/>
+    <path fill-rule="evenodd" d="M696 42c27 0 45 19 45 48s-18 48-45 48-45-19-45-48 18-48 45-48Zm0 17c-16 0-27 12-27 31s11 31 27 31 27-12 27-31-11-31-27-31Z"/>
+  </g>
+</svg>

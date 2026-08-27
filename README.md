@@ -1,195 +1,173 @@
-# TabBeacon
+<p align="center">
+  <img src="docs/assets/brand/tabbeacon-logo.svg" width="420" alt="TabBeacon" />
+</p>
 
-TabBeacon is a terminal-native identity and live-status layer for coding-agent sessions.
+<p align="center"><strong>Live identity and status for coding-agent tabs, without changing how you launch them.</strong></p>
 
-The project is intentionally narrow: it keeps the user's existing terminal and agent CLI workflow, then makes each terminal tab act as a compact status beacon. The first supported product path is **Codex CLI in stock Windows Terminal**.
+<p align="center"><a href="README.zh-CN.md">简体中文</a></p>
 
-## Product invariants
+<!-- tabbeacon:hero-badges:start -->
+<p align="center">
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.97.1%2B-DEA584?logo=rust&logoColor=white" alt="Rust MSRV 1.97.1 or newer" /></a>
+  <a href="https://github.com/JerrySkywalker/tabbeacon/actions/workflows/ci.yml"><img src="https://github.com/JerrySkywalker/tabbeacon/actions/workflows/ci.yml/badge.svg" alt="Windows CI" /></a>
+</p>
+<!-- tabbeacon:hero-badges:end -->
 
-- **Zero workflow change:** after one-time setup, daily use remains literal
-  `codex` or `agy`.
-- **Fail open:** if TabBeacon is absent or broken, Codex must remain usable.
-- **Offline-first identity:** repository naming must not require GitHub or network access.
-- **Provider-neutral core:** Codex, Claude, OpenCode, and future agents are adapters beneath one evidence/state model.
-- **Terminal-native presentation:** v0.6 targets Windows Terminal using terminal control sequences rather than replacing the PTY or terminal UI.
-- **Machine-verifiable UI:** title, animation, and color behavior must eventually be covered by visual CI.
+<p align="center"><a href="https://github.com/JerrySkywalker/tabbeacon/releases">Releases</a> · <a href="https://crates.io/crates/tabbeacon">crates.io</a> · <a href="docs/architecture.md">Documentation</a> · <a href="LICENSE">MIT License</a></p>
 
-## Current status
+## Why TabBeacon?
 
-The provider-neutral core, Windows Terminal presentation layer, deterministic
-visual infrastructure, Git and non-Git workspace identity, first Codex hooks
-provider, session-scoped ephemeral title animator, bilingual human-first
-diagnostics, guided setup presets, portable local preferences, and keyboard-only
-live Control Center are implemented. Exact Agy 1.1.19 is also supported through
-its user-global structured title callback, with a deliberately smaller proven
-capability set than Codex. See
-[`dev_governance_files/ROADMAP.md`](dev_governance_files/ROADMAP.md) and the
-[`Codex hooks integration guide`](docs/codex-hooks.md).
+Coding-agent tabs are easy to lose in a busy Windows Terminal. TabBeacon gives
+each supported session a stable workspace identity and a compact, evidence-driven
+status signal while preserving the commands you already use. Daily launch stays
+literally `codex` or `agy`; TabBeacon is not a wrapper, PTY host, terminal
+replacement, or background daemon.
 
-The default TabBeacon-owned tab title uses a compact status-first grammar:
+## What It Looks Like
+
+The production visual backend is title-first and intentionally compact:
 
 ```text
-○ OWH
-⠋ OWH
-✓ OWH
-! OWH
-? OWH
+○ OWH     idle identity
+⠋ OWH     working
+✓ OWH     result ready
+! OWH     attention
+? OWH     question
 ```
 
-The mutable status slot stays on the left and the stable offline repository
-alias stays on the right. Default titles do not append lifecycle prose.
+> [!NOTE]
+> This repository deliberately does not substitute a mockup for a product
+> screenshot. A privacy-safe capture of a real Windows Terminal fixture requires
+> an Owner visual-capture session on this host; see the documentation for the
+> production title and color model.
 
-## Current product scope
+## Features
 
-The Codex-first product is intentionally limited to:
+- Stable, offline-first workspace aliases with Git identity as a specialization.
+- Typed title, activity, tab-color, and Windows Terminal-progress presentation.
+- Evidence-driven status with fail-open behavior when an integration is absent
+  or cannot prove a claim.
+- Guided setup, presets, a keyboard-only Control Center, and portable
+  preferences that stay user-global rather than repository-local.
+- Read-only diagnostics for title, workspace, compatibility, hooks, and
+  session projections without persisting prompt, assistant, or tool content.
+- Ownership-safe configuration changes that preserve unrelated provider settings.
 
-- Windows Terminal;
-- Codex CLI and exact Agy 1.1.19;
-- pure Rust product code;
-- automatic repository abbreviation;
-- tab title ownership;
-- independently configurable title, activity, and dynamic tab-color channels;
-- muted-dark and classic semantic palettes;
-- static title indicators and a fail-open ephemeral title animator;
-- global Codex integration with no change to the `codex` launch command;
-- autonomous functional and visual verification.
+## Supported Coding Agents
 
-Claude and OpenCode support are architectural extension points, not part of the v0.6 multi-provider release.
+| Coding Agent | Status | Daily command | Compatibility policy |
+| --- | --- | --- | --- |
+| Codex CLI | Production | `codex` | Capability-based; a version string is diagnostic only. |
+| Agy CLI | Production | `agy` | Exact admitted profile: Agy 1.1.19. |
 
-## Installation
+### Deferred integrations
 
-TabBeacon has two first-class installation channels:
+- Claude Code — Deferred
+- OpenCode — Deferred
 
-- **Windows binary users:** download the prebuilt Windows x64 ZIP from
-  [GitHub Releases](https://github.com/JerrySkywalker/tabbeacon/releases).
-- **Rust/Cargo users:** install the public CLI from crates.io:
+They are not partially supported and are not enabled by this release train.
 
-  ```powershell
-  cargo install tabbeacon --locked
-  ```
+## Quick Start
 
-  To install v0.6.0 exactly after its public release:
+Current public release: **v0.6.1**. v0.7 documentation is in development and
+is not a published release.
 
-  ```powershell
-  cargo install tabbeacon --version 0.6.0 --locked
-  ```
-
-TabBeacon requires Rust 1.97.1. If your default Rust toolchain is older, use a
-process-scoped recovery without changing your user or machine default:
+Install the public CLI, then run the guided setup:
 
 ```powershell
-rustup run 1.97.1 cargo install tabbeacon --locked
-```
-
-The default Cargo install surface is the public `tabbeacon` command only.
-After installing, start the guided first-run or reconfiguration flow with:
-
-```powershell
+cargo install tabbeacon --locked
 tabbeacon setup
 ```
 
-Use `tabbeacon setup --quick` to preview the recommended atomic preset with no
-enum spelling required. Both flows reuse the existing ownership-safe Codex
-setup path. `tabbeacon setup codex` remains available for scripted
-provider-only setup. Complete Codex `/hooks` trust review only when prompted.
-Daily Codex use remains literally `codex`, not `tabbeacon codex`.
+Review provider Hook trust manually when the supported setup flow asks for it.
+Then launch your coding agent as usual:
 
-For Agy 1.1.19, install the ownership-safe user-global title callback with:
+```powershell
+codex
+```
+
+For the admitted Agy profile, configure its user-global title callback and keep
+the daily command literal:
 
 ```powershell
 tabbeacon setup agy
+agy
 ```
 
-Daily Agy use then remains literally `agy`. TabBeacon preserves unrelated Agy
-settings, refuses a foreign title owner or configuration drift, and restores
-the original settings bytes on owned uninstall when no unrelated change exists.
-Agy supports plain title identity plus observed Ready/Working lifecycle state.
-Tab color, Windows Terminal progress, animation, approval, result-ready, health,
-and background-task counts are explicitly unsupported or unavailable rather
-than inferred.
+> [!TIP]
+> `tabbeacon setup --quick` previews the recommended preset. It does not turn
+> TabBeacon into a launcher.
 
-For daily interactive management, run `tabbeacon ui` in a terminal. The
-Control Center keeps appearance edits in memory until Apply, supports Revert,
-and never enters full-screen mode when stdin or stdout is redirected.
+## Compatibility
 
-### Naming and title explanation
+TabBeacon targets Windows Terminal on Windows. Codex support is derived from
+locally observed required capabilities, not from a version ordering rule. Agy
+support is intentionally narrower: only the exact admitted 1.1.19 profile is
+production-supported. Unavailable or unproven evidence fails open instead of
+being guessed into a compatible state.
 
-`tabbeacon alias explain` shows the ordered Adaptive Naming candidates and the
-exact integer components behind the generated alias. `tabbeacon explain title`
-shows the read-only provider, workspace, alias, presentation, and title
-authority facts available to the current CLI invocation. JSON and `--plain`
-use stable named fields; Human output is localized. Neither command writes
-configuration, binds a workspace, exposes a canonical identity or path, nor
-guesses that an activity lease belongs to the invoking terminal.
+## How It Works
 
-### Operational diagnostics
+```mermaid
+flowchart LR
+  P[Admitted provider evidence] --> N[Provider-neutral state]
+  W[Offline workspace identity] --> N
+  N --> V[Typed terminal presentation]
+  V --> T[Title, activity, color, progress]
+```
 
-Use the read-only status commands to inspect the current installation without
-scraping the human `doctor` output:
+Provider identity, runtime state, and workspace identity are separate slots.
+Presentation makes their relationship visible; it never grants trust,
+compatibility, configuration ownership, or process control.
+
+## Safety & Privacy
+
+TabBeacon is fail-open for coding agents and fail-closed for configuration
+ownership. Hook trust stays manual. Normal presentation does not ingest or
+persist prompt content, assistant content, or tool content. Read-only status
+surfaces expose bounded operational facts rather than credentials, raw session
+identifiers, or environment dumps.
+
+Native Windows Terminal tab icons are **NO_GO** under the accepted current-host
+feasibility evidence. Stock Windows Terminal has no supported public tab-icon
+bridge, and the only remaining instrumentation route could not be isolated
+safely. `TitleMarkBackend` remains the production visual path.
+
+## Configuration
+
+Use the guided flow for cohesive setup, or inspect and change closed typed
+preferences directly:
 
 ```powershell
-tabbeacon status
-tabbeacon status --json
-tabbeacon sessions
-tabbeacon sessions --json
-tabbeacon hooks
-tabbeacon hooks --json
-tabbeacon doctor
-tabbeacon doctor --json
+tabbeacon config show
+tabbeacon config wizard
+tabbeacon config set spinner braille
+tabbeacon config set theme muted-dark
+tabbeacon config preset balanced
+tabbeacon ui
 ```
 
-The version-1 JSON schemas contain only bounded status, configuration choices,
-safe counts, and the TabBeacon binary path. They never emit prompt or assistant
-content, Hook payloads, credentials, raw session/turn identifiers, alias
-registry identities, or an environment dump. `doctor --json` writes JSON only
-to stdout and keeps the normal doctor exit contract: a failure is nonzero while
-warning and pass are successful. `status --json` remains observational and
-successful even when its nested doctor verdict is a failure.
+Preferences are distinct from provider integration state, Hook trust, and
+runtime/session evidence. See the [Codex Hooks guide](docs/codex-hooks.md) and
+[Agy setup guide](docs/agy-setup.md) for current ownership boundaries.
 
-TabBeacon 0.6.0 includes provider-aware Integrations and `sessions` projections,
-Hook Inspector diagnostics, title/naming explainability, and runtime-worker
-upgrade diagnostics. `sessions` remains a read-only projection of
-ephemeral activity leases. Each row contains only a safe workspace alias,
-semantic state, age/recency, and lease-backed worker health. A current lease is
-reported as `recently_authorized`, not as proof that an operating-system process
-is alive. Raw session/turn identifiers, canonical workspace identity, content,
-credentials, process control, and session control are outside this interface.
+## Documentation
 
-The v0.6 provider projections include Agy only for exact admitted 1.1.19 and
-distinguish configured, not configured, unsupported-version, and configuration
-drift states. Agy session rows contain only the shared workspace alias, provider,
-semantic state, recency, and root-stability facts.
+- [Technical overview](docs/architecture.md)
+- [Architecture](docs/architecture.md)
+- [Codex Hooks](docs/codex-hooks.md)
+- [Agy setup](docs/agy-setup.md)
+- [Codex compatibility](docs/CODEX_COMPATIBILITY_V3.md)
+- [Terminal visual backends](docs/TERMINAL_VISUAL_BACKENDS.md)
+- [Native tab-icon disposition](docs/research/WT_NATIVE_ICON_DISPOSITION.md)
 
-See the [Agy setup guide](docs/agy-setup.md), [v0.6.0 release
-notes](docs/v0.6-release-notes.md), [v0.6.1 release
-notes](docs/v0.6.1-release-notes.md), and [v0.6.0 to v0.6.1 upgrade
-guide](docs/v0.6.1-upgrade.md) for the exact profile and migration boundaries.
+## Contributing
 
-### Rust library target
-
-The published package includes the `tabbeacon` library target used internally
-by the CLI and its tests. TabBeacon v0.6.x is CLI-first and does not promise a
-mature public Rust library API beyond normal SemVer expectations.
-
-## Non-goals for v0.6
-
-TabBeacon is not a PTY host, session manager, worktree manager, agent orchestrator, prompt router, remote-control service, terminal replacement, or web dashboard.
-
-## Development
-
-The repository pins Rust 1.97.1. The local quality gate is:
-
-```powershell
-pwsh -NoProfile -File ./scripts/ci/run-local-ci.ps1
-```
-
-For daily presentation choices, use `tabbeacon setup`, `tabbeacon config show`,
-the compact `tabbeacon config wizard`, or the documented presets in the
-[`Codex hooks integration guide`](docs/codex-hooks.md). Settings are user-global
-under `%LOCALAPPDATA%\TabBeacon`, never in a repository.
-
-All production changes after the bootstrap commit follow feature-branch, pull-request, exact-head CI, and evidence rules defined in [`AGENTS.md`](AGENTS.md) and [`dev_governance_files/QUALITY_GATES.md`](dev_governance_files/QUALITY_GATES.md).
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md); use a
+focused branch and let exact-head CI validate the candidate. High-risk changes
+to provider configuration, process targeting, or terminal instrumentation have
+additional governance and safety boundaries.
 
 ## License
 
-MIT.
+TabBeacon is licensed under the [MIT License](LICENSE).
