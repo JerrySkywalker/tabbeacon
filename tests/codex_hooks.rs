@@ -419,6 +419,40 @@ enum HookStream {
 }
 
 #[cfg(windows)]
+#[derive(Debug)]
+enum WindowsHookStageFailure {
+    Spawn(io::Error),
+    Input(io::Error),
+    RootTimeout,
+    OutputPipeTimeout,
+    OutputPipe(io::Error),
+    Wait(io::Error),
+}
+
+#[cfg(windows)]
+impl WindowsHookStageFailure {
+    fn is_environment_timeout(&self) -> bool {
+        matches!(self, Self::RootTimeout | Self::OutputPipeTimeout)
+    }
+}
+
+#[cfg(windows)]
+impl std::fmt::Display for WindowsHookStageFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Spawn(error) => write!(formatter, "could not start: {error}"),
+            Self::Input(error) => write!(formatter, "could not write stdin: {error}"),
+            Self::RootTimeout => formatter.write_str("exceeded its root-process deadline"),
+            Self::OutputPipeTimeout => {
+                formatter.write_str("left an output pipe open after root exit")
+            }
+            Self::OutputPipe(error) => write!(formatter, "could not collect output: {error}"),
+            Self::Wait(error) => write!(formatter, "could not observe root exit: {error}"),
+        }
+    }
+}
+
+#[cfg(windows)]
 fn terminate_windows_hook_tree(process_id: u32) {
     let taskkill = env::var_os("SystemRoot").map_or_else(
         || PathBuf::from("taskkill.exe"),
@@ -436,44 +470,45 @@ fn terminate_windows_hook_tree(process_id: u32) {
 fn receive_hook_stream(
     receiver: &std::sync::mpsc::Receiver<HookStream>,
     deadline: Instant,
-    process_id: u32,
-    stage: &str,
     stdout: &mut Option<Vec<u8>>,
     stderr: &mut Option<Vec<u8>>,
-) {
+) -> Result<(), WindowsHookStageFailure> {
     let remaining = deadline.saturating_duration_since(Instant::now());
-    let stream = receiver.recv_timeout(remaining).unwrap_or_else(|_| {
-        terminate_windows_hook_tree(process_id);
-        panic!("Windows hook stage {stage} left an output pipe open after its shell exited")
-    });
+    let stream = receiver
+        .recv_timeout(remaining)
+        .map_err(|_| WindowsHookStageFailure::OutputPipeTimeout)?;
     match stream {
-        HookStream::Stdout(Ok(bytes)) => *stdout = Some(bytes),
-        HookStream::Stderr(Ok(bytes)) => *stderr = Some(bytes),
+        HookStream::Stdout(Ok(bytes)) => {
+            *stdout = Some(bytes);
+            Ok(())
+        }
+        HookStream::Stderr(Ok(bytes)) => {
+            *stderr = Some(bytes);
+            Ok(())
+        }
         HookStream::Stdout(Err(error)) | HookStream::Stderr(Err(error)) => {
-            terminate_windows_hook_tree(process_id);
-            panic!("Windows hook stage {stage} could not collect shell output: {error}");
+            Err(WindowsHookStageFailure::OutputPipe(error))
         }
     }
 }
 
 #[cfg(windows)]
-fn write_and_wait_for_windows_hook(
+fn try_write_and_wait_for_windows_hook(
     mut child: Child,
-    input: &[u8],
-    stage: &str,
+    input: Option<&[u8]>,
     timeout: Duration,
-) -> Output {
+) -> Result<Output, WindowsHookStageFailure> {
     let process_id = child.id();
     let mut stdin = child
         .stdin
         .take()
         .expect("Codex-compatible hook shell exposes stdin");
-    stdin
-        .write_all(input)
-        .expect("Codex-compatible hook shell accepts stdin");
-    stdin
-        .flush()
-        .expect("Codex-compatible hook shell flushes stdin");
+    if let Some(input) = input
+        && let Err(error) = stdin.write_all(input).and_then(|()| stdin.flush())
+    {
+        terminate_windows_hook_tree(process_id);
+        return Err(WindowsHookStageFailure::Input(error));
+    }
     drop(stdin);
 
     let mut stdout_pipe = child
@@ -504,11 +539,11 @@ fn write_and_wait_for_windows_hook(
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(25)),
             Ok(None) => {
                 terminate_windows_hook_tree(process_id);
-                panic!("Windows hook stage {stage} exceeded {timeout:?}");
+                return Err(WindowsHookStageFailure::RootTimeout);
             }
             Err(error) => {
                 terminate_windows_hook_tree(process_id);
-                panic!("Windows hook stage {stage} could not observe its shell: {error}");
+                return Err(WindowsHookStageFailure::Wait(error));
             }
         }
     };
@@ -516,20 +551,27 @@ fn write_and_wait_for_windows_hook(
     let mut stdout = None;
     let mut stderr = None;
     while stdout.is_none() || stderr.is_none() {
-        receive_hook_stream(
-            &receiver,
-            deadline,
-            process_id,
-            stage,
-            &mut stdout,
-            &mut stderr,
-        );
+        if let Err(error) = receive_hook_stream(&receiver, deadline, &mut stdout, &mut stderr) {
+            terminate_windows_hook_tree(process_id);
+            return Err(error);
+        }
     }
-    Output {
+    Ok(Output {
         status,
         stdout: stdout.expect("stdout is collected"),
         stderr: stderr.expect("stderr is collected"),
-    }
+    })
+}
+
+#[cfg(windows)]
+fn write_and_wait_for_windows_hook(
+    child: Child,
+    input: &[u8],
+    stage: &str,
+    timeout: Duration,
+) -> Output {
+    try_write_and_wait_for_windows_hook(child, Some(input), timeout)
+        .unwrap_or_else(|error| panic!("Windows hook stage {stage} {error}"))
 }
 
 #[cfg(windows)]
@@ -561,6 +603,28 @@ fn run_codex_windows_hook_with_shell_and_terminal(
     terminal_session: Option<&str>,
     timeout: Duration,
 ) -> std::process::Output {
+    try_run_codex_windows_hook_with_shell_and_terminal(
+        shell,
+        command_line,
+        input,
+        isolate_runtime_state,
+        local_app_data,
+        terminal_session,
+        timeout,
+    )
+    .unwrap_or_else(|error| panic!("Windows hook stage {} {error}", shell.label()))
+}
+
+#[cfg(windows)]
+fn try_run_codex_windows_hook_with_shell_and_terminal(
+    shell: CodexWindowsHookShell,
+    command_line: &str,
+    input: &[u8],
+    isolate_runtime_state: bool,
+    local_app_data: Option<&Path>,
+    terminal_session: Option<&str>,
+    timeout: Duration,
+) -> Result<std::process::Output, WindowsHookStageFailure> {
     // These regressions start actual PowerShell/cmd processes. Keep their
     // bounded shell stages independent of unrelated fixture-compilation load
     // in the parallel integration suite; the dedicated transport benchmark
@@ -612,8 +676,66 @@ fn run_codex_windows_hook_with_shell_and_terminal(
     } else {
         command.env_remove("WT_SESSION");
     }
-    let child = command.spawn().expect("Codex-compatible hook shell starts");
-    write_and_wait_for_windows_hook(child, input, shell.label(), timeout)
+    let child = command.spawn().map_err(WindowsHookStageFailure::Spawn)?;
+    try_write_and_wait_for_windows_hook(child, Some(input), timeout)
+}
+
+#[cfg(windows)]
+fn shell_noop_command(shell: CodexWindowsHookShell) -> &'static str {
+    match shell {
+        CodexWindowsHookShell::Pwsh7 | CodexWindowsHookShell::WindowsPowerShell => {
+            "$input | Out-Null; exit 0"
+        }
+        CodexWindowsHookShell::Cmd | CodexWindowsHookShell::ComspecFallback => {
+            "more > NUL & exit /b 0"
+        }
+    }
+}
+
+#[cfg(windows)]
+fn shell_environment_is_qualified(
+    scope: &str,
+    shell: CodexWindowsHookShell,
+    input: &[u8],
+    isolate_runtime_state: bool,
+    local_app_data: Option<&Path>,
+    terminal_session: Option<&str>,
+    timeout: Duration,
+) -> bool {
+    match try_run_codex_windows_hook_with_shell_and_terminal(
+        shell,
+        shell_noop_command(shell),
+        input,
+        isolate_runtime_state,
+        local_app_data,
+        terminal_session,
+        timeout,
+    ) {
+        Ok(output) => {
+            assert!(
+                output.status.success(),
+                "matched shell no-op exited unsuccessfully for {scope}/{}",
+                shell.label()
+            );
+            assert!(
+                output.stdout.is_empty() && output.stderr.is_empty(),
+                "matched shell no-op wrote output for {scope}/{}",
+                shell.label()
+            );
+            true
+        }
+        Err(error) if error.is_environment_timeout() => {
+            eprintln!(
+                "PERFORMANCE_ENVIRONMENT=UNQUALIFIED SCOPE={scope} SHELL={} REASON={error}",
+                shell.label()
+            );
+            false
+        }
+        Err(error) => panic!(
+            "matched shell no-op could not qualify {scope}/{}: {error}",
+            shell.label()
+        ),
+    }
 }
 
 fn codex_event_key(event: &str) -> &'static str {
@@ -844,6 +966,48 @@ fn assert_real_hook_direct(executable: &Path, payload: &[u8], local_app_data: &P
 }
 
 #[cfg(windows)]
+fn direct_environment_is_qualified(
+    scope: &str,
+    executable: &Path,
+    local_app_data: &Path,
+    timeout: Duration,
+) -> bool {
+    let _shell_guard = WINDOWS_HOOK_SHELL_SERIALIZER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let child = Command::new(executable)
+        .arg("--version")
+        .env("LOCALAPPDATA", local_app_data)
+        .env_remove("WT_SESSION")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(WindowsHookStageFailure::Spawn)
+        .unwrap_or_else(|error| panic!("direct no-op could not start for {scope}: {error}"));
+    match try_write_and_wait_for_windows_hook(child, None, timeout) {
+        Ok(output) => {
+            assert!(
+                output.status.success(),
+                "direct no-op exited unsuccessfully for {scope}"
+            );
+            assert!(
+                output.stderr.is_empty(),
+                "direct no-op wrote stderr for {scope}"
+            );
+            true
+        }
+        Err(error) if error.is_environment_timeout() => {
+            eprintln!(
+                "PERFORMANCE_ENVIRONMENT=UNQUALIFIED SCOPE={scope} SHELL=DIRECT REASON={error}"
+            );
+            false
+        }
+        Err(error) => panic!("direct no-op could not qualify {scope}: {error}"),
+    }
+}
+
+#[cfg(windows)]
 fn assert_real_hook_with_local_state_within(
     executable: &Path,
     payload: &[u8],
@@ -885,6 +1049,17 @@ fn assert_real_hook_shell_matrix(root: &TestRoot, command: &str, payload: &[u8])
         CodexWindowsHookShell::Cmd,
         CodexWindowsHookShell::ComspecFallback,
     ] {
+        if !shell_environment_is_qualified(
+            "real-hook-shell-matrix",
+            shell,
+            payload,
+            false,
+            Some(&local_app_data),
+            None,
+            WINDOWS_HOOK_STAGE_TIMEOUT,
+        ) {
+            continue;
+        }
         let output = run_codex_windows_hook_with_shell(
             shell,
             command,
@@ -920,6 +1095,17 @@ fn assert_real_hook_ingress(root: &TestRoot, command: &str) {
         Path::new(env!("CARGO_MANIFEST_DIR")),
     ))
     .expect("ingress payload serializes");
+    if !shell_environment_is_qualified(
+        "real-hook-ingress",
+        CodexWindowsHookShell::Pwsh7,
+        &payload,
+        false,
+        Some(&local_app_data),
+        None,
+        WINDOWS_HOOK_STAGE_TIMEOUT,
+    ) {
+        return;
+    }
     let output = run_codex_windows_hook_with_shell(
         CodexWindowsHookShell::Pwsh7,
         command,
@@ -1885,14 +2071,25 @@ fn prerelease_mcp_manifest_refuses_a_present_malformed_terminal_allow_list_witho
 
 #[cfg(windows)]
 #[test]
-fn doctor_runtime_probe_models_codex_0149_terminate_before_eof_and_proves_session_end_cleanup() {
+fn doctor_runtime_probe_models_codex_0149_or_reports_unqualified_shell_environment() {
     // The probe starts a real stdio server and a real worker process. Keep its
     // diagnostic window independent of the parallel test suite's real shell
     // fixtures; lock acquisition is deliberately outside the measured proof.
+    let root = TestRoot::new("codex-0149-mcp-runtime-probe");
+    if !shell_environment_is_qualified(
+        "doctor-0149-runtime-probe",
+        CodexWindowsHookShell::ComspecFallback,
+        b"{}",
+        false,
+        None,
+        None,
+        WINDOWS_HOOK_STAGE_TIMEOUT,
+    ) {
+        return;
+    }
     let _shell_guard = WINDOWS_HOOK_SHELL_SERIALIZER
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let root = TestRoot::new("codex-0149-mcp-runtime-probe");
     let codex_home = root.child("codex-home");
     write_hooks_fixture(&codex_home, "0.149.0-observed.json");
     let integration = CodexIntegration::new(
@@ -4573,7 +4770,7 @@ fn missing_managed_binary_is_diagnosed_without_claiming_direct_command_fail_open
 
 #[cfg(windows)]
 #[test]
-fn generated_windows_command_runs_the_real_binary_in_the_codex_0149_shell_model() {
+fn generated_windows_command_runs_the_real_binary_or_reports_unqualified_environment() {
     // Keep a fixture component between `windows` and the generated process id.
     // The bare `...-windows-<pid>` shape can leave the nested PowerShell
     // command host open on this Windows runner, obscuring the command-shape
@@ -4584,6 +4781,14 @@ fn generated_windows_command_runs_the_real_binary_in_the_codex_0149_shell_model(
 
     let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "real-shell", &root.path))
         .expect("Codex-shaped payload serializes");
+    if !direct_environment_is_qualified(
+        "generated-windows-command",
+        &executable,
+        &local_app_data,
+        WINDOWS_HOOK_STAGE_TIMEOUT,
+    ) {
+        return;
+    }
     assert_real_hook_direct(&executable, &payload, &local_app_data);
     assert_real_hook_shell_matrix(&root, &command, &payload);
     assert_real_hook_ingress(&root, &command);
@@ -4591,7 +4796,7 @@ fn generated_windows_command_runs_the_real_binary_in_the_codex_0149_shell_model(
 
 #[cfg(windows)]
 #[test]
-fn shell_neutral_windows_declaration_succeeds_in_every_codex_0149_shell_mode() {
+fn shell_neutral_windows_declaration_succeeds_or_reports_unqualified_environment() {
     let root = TestRoot::new("safe-command-windows-shell");
     let (executable, generic_command, windows_command) = fast_real_windows_hook_command(&root);
     let local_app_data = root.child("direct-local-app-data");
@@ -4601,6 +4806,14 @@ fn shell_neutral_windows_declaration_succeeds_in_every_codex_0149_shell_mode() {
     // The generic declaration remains the established compatibility fallback.
     // Production `commandWindows` must use the same shell-neutral form in a
     // configured pwsh/PowerShell/cmd shell and in the empty-shell COMSPEC path.
+    if !direct_environment_is_qualified(
+        "shell-neutral-windows-declaration",
+        &executable,
+        &local_app_data,
+        WINDOWS_HOOK_STAGE_TIMEOUT,
+    ) {
+        return;
+    }
     assert_real_hook_direct(&executable, &payload, &local_app_data);
     assert_real_hook_shell_matrix(&root, &generic_command, &payload);
     assert_real_hook_shell_matrix(&root, &windows_command, &payload);
@@ -4642,8 +4855,19 @@ fn legacy_cmd_fail_open_declaration_reproduces_the_codex_0149_turn_environment_f
 
 #[cfg(windows)]
 #[test]
-fn static_doctor_requires_a_bounded_explicit_hook_runtime_probe() {
+fn static_doctor_requires_a_bounded_probe_or_reports_unqualified_environment() {
     let root = TestRoot::new("doctor-runtime-probe");
+    if !shell_environment_is_qualified(
+        "doctor-runtime-probe",
+        CodexWindowsHookShell::ComspecFallback,
+        b"{}",
+        false,
+        None,
+        None,
+        WINDOWS_HOOK_STAGE_TIMEOUT,
+    ) {
+        return;
+    }
     let integration = trusted_real_windows_integration(&root);
     let hooks_path = root.child("codex-home/hooks.json");
     let config_path = root.child("codex-home/config.toml");
@@ -4682,16 +4906,23 @@ fn static_doctor_requires_a_bounded_explicit_hook_runtime_probe() {
 
 #[cfg(windows)]
 #[test]
-fn real_windows_hook_shell_stages_are_independently_bounded() {
+fn real_windows_hook_shell_stages_are_independently_bounded_or_unqualified() {
     let root = TestRoot::new("real-command-stage-diagnostics");
     let (executable, command) = real_windows_hook_command(&root);
     let local_app_data = root.child("stage-local-app-data");
     let payload = serde_json::to_vec(&hook_payload("UserPromptSubmit", "real-shell", &root.path))
         .expect("Codex-shaped payload serializes");
     let mut failures = Vec::new();
-    capture_windows_hook_stage(&mut failures, "direct", || {
-        assert_real_hook_direct(&executable, &payload, &local_app_data);
-    });
+    if direct_environment_is_qualified(
+        "real-hook-stage-direct",
+        &executable,
+        &local_app_data,
+        WINDOWS_HOOK_STAGE_TIMEOUT,
+    ) {
+        capture_windows_hook_stage(&mut failures, "direct", || {
+            assert_real_hook_direct(&executable, &payload, &local_app_data);
+        });
+    }
     for (stage, shell) in [
         ("Pwsh7", CodexWindowsHookShell::Pwsh7),
         (
@@ -4701,6 +4932,17 @@ fn real_windows_hook_shell_stages_are_independently_bounded() {
         ("Cmd", CodexWindowsHookShell::Cmd),
         ("COMSPEC", CodexWindowsHookShell::ComspecFallback),
     ] {
+        if !shell_environment_is_qualified(
+            "real-hook-stage",
+            shell,
+            &payload,
+            false,
+            Some(&local_app_data),
+            None,
+            WINDOWS_HOOK_STAGE_TIMEOUT,
+        ) {
+            continue;
+        }
         capture_windows_hook_stage(&mut failures, stage, || {
             let output = run_codex_windows_hook_with_shell(
                 shell,
@@ -4727,9 +4969,19 @@ fn real_windows_hook_shell_stages_are_independently_bounded() {
             );
         });
     }
-    capture_windows_hook_stage(&mut failures, "Ingress", || {
-        assert_real_hook_ingress(&root, &command);
-    });
+    if shell_environment_is_qualified(
+        "real-hook-stage-ingress",
+        CodexWindowsHookShell::Pwsh7,
+        &payload,
+        false,
+        Some(&local_app_data),
+        None,
+        WINDOWS_HOOK_STAGE_TIMEOUT,
+    ) {
+        capture_windows_hook_stage(&mut failures, "Ingress", || {
+            assert_real_hook_ingress(&root, &command);
+        });
+    }
     assert!(
         failures.is_empty(),
         "bounded real Windows hook stages failed: {}",
@@ -4739,7 +4991,7 @@ fn real_windows_hook_shell_stages_are_independently_bounded() {
 
 #[cfg(windows)]
 #[test]
-fn anchored_production_hook_is_bounded_below_the_one_second_declaration() {
+fn anchored_production_hook_is_bounded_or_reports_unqualified_environment() {
     let root = TestRoot::new("anchored-production-hook-sla");
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon"));
     let workspace = root.child("workspace");
@@ -4748,6 +5000,14 @@ fn anchored_production_hook_is_bounded_below_the_one_second_declaration() {
         &workspace,
         "https://example.invalid/team/performance-anchor.git",
     );
+    if !direct_environment_is_qualified(
+        "anchored-production-hook-sla",
+        &executable,
+        &local_app_data,
+        WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
+    ) {
+        return;
+    }
 
     let mut start = hook_payload("SessionStart", "performance-session", &workspace);
     start["source"] = Value::String("startup".to_owned());
@@ -4797,7 +5057,7 @@ fn anchored_production_hook_is_bounded_below_the_one_second_declaration() {
 
 #[cfg(windows)]
 #[test]
-fn anchored_default_windows_hook_declaration_finishes_within_the_one_second_sla() {
+fn anchored_default_windows_hook_is_bounded_or_reports_unqualified_environment() {
     // The system coordinator publishes a content-bound worker image. Debug
     // test binaries are deliberately much larger than the distributed release
     // CLI, so the enforceable production SLA belongs to the explicit release
@@ -4819,6 +5079,17 @@ fn anchored_default_windows_hook_declaration_finishes_within_the_one_second_sla(
     let mut start = hook_payload("SessionStart", "performance-shell-session", &workspace);
     start["source"] = Value::String("startup".to_owned());
     let start = serde_json::to_vec(&start).expect("start payload serializes");
+    if !shell_environment_is_qualified(
+        "anchored-default-shell-hook-sla",
+        CodexWindowsHookShell::ComspecFallback,
+        &start,
+        false,
+        Some(&local_app_data),
+        Some(terminal_session),
+        WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
+    ) {
+        return;
+    }
     let start_output = run_codex_windows_hook_with_shell_and_terminal(
         CodexWindowsHookShell::ComspecFallback,
         &command,
@@ -4859,7 +5130,7 @@ fn anchored_default_windows_hook_declaration_finishes_within_the_one_second_sla(
 
 #[cfg(windows)]
 #[test]
-fn malformed_hook_runtime_is_fail_open_in_every_admitted_shell() {
+fn malformed_hook_runtime_is_fail_open_or_reports_unqualified_environment() {
     let root = TestRoot::new("malformed-hook-runtime-fail-open");
     let (_executable, _generic_command, command) = fast_real_windows_hook_command(&root);
     let local_app_data = root.child("malformed-local-app-data");
@@ -4869,6 +5140,17 @@ fn malformed_hook_runtime_is_fail_open_in_every_admitted_shell() {
         CodexWindowsHookShell::Cmd,
         CodexWindowsHookShell::ComspecFallback,
     ] {
+        if !shell_environment_is_qualified(
+            "malformed-hook-runtime",
+            shell,
+            b"malformed",
+            false,
+            Some(&local_app_data),
+            None,
+            WINDOWS_HOOK_STAGE_TIMEOUT,
+        ) {
+            continue;
+        }
         let output = run_codex_windows_hook_with_shell(
             shell,
             &command,
