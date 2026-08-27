@@ -2,14 +2,14 @@
 
 Roadmap IDs are stable governance identifiers. `X` suffixes denote experimental work that does not block the adjacent production release unless promoted by a later decision.
 
-## v0.6.1 forward-compatibility start
+## v0.6.1 production release — COMPLETE
 
-`TB-V061-12H-FORWARD-COMPAT-VISUAL-001` begins the non-release v0.6.1 train.
-Its first candidate replaces exact Codex version admission with local capability
+`TB-V061-12H-FORWARD-COMPAT-VISUAL-001` began the v0.6.1 train. Its completed
+release replaces exact Codex version admission with local capability
 compatibility while preserving ownership-safe setup, manual Hook trust, and the
 literal `codex` daily command. Provider Visual Identity v2 and Windows Terminal
-native-icon research remain ordered follow-on work; no v0.6.1 publication is
-authorized by this planning/status entry.
+native-icon research remain ordered follow-on work; native-icon work was not
+part of v0.6.1.
 
 Train A merged as PR #82 at `43cd07d6152e0acb99fb1a948cde23b45fbad5ff`.
 Provider Visual Identity v2 is the active non-release follow-on; its stable
@@ -19,11 +19,21 @@ The following native-icon source-truth research confirms no stock public
 native-icon bridge; it does not enable experimental instrumentation or release
 work.
 
+v0.6.1 was released from `b3c1ee91036683bee9ebd1e15020364cb556c2a4` as
+`v0.6.1`. Public distribution includes crates.io `tabbeacon 0.6.1`, the GitHub
+`v0.6.1` Release, the verified Windows x64 ZIP and SHA-256 sidecar, and clean
+crates.io and GitHub-asset consumer verification.
+
+```text
+RELEASE_SHA=b3c1ee91036683bee9ebd1e15020364cb556c2a4
+TAG=v0.6.1
+```
+
 ## Current production baseline
 
-CURRENT_PUBLIC_RELEASE=v0.6.0
+CURRENT_PUBLIC_RELEASE=v0.6.1
 
-The v0.6 production line is complete through public `0.6.0` distribution.
+The v0.6.1 production line is complete through public `0.6.1` distribution.
 Historical production evidence remains below; it is retained as the record for
 each release line and does not supersede the current public baseline.
 

@@ -161,7 +161,7 @@ drift states. Agy session rows contain only the shared workspace alias, provider
 semantic state, recency, and root-stability facts.
 
 See the [Agy setup guide](docs/agy-setup.md), [v0.6.0 release
-notes](docs/v0.6-release-notes.md), [v0.6.1 release-candidate
+notes](docs/v0.6-release-notes.md), [v0.6.1 release
 notes](docs/v0.6.1-release-notes.md), and [v0.6.0 to v0.6.1 upgrade
 guide](docs/v0.6.1-upgrade.md) for the exact profile and migration boundaries.
 
