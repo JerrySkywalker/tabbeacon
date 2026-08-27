@@ -218,6 +218,12 @@ function Start-ProductionHook {
     $info.EnvironmentVariables['WT_SESSION'] = $TerminalToken
     $timingFile = Join-Path $State ("timing-{0}.txt" -f [guid]::NewGuid().ToString('N'))
     $info.EnvironmentVariables['TABBEACON_HOOK_TIMING_FILE'] = $timingFile
+    # CreateNoWindow does not provide the owned console that a real Windows
+    # Terminal activity worker inherits. Keep this isolated fixture's worker
+    # alive through the production probe seam, which renders to NUL while
+    # retaining the real worker/observer lifecycle and explicit detached stdio.
+    $info.EnvironmentVariables['TABBEACON_ACTIVITY_WORKER_PROBE_RECEIPT'] =
+        Join-Path $State 'activity-worker-probe.json'
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $info
@@ -520,6 +526,7 @@ $report = [ordered]@{
         ) | ForEach-Object { $_.ToString('x2') }) -join ''
     }
     terminal_binding = 'isolated_synthetic_per_session_windows_terminal_tokens'
+    activity_worker_probe = 'isolated_NUL_backed_long_lived_worker'
     declaration_timeout_ms = 1000
     cold = Get-Statistics -Samples $cold
     warm = Get-Statistics -Samples $warm

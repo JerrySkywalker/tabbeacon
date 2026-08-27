@@ -29,6 +29,7 @@ use crate::{
         HookCurrentness, HookHandlerKind, HookInventory, HookInventoryEntry, HookOwner,
         HookSourceKind, HookTrustState,
     },
+    worker_runtime::WorkerRuntimeStore,
 };
 
 use super::{
@@ -1337,6 +1338,11 @@ impl CodexIntegration {
                 manifest.executable.clone_from(&self.tabbeacon_executable);
                 changed = true;
             }
+            // Worker images are immutable and content-addressed. Materialize
+            // this candidate while setup is already allowed to perform its
+            // bounded owned-state work, rather than copying and hashing an
+            // executable during the first one-second Hook invocation.
+            self.prepare_worker_runtime_image()?;
             if changed {
                 atomic_write(&self.hooks_path(), &serialize_hooks(&hooks)?)?;
                 if config_changed {
@@ -1358,6 +1364,11 @@ impl CodexIntegration {
         if contains_tabbeacon_like_hook(&hooks) {
             return Err(CodexIntegrationError::TabBeaconLikeAmbiguityBlocked);
         }
+        // Keep first real activity delivery out of the synchronous Hook path.
+        // This private image remains content-bound to the exact executable
+        // declared by the manifest below; it never substitutes a package or
+        // unverified binary for a worker.
+        self.prepare_worker_runtime_image()?;
         append_owned_hooks(&mut hooks, &desired_hooks)?;
         let prior_title = terminal_title_item(&config)?.map(ToString::to_string);
         let title_owned = tabbeacon_owns_title && !terminal_title_is_disabled(&config)?;
@@ -1394,6 +1405,21 @@ impl CodexIntegration {
         manifest.phase = ManifestPhase::Active;
         self.write_manifest(&manifest)?;
         Ok(SetupOutcome::InstalledTrustReviewRequired)
+    }
+
+    fn prepare_worker_runtime_image(&self) -> Result<(), CodexIntegrationError> {
+        // Hook dispatch deliberately keeps activity leases under the stable
+        // repository-identity root, not the Codex declaration manifest root.
+        // These roots are siblings beneath the same per-user TabBeacon
+        // directory in production.  Keep that relationship explicit here so
+        // setup prewarms the exact image that a later one-shot Hook will use.
+        let worker_state_root = self
+            .state_root
+            .parent()
+            .map(|root| root.join("repository-identity"))
+            .ok_or(CodexIntegrationError::StateRootUnavailable)?;
+        WorkerRuntimeStore::new(worker_state_root).publish(&self.tabbeacon_executable)?;
+        Ok(())
     }
 
     fn repair_locked(

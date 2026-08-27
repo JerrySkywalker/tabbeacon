@@ -15,7 +15,7 @@ use std::{
 };
 
 #[cfg(windows)]
-use std::os::windows::process::CommandExt;
+use std::os::windows::{ffi::OsStrExt, process::CommandExt};
 
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,7 @@ use crate::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleStatus,
         WindowsTerminalCapabilities, WindowsTerminalRenderer,
     },
+    providers::visual_identity::ProviderVisualIdentity,
     repo::RepositoryAlias,
     settings::{
         ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
@@ -59,6 +60,8 @@ pub const ACTIVITY_WORKER_PROBE_STARTED_FILE: &str = "activity-worker-probe-star
 /// Required basename for the non-content process-entry marker used by the
 /// isolated MCP activity probe.
 pub const ACTIVITY_WORKER_PROBE_PROCESS_FILE: &str = "activity-worker-probe-process.json";
+/// Required basename for the content-minimal cleanup-observer process marker.
+pub const ACTIVITY_OBSERVER_PROBE_PROCESS_FILE: &str = "activity-observer-probe-process.json";
 // The worker renders at 100 ms, but cleanup is a bounded recovery path. A
 // five-second native presence poll avoids turning every active Codex tab into
 // a recurring PowerShell/CIM process under multi-session load.
@@ -541,6 +544,12 @@ pub struct WorkerPresentation {
     /// Stable provider ID, defaulted for leases produced before G62.
     #[serde(default = "default_worker_provider")]
     provider: String,
+    /// Bounded visibility fact selected by the originating presentation action.
+    ///
+    /// Leases written before provider visual identity keep the conservative
+    /// false default: a worker must never infer visibility from a provider ID.
+    #[serde(default)]
+    provider_identity_visible: bool,
     semantic_state: String,
     spinner_preset: String,
     #[serde(default)]
@@ -555,6 +564,7 @@ impl WorkerPresentation {
             "codex",
             workspace_alias,
             spinner,
+            false,
             SessionWorkspaceObservability::default(),
         )
     }
@@ -563,11 +573,13 @@ impl WorkerPresentation {
         provider: &str,
         workspace_alias: &str,
         spinner: SpinnerPreset,
+        provider_identity_visible: bool,
         workspace_observability: SessionWorkspaceObservability,
     ) -> Self {
         Self {
             workspace_alias: workspace_alias.to_owned(),
             provider: provider.to_owned(),
+            provider_identity_visible,
             semantic_state: "working".to_owned(),
             spinner_preset: spinner.as_str().to_owned(),
             workspace_observability,
@@ -583,6 +595,7 @@ impl WorkerPresentation {
             "codex",
             workspace_alias,
             spinner,
+            false,
             SessionWorkspaceObservability::default(),
         )
     }
@@ -591,11 +604,13 @@ impl WorkerPresentation {
         provider: &str,
         workspace_alias: &str,
         spinner: SpinnerPreset,
+        provider_identity_visible: bool,
         workspace_observability: SessionWorkspaceObservability,
     ) -> Self {
         Self {
             workspace_alias: workspace_alias.to_owned(),
             provider: provider.to_owned(),
+            provider_identity_visible,
             semantic_state: "result-ready".to_owned(),
             spinner_preset: spinner.as_str().to_owned(),
             workspace_observability,
@@ -611,6 +626,7 @@ impl WorkerPresentation {
             "codex",
             workspace_alias,
             spinner,
+            false,
             SessionWorkspaceObservability::default(),
         )
     }
@@ -619,11 +635,13 @@ impl WorkerPresentation {
         provider: &str,
         workspace_alias: &str,
         spinner: SpinnerPreset,
+        provider_identity_visible: bool,
         workspace_observability: SessionWorkspaceObservability,
     ) -> Self {
         Self {
             workspace_alias: workspace_alias.to_owned(),
             provider: provider.to_owned(),
+            provider_identity_visible,
             semantic_state: "approval".to_owned(),
             spinner_preset: spinner.as_str().to_owned(),
             workspace_observability,
@@ -641,6 +659,63 @@ impl WorkerPresentation {
             "approval" => Some((Phase::WaitingUser, Attention::Approval)),
             _ => None,
         }
+    }
+
+    fn from_action(
+        provider: &str,
+        workspace_alias: &str,
+        action: &PresentationAction,
+        settings: PresentationSettings,
+        workspace_observability: SessionWorkspaceObservability,
+    ) -> Option<Self> {
+        if settings.title() != TitleMode::TabBeacon {
+            return None;
+        }
+        let state = match action {
+            PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
+        };
+        let provider_identity_visible = state.provider_visual_identity().is_some();
+        match state.title_status() {
+            TitleStatus::Working if settings.activity().uses_worker_animation() => {
+                Some(Self::working_with_workspace_observability(
+                    provider,
+                    workspace_alias,
+                    settings.spinner(),
+                    provider_identity_visible,
+                    workspace_observability,
+                ))
+            }
+            TitleStatus::ResultReady => Some(Self::result_ready_with_workspace_observability(
+                provider,
+                workspace_alias,
+                settings.spinner(),
+                provider_identity_visible,
+                workspace_observability,
+            )),
+            TitleStatus::Approval => Some(Self::approval_with_workspace_observability(
+                provider,
+                workspace_alias,
+                settings.spinner(),
+                provider_identity_visible,
+                workspace_observability,
+            )),
+            _ => None,
+        }
+    }
+
+    fn presentation_action(&self, phase: Phase, attention: Attention) -> PresentationAction {
+        let provider_visual_identity = self
+            .provider_identity_visible
+            .then(|| ProviderVisualIdentity::for_provider_id(&self.provider));
+        PresentationPolicy::resolve(
+            SemanticPresentationInput::new_with_provider_visual_identity(
+                phase,
+                attention,
+                Health::Normal,
+                &self.workspace_alias,
+                provider_visual_identity,
+            ),
+        )
     }
 
     fn lease_ttl_ms(&self) -> u64 {
@@ -678,6 +753,33 @@ pub(crate) enum ActivityRender {
     WithoutTitle,
     /// Ownership could not be proved, so decoration is suppressed fail-open.
     Suppress,
+}
+
+/// Bounded outcome of the asynchronous worker handoff after a lease is
+/// published. None of these outcomes may suppress the originating Hook title:
+/// spawn success is not worker-render readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishedWorkerStartup {
+    Started,
+    WorkerSpawnFailed,
+}
+
+impl PublishedWorkerStartup {
+    const fn hook_render(self) -> ActivityRender {
+        let _ = self;
+        ActivityRender::Full
+    }
+}
+
+fn start_published_worker(spawn: impl FnOnce() -> io::Result<u32>) -> PublishedWorkerStartup {
+    match spawn() {
+        Ok(_) => PublishedWorkerStartup::Started,
+        Err(_) => PublishedWorkerStartup::WorkerSpawnFailed,
+    }
+}
+
+const fn already_active_worker_render() -> ActivityRender {
+    ActivityRender::WithoutTitle
 }
 
 #[derive(Debug, Clone)]
@@ -784,42 +886,13 @@ impl ActivityCoordinator {
             generation,
             terminal_binding_sha256,
         );
-        let title_status = match action {
-            PresentationAction::Apply(state) | PresentationAction::Reset(state) => {
-                state.title_status()
-            }
-        };
-        let worker_presentation = if settings.title() == TitleMode::TabBeacon {
-            match title_status {
-                TitleStatus::Working if settings.activity().uses_worker_animation() => {
-                    Some(WorkerPresentation::working_with_workspace_observability(
-                        provider,
-                        workspace_alias,
-                        settings.spinner(),
-                        workspace_observability.clone(),
-                    ))
-                }
-                TitleStatus::ResultReady => Some(
-                    WorkerPresentation::result_ready_with_workspace_observability(
-                        provider,
-                        workspace_alias,
-                        settings.spinner(),
-                        workspace_observability.clone(),
-                    ),
-                ),
-                TitleStatus::Approval => {
-                    Some(WorkerPresentation::approval_with_workspace_observability(
-                        provider,
-                        workspace_alias,
-                        settings.spinner(),
-                        workspace_observability,
-                    ))
-                }
-                _ => None,
-            }
-        } else {
-            None
-        };
+        let worker_presentation = WorkerPresentation::from_action(
+            provider,
+            workspace_alias,
+            action,
+            settings,
+            workspace_observability,
+        );
         let now = unix_ms();
         if let Some(presentation) = worker_presentation {
             match self.store.refresh_runtime_backed_active_if_current(
@@ -831,7 +904,7 @@ impl ActivityCoordinator {
             ) {
                 Ok(Some(LeaseTransition::Stale)) => return ActivityRender::Suppress,
                 Ok(Some(LeaseTransition::AlreadyActive)) => {
-                    return ActivityRender::WithoutTitle;
+                    return already_active_worker_render();
                 }
                 Ok(None) => {}
                 Ok(Some(LeaseTransition::Published { .. } | LeaseTransition::Stopped { .. })) => {
@@ -857,30 +930,33 @@ impl ActivityCoordinator {
             };
             match transition {
                 LeaseTransition::Stale => ActivityRender::Suppress,
-                LeaseTransition::AlreadyActive => ActivityRender::WithoutTitle,
+                LeaseTransition::AlreadyActive => already_active_worker_render(),
                 LeaseTransition::Published { lease, .. } => {
                     // Publishing this lease atomically revokes the predecessor.
                     // It is safe to start the successor immediately because
                     // every worker validates the current lease before writing;
                     // waiting for the old worker's exit would consume most of
                     // the synchronous one-second Hook budget.
-                    if let Ok(worker_pid) = spawn_worker(&runtime_image.executable, &lease) {
-                        if spawn_cleanup_observer(&runtime_image.executable, &lease, worker_pid)
-                            .is_ok()
-                        {
-                            self.store.collect_unused_runtime_images(&runtime_store);
-                            ActivityRender::WithoutTitle
-                        } else {
-                            // A console-attached worker can be terminated with its
-                            // terminal. Without the detached observer, leaving the
-                            // lease active would suppress future presentation, so
-                            // fail open to the static one-shot rendering instead.
-                            let _ = self.store.deactivate_if_owned(&lease, unix_ms());
-                            ActivityRender::Full
+                    match start_published_worker(|| spawn_worker(&runtime_image.executable, &lease))
+                    {
+                        PublishedWorkerStartup::Started => {
+                            // Runtime-image collection is retention-only.  It
+                            // re-enumerates state and hashes image files, so it
+                            // must not delay the first one-second Hook frame.
+                            // Setup prewarms the current immutable image;
+                            // orphaned images remain safely retained until an
+                            // explicit maintenance path collects them.
+                            // Process creation establishes only that the worker
+                            // was requested. It does not establish that it has
+                            // opened the console or rendered its first frame.
+                            // Keep this Hook's complete frame authoritative
+                            // until a later event observes the active lease.
+                            PublishedWorkerStartup::Started.hook_render()
                         }
-                    } else {
-                        let _ = self.store.deactivate_if_owned(&lease, unix_ms());
-                        ActivityRender::Full
+                        PublishedWorkerStartup::WorkerSpawnFailed => {
+                            let _ = self.store.deactivate_if_owned(&lease, unix_ms());
+                            PublishedWorkerStartup::WorkerSpawnFailed.hook_render()
+                        }
                     }
                 }
                 LeaseTransition::Stopped { .. } => {
@@ -966,9 +1042,9 @@ pub fn run_activity_worker_system(key_digest: &str, generation: u64, revision: u
         return;
     };
     let ActivityExecution::System {
+        executable,
         owner_sha256,
         terminal_binding_sha256,
-        ..
     } = coordinator.execution
     else {
         return;
@@ -982,11 +1058,20 @@ pub fn run_activity_worker_system(key_digest: &str, generation: u64, revision: u
         revision,
         &owner_sha256,
         &terminal_binding_sha256,
+        &executable,
     );
 }
 
 fn record_activity_worker_probe_process_entry() {
-    let Some(path) = activity_worker_probe_path(ACTIVITY_WORKER_PROBE_PROCESS_FILE) else {
+    record_activity_probe_process_entry(ACTIVITY_WORKER_PROBE_PROCESS_FILE, "worker");
+}
+
+fn record_activity_observer_probe_process_entry() {
+    record_activity_probe_process_entry(ACTIVITY_OBSERVER_PROBE_PROCESS_FILE, "observer");
+}
+
+fn record_activity_probe_process_entry(file_name: &str, role: &str) {
+    let Some(path) = activity_worker_probe_path(file_name) else {
         return;
     };
     let Ok(file) = OpenOptions::new().write(true).create_new(true).open(path) else {
@@ -996,9 +1081,49 @@ fn record_activity_worker_probe_process_entry() {
         file,
         &serde_json::json!({
             "schema": "tabbeacon-activity-worker-probe-v1",
-            "worker_process_entered": true,
+            "role": role,
+            "worker_process_entered": role == "worker",
+            "stdin_class": standard_handle_class(StandardHandle::Input),
+            "stdout_class": standard_handle_class(StandardHandle::Output),
+            "stderr_class": standard_handle_class(StandardHandle::Error),
         }),
     );
+}
+
+#[derive(Clone, Copy)]
+enum StandardHandle {
+    Input,
+    Output,
+    Error,
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn standard_handle_class(handle: StandardHandle) -> &'static str {
+    use windows::Win32::{
+        Storage::FileSystem::{FILE_TYPE_CHAR, FILE_TYPE_DISK, FILE_TYPE_PIPE, GetFileType},
+        System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE},
+    };
+
+    let identifier = match handle {
+        StandardHandle::Input => STD_INPUT_HANDLE,
+        StandardHandle::Output => STD_OUTPUT_HANDLE,
+        StandardHandle::Error => STD_ERROR_HANDLE,
+    };
+    let Ok(handle) = (unsafe { GetStdHandle(identifier) }) else {
+        return "UNKNOWN";
+    };
+    match unsafe { GetFileType(handle) } {
+        FILE_TYPE_PIPE => "PIPE",
+        FILE_TYPE_CHAR => "CHAR",
+        FILE_TYPE_DISK => "DISK",
+        _ => "UNKNOWN",
+    }
+}
+
+#[cfg(not(windows))]
+fn standard_handle_class(_handle: StandardHandle) -> &'static str {
+    "UNKNOWN"
 }
 
 fn activity_worker_probe_path(file_name: &str) -> Option<PathBuf> {
@@ -1022,6 +1147,7 @@ pub fn run_activity_cleanup_observer_system(
     owner_sha256: &str,
     expected_executable: &str,
 ) {
+    record_activity_observer_probe_process_entry();
     if worker_pid == 0
         || !is_sha256(key_digest)
         || !is_sha256(owner_sha256)
@@ -1536,6 +1662,7 @@ impl ActivityLeaseStore {
         revision: u64,
         owner_sha256: &str,
         terminal_binding_sha256: &str,
+        executable: &Path,
     ) {
         let ownership = WorkerOwnership {
             key_sha256: key_digest.to_owned(),
@@ -1564,6 +1691,17 @@ impl ActivityLeaseStore {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
             return;
         };
+        // The command Hook has already left a complete persistent frame. Do
+        // not make that one-second path synchronously create a second process
+        // merely to observe this worker. Once this verified runtime image has
+        // opened the inherited console, it can establish its own exact cleanup
+        // observer before it takes title ownership. A failure leaves the
+        // Hook's full frame intact and deactivates this lease without writing a
+        // worker frame.
+        if spawn_cleanup_observer(executable, &initial, std::process::id()).is_err() {
+            let _ = self.deactivate_if_owned(&initial, unix_ms());
+            return;
+        }
         let settings = PresentationSettings::new(
             TitleMode::TabBeacon,
             TabColorMode::Off,
@@ -1575,12 +1713,7 @@ impl ActivityLeaseStore {
             WindowsTerminalCapabilities::new(false),
             settings,
         );
-        let action = PresentationPolicy::resolve(SemanticPresentationInput::new(
-            phase,
-            attention,
-            Health::Normal,
-            &presentation.workspace_alias,
-        ));
+        let action = presentation.presentation_action(phase, attention);
         let state = match &action {
             PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
         };
@@ -1721,6 +1854,7 @@ impl ActivityLeaseStore {
             .map_or_else(|_| (BTreeSet::new(), false), |images| (images, true))
     }
 
+    #[cfg(test)]
     fn active_runtime_images_for_gc_locked(&self) -> io::Result<BTreeSet<String>> {
         let mut active_images = BTreeSet::new();
         let mut lease_files = 0_usize;
@@ -1760,6 +1894,7 @@ impl ActivityLeaseStore {
         Ok(active_images)
     }
 
+    #[cfg(test)]
     fn collect_unused_runtime_images(&self, runtime_store: &WorkerRuntimeStore) {
         let _ = self.with_lock(|| {
             let (active_images, ownership_proven) = self
@@ -2158,6 +2293,7 @@ fn validate_lease(lease: &WorkerLease) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
     Command::new(executable)
         .args([
@@ -2171,6 +2307,190 @@ fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
         .stderr(Stdio::null())
         .spawn()
         .map(|child| child.id())
+}
+
+#[cfg(windows)]
+struct OwnedWorkerHandle(windows::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for OwnedWorkerHandle {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
+#[cfg(windows)]
+struct WorkerAttributeList {
+    pointer: windows::Win32::System::Threading::LPPROC_THREAD_ATTRIBUTE_LIST,
+    _storage: Vec<usize>,
+}
+
+#[cfg(windows)]
+impl Drop for WorkerAttributeList {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        unsafe {
+            windows::Win32::System::Threading::DeleteProcThreadAttributeList(self.pointer);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn windows_io_error(error: windows::core::Error) -> io::Error {
+    io::Error::other(error)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn open_inheritable_nul(access: u32) -> io::Result<OwnedWorkerHandle> {
+    use std::{mem, ptr};
+
+    use windows::Win32::{
+        Security::SECURITY_ATTRIBUTES,
+        Storage::FileSystem::{
+            CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        },
+    };
+
+    let security = SECURITY_ATTRIBUTES {
+        nLength: u32::try_from(mem::size_of::<SECURITY_ATTRIBUTES>()).unwrap_or(u32::MAX),
+        lpSecurityDescriptor: ptr::null_mut(),
+        bInheritHandle: true.into(),
+    };
+    unsafe {
+        CreateFileW(
+            windows::core::w!("NUL"),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            Some(&raw const security),
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    }
+    .map(OwnedWorkerHandle)
+    .map_err(windows_io_error)
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn worker_attribute_list(
+    handles: &[windows::Win32::Foundation::HANDLE],
+) -> io::Result<WorkerAttributeList> {
+    use std::{ffi::c_void, mem};
+
+    use windows::Win32::System::Threading::{
+        DeleteProcThreadAttributeList, InitializeProcThreadAttributeList,
+        LPPROC_THREAD_ATTRIBUTE_LIST, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, UpdateProcThreadAttribute,
+    };
+
+    let mut bytes = 0_usize;
+    let _ = unsafe { InitializeProcThreadAttributeList(None, 1, None, &raw mut bytes) };
+    if bytes == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let words = bytes.div_ceil(mem::size_of::<usize>());
+    let mut storage = vec![0_usize; words];
+    let pointer = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast::<c_void>());
+    unsafe { InitializeProcThreadAttributeList(Some(pointer), 1, None, &raw mut bytes) }
+        .map_err(windows_io_error)?;
+    if let Err(error) = unsafe {
+        UpdateProcThreadAttribute(
+            pointer,
+            0,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+            Some(handles.as_ptr().cast::<c_void>()),
+            mem::size_of_val(handles),
+            None,
+            None,
+        )
+    } {
+        unsafe { DeleteProcThreadAttributeList(pointer) };
+        return Err(windows_io_error(error));
+    }
+    Ok(WorkerAttributeList {
+        pointer,
+        _storage: storage,
+    })
+}
+
+/// Starts a long-lived worker with an explicit standard-handle allowlist.
+///
+/// Rust's Windows `Command` implementation currently calls `CreateProcessW`
+/// with `bInheritHandles=TRUE`. `Stdio::null()` replaces the three standard
+/// handles, but it does not exclude other inheritable handles already present
+/// in the Hook process (notably the command runner's redirected pipe ends).
+/// A `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` preserves explicit NUL stdio without
+/// allowing those ambient handles to keep Codex's output pipes open.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
+    use std::mem;
+
+    use windows::{
+        Win32::{
+            Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE},
+            System::Threading::{
+                CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
+                PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+            },
+        },
+        core::{PCWSTR, PWSTR},
+    };
+
+    let stdin = open_inheritable_nul(GENERIC_READ.0)?;
+    let output = open_inheritable_nul(GENERIC_WRITE.0)?;
+    let inherited_handles = [stdin.0, output.0];
+    let attributes = worker_attribute_list(&inherited_handles)?;
+
+    let mut application = executable.as_os_str().encode_wide().collect::<Vec<_>>();
+    if application.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "worker executable contains an embedded NUL",
+        ));
+    }
+    application.push(0);
+    let mut command_line = Vec::new();
+    command_line.push(u16::from(b'"'));
+    command_line.extend(executable.as_os_str().encode_wide());
+    command_line.extend(
+        format!(
+            "\" __activity-worker-v1 {} {} {}",
+            lease.key_sha256, lease.generation, lease.revision
+        )
+        .encode_utf16(),
+    );
+    command_line.push(0);
+
+    let mut startup = STARTUPINFOEXW::default();
+    startup.StartupInfo.cb = u32::try_from(mem::size_of::<STARTUPINFOEXW>()).unwrap_or(u32::MAX);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    startup.StartupInfo.hStdInput = stdin.0;
+    startup.StartupInfo.hStdOutput = output.0;
+    startup.StartupInfo.hStdError = output.0;
+    startup.lpAttributeList = attributes.pointer;
+    let mut process_information = PROCESS_INFORMATION::default();
+    unsafe {
+        CreateProcessW(
+            PCWSTR(application.as_ptr()),
+            Some(PWSTR(command_line.as_mut_ptr())),
+            None,
+            None,
+            true,
+            CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+            None,
+            PCWSTR::null(),
+            &raw const startup.StartupInfo,
+            &raw mut process_information,
+        )
+    }
+    .map_err(windows_io_error)?;
+    let process_id = process_information.dwProcessId;
+    let _ = unsafe { CloseHandle(process_information.hThread) };
+    let _ = unsafe { CloseHandle(process_information.hProcess) };
+    Ok(process_id)
 }
 
 fn spawn_cleanup_observer(
@@ -2488,7 +2808,7 @@ fn reject_symbolic_link(path: &Path) -> io::Result<()> {
 fn open_owned_console(probe_enabled: bool) -> io::Result<Box<dyn Write>> {
     if probe_enabled {
         // A test process can inherit a syntactically open CONOUT$ handle that
-        // still rejects SetConsoleTitleW because its host is noninteractive.
+        // still rejects a direct console-title API because its host is noninteractive.
         // Route the isolated probe's already-rendered bytes to NUL instead:
         // this proves the worker's real write/flush/cadence path without
         // persisting a title or conflating test-host UI ownership with the
@@ -2525,18 +2845,22 @@ mod tests {
 
     use super::{
         ActivityCoordinator, ActivityExecution, ActivityLeaseHealth, ActivityLeaseStore,
-        ActivityRender, CleanupObserverAction, LeaseTransition, SESSIONS_SCHEMA_VERSION,
-        STATIC_ATTENTION_LEASE_TTL_MS, SessionWorkspaceObservability, TARGET_FRAME_INTERVAL_MS,
-        WorkerKey, WorkerPresentation, WorkerProcessLiveness, cleanup_identity_recheck_due,
-        cleanup_observer_action, cleanup_observer_poll_ms, command_output_with_timeout,
-        inspect_activity_leases_read_only, inspect_sessions_read_only,
-        next_animation_frame_deadline, normalized_windows_path,
-        record_provider_session_observation, system_powershell_path,
+        ActivityRender, CleanupObserverAction, LeaseTransition, PublishedWorkerStartup,
+        SESSIONS_SCHEMA_VERSION, STATIC_ATTENTION_LEASE_TTL_MS, SessionWorkspaceObservability,
+        TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation, WorkerProcessLiveness,
+        already_active_worker_render, cleanup_identity_recheck_due, cleanup_observer_action,
+        cleanup_observer_poll_ms, command_output_with_timeout, inspect_activity_leases_read_only,
+        inspect_sessions_read_only, next_animation_frame_deadline, normalized_windows_path,
+        record_provider_session_observation, start_published_worker, system_powershell_path,
         tasklist_output_reports_absence,
     };
     use crate::{
         core::{Attention, Health, Phase},
-        presentation::{PresentationPolicy, SemanticPresentationInput},
+        presentation::{
+            PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleStatus,
+            WindowsTerminalCapabilities, WindowsTerminalRenderer,
+        },
+        providers::visual_identity::ProviderVisualIdentity,
         settings::{
             ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
             TitleMode,
@@ -2580,6 +2904,174 @@ mod tests {
 
     fn presentation() -> WorkerPresentation {
         WorkerPresentation::working("OWH", SpinnerPreset::Braille)
+    }
+
+    fn rendered_worker_title(presentation: &WorkerPresentation) -> String {
+        let (phase, attention) = presentation
+            .semantic_input()
+            .expect("fixture presentation has a supported semantic state");
+        let action = presentation.presentation_action(phase, attention);
+        let state = match action {
+            PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
+        };
+        let renderer = WindowsTerminalRenderer::with_settings(
+            WindowsTerminalCapabilities::new(false),
+            PresentationSettings::new(
+                TitleMode::TabBeacon,
+                TabColorMode::Off,
+                ActivityMode::TitleSpinner,
+                SpinnerPreset::Braille,
+                PresentationTheme::MutedDark,
+            ),
+        );
+        String::from_utf8(renderer.render_title_spinner_frame(&state, 0))
+            .expect("worker title frame is UTF-8")
+    }
+
+    fn reconstructed_worker_state(
+        presentation: &WorkerPresentation,
+    ) -> crate::presentation::VisualState {
+        let (phase, attention) = presentation
+            .semantic_input()
+            .expect("fixture presentation has a supported semantic state");
+        match presentation.presentation_action(phase, attention) {
+            PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
+        }
+    }
+
+    fn source_action(
+        phase: Phase,
+        attention: Attention,
+        provider_visual_identity: Option<ProviderVisualIdentity>,
+    ) -> PresentationAction {
+        PresentationPolicy::resolve(
+            SemanticPresentationInput::new_with_provider_visual_identity(
+                phase,
+                attention,
+                Health::Normal,
+                "OWH",
+                provider_visual_identity,
+            ),
+        )
+    }
+
+    fn worker_settings() -> PresentationSettings {
+        PresentationSettings::new(
+            TitleMode::TabBeacon,
+            TabColorMode::Off,
+            ActivityMode::TitleSpinner,
+            SpinnerPreset::Braille,
+            PresentationTheme::MutedDark,
+        )
+    }
+
+    fn worker_from_source_action(
+        provider: &str,
+        action: &PresentationAction,
+    ) -> WorkerPresentation {
+        WorkerPresentation::from_action(
+            provider,
+            "OWH",
+            action,
+            worker_settings(),
+            SessionWorkspaceObservability::default(),
+        )
+        .expect("source action needs a worker lease")
+    }
+
+    #[test]
+    fn worker_reconstruction_retains_codex_provider_visibility() {
+        let source = source_action(
+            Phase::Working,
+            Attention::None,
+            Some(ProviderVisualIdentity::codex()),
+        );
+        let presentation = worker_from_source_action("codex", &source);
+
+        assert!(presentation.provider_identity_visible);
+        assert!(
+            rendered_worker_title(&presentation).contains("Codex"),
+            "the worker must reconstruct the originating provider identity"
+        );
+    }
+
+    #[test]
+    fn static_worker_reconstruction_retains_codex_provider_visibility() {
+        for (attention, expected_status) in [
+            (Attention::ResultReady, TitleStatus::ResultReady),
+            (Attention::Approval, TitleStatus::Approval),
+        ] {
+            let source = source_action(
+                Phase::WaitingUser,
+                attention,
+                Some(ProviderVisualIdentity::codex()),
+            );
+            let presentation = worker_from_source_action("codex", &source);
+            let state = reconstructed_worker_state(&presentation);
+
+            assert!(presentation.provider_identity_visible);
+            assert_eq!(state.title_status(), expected_status);
+            assert!(rendered_worker_title(&presentation).contains("Codex"));
+        }
+    }
+
+    #[test]
+    fn worker_reconstruction_does_not_infer_identity_when_provider_badge_is_off() {
+        let source = source_action(Phase::Working, Attention::None, None);
+        let presentation = worker_from_source_action("codex", &source);
+
+        assert!(!presentation.provider_identity_visible);
+        assert!(!rendered_worker_title(&presentation).contains("Codex"));
+    }
+
+    #[test]
+    fn legacy_worker_lease_defaults_provider_identity_visibility_conservatively() {
+        let source = source_action(
+            Phase::Working,
+            Attention::None,
+            Some(ProviderVisualIdentity::codex()),
+        );
+        let presentation = worker_from_source_action("codex", &source);
+        let mut legacy_value = serde_json::to_value(presentation).expect("fixture serializes");
+        legacy_value
+            .as_object_mut()
+            .expect("serialized worker presentation is an object")
+            .remove("provider_identity_visible");
+        let legacy: WorkerPresentation =
+            serde_json::from_value(legacy_value).expect("legacy worker presentation deserializes");
+
+        assert!(!legacy.provider_identity_visible);
+        assert!(!rendered_worker_title(&legacy).contains("Codex"));
+    }
+
+    #[test]
+    fn worker_provider_transition_keeps_runtime_and_workspace_independent() {
+        let codex = worker_from_source_action(
+            "codex",
+            &source_action(
+                Phase::WaitingUser,
+                Attention::ResultReady,
+                Some(ProviderVisualIdentity::codex()),
+            ),
+        );
+        let agy = worker_from_source_action(
+            "agy",
+            &source_action(
+                Phase::WaitingUser,
+                Attention::ResultReady,
+                Some(ProviderVisualIdentity::agy()),
+            ),
+        );
+        let codex_state = reconstructed_worker_state(&codex);
+        let agy_state = reconstructed_worker_state(&agy);
+
+        assert_eq!(codex_state.title_status(), agy_state.title_status());
+        assert_eq!(codex_state.tab_color(), agy_state.tab_color());
+        assert_eq!(codex_state.progress(), agy_state.progress());
+        assert_eq!(codex_state.workspace_alias().as_str(), "OWH");
+        assert_eq!(agy_state.workspace_alias().as_str(), "OWH");
+        assert!(rendered_worker_title(&codex).contains("Codex"));
+        assert!(rendered_worker_title(&agy).contains("Agy"));
     }
 
     #[test]
@@ -3779,6 +4271,60 @@ mod tests {
                 .expect("fallback lease lookup succeeds")
                 .is_none(),
             "runtime publication must finish before an active lease is written"
+        );
+    }
+
+    #[test]
+    fn published_worker_leaves_the_hook_owned_full_provider_title_before_animation() {
+        let startup = start_published_worker(|| Ok(17));
+        assert_eq!(startup, PublishedWorkerStartup::Started);
+        assert_eq!(
+            startup.hook_render(),
+            ActivityRender::Full,
+            "a spawned worker is not yet proof that it rendered a title frame"
+        );
+
+        let action = source_action(
+            Phase::Working,
+            Attention::None,
+            Some(ProviderVisualIdentity::codex()),
+        );
+        let settings = worker_settings();
+        let renderer = WindowsTerminalRenderer::with_settings(
+            WindowsTerminalCapabilities::new(false),
+            settings,
+        );
+        let title = String::from_utf8(renderer.render(&action)).expect("renderer output is UTF-8");
+        assert!(title.contains("Codex"));
+        assert!(title.contains("OWH"));
+    }
+
+    #[test]
+    fn already_active_worker_keeps_its_animation_without_resetting_the_title() {
+        assert_eq!(
+            already_active_worker_render(),
+            ActivityRender::WithoutTitle,
+            "an already active worker continues its animation without resetting the first frame"
+        );
+    }
+
+    #[test]
+    fn worker_startup_failures_leave_the_hook_with_a_full_render() {
+        let worker_spawn_failure = start_published_worker(|| {
+            Err(std::io::Error::other(
+                "owned worker fixture refuses to spawn",
+            ))
+        });
+        assert_eq!(
+            worker_spawn_failure,
+            PublishedWorkerStartup::WorkerSpawnFailed
+        );
+        assert_eq!(worker_spawn_failure.hook_render(), ActivityRender::Full);
+
+        assert_eq!(
+            PublishedWorkerStartup::Started.hook_render(),
+            ActivityRender::Full,
+            "a later worker-side observer failure cannot retract the originating Hook frame"
         );
     }
 

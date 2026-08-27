@@ -492,8 +492,32 @@ enum AnchorSelectionError {
     Anchor,
 }
 
-fn open_owned_console() -> io::Result<crate::console_output::OwnedConsole> {
-    crate::console_output::open_owned_console()
+fn open_owned_console() -> io::Result<Box<dyn Write>> {
+    #[cfg(windows)]
+    if activity_worker_probe_enabled() {
+        return fs::OpenOptions::new()
+            .write(true)
+            .open("NUL")
+            .map(|sink| Box::new(sink) as Box<dyn Write>);
+    }
+    crate::console_output::open_owned_console().map(|sink| Box::new(sink) as Box<dyn Write>)
+}
+
+#[cfg(windows)]
+fn activity_worker_probe_enabled() -> bool {
+    let Some(path) =
+        std::env::var_os(crate::activity::ACTIVITY_WORKER_PROBE_RECEIPT_ENV).map(PathBuf::from)
+    else {
+        return false;
+    };
+    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) else {
+        return false;
+    };
+    path.is_absolute()
+        && path
+            .file_name()
+            .is_some_and(|name| name == crate::activity::ACTIVITY_WORKER_PROBE_RECEIPT_FILE)
+        && path.parent() == Some(local_app_data.as_path())
 }
 
 /// Opt-in, content-free timing capture for the production Hook command.
