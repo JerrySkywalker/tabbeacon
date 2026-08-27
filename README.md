@@ -4,7 +4,7 @@
 
 <p align="center"><strong>Live identity and status for coding-agent tabs, without changing how you launch them.</strong></p>
 
-<p align="center"><a href="README.zh-CN.md">简体中文</a></p>
+<p align="center">English | <a href="README.zh-CN.md">简体中文</a></p>
 
 <!-- tabbeacon:hero-badges:start -->
 <p align="center">

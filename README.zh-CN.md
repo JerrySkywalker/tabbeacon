@@ -4,7 +4,7 @@
 
 <p align="center"><strong>为编码智能体标签页提供实时身份与状态，同时不改变你的启动方式。</strong></p>
 
-<p align="center"><a href="README.md">English</a></p>
+<p align="center">简体中文 | <a href="README.md">English</a></p>
 
 <!-- tabbeacon:hero-badges:start -->
 <p align="center">
