@@ -53,3 +53,54 @@ correlation or restoration for an isolated Windows Terminal process.
 
 No XAML diagnostics attachment occurred in this goal. In particular, no
 diagnostics shim was attached to the terminal hosting the goal.
+
+## v0.7 revalidation — 2026-08-28
+
+`TB-G83` revalidated this record against the current stock
+[`microsoft/terminal` `main`](https://github.com/microsoft/terminal/tree/8c0a234f056910776e56afa3f8a38d6ddc3db33c)
+commit `8c0a234f056910776e56afa3f8a38d6ddc3db33c` (upstream commit date
+2026-08-26 UTC). The revalidation is source and public-documentation evidence
+only: it did not attach XAML Diagnostics or mutate a Windows Terminal tab.
+
+### Current stock source result
+
+- `src/cascadia/TerminalApp/Tab.cpp` still implements `Tab::UpdateIcon` and
+  writes `TabViewItem().IconSource`; hidden/show state preserves the last icon
+  path/style and reapplies it through the same internal path.
+- `src/terminal/parser/OutputStateMachineEngine.cpp` still sends OSC title
+  controls to `SetWindowTitle`, while its Windows-Terminal action payload is
+  dispatched separately through `DoWTAction`.
+- `src/terminal/adapter/adaptDispatch.cpp` still exposes the stock action
+  payload used for `CmdNotFound`; it is not a tab-icon setter.
+- `src/cascadia/TerminalSettingsModel/ActionArgs.idl` still declares tab-color
+  and tab-rename arguments and contains no `SetTabIcon` action/argument.
+- `src/cascadia/TerminalConnection/ConptyConnection.cpp` still writes
+  `WT_SESSION` into the child environment. It is a session correlation value,
+  not a public tab object or native-icon mutation capability.
+- The public request for application-controlled tab icons,
+  [microsoft/terminal#1868](https://github.com/microsoft/terminal/issues/1868),
+  remained open when rechecked on 2026-08-28.
+
+```text
+WT_UPSTREAM_REF=8c0a234f056910776e56afa3f8a38d6ddc3db33c
+WT_SOURCE_DATE=2026-08-26
+WT_INTERNAL_NATIVE_PIPELINE=CONFIRMED
+STOCK_PUBLIC_ICON_BRIDGE=false
+OFFICIAL_NATIVE_ICON_BRIDGE=false
+XAML_ROUTE_STILL_RELEVANT=true
+```
+
+### Current public diagnostics boundary
+
+Microsoft's current
+[`InitializeXamlDiagnosticsEx`](https://learn.microsoft.com/windows/win32/api/xamlom/nf-xamlom-initializexamldiagnosticsex)
+documentation and the installed Windows SDK `xamlom.h` agree that the public
+entry point takes a target PID, a `XamlDiagnostics.dll` path, and a diagnostic
+site DLL/CLSID implementing `IObjectWithSite`. The public visual-tree service
+offers enumeration and property APIs, including `SetProperty`, but that is
+documented process instrumentation—not a Windows Terminal protocol.
+
+This keeps XAML Diagnostics as the only plausible *feasibility* route. It does
+not grant production integration authority and does not relax the requirement
+for an isolated target, exact-tab correlation, reversible restore, or fail-open
+behavior.
