@@ -13,7 +13,9 @@
 </p>
 <!-- tabbeacon:hero-badges:end -->
 
-<p align="center"><a href="https://github.com/JerrySkywalker/tabbeacon/releases">发布版本</a> · <a href="https://crates.io/crates/tabbeacon">crates.io</a> · <a href="docs/architecture.md">文档</a> · <a href="LICENSE">MIT 许可证</a></p>
+<p align="center"><a href="https://github.com/JerrySkywalker/tabbeacon/releases">发布版本</a> · <a href="https://crates.io/crates/tabbeacon">crates.io</a> · <a href="docs/README.md">文档</a> · <a href="LICENSE">MIT 许可证</a></p>
+
+<!-- tabbeacon:critical-invariants install=cargo-install-tabbeacon-locked setup=tabbeacon-setup codex=codex agy=agy providers=codex-agy claude=deferred opencode=deferred trust=manual fail-open=true privacy=content-minimal -->
 
 ## 为什么选择 TabBeacon？
 
@@ -90,7 +92,8 @@ agy
 ```
 
 > [!TIP]
-> `tabbeacon setup --quick` 会预览推荐预设；它不会把 TabBeacon 变成启动器。
+> `tabbeacon setup --quick` 只处理缺失、过期或需要操作的设置工作。应用前请审查
+> 所有建议的变更；它不会把 TabBeacon 变成启动器。
 
 ## 兼容性
 
@@ -139,6 +142,7 @@ tabbeacon ui
 
 ## 文档
 
+- [文档入口](docs/README.md)
 - [技术概览](docs/architecture.md)
 - [架构](docs/architecture.md)
 - [Codex Hooks](docs/codex-hooks.md)

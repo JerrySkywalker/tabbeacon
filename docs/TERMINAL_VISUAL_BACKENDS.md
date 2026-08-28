@@ -30,11 +30,12 @@ compatibility, or workspace identity.
 
 ## Native tab icon boundary
 
-No native tab icon backend is enabled or implied by this model. A future
-`WtNativeProtocolBackend` or `WtXamlDiagnosticsBackend` must implement the
-same capability boundary and remain disabled until it proves exact-tab
-correlation, restoration, upgrade tolerance, and fail-open fallback. Provider
+No native tab icon backend is enabled or implied by this model. Native Windows
+Terminal tab icon is **NO_GO** under the accepted current-host safety evidence:
+stock Windows Terminal has no supported public application-controlled bridge,
+and the remaining process-scoped route could not be safely isolated. Provider
 metadata alone can never select a native icon path.
 
-The current disposition therefore remains title-mark fallback first. Native
-icon failure is decoration-only and cannot block the v0.6.1 release train.
+`TitleMarkBackend` remains the production path. Reconsideration requires a
+separately admitted Goal after a material public-API or safely isolated-target
+change; it is not a postponed production feature.

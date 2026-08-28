@@ -46,6 +46,7 @@ if ($BadEol.Count -gt 0) {
 }
 Write-Host 'EOL_GATE=PASS'
 
+Invoke-Checked 'DOCUMENTATION CONTRACT' { pwsh -NoProfile -File ./scripts/ci/check-docs.ps1 }
 Invoke-Checked 'RUSTC VERSION' { rustc --version }
 Invoke-Checked 'CARGO VERSION' { cargo --version }
 Invoke-Checked 'FORMAT' { cargo fmt --all -- --check }
