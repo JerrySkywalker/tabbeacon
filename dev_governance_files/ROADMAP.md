@@ -31,14 +31,13 @@ TAG=v0.6.1
 
 ## Current production baseline
 
-CURRENT_PUBLIC_RELEASE=v0.7.0
+CURRENT_PUBLIC_RELEASE=v0.7.1
 CURRENT_PUBLIC_TARGET=v0.7.1
 
-The v0.7.0 production line is complete through public `0.7.0` distribution.
-The v0.7.1 maintenance candidate is a closeout-only release and is not public
-until its release transaction completes. Historical production evidence remains
-below; it is retained as the record for each release line and does not
-supersede the current public baseline.
+The v0.7.1 maintenance closeout is publicly distributed. Active feature
+development is paused for the Owner's extended dogfood period. Historical
+production evidence remains below; it is retained as the record for each
+release line and does not supersede the current public baseline.
 
 ## Historical v0.4 production baseline
 

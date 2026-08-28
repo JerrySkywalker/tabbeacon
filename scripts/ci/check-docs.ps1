@@ -203,30 +203,28 @@ foreach ($path in $currentFacingPaths) {
 }
 
 $currentReleaseProofs = @(
-    @{ Path = 'README.md'; Pattern = 'Current public release remains\s+\*\*v0\.7\.0\*\*' },
-    @{ Path = 'README.zh-CN.md'; Pattern = '当前公开版本仍为\s+\*\*v0\.7\.0\*\*' },
-    @{ Path = 'SECURITY.md'; Pattern = 'current published release is \*\*v0\.7\.0\*\*' },
-    @{ Path = 'docs/README.md'; Pattern = 'Current public release remains\s+\*\*v0\.7\.0\*\*' },
-    @{ Path = 'docs/getting-started.md'; Pattern = 'current public release is \*\*v0\.7\.0\*\*' },
-    @{ Path = 'docs/development/release-process.md'; Pattern = 'current public release is \*\*v0\.7\.0\*\*' },
-    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.7\.0' },
-    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.7\.0' }
+    @{ Path = 'README.md'; Pattern = 'Current public release:\s+\*\*v0\.7\.1\*\*' },
+    @{ Path = 'README.zh-CN.md'; Pattern = '当前公开版本：\*\*v0\.7\.1\*\*' },
+    @{ Path = 'SECURITY.md'; Pattern = 'current published release is \*\*v0\.7\.1\*\*' },
+    @{ Path = 'docs/README.md'; Pattern = 'Current public release:\s+\*\*v0\.7\.1\*\*' },
+    @{ Path = 'docs/getting-started.md'; Pattern = 'current public release is \*\*v0\.7\.1\*\*' },
+    @{ Path = 'docs/development/release-process.md'; Pattern = 'current public release is \*\*v0\.7\.1\*\*' },
+    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.7\.1' },
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.7\.1' }
 )
 foreach ($proof in $currentReleaseProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not declare v0.7.0 as the current public release"
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not declare v0.7.1 as the current public release"
 }
 
-$releaseCandidateProofs = @(
-    @{ Path = 'README.md'; Pattern = 'Release candidate target:\s+\*\*v0\.7\.1\*\*' },
-    @{ Path = 'README.zh-CN.md'; Pattern = '发布候选目标：\*\*v0\.7\.1\*\*' },
-    @{ Path = 'docs/README.md'; Pattern = 'Release candidate target:\s+\*\*v0\.7\.1\*\*' },
+$releaseTargetProofs = @(
     @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_TARGET=v0\.7\.1' },
-    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'CURRENT_PUBLIC_TARGET=v0\.7\.1' }
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'CURRENT_PUBLIC_TARGET=v0\.7\.1' },
+    @{ Path = 'docs/v0.7.1-release-notes.md'; Pattern = '# TabBeacon v0\.7\.1' }
 )
-foreach ($proof in $releaseCandidateProofs) {
+foreach ($proof in $releaseTargetProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not identify v0.7.1 as the release candidate target"
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not identify the v0.7.1 release record"
 }
 
 Write-Host 'README_BADGE_COUNT=2'

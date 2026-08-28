@@ -71,8 +71,8 @@ They are not partially supported and are not enabled by this release train.
 
 ## Quick Start
 
-Release candidate target: **v0.7.1**. Current public release remains
-**v0.7.0** until v0.7.1 publication completes.
+Current public release: **v0.7.1**. Active feature development is paused for
+an extended dogfood period after this maintenance closeout.
 
 Install the public CLI, then run the guided setup:
 
