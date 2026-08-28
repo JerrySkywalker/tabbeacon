@@ -4,6 +4,26 @@ All notable changes to TabBeacon will be documented here.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-08-28
+
+### Added
+
+- Added TabBeacon's original SVG identity, English-canonical README, full
+  Simplified Chinese README, privacy-safe real Windows Terminal fixture
+  screenshot, documentation portal, user/design/development guides,
+  CONTRIBUTING v2, and offline documentation CI checks.
+- Added a scalable supported-coding-agent guide: Codex remains
+  capability-based, while Agy remains production-supported only for the exact
+  admitted 1.1.19 profile. Claude Code and OpenCode remain deferred.
+
+### Changed
+
+- Closed Native Windows Terminal Tab Icon feasibility as `NO_GO`: stock
+  Windows Terminal still has no supported public tab-icon bridge, and the
+  documented XAML Diagnostics route could not meet the required isolated-target
+  safety bar. No attachment or mutation was attempted; `TitleMarkBackend`
+  remains the production presentation path.
+
 ## [0.6.1] - 2026-08-27
 
 ### Added
