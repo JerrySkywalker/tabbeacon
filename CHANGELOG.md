@@ -4,6 +4,25 @@ All notable changes to TabBeacon will be documented here.
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-28
+
+### Changed
+
+- Repaired the TabBeacon SVG wordmark with a deterministic bounded glyph grid:
+  cap height and baseline are uniform, glyph cells do not overlap, and the
+  primary mark remains unchanged.
+- Reconciled current-facing Agy and architecture documentation with the
+  admitted Agy 1.1.19 production profile, while preserving historical records.
+- Corrected the current public-release pointer in the governance roadmap.
+- Entered a deliberate post-v0.7.1 dogfood pause. Future feature work requires
+  a new explicit Owner admission; v0.8 options remain non-authoritative.
+
+### Maintained
+
+- No runtime, provider, configuration-ownership, Hook-trust, terminal
+  presentation, or native-tab-icon behavior changed in this maintenance
+  release.
+
 ## [0.7.0] - 2026-08-28
 
 ### Added
