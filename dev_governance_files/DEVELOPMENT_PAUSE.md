@@ -2,15 +2,15 @@
 
 ```text
 CURRENT_PUBLIC_TARGET=v0.7.1
-CURRENT_PUBLIC_RELEASE=v0.7.0
+CURRENT_PUBLIC_RELEASE=v0.7.1
 ACTIVE_FEATURE_DEVELOPMENT=PAUSED
 ```
 
 The Owner has authorized v0.7.1 as a maintenance/closeout release and will use
 the product through an extended dogfood period. Future work is not cancelled,
-but no feature option is currently admitted for implementation. Once v0.7.1 is
-public, this file's current-public-release value is reconciled in a separate
-metadata-only closeout step.
+but no feature option is currently admitted for implementation. v0.7.1 is the
+public maintenance closeout; this file is the completed metadata-only closeout
+record.
 
 ## Deferred, not active
 
