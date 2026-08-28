@@ -35,6 +35,7 @@ If one step fails, record the exact completed boundary and stop for a truthful
 recovery decision rather than silently claiming a release. Do not expose
 credentials or use an unreviewed token path in release evidence.
 
-The current public release is **v0.7.0**. Its package, immutable tag, and
-GitHub Release are public release records; future releases must establish their
-own accepted source and publication evidence.
+The current public release is **v0.7.0**. The v0.7.1 maintenance candidate is
+not public until its package, immutable tag, GitHub Release, and public
+consumers are all verified. Each future release must establish its own accepted
+source and publication evidence.

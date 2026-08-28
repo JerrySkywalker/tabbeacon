@@ -1044,7 +1044,7 @@ dependencies = [
 
 [[package]]
 name = "tabbeacon"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "atomic-write-file",
  "clap",
