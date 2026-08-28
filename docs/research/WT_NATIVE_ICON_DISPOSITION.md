@@ -1,37 +1,63 @@
 # Windows Terminal Native Icon Disposition
 
-## Decision for this goal
+## TB-G86 decision — 2026-08-28
 
 ```text
-WT_INTERNAL_NATIVE_PIPELINE=SOURCE_CONFIRMED
-STOCK_SAFE_NATIVE_ICON_BRIDGE=UNPROVEN
-XAML_DIAGNOSTICS_SPIKE=N/A
-NATIVE_ICON_DISPOSITION=UNPROVEN
+GOAL_ID=TB-V07-24H-NATIVE-ICON-FEASIBILITY-TRAIN-AB-001
+NATIVE_TAB_ICON_DISPOSITION=NO_GO
+PRODUCTION_RUNTIME_NATIVE_ICON=false
+NORMAL_CLI_NATIVE_ICON=false
+PRODUCTION_NATIVE_ICON_INTEGRATION=false
+TITLE_MARK_BACKEND_REMAINS_PRODUCTION=true
 ```
 
-Stock Windows Terminal has a real internal icon pipeline, but its public
-terminal protocols and tab action model do not expose it. Therefore no
-production or experimental TabBeacon native-icon backend is enabled.
-`TitleMarkBackend` remains the complete production fallback.
+This is a successful feasibility conclusion, not a feature failure. TabBeacon
+will continue to use the stable `TitleMarkBackend` for terminal identity and
+state decoration.
 
-## Why no XAML diagnostics spike ran
+## Deciding safety boundary
 
-The only official diagnostics route found requires process instrumentation via
-an injected `IObjectWithSite` implementation. This goal did not yet establish
-an owned C++/WinRT diagnostic-site binary, a safe isolated stock-WT attach
-workflow, exact `TabViewItem` correlation, mutation restoration, or recovery
-after a helper failure. Attaching such a shim to the terminal hosting the goal
-is prohibited. Building one merely to create a partial proof would expand the
-P1 research scope beyond the completed P0/PVI train.
+G83 revalidated that stock Windows Terminal retains an internal icon pipeline
+but has no supported public tab-icon bridge. The only remaining documented
+route is `InitializeXamlDiagnosticsEx`, whose public contract loads an
+`IObjectWithSite` diagnostic component into the *target process*.
 
-`XAML_SPIKE=N/A` is a bounded-budget outcome, not evidence that diagnostics is
-safe or unsafe. A future opt-in-only spike must use an isolated Windows
-Terminal process and stop immediately on wrong-tab mutation or a crash.
+On the available stock Windows Terminal 1.24.11911.0, two Windows Terminal
+processes were already present before G84. A purpose-created, nonce-named
+`wt -w <fresh-name>` observation then produced:
 
-## Release consequence
+```text
+PREEXISTING_WT_PROCESS_COUNT=2
+POST_LAUNCH_NEW_WT_PROCESS_COUNT=0
+TARGET_ADMISSION=REFUSED_NO_UNAMBIGUOUS_NEW_MARKER_WINDOW
+INITIALIZE_XAML_DIAGNOSTICS_EX=NOT_CALLED
+```
 
-Native icon failure does not affect provider identity, runtime state, workspace
-identity, literal `codex`/`agy` launches, Hook behavior, or the v0.6.1 release
-boundary. The next safe research goal is a disposable XAML Diagnostics
-feasibility harness that proves only attach, enumerate, exact-tab correlate,
-restore, and exit cleanup before considering any TabBeacon integration.
+The harness did not infer ownership from the fresh window name, active tab,
+PID image, window order, or a title prefix. Because no newly created Terminal
+process could be proven, an XAML Diagnostics attach would have been
+process-scoped instrumentation of an existing host that might contain the
+active Codex or Owner terminal. That violates the feasibility isolation
+contract, so the harness refused before the diagnostics API call.
+
+## Consequences
+
+- No XAML Diagnostics attachment, visual-tree enumeration, `IconSource`
+  snapshot, icon mutation, icon restore, or native-tab visual change occurred.
+- `WRONG_TAB_MUTATION=0`, `WT_CRASH=0`, and `RESTORE_FAILURE=0` describe the
+  zero-authorized-mutation observation; they are not positive mutation proof.
+- No elevation, Windows Terminal settings/package change, private ABI,
+  signature scanning, memory patching, persistent helper, service, or Owner
+  TabBeacon mutation was used.
+- The temporary helper/source was intentionally not retained in the repository:
+  without a safe target substrate it would be a generic process-instrumentation
+  artifact rather than useful reproducible product research.
+
+## Reconsideration rule
+
+Do not retry this route merely because time remains. Re-open Native Tab Icon
+research only under a new admitted Goal after at least one material condition
+changes: stock Windows Terminal exposes a supported icon API, or an explicit
+Owner-approved isolated Terminal process can be proven without touching an
+active/development/production host. A new G83 source and live-isolation
+revalidation is required before any future attachment.
