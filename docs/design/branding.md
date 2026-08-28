@@ -22,11 +22,27 @@ beacon-point diameter on every side. Use the full-color mark at 24 px or larger;
 use the monochrome mark only when one ink color is required. Do not render the
 horizontal logo below 160 px wide; use the mark instead.
 
-The primary palette is ink `#14213D`, deep tab blue `#20345A`, beacon cyan
-`#39D9F2`, and signal blue `#80C7FF`. The state strip additionally documents
+The primary palette is ink `#14213D`, deep tab blue `#20345A`, balanced logo
+blue `#2A7FA8`, beacon cyan `#39D9F2`, and signal blue `#80C7FF`. The state strip additionally documents
 neutral, working, ready, attention, and question colors. These colors support
 presentation comprehension; they do not grant trust, compatibility, or
 configuration authority.
+
+### Wordmark grid
+
+The horizontal logo keeps the existing mark unchanged and constructs
+`TABBEACON` from seven local vector glyphs. Every glyph is bounded by a 60 × 84
+cell, uses a 12-unit grid, starts on the shared cap line, and ends on the shared
+baseline. Its 76-unit advance leaves a fixed 16-unit gap between cells. The SVG
+records these facts as data attributes and each `<use>` records its closed cell
+interval, so the wordmark has no font runtime or embedded-font dependency.
+
+The rendered proof is
+[`tabbeacon-logo-render-evidence.png`](../assets/brand/tabbeacon-logo-render-evidence.png),
+generated from the adjacent reproducible
+[`HTML render sheet`](../assets/brand/tabbeacon-logo-render-evidence.html).
+It shows 210 px, README hero 420 px, and 840 px renders on light and dark
+backgrounds.
 
 ## Light, dark, and monochrome use
 
@@ -63,6 +79,11 @@ LIGHT_MODE_REVIEW=PASS
 DARK_MODE_REVIEW=PASS
 NO_CLIPPED_GEOMETRY=true
 NO_UNREADABLE_SMALL_TEXT=true
+WORDMARK_CAP_HEIGHT_UNIFORM=true
+WORDMARK_BASELINE_UNIFORM=true
+GLYPH_OVERLAP_COUNT=0
+WORDMARK_SPACING_REVIEW=PASS
+README_HERO_LOGO=PASS
 ```
 
 [`tabbeacon-overview.png`](../assets/screenshots/tabbeacon-overview.png) is a

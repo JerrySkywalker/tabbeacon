@@ -4,7 +4,7 @@
 //! configuration installer, process launcher, or production capability claim.
 //! It accepts disposable callback and Hook samples, drops content-capable fields
 //! at the boundary, and projects only safe observations required to prepare the
-//! later Owner-present `TB-G64` admission spike.
+//! historical Owner-present `TB-G64` admission spike.
 
 use std::{collections::HashSet, fmt};
 
@@ -15,7 +15,7 @@ use serde::{
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
-/// Stable Agy provider identifier reserved for pre-admission diagnostics.
+/// Stable Agy provider identifier shared by qualification and production adapters.
 pub const AGY_PROVIDER_ID: &str = "agy";
 /// Schema version for pre-admission Agy qualification records.
 pub const AGY_PREADMISSION_SCHEMA_VERSION: u32 = 1;
@@ -266,7 +266,7 @@ impl AgyDirectCommandQualification {
     }
 }
 
-/// Whether a future Owner-present qualification has been performed.
+/// Whether the historical Owner-present qualification recorded a result.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgyQualificationStatus {
