@@ -34,9 +34,11 @@ PTY 主机、终端替代品或后台守护进程。
 ? OWH     问题
 ```
 
+![由 TabBeacon 确定性展示夹具驱动的真实 Windows Terminal 渲染效果。](docs/assets/screenshots/tabbeacon-overview.png)
+
 > [!NOTE]
-> 本仓库不会用模拟界面代替产品截图。在此主机上生成隐私安全的真实 Windows
-> Terminal 截图需要 Owner 的视觉捕获会话；请参阅文档中的生产标题和颜色模型。
+> 由 TabBeacon 确定性展示夹具驱动的真实 Windows Terminal 渲染效果；这不是实时
+> Codex 或 Agy 模型对话。
 
 ## 功能
 

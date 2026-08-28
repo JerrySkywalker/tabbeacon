@@ -65,8 +65,9 @@ NO_CLIPPED_GEOMETRY=true
 NO_UNREADABLE_SMALL_TEXT=true
 ```
 
-`docs/assets/screenshots/tabbeacon-overview.png` is intentionally not present.
-The available desktop-capture runtime timed out before a controlled Windows
-Terminal fixture could be inspected. A later Owner visual-capture session must
-produce a privacy-safe real Windows Terminal image rather than substitute a
-mockup or synthetic live-provider claim.
+[`tabbeacon-overview.png`](../assets/screenshots/tabbeacon-overview.png) is a
+privacy-safe capture of a real Windows Terminal window rendered by TabBeacon's
+deterministic presentation fixture. It is intentionally not presented as a
+live Codex or Agy model conversation. The capture contains only the controlled
+fixture identity and terminal chrome; no private prompt, assistant, tool,
+repository, path, token, or authentication content is present.

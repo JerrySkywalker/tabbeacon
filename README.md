@@ -35,11 +35,11 @@ The production visual backend is title-first and intentionally compact:
 ? OWH     question
 ```
 
+![Real Windows Terminal rendering using TabBeacon's deterministic presentation fixture.](docs/assets/screenshots/tabbeacon-overview.png)
+
 > [!NOTE]
-> This repository deliberately does not substitute a mockup for a product
-> screenshot. A privacy-safe capture of a real Windows Terminal fixture requires
-> an Owner visual-capture session on this host; see the documentation for the
-> production title and color model.
+> Real Windows Terminal rendering using TabBeacon's deterministic presentation
+> fixture. It is not a live Codex or Agy model conversation.
 
 ## Features
 
