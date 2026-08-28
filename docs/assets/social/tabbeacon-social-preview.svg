@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">TabBeacon for coding-agent tabs in Windows Terminal</title>
+  <desc id="desc">A TabBeacon-owned social preview with a concise value statement and three synthetic terminal tab states.</desc>
+  <rect width="1280" height="640" fill="#071426"/>
+  <path d="M0 500C230 418 426 587 664 498s330-3 616-76v218H0Z" fill="#0D2745"/>
+  <path d="M0 548c221-92 417 50 651-42s364 1 629-94" fill="none" stroke="#20345A" stroke-width="3" opacity=".9"/>
+  <g transform="translate(100 92) scale(.86)">
+    <path fill="#14213D" d="M40 58c0-11 9-20 20-20h61l17 18h58c11 0 20 9 20 20v105c0 11-9 20-20 20H60c-11 0-20-9-20-20V58Z"/>
+    <path fill="#20345A" d="M40 82h176v24H40z"/>
+    <path fill="#39D9F2" d="M65 108h69v16H65z"/>
+    <path fill="#80C7FF" d="m65 147 27 18-27 18z"/>
+    <circle cx="167" cy="139" r="15" fill="#39D9F2"/>
+    <circle cx="167" cy="139" r="5" fill="#14213D"/>
+    <path fill="none" stroke="#39D9F2" stroke-linecap="round" stroke-width="10" d="M195 111a40 40 0 0 1 0 56"/>
+    <path fill="none" stroke="#80C7FF" stroke-linecap="round" stroke-width="8" d="M211 94a65 65 0 0 1 0 90"/>
+  </g>
+  <text x="332" y="165" fill="#80C7FF" font-family="Segoe UI, Arial, sans-serif" font-size="30" font-weight="700" letter-spacing="7">TABBEACON</text>
+  <text x="100" y="296" fill="#F5FAFF" font-family="Segoe UI, Arial, sans-serif" font-size="58" font-weight="700">Know what your coding-agent tabs</text>
+  <text x="100" y="367" fill="#F5FAFF" font-family="Segoe UI, Arial, sans-serif" font-size="58" font-weight="700">are doing — at a glance.</text>
+  <text x="103" y="421" fill="#A9BED8" font-family="Segoe UI, Arial, sans-serif" font-size="26">Live identity and status in Windows Terminal, without changing how you launch.</text>
+  <g transform="translate(100 475)">
+    <rect width="1032" height="96" rx="18" fill="#102946" stroke="#2A5279" stroke-width="2"/>
+    <rect x="20" y="18" width="300" height="60" rx="12" fill="#173A5C"/>
+    <circle cx="54" cy="48" r="10" fill="#39D9F2"/>
+    <text x="78" y="57" fill="#EAF6FF" font-family="Consolas, monospace" font-size="26" font-weight="700">⠋ API</text>
+    <rect x="366" y="18" width="300" height="60" rx="12" fill="#173A5C"/>
+    <circle cx="400" cy="48" r="10" fill="#69D19B"/>
+    <text x="424" y="57" fill="#EAF6FF" font-family="Consolas, monospace" font-size="26" font-weight="700">✓ WEB</text>
+    <rect x="712" y="18" width="300" height="60" rx="12" fill="#173A5C"/>
+    <circle cx="746" cy="48" r="10" fill="#F2C96D"/>
+    <text x="770" y="57" fill="#EAF6FF" font-family="Consolas, monospace" font-size="26" font-weight="700">? DOCS</text>
+  </g>
+</svg>
