@@ -19,6 +19,10 @@ cargo install tabbeacon --version 0.7.2 --locked
 
 ## Preconditions
 
+This roadmap document does not itself authorize G101 implementation. A fresh
+explicit Owner admission is required before any G101 repository write. A
+separately authorized goal may perform bounded read-only G101 preparation.
+
 G99 and G100 should be accepted or reconciled cleanly onto the current v0.7.2
 candidate. Re-read current Cargo metadata, package include/exclude behavior,
 README English/Chinese parity checks, and crates.io rendering behavior.

@@ -9,6 +9,10 @@ presentation improvements.
 
 ## Preconditions
 
+This roadmap document does not itself authorize G102 implementation. A fresh
+explicit Owner admission is required before any G102 repository write, version
+bump, publication, tag, or release mutation.
+
 Required:
 
 ```text

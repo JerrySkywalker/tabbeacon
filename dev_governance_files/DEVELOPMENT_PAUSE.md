@@ -17,15 +17,19 @@ expansion and does not create a v0.8 roadmap.
 
 ## Active narrow exception
 
-The only active implementation train is:
+The only active implementation scope under the current Owner authorization is:
 
 ```text
 v0.7.2 — Discoverability & Automated Demo
 TB-G99  GitHub Discovery Surface
 TB-G100 Automated Real-WT Promo Demo
-TB-G101 README & crates.io Distribution Polish
-TB-G102 v0.7.2 Hardening & Public Release
 ```
+
+TB-G101 (README & crates.io Distribution Polish) and TB-G102 (v0.7.2
+Hardening & Public Release) remain roadmap/planning-only. Their implementation,
+including any version bump, publication, tag, or release mutation, requires a
+separate explicit Owner admission. A separately authorized goal may perform
+read-only G101 preparation without admitting G101 implementation.
 
 The v0.7.2 train explicitly excludes Windows installers, a TabBeacon Winget or
 Scoop package, PATH mutation, new provider support, production runtime changes,

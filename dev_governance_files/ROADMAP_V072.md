@@ -2,18 +2,23 @@
 
 ## Status
 
-**OWNER-ADMITTED MAINTENANCE TRAIN** from public `v0.7.1` and post-release
-closeout on `main` at
+**OWNER-ADMITTED ROADMAP WITH A NARROW FIRST IMPLEMENTATION SLICE** from public
+`v0.7.1` and post-release closeout on `main` at
 `21181ecd3a3d3dc2f3de57548677d4a667f64be7`.
 
 The Owner's broader feature-development pause remains in force. v0.7.2 is a
-narrow exception for discoverability, deterministic promotional evidence, and
-Rust/crates.io distribution polish. It does **not** admit v0.8 feature work.
+narrow roadmap exception for discoverability, deterministic promotional
+evidence, and Rust/crates.io distribution polish. The active implementation
+scope of this first slice is **TB-G99 and TB-G100 only**. TB-G101 and TB-G102
+remain planning-only until a separate explicit Owner admission. This does
+**not** admit v0.8 feature work.
 
 ```text
 CURRENT_PUBLIC_RELEASE=v0.7.1
 TARGET_PUBLIC_RELEASE=v0.7.2
 ACTIVE_FEATURE_DEVELOPMENT=PAUSED_EXCEPT_V072_MAINTENANCE
+ACTIVE_IMPLEMENTATION_SCOPE=TB-G99_TB-G100_ONLY
+G101_G102_EXECUTION=SEPARATE_OWNER_ADMISSION_REQUIRED
 ROADMAP_V08_CREATED=false
 NEW_PROVIDER_ADDED=false
 RUNTIME_BEHAVIOR_CHANGED=false_expected
