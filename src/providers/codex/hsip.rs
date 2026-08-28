@@ -831,9 +831,11 @@ mod tests {
                 all_samples.extend(samples);
             }
         }
-        let p50_ms = (!all_samples.is_empty())
-            .then(|| percentile_ms(&mut all_samples, 50))
-            .unwrap_or(0.0);
+        let p50_ms = if all_samples.is_empty() {
+            0.0
+        } else {
+            percentile_ms(&mut all_samples, 50)
+        };
         drop(child);
         std::fs::remove_dir_all(&directory).unwrap();
         println!(
