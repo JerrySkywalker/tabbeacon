@@ -149,7 +149,7 @@ $currentFacingPaths = @(
 )
 foreach ($path in $currentFacingPaths) {
     $content = Get-Content -LiteralPath $path -Raw
-    Assert-Docs ($content -notmatch '(?i)(current|latest|supported)\s+(public\s+|published\s+)?release[^\n]{0,80}v?0\.(2|6\.1)') "$path contains a stale current release marker"
+    Assert-Docs ($content -notmatch '(?i)(current|latest|supported)\s+(public\s+|published\s+)?release[^\n]{0,80}v?0\.(2|6\.0|6\.1)') "$path contains a stale current release marker"
     Assert-Docs ($content -notmatch '(?i)TabBeacon\s+0\.6\.0\s+(supports|is|includes)') "$path contains stale v0.6.0 current-product wording"
 }
 
