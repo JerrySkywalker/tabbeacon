@@ -199,7 +199,7 @@ ffmpeg -framerate 10 -i 'frame-%04d.png' -i palette.png `
   -loop 0 -y tabbeacon-demo.gif
 ```
 
-Do not treat the example numeric parameters as immutable if a safer/crocker
+Do not treat the example numeric parameters as immutable if a safer/tighter
 crop or smaller file is proven better.
 
 ## H. Committed outputs
