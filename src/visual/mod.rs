@@ -53,7 +53,8 @@ pub use session::{TerminalTestSession, TerminalTestSessionLauncher};
 pub use title_probe::{emit_title_authority_fixture, run_title_authority_probe};
 #[cfg(windows)]
 pub use uia::{
-    OwnedTabActivation, OwnedTabTitleReader, OwnedWindowTabReader, TargetLocator, WindowsUiaLocator,
+    ExactOwnedWindow, OwnedTabActivation, OwnedTabTitleReader, OwnedWindowTabReader, TargetLocator,
+    WindowsUiaLocator,
 };
 
 #[cfg(not(windows))]

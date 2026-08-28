@@ -22,9 +22,10 @@ use tabbeacon::{
     repo::WorkspaceIdentityResolver,
     settings::PresentationSettings,
     visual::{
-        CaptureBackend, FixtureDriver, LiveVisualRunRequest, OwnedWindowCaptureTarget,
-        PrintWindowCaptureBackend, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME, VisualDisposition,
-        VisualError, VisualResult, WindowsUiaLocator, root_workspace_anchor_fixture_alias,
+        CaptureBackend, ExactOwnedWindow, FixtureDriver, LiveVisualRunRequest,
+        OwnedWindowCaptureTarget, PrintWindowCaptureBackend, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME,
+        VisualDisposition, VisualError, VisualResult, WindowsUiaLocator,
+        root_workspace_anchor_fixture_alias,
         runner::{authorize_live_worker, run_live, run_live_in_worker},
     },
 };
@@ -118,6 +119,40 @@ struct PromoShowcaseReceipt {
     controlled_fixture_only: bool,
 }
 
+/// Retains only the exact UIA window proven by the promo admission. It never
+/// touches a process or a window selected by a broad title/process query.
+struct ControlledPromoWindowGuard {
+    target: Option<ExactOwnedWindow>,
+}
+
+impl ControlledPromoWindowGuard {
+    const fn new(target: ExactOwnedWindow) -> Self {
+        Self {
+            target: Some(target),
+        }
+    }
+
+    fn close(&mut self) -> VisualResult<()> {
+        if let Some(target) = self.target.as_ref() {
+            target.close()?;
+            self.target = None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ControlledPromoWindowGuard {
+    fn drop(&mut self) {
+        if let Some(target) = self.target.as_ref() {
+            // The worker may leave early after a capture or receipt failure.
+            // This is still limited to the one HWND admitted through exact UIA
+            // correlation; a pre-admission failure intentionally has no close
+            // fallback that could touch an Owner window.
+            let _ = target.close();
+        }
+    }
+}
+
 /// Launches one controlled Windows Terminal window, proves a unique initial
 /// fixture target with UIA, and captures only that admitted HWND. This remains
 /// inside the `visual-fixture` feature boundary; normal `TabBeacon` never exposes
@@ -187,7 +222,7 @@ fn run_promo_worker(arguments: &[String]) -> VisualResult<()> {
         &start_path,
         true,
     )?;
-    let (target, target_window_match_count) = locate_unique_owned_target(&run_id, &expected_title)?;
+    let target = locate_unique_owned_target(&run_id, &expected_title)?;
 
     for role in ["web", "docs"] {
         launch_showcase_tab(
@@ -205,14 +240,15 @@ fn run_promo_worker(arguments: &[String]) -> VisualResult<()> {
     let start_unix_ms = unix_millis().saturating_add(1_000);
     write_new_text(&start_path, &start_unix_ms.to_string())?;
 
-    let capture_target = OwnedWindowCaptureTarget::new(
-        target.native_window_id.ok_or_else(|| {
-            VisualError::Platform("owned promo target did not expose a native HWND".to_owned())
-        })?,
-        target.window_bounds.ok_or_else(|| {
-            VisualError::Platform("owned promo target did not expose window bounds".to_owned())
-        })?,
-    )?;
+    let native_window_id = target.dump.native_window_id.ok_or_else(|| {
+        VisualError::Platform("owned promo target did not expose a native HWND".to_owned())
+    })?;
+    let target_window_match_count = target.target_window_match_count;
+    let target_bounds = target.dump.window_bounds.ok_or_else(|| {
+        VisualError::Platform("owned promo target did not expose window bounds".to_owned())
+    })?;
+    let mut controlled_window = ControlledPromoWindowGuard::new(target);
+    let capture_target = OwnedWindowCaptureTarget::new(native_window_id, target_bounds)?;
     wait_until_unix_millis(start_unix_ms);
     let backend = PrintWindowCaptureBackend;
     let frame_interval_ms = 1_000 / u64::from(PROMO_FPS);
@@ -247,6 +283,7 @@ fn run_promo_worker(arguments: &[String]) -> VisualResult<()> {
         controlled_fixture_only: true,
     };
     write_new_json(&receipt_path, &receipt)?;
+    controlled_window.close()?;
     println!(
         "{}",
         serde_json::to_string(&receipt).map_err(VisualError::Json)?
@@ -396,15 +433,16 @@ fn launch_showcase_tab(
 fn locate_unique_owned_target(
     run_id: &str,
     expected_title: &str,
-) -> VisualResult<(tabbeacon::visual::UiaDump, u32)> {
+) -> VisualResult<ExactOwnedWindow> {
     let deadline = Instant::now() + Duration::from_secs(6);
     let mut last_error = None;
     while Instant::now() < deadline {
         match WindowsUiaLocator.locate_and_activate_exactly_one(run_id, expected_title) {
-            Ok((target, target_window_match_count))
-                if target.window_name == expected_title && target.tab_name == expected_title =>
+            Ok(target)
+                if target.dump.window_name == expected_title
+                    && target.dump.tab_name == expected_title =>
             {
-                return Ok((target, target_window_match_count));
+                return Ok(target);
             }
             Ok(_) => {
                 last_error = Some(VisualError::Platform(

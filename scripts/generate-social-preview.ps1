@@ -70,7 +70,7 @@ try {
     if (-not $rendered) { throw "Edge did not create the social-preview PNG within 30 seconds: $temporaryOutput" }
 }
 finally {
-    if ($rendered -and (Test-Path -LiteralPath $profileRoot)) {
+    if (Test-Path -LiteralPath $profileRoot) {
         $profileItem = Get-Item -LiteralPath $profileRoot -Force
         if ($profileItem.LinkType) { throw "Refusing to remove reparse-point Edge profile root: $profileRoot" }
         try {

@@ -8,6 +8,7 @@ use std::{
 
 use uiautomation::{
     UIAutomation, UIElement,
+    actions::Window,
     controls::WindowControl,
     types::{ControlType, Rect},
 };
@@ -33,6 +34,29 @@ pub trait TargetLocator {
 /// The Windows UIA implementation used by G03.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct WindowsUiaLocator;
+
+/// One exact top-level fixture window retained after UIA cardinality admission.
+/// Its only mutation surface is the safe UIA close operation.
+pub struct ExactOwnedWindow {
+    /// Content-minimal UIA evidence for the correlated window and active tab.
+    pub dump: UiaDump,
+    /// Number derived from the exact-title top-level UIA collection.
+    pub target_window_match_count: u32,
+    window: UIElement,
+}
+
+impl ExactOwnedWindow {
+    /// Closes exactly the window captured by UIA admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the safe UIA Window pattern cannot close this one
+    /// exact window. It never selects a process or searches by a broad title.
+    pub fn close(&self) -> VisualResult<()> {
+        let control = WindowControl::try_from(self.window.clone()).map_err(platform_error)?;
+        control.close().map_err(platform_error)
+    }
+}
 
 /// A live UIA tab element that was already correlated to one owned test window.
 pub struct OwnedTabTitleReader {
@@ -272,7 +296,7 @@ impl WindowsUiaLocator {
         &self,
         run_id: &str,
         expected_title: &str,
-    ) -> VisualResult<(UiaDump, u32)> {
+    ) -> VisualResult<ExactOwnedWindow> {
         let (window, tab, target_window_match_count) =
             owned_window_and_tab_exactly_one(run_id, expected_title)?;
         let mut dump = uia_dump(&window, &tab, None)?;
@@ -289,7 +313,11 @@ impl WindowsUiaLocator {
             set_foreground,
             set_focus: true,
         });
-        Ok((dump, target_window_match_count))
+        Ok(ExactOwnedWindow {
+            dump,
+            target_window_match_count,
+            window,
+        })
     }
 
     /// Activates an owned window and retains its exact animated tab for later
