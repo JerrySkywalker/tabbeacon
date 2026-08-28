@@ -23,17 +23,15 @@ the worker emits only the mutable left title slot.
 A provider may have more than one backend.
 
 ```text
-Codex
-  hooks        (production v0.1)
-  app-server   (experimental)
+Codex CLI
+  hooks        (production, capability-based admission)
+  app-server   (deferred)
 
-Claude
-  hooks        (future)
-  richer source(s) only if required
+Claude Code
+  deferred     (no production integration)
 
 OpenCode
-  plugin       (future first backend)
-  SSE          (future enhanced backend)
+  deferred     (no production integration)
 ```
 
 A backend is a source of observations, not the owner of global UI state.

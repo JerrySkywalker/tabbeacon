@@ -1,6 +1,6 @@
 # Agy setup
 
-TabBeacon 0.6.0 supports exactly Agy 1.1.19 on Windows through Agy's
+TabBeacon supports exactly Agy 1.1.19 on Windows through Agy's
 user-global structured title callback. Install the provider integration once:
 
 ```powershell

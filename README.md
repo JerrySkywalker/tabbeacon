@@ -13,7 +13,9 @@
 </p>
 <!-- tabbeacon:hero-badges:end -->
 
-<p align="center"><a href="https://github.com/JerrySkywalker/tabbeacon/releases">Releases</a> · <a href="https://crates.io/crates/tabbeacon">crates.io</a> · <a href="docs/architecture.md">Documentation</a> · <a href="LICENSE">MIT License</a></p>
+<p align="center"><a href="https://github.com/JerrySkywalker/tabbeacon/releases">Releases</a> · <a href="https://crates.io/crates/tabbeacon">crates.io</a> · <a href="docs/README.md">Documentation</a> · <a href="LICENSE">MIT License</a></p>
+
+<!-- tabbeacon:critical-invariants install=cargo-install-tabbeacon-locked setup=tabbeacon-setup codex=codex agy=agy providers=codex-agy claude=deferred opencode=deferred trust=manual fail-open=true privacy=content-minimal -->
 
 ## Why TabBeacon?
 
@@ -153,6 +155,7 @@ runtime/session evidence. See the [Codex Hooks guide](docs/codex-hooks.md) and
 
 ## Documentation
 
+- [Documentation portal](docs/README.md)
 - [Technical overview](docs/architecture.md)
 - [Architecture](docs/architecture.md)
 - [Codex Hooks](docs/codex-hooks.md)
