@@ -32,9 +32,10 @@ ADR 0012 defines the v0.5 Human/i18n boundary, deterministic Adaptive Naming v2,
 
 ADR 0013 defines the v0.5.1/v0.6 boundaries: session-scoped Root Workspace ownership, count-only subagent observability, typed Hook/naming/title explainability, upgrade-safe runtime worker images, provider capability truthfulness, and real-environment-only Agy admission after public v0.5.1.
 
-ADR 0014 constrains pre-admission Agy preparation to disposable,
-content-minimal qualification machinery. Agy remains unavailable to ordinary
-product registration until the later Owner-present G64 admission is accepted.
+ADR 0014 records the pre-admission Agy preparation boundary: disposable,
+content-minimal qualification machinery was kept separate from ordinary product
+registration until the later Owner-present G64 admission was accepted. The
+current Agy 1.1.19 production profile is defined by ADR 0015.
 
 ADR 0015 freezes the real Agy 1.1.19 production profile: user-global structured
 title callback, content-minimal Ready/Working evidence, ownership-safe setup,

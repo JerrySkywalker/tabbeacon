@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TabBeacon logo rendered evidence</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 32px; background: #d8dee9; color: #14213d; font: 600 20px/1.35 system-ui, sans-serif; }
+    h1 { margin: 0 0 8px; font-size: 30px; }
+    p { margin: 0 0 24px; font-weight: 400; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    .panel { min-height: 260px; padding: 28px; overflow: hidden; border-radius: 12px; }
+    .light { background: #ffffff; color: #14213d; }
+    .dark { background: #0d1b2a; color: #e7f0ff; }
+    .label { display: block; margin-bottom: 18px; font-size: 18px; letter-spacing: .04em; text-transform: uppercase; }
+    img { display: block; height: auto; max-width: 100%; }
+    .wide { grid-column: 1 / -1; }
+    .scale-210 { width: 210px; }
+    .scale-420 { width: 420px; }
+    .scale-840 { width: 840px; }
+  </style>
+</head>
+<body>
+  <h1>TabBeacon logo rendered evidence</h1>
+  <p>Browser render of the committed transparent SVG at 210 px, README hero 420 px, and 840 px on light and dark surfaces.</p>
+  <main class="grid">
+    <section class="panel light"><span class="label">210 px · light</span><img class="scale-210" src="tabbeacon-logo.svg" alt="TabBeacon logo at 210 pixels on light"></section>
+    <section class="panel dark"><span class="label">210 px · dark</span><img class="scale-210" src="tabbeacon-logo.svg" alt="TabBeacon logo at 210 pixels on dark"></section>
+    <section class="panel light"><span class="label">420 px · README hero · light</span><img class="scale-420" src="tabbeacon-logo.svg" alt="TabBeacon logo at README hero width on light"></section>
+    <section class="panel dark"><span class="label">420 px · README hero · dark</span><img class="scale-420" src="tabbeacon-logo.svg" alt="TabBeacon logo at README hero width on dark"></section>
+    <section class="panel light wide"><span class="label">840 px · light</span><img class="scale-840" src="tabbeacon-logo.svg" alt="TabBeacon logo at 840 pixels on light"></section>
+    <section class="panel dark wide"><span class="label">840 px · dark</span><img class="scale-840" src="tabbeacon-logo.svg" alt="TabBeacon logo at 840 pixels on dark"></section>
+  </main>
+</body>
+</html>

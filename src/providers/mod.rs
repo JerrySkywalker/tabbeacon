@@ -1,7 +1,8 @@
 //! Agent-provider adapters live below the provider-neutral core contract.
 //!
-//! Codex Hooks are the only production adapter. `agy` contains qualification
-//! primitives only and cannot enable a provider before `TB-G64` admission.
+//! Codex Hooks and the exact admitted Agy 1.1.19 title callback are production
+//! adapters. `agy` also retains historical qualification primitives, which are
+//! isolated from the production setup and runtime paths.
 
 pub mod agy;
 pub mod agy_backend;

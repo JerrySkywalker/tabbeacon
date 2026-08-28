@@ -27,7 +27,7 @@ pub struct Cli {
 /// A named `TabBeacon` operation.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Run inline guided setup, or install the Codex integration directly.
+    /// Run inline guided setup, or install a supported provider integration directly.
     Setup {
         #[command(subcommand)]
         command: Option<SetupCommand>,
@@ -53,7 +53,7 @@ pub enum Command {
     Sessions(OutputArgs),
     /// Inspect the provider-neutral, command-redacted Hook inventory.
     Hooks(OutputArgs),
-    /// Run bounded, no-mutation Agy qualification helpers; this never enables Agy.
+    /// Run bounded legacy Agy qualification helpers; they never alter production setup.
     Agy {
         #[command(subcommand)]
         command: AgyPreadmissionCommand,
@@ -185,7 +185,7 @@ pub enum RepairCommand {
     },
 }
 
-/// Explicitly pre-admission Agy qualification operations.
+/// Historical/disposable Agy qualification operations, separate from production setup.
 #[derive(Debug, Subcommand)]
 pub enum AgyPreadmissionCommand {
     /// Run the cohesive disposable G64 qualification workflow.
@@ -233,7 +233,7 @@ pub enum AgyQualificationCommand {
         #[command(flatten)]
         output: OutputArgs,
     },
-    /// Show the future Owner-present qualification plan without changing state.
+    /// Show the historical Owner-present qualification plan without changing state.
     Plan(OutputArgs),
     /// Initialize a new disposable managed qualification workspace.
     Init {

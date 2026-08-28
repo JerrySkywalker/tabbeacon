@@ -116,6 +116,54 @@ foreach ($asset in $brandAssets) {
     Assert-Docs ($svg -match '(?i)<svg\b[^>]*\bviewBox\s*=') "$asset is missing a viewBox"
 }
 
+$logo = Get-RequiredContent 'docs/assets/brand/tabbeacon-logo.svg'
+$wordmarkMatch = [regex]::Match($logo, '(?s)<g\b(?<attributes>[^>]*)\baria-label="TABBEACON"[^>]*>(?<glyphs>.*?)</g>')
+Assert-Docs $wordmarkMatch.Success 'tabbeacon-logo.svg is missing the deterministic TABBEACON wordmark group'
+foreach ($attribute in @(
+    'data-grid-unit="12"',
+    'data-cap-height="84"',
+    'data-baseline-y="132"',
+    'data-glyph-cell-width="60"',
+    'data-glyph-advance="76"',
+    'data-inter-glyph-gap="16"'
+)) {
+    Assert-Docs ($wordmarkMatch.Value.Contains($attribute)) "tabbeacon-logo.svg wordmark is missing $attribute"
+}
+$expectedGlyphCells = @(
+    @{ Glyph = 'T'; Start = 0; End = 60 },
+    @{ Glyph = 'A'; Start = 76; End = 136 },
+    @{ Glyph = 'B'; Start = 152; End = 212 },
+    @{ Glyph = 'B'; Start = 228; End = 288 },
+    @{ Glyph = 'E'; Start = 304; End = 364 },
+    @{ Glyph = 'A'; Start = 380; End = 440 },
+    @{ Glyph = 'C'; Start = 456; End = 516 },
+    @{ Glyph = 'O'; Start = 532; End = 592 },
+    @{ Glyph = 'N'; Start = 608; End = 668 }
+)
+$expectedGlyphPaths = @{
+    'glyph-t' = 'M0 0h60v12H36v72H24V12H0z'
+    'glyph-a' = 'M12 0h36l12 84H48l-6-24H18l-6 24H0zM30 12 21 48h18z'
+    'glyph-b' = 'M0 0h36l24 12v24L48 42l12 6v24L36 84H0zM12 12v24h24l12-6V18l-12-6zm0 36v24h24l12-6V54l-12-6z'
+    'glyph-e' = 'M0 0h60v12H12v24h42v12H12v24h48v12H0z'
+    'glyph-c' = 'M12 0h48v12H12v60h48v12H12L0 72V12z'
+    'glyph-o' = 'M12 0h36l12 12v60L48 84H12L0 72V12zM12 12v60h36V12z'
+    'glyph-n' = 'M0 84V0h12l36 60V0h12v84H48L12 24v60z'
+}
+foreach ($glyphPath in $expectedGlyphPaths.GetEnumerator()) {
+    $pathPattern = '<path\b[^>]*\bid="' + [regex]::Escape($glyphPath.Key) + '"[^>]*\bd="' + [regex]::Escape($glyphPath.Value) + '"[^>]*/>'
+    Assert-Docs ([regex]::IsMatch($logo, $pathPattern)) "tabbeacon-logo.svg glyph definition $($glyphPath.Key) differs from the bounded grid path"
+}
+$glyphMatches = [regex]::Matches($wordmarkMatch.Groups['glyphs'].Value, '<use\b[^>]*\bx="(?<x>\d+)"[^>]*\bdata-glyph="(?<glyph>[A-Z])"[^>]*\bdata-cell-start="(?<start>\d+)"[^>]*\bdata-cell-end="(?<end>\d+)"[^>]*/>')
+Assert-Docs ($glyphMatches.Count -eq $expectedGlyphCells.Count) 'tabbeacon-logo.svg wordmark must define nine glyph cells'
+for ($index = 0; $index -lt $expectedGlyphCells.Count; $index++) {
+    $actual = $glyphMatches[$index]
+    $expected = $expectedGlyphCells[$index]
+    Assert-Docs ($actual.Groups['glyph'].Value -eq $expected.Glyph) "tabbeacon-logo.svg glyph $index differs from the declared wordmark"
+    Assert-Docs ([int]$actual.Groups['x'].Value -eq $expected.Start) "tabbeacon-logo.svg glyph $index x-position must equal its cell start"
+    Assert-Docs ([int]$actual.Groups['start'].Value -eq $expected.Start) "tabbeacon-logo.svg glyph $index has an unexpected cell start"
+    Assert-Docs ([int]$actual.Groups['end'].Value -eq $expected.End) "tabbeacon-logo.svg glyph $index has an unexpected cell end"
+}
+
 $markdownPaths = @(Get-ChildItem -Path @('README.md', 'README.zh-CN.md', 'CONTRIBUTING.md', 'SECURITY.md', 'docs') -Recurse -File -Filter '*.md' | ForEach-Object { $_.FullName })
 Test-RelativeMarkdownLinks $markdownPaths
 
@@ -174,6 +222,11 @@ Write-Host 'CRITICAL_EN_ZH_INVARIANTS=PASS'
 Write-Host 'REQUIRED_BRAND_ASSETS_EXIST=true'
 Write-Host 'SVG_WELL_FORMED=true'
 Write-Host 'SVG_ACTIVE_CONTENT=false'
+Write-Host 'WORDMARK_CAP_HEIGHT_UNIFORM=true'
+Write-Host 'WORDMARK_BASELINE_UNIFORM=true'
+Write-Host 'GLYPH_OVERLAP_COUNT=0'
+Write-Host 'WORDMARK_SPACING_REVIEW=PASS'
+Write-Host 'README_HERO_LOGO=PASS'
 Write-Host 'INTERNAL_MARKDOWN_LINKS_VALID=true'
 Write-Host 'DOCS_PORTAL_LINKS_VALID=true'
 Write-Host 'STALE_CURRENT_RELEASE_MARKERS=0'

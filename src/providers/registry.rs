@@ -620,7 +620,7 @@ impl ProviderRegistry {
         })
     }
 
-    /// Builds the only v0.5.1 production registration from bounded probe facts.
+    /// Builds the Codex observation plus an initially-unadmitted Agy catalog row.
     ///
     /// The constructor is intentionally useful to offline guided-setup and
     /// focused tests. It has no environment or provider side effects.

@@ -1,8 +1,15 @@
-# Agy pre-admission qualification
+# Agy pre-admission qualification (historical record)
+
+> [!IMPORTANT]
+> This document preserves the pre-G64 qualification boundary as it stood in
+> 2026-08-22. It is not current product status: Agy 1.1.19 is now an admitted
+> production provider. For the live ownership and setup contract, use the
+> [Agy setup guide](agy-setup.md) and
+> [ADR 0015](adr/0015-agy-1-1-19-production-profile.md).
 
 ## Status
 
-This is preparation for `TB-G64`, not Agy provider admission.
+This was preparation for `TB-G64`, not Agy provider admission.
 
 ```text
 AGY_PRODUCTION_ADMISSION=false
@@ -13,10 +20,10 @@ RAW_AGY_CONTENT_PERSISTED=false
 PROJECT_LOCAL_CONFIG=false
 ```
 
-The only production provider remains Codex. The ordinary Integrations catalog
-now shows Agy as `known + unadmitted`, with qualification available and
-production disabled. It is excluded from registered production IDs, runtime
-Sessions, title badges, and guided Setup apply actions.
+At this historical checkpoint, the only production provider was Codex. The
+ordinary Integrations catalog then showed Agy as `known + unadmitted`, with
+qualification available and production disabled. The statements below describe
+that retained pre-admission state only.
 
 ## Read-only audit snapshot (2026-08-22)
 

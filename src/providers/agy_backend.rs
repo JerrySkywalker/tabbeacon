@@ -55,7 +55,7 @@ pub const AGY_PROVIDER: bool = true;
 /// Stable admitted profile family.
 pub const AGY_ADMITTED_PROFILE_FAMILY: &str = "tabbeacon-agy-admitted-profile";
 
-/// Production backend state before real G64 admission.
+/// Backend state used by the historical qualification and admitted production paths.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgyBackendState {
@@ -81,7 +81,7 @@ pub enum AgyCandidatePresence {
     NotObserved,
 }
 
-/// Qualification-safe observation passed toward the future normalizer.
+/// Qualification-safe observation passed to the provider-neutral normalizer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 pub struct AgySafeRawObservation {
     pub lifecycle: AgyCandidatePresence,
@@ -156,7 +156,7 @@ impl AgyAdmittedProfile {
     }
 }
 
-/// Safe rejection from the explicit future admitted-profile boundary.
+/// Safe rejection from the explicit admitted-profile capability boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgyAdmissionGateError {
@@ -187,7 +187,7 @@ impl AgyCapabilityGate {
     ///
     /// # Errors
     ///
-    /// Returns a bounded rejection; no document can enable Agy today.
+    /// Returns a bounded rejection unless the input is the exact G64-frozen profile.
     pub fn admit_profile(bytes: &[u8]) -> Result<AgyAdmittedProfile, AgyAdmissionGateError> {
         if bytes.len() > MAX_AGY_QUALIFICATION_INPUT_BYTES {
             return Err(AgyAdmissionGateError::Oversized);
@@ -795,7 +795,7 @@ pub struct AgyReadinessProjection {
 }
 
 impl AgyReadinessProjection {
-    /// Builds today's unadmitted readiness state.
+    /// Builds an explicit known-unadmitted readiness projection.
     #[must_use]
     pub fn unadmitted(qualification_observations_available: bool) -> Self {
         Self {
@@ -1749,11 +1749,11 @@ impl AgySetupTransaction {
         })
     }
 
-    /// Applies only to the future user-global supported surface.
+    /// Applies only to the admitted user-global supported surface.
     ///
     /// # Errors
     ///
-    /// Refuses workspace-local configuration before an explicit later admission.
+    /// Refuses workspace-local configuration.
     pub fn apply_for_scope(
         scope: AgySetupScope,
         snapshot: &AgyConfigSnapshot,

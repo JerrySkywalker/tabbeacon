@@ -6,7 +6,7 @@ TabBeacon converts heterogeneous coding-agent lifecycle signals into a small, st
 
 The architecture deliberately separates:
 
-1. **provider integrations** — how Codex/Claude/OpenCode expose events;
+1. **provider integrations** — how admitted Codex and Agy backends expose events;
 2. **normalization** — how raw events become provider-neutral evidence;
 3. **reconciliation** — how competing/fresh evidence becomes one session snapshot;
 4. **workspace identity** — how a Git or ordinary directory maps to a stable short key;
@@ -26,6 +26,10 @@ A provider may have more than one backend.
 Codex CLI
   hooks        (production, capability-based admission)
   app-server   (deferred)
+
+Agy CLI
+  structured title callback (production only for exact admitted 1.1.19)
+  historical qualification helpers (not a runtime backend)
 
 Claude Code
   deferred     (no production integration)

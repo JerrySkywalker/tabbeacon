@@ -46,6 +46,7 @@ Current public release: **v0.7.0**.
 
 - [Native icon source truth](research/WT_NATIVE_TAB_ICON_SOURCE_TRUTH_2026-08.md)
 - [Native icon conclusion](research/WT_NATIVE_ICON_DISPOSITION.md)
+- [Post-v0.7 product audit](research/POST_V07_PRODUCT_AUDIT_2026-08.md)
 - [v0.7.0 release notes](v0.7.0-release-notes.md)
 - [v0.7.0 upgrade guide](v0.7.0-upgrade.md)
 - [v0.6.1 release notes](v0.6.1-release-notes.md)

@@ -562,7 +562,7 @@ fn ordinary_runtime_reports_truthful_agy_probe_and_setup_state() {
         .expect("setup help starts");
     assert!(setup_help.status.success());
     let setup_help = String::from_utf8(setup_help.stdout).expect("setup help is UTF-8");
-    assert!(setup_help.contains("Codex integration"));
+    assert!(setup_help.contains("supported provider integration"));
     assert!(setup_help.contains("codex"));
     assert!(setup_help.contains("Agy"));
 
