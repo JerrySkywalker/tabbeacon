@@ -97,7 +97,8 @@ agy
 ```
 
 > [!TIP]
-> `tabbeacon setup --quick` previews the recommended preset. It does not turn
+> `tabbeacon setup --quick` visits only missing, stale, or action-required setup
+> work. Review any proposed change before applying it; it does not turn
 > TabBeacon into a launcher.
 
 ## Compatibility

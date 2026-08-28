@@ -16,6 +16,24 @@ contract is admitted by evidence.
 Deferred does not mean partially supported. It means no production provider is
 enabled or implied.
 
+## Setup paths
+
+Use the owned setup path once, then retain the provider's literal daily command:
+
+```powershell
+# Codex CLI: review Hook trust manually when the provider asks.
+tabbeacon setup codex
+codex
+
+# Agy CLI: only the admitted 1.1.19 title-callback profile.
+tabbeacon setup agy
+agy
+```
+
+`tabbeacon setup` provides the guided combined flow. Setup does not create a
+provider wrapper or grant Hook trust. Read [Codex Hooks](codex-hooks.md) and
+[Agy setup](agy-setup.md) before changing an existing provider configuration.
+
 ## Capability matrix
 
 `Supported` means the admitted provider contract supplies the fact. `Unavailable`

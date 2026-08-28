@@ -34,7 +34,9 @@ function Test-RelativeMarkdownLinks {
     foreach ($path in $MarkdownPaths) {
         $content = Get-Content -LiteralPath $path -Raw
         $directory = Split-Path -Parent $path
-        foreach ($match in [regex]::Matches($content, $linkPattern)) {
+        $htmlLinkPattern = '(?i)<a\b[^>]*\bhref\s*=\s*["''](?<target>[^"'']+)["'']'
+        $linkMatches = @([regex]::Matches($content, $linkPattern)) + @([regex]::Matches($content, $htmlLinkPattern))
+        foreach ($match in $linkMatches) {
             $target = $match.Groups['target'].Value.Trim('<', '>')
             if ($target -match '^(https?:|mailto:|#)') {
                 continue

@@ -92,7 +92,8 @@ agy
 ```
 
 > [!TIP]
-> `tabbeacon setup --quick` 会预览推荐预设；它不会把 TabBeacon 变成启动器。
+> `tabbeacon setup --quick` 只处理缺失、过期或需要操作的设置工作。应用前请审查
+> 所有建议的变更；它不会把 TabBeacon 变成启动器。
 
 ## 兼容性
 

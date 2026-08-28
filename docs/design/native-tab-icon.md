@@ -26,6 +26,21 @@ No XAML Diagnostics attach, visual-tree enumeration, `IconSource` mutation,
 snapshot, restore, memory patching, private ABI use, or settings/package change
 occurred.
 
+## Required boundary for any future admission
+
+This `NO_GO` is not an incomplete production proof. In a separately admitted
+future feasibility route, a mutation would require a content-minimal unique
+title marker and `MATCH_COUNT == 1` before any write. A zero or multiple match
+must fail open with no icon mutation. Before a write, that route would need the
+strongest reversible `IconSource`/state snapshot the public API exposes,
+neighboring-tab evidence for wrong-tab detection, a target-only visual change,
+and successful restore. A single wrong-tab mutation would stop broadening.
+
+None of those correlation, snapshot, mutation, or restore conditions was
+reached or proven here. No experimental helper was retained in the repository:
+without a safely isolated target it would be unsafe general
+process-instrumentation tooling rather than reproducible research.
+
 ## Production behavior
 
 `TitleMarkBackend` remains the production visual backend. It uses the typed
@@ -40,6 +55,10 @@ change: either Windows Terminal documents a supported native-icon bridge, or
 an explicit Owner-approved, demonstrably isolated disposable terminal process
 is available. A new source and isolation admission is required before any
 instrumentation; a fresh window name or newer version number is insufficient.
+
+Even a future `GO_PRODUCTION_CANDIDATE` feasibility result would not authorize
+production native-icon integration in v0.7. Production integration requires a
+separate, explicitly authorized release goal.
 
 See the [research disposition](../research/WT_NATIVE_ICON_DISPOSITION.md) and
 [ADR 0018](../adr/0018-native-tab-icon-feasibility-no-go.md) for exact evidence.
