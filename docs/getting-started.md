@@ -7,8 +7,7 @@ the coding-agent command.
 ## Before you start
 
 Use Windows with Windows Terminal and a Rust toolchain capable of installing the
-current package. The current public release is **v0.6.1**; v0.7 documentation
-is development work and is not a published release.
+current package. The current public release is **v0.7.0**.
 
 ## Install
 

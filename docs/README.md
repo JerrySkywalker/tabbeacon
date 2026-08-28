@@ -2,7 +2,9 @@
 
 This is the English-canonical documentation for TabBeacon. The project landing
 pages are available in [English](../README.md) and [Simplified Chinese](../README.zh-CN.md);
-technical guides remain English-canonical for v0.7 development.
+technical guides remain English-canonical.
+
+Current public release: **v0.7.0**.
 
 ## Start here
 
@@ -44,6 +46,8 @@ technical guides remain English-canonical for v0.7 development.
 
 - [Native icon source truth](research/WT_NATIVE_TAB_ICON_SOURCE_TRUTH_2026-08.md)
 - [Native icon conclusion](research/WT_NATIVE_ICON_DISPOSITION.md)
+- [v0.7.0 release notes](v0.7.0-release-notes.md)
+- [v0.7.0 upgrade guide](v0.7.0-upgrade.md)
 - [v0.6.1 release notes](v0.6.1-release-notes.md)
 - [v0.6.1 upgrade guide](v0.6.1-upgrade.md)
 

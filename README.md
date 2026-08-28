@@ -71,8 +71,7 @@ They are not partially supported and are not enabled by this release train.
 
 ## Quick Start
 
-Current public release: **v0.6.1**. v0.7 documentation is in development and
-is not a published release.
+Current public release: **v0.7.0**.
 
 Install the public CLI, then run the guided setup:
 
