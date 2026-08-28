@@ -115,6 +115,7 @@ struct PromoShowcaseReceipt {
     real_tabbeacon_renderer: bool,
     real_model_session: bool,
     desktop_capture: bool,
+    controlled_fixture_only: bool,
 }
 
 /// Launches one controlled Windows Terminal window, proves a unique initial
@@ -169,16 +170,7 @@ fn run_promo_worker(arguments: &[String]) -> VisualResult<()> {
             "promo output paths must be fresh exact-owned evidence paths".to_owned(),
         ));
     }
-    let Some(evidence_root) = frames_directory.parent() else {
-        return Err(VisualError::Platform(
-            "promo frames directory must have an owned evidence parent".to_owned(),
-        ));
-    };
-    if !evidence_root.is_dir() {
-        return Err(VisualError::Platform(
-            "promo evidence parent must exist before capture".to_owned(),
-        ));
-    }
+    let evidence_root = validate_promo_evidence_paths(&run_id, &frames_directory, &receipt_path)?;
     fs::create_dir(&frames_directory)?;
 
     let fixture_executable = env::current_exe().map_err(VisualError::Io)?;
@@ -195,7 +187,7 @@ fn run_promo_worker(arguments: &[String]) -> VisualResult<()> {
         &start_path,
         true,
     )?;
-    let target = locate_unique_owned_target(&run_id, &expected_title)?;
+    let (target, target_window_match_count) = locate_unique_owned_target(&run_id, &expected_title)?;
 
     for role in ["web", "docs"] {
         launch_showcase_tab(
@@ -247,11 +239,12 @@ fn run_promo_worker(arguments: &[String]) -> VisualResult<()> {
         duration_ms: PROMO_DURATION_MS,
         frame_width,
         frame_height,
-        target_window_match_count: 1,
+        target_window_match_count,
         real_windows_terminal: true,
         real_tabbeacon_renderer: true,
         real_model_session: false,
         desktop_capture: false,
+        controlled_fixture_only: true,
     };
     write_new_json(&receipt_path, &receipt)?;
     println!(
@@ -376,7 +369,7 @@ fn launch_showcase_tab(
     let escaped_executable = executable.display().to_string().replace('\'', "''");
     let escaped_start_path = start_path.display().to_string().replace('\'', "''");
     let command = format!(
-        "& '{escaped_executable}' showcase --role {role} --run-id '{run_id}' --start-file '{escaped_start_path}'"
+        "& '{escaped_executable}' showcase --role {role} --run-id '{run_id}' --start-file '{escaped_start_path}'; exit $LASTEXITCODE"
     );
     let mut launch = Command::new("wt.exe");
     launch.args(["-w", window_name]);
@@ -403,19 +396,15 @@ fn launch_showcase_tab(
 fn locate_unique_owned_target(
     run_id: &str,
     expected_title: &str,
-) -> VisualResult<tabbeacon::visual::UiaDump> {
+) -> VisualResult<(tabbeacon::visual::UiaDump, u32)> {
     let deadline = Instant::now() + Duration::from_secs(6);
     let mut last_error = None;
     while Instant::now() < deadline {
-        match WindowsUiaLocator.locate_and_activate_any(run_id, &[expected_title.to_owned()]) {
-            Ok(target)
+        match WindowsUiaLocator.locate_and_activate_exactly_one(run_id, expected_title) {
+            Ok((target, target_window_match_count))
                 if target.window_name == expected_title && target.tab_name == expected_title =>
             {
-                // The run ID is fresh, embedded in the exact title at both UIA
-                // levels, and this launcher creates only one anchor window for
-                // it. The existing locator intentionally returns one target;
-                // the prior `find_all` collection call is unsafe on this host.
-                return Ok(target);
+                return Ok((target, target_window_match_count));
             }
             Ok(_) => {
                 last_error = Some(VisualError::Platform(
@@ -432,6 +421,40 @@ fn locate_unique_owned_target(
             "owned promo target did not appear before the bounded deadline".to_owned(),
         )
     }))
+}
+
+fn validate_promo_evidence_paths(
+    run_id: &str,
+    frames_directory: &Path,
+    receipt_path: &Path,
+) -> VisualResult<PathBuf> {
+    let expected_evidence_root = PathBuf::from(r"V:\build\tabbeacon").join(run_id);
+    let evidence_root = frames_directory.parent().ok_or_else(|| {
+        VisualError::Platform(
+            "promo frames directory must have an owned evidence parent".to_owned(),
+        )
+    })?;
+    if !evidence_root.is_dir() {
+        return Err(VisualError::Platform(
+            "promo evidence parent must exist before capture".to_owned(),
+        ));
+    }
+    let canonical_evidence_root = fs::canonicalize(evidence_root)?;
+    let canonical_expected_root = fs::canonicalize(&expected_evidence_root).map_err(|_| {
+        VisualError::Platform(
+            "promo evidence root must be the exact owned V:\\build\\tabbeacon run directory"
+                .to_owned(),
+        )
+    })?;
+    if canonical_evidence_root != canonical_expected_root
+        || frames_directory != evidence_root.join("frames")
+        || receipt_path != evidence_root.join("promo-fixture-receipt.json")
+    {
+        return Err(VisualError::Platform(
+            "promo paths must stay inside the exact owned evidence root".to_owned(),
+        ));
+    }
+    Ok(canonical_evidence_root)
 }
 
 fn wait_for_showcase_start(path: &Path) -> VisualResult<u64> {

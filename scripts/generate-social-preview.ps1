@@ -34,9 +34,10 @@ function Get-PngDimensions([string]$Path) {
 
 $source = (Resolve-Path -LiteralPath $SourcePath).Path
 $output = [System.IO.Path]::GetFullPath($OutputPath)
+$temporaryOutput = "$output.$PID.render.png"
 $svg = Get-Content -LiteralPath $source -Raw
 
-if ($svg -match '(?is)<script|<foreignObject|\son[a-z]+\s*=|@font-face|url\(\s*["'']?https?://|\bxlink:href\s*=|\bhref\s*=') {
+if ($svg -match '(?is)<script|<foreignObject|<text\b|\son[a-z]+\s*=|@font-face|font-family|url\(|\b(?:xlink:)?href\s*=\s*["''](?!#)') {
     throw 'Social preview SVG contains active content, remote content, or a font dependency.'
 }
 
@@ -49,7 +50,7 @@ if ($document.DocumentElement.LocalName -ne 'svg' -or $document.DocumentElement.
 
 $outputDirectory = Split-Path -Parent $output
 [System.IO.Directory]::CreateDirectory($outputDirectory) | Out-Null
-if (Test-Path -LiteralPath $output) { Remove-Item -LiteralPath $output -Force }
+if (Test-Path -LiteralPath $temporaryOutput) { throw "Refusing to reuse temporary social-preview output: $temporaryOutput" }
 
 $edge = Resolve-EdgeExecutable
 $uri = [System.Uri]::new($source).AbsoluteUri
@@ -59,14 +60,14 @@ if (Test-Path -LiteralPath $profileRoot) { throw "Refusing to reuse Edge profile
 $rendered = $false
 try {
     $global:LASTEXITCODE = 0
-    & $edge --headless=new --disable-gpu --hide-scrollbars --no-first-run --no-default-browser-check "--user-data-dir=$profileRoot" "--window-size=1280,640" "--screenshot=$output" $uri
+    & $edge --headless=new --disable-gpu --hide-scrollbars --no-first-run --no-default-browser-check "--user-data-dir=$profileRoot" "--window-size=1280,640" "--screenshot=$temporaryOutput" $uri
     if ($LASTEXITCODE -ne 0) { throw "Edge render failed with exit code $LASTEXITCODE." }
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
-    while (-not (Test-Path -LiteralPath $output -PathType Leaf) -and [DateTime]::UtcNow -lt $deadline) {
+    while (-not (Test-Path -LiteralPath $temporaryOutput -PathType Leaf) -and [DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 250
     }
-    $rendered = Test-Path -LiteralPath $output -PathType Leaf
-    if (-not $rendered) { throw "Edge did not create the social-preview PNG within 30 seconds: $output" }
+    $rendered = Test-Path -LiteralPath $temporaryOutput -PathType Leaf
+    if (-not $rendered) { throw "Edge did not create the social-preview PNG within 30 seconds: $temporaryOutput" }
 }
 finally {
     if ($rendered -and (Test-Path -LiteralPath $profileRoot)) {
@@ -81,10 +82,11 @@ finally {
     }
 }
 
-$dimensions = Get-PngDimensions $output
+$dimensions = Get-PngDimensions $temporaryOutput
 if ($dimensions[0] -ne 1280 -or $dimensions[1] -ne 640) {
     throw "Rendered social preview dimensions are $($dimensions[0])x$($dimensions[1]), expected 1280x640."
 }
+Move-Item -LiteralPath $temporaryOutput -Destination $output -Force
 
 Write-Output "SOCIAL_PREVIEW_SVG=PASS"
 Write-Output "SOCIAL_PREVIEW_PNG=PASS"

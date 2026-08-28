@@ -255,6 +255,43 @@ impl WindowsUiaLocator {
         }
     }
 
+    /// Locates and activates exactly one run-correlated window and tab.
+    ///
+    /// This is intentionally stricter than the animated-fixture helper: a
+    /// caller that will capture pixels must reject a duplicate/stale target
+    /// rather than letting first-match UIA selection choose one implicitly.
+    /// The returned count is derived from the UIA collection and is therefore
+    /// suitable for a content-minimal capture receipt.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualError::Platform`] when UIA cannot enumerate exactly one
+    /// matching top-level window, when its matching tab is absent, or when
+    /// Windows rejects foreground/focus activation.
+    pub fn locate_and_activate_exactly_one(
+        &self,
+        run_id: &str,
+        expected_title: &str,
+    ) -> VisualResult<(UiaDump, u32)> {
+        let (window, tab, target_window_match_count) =
+            owned_window_and_tab_exactly_one(run_id, expected_title)?;
+        let mut dump = uia_dump(&window, &tab, None)?;
+        let control = WindowControl::try_from(window.clone()).map_err(platform_error)?;
+        let set_foreground = control.set_foregrand().map_err(platform_error)?;
+        window.set_focus().map_err(platform_error)?;
+        if !set_foreground {
+            return Err(VisualError::Platform(
+                "Windows did not accept foreground activation for the exact owned fixture window"
+                    .to_owned(),
+            ));
+        }
+        dump.activation = Some(WindowActivation {
+            set_foreground,
+            set_focus: true,
+        });
+        Ok((dump, target_window_match_count))
+    }
+
     /// Activates an owned window and retains its exact animated tab for later
     /// title sampling without a second dynamic-title lookup.
     ///
@@ -377,6 +414,48 @@ fn owned_window_and_tab(
         .find_first()
         .map_err(platform_error)?;
     Ok((window, tab))
+}
+
+fn owned_window_and_tab_exactly_one(
+    run_id: &str,
+    expected_title: &str,
+) -> VisualResult<(UIElement, UIElement, u32)> {
+    let automation = UIAutomation::new().map_err(platform_error)?;
+    if !title_is_run_correlated(run_id, expected_title) {
+        return Err(VisualError::Platform(
+            "fixture title is not correlated to the requested visual run".to_owned(),
+        ));
+    }
+    // Pixel capture needs a cardinality proof. `find_first` is deliberately
+    // not used here because it would hide a stale or duplicate owned title.
+    let windows = automation
+        .create_matcher()
+        .name(expected_title)
+        .control_type(ControlType::Window)
+        .timeout(0)
+        .find_all()
+        .map_err(platform_error)?;
+    let target_window_match_count = u32::try_from(windows.len()).map_err(|_| {
+        VisualError::Platform("UIA target count does not fit the receipt contract".to_owned())
+    })?;
+    if target_window_match_count != 1 {
+        return Err(VisualError::Platform(format!(
+            "TARGET_WINDOW_MATCH_COUNT={target_window_match_count}, expected exactly 1"
+        )));
+    }
+    let window = windows.into_iter().next().ok_or_else(|| {
+        VisualError::Platform("UIA exact target collection was unexpectedly empty".to_owned())
+    })?;
+    let tab = automation
+        .create_matcher()
+        .from_ref(&window)
+        .depth(12)
+        .name(expected_title)
+        .control_type(ControlType::TabItem)
+        .timeout(0)
+        .find_first()
+        .map_err(platform_error)?;
+    Ok((window, tab, target_window_match_count))
 }
 
 fn owned_window_and_tab_any(
