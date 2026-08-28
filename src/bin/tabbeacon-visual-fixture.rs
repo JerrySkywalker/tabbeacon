@@ -139,6 +139,24 @@ impl ControlledPromoWindowGuard {
         }
         Ok(())
     }
+
+    fn native_window_id(&self) -> Option<isize> {
+        self.target
+            .as_ref()
+            .and_then(ExactOwnedWindow::native_window_id)
+    }
+
+    fn window_bounds(&self) -> Option<tabbeacon::visual::ScreenRect> {
+        self.target
+            .as_ref()
+            .and_then(ExactOwnedWindow::window_bounds)
+    }
+
+    fn target_window_match_count(&self) -> Option<u32> {
+        self.target
+            .as_ref()
+            .map(|target| target.target_window_match_count)
+    }
 }
 
 impl Drop for ControlledPromoWindowGuard {
@@ -222,7 +240,8 @@ fn run_promo_worker(arguments: &[String]) -> VisualResult<()> {
         &start_path,
         true,
     )?;
-    let target = locate_unique_owned_target(&run_id, &expected_title)?;
+    let mut controlled_window =
+        ControlledPromoWindowGuard::new(locate_unique_owned_target(&run_id, &expected_title)?);
 
     for role in ["web", "docs"] {
         launch_showcase_tab(
@@ -240,14 +259,18 @@ fn run_promo_worker(arguments: &[String]) -> VisualResult<()> {
     let start_unix_ms = unix_millis().saturating_add(1_000);
     write_new_text(&start_path, &start_unix_ms.to_string())?;
 
-    let native_window_id = target.dump.native_window_id.ok_or_else(|| {
+    let native_window_id = controlled_window.native_window_id().ok_or_else(|| {
         VisualError::Platform("owned promo target did not expose a native HWND".to_owned())
     })?;
-    let target_window_match_count = target.target_window_match_count;
-    let target_bounds = target.dump.window_bounds.ok_or_else(|| {
+    let target_window_match_count =
+        controlled_window
+            .target_window_match_count()
+            .ok_or_else(|| {
+                VisualError::Platform("owned promo target was unexpectedly absent".to_owned())
+            })?;
+    let target_bounds = controlled_window.window_bounds().ok_or_else(|| {
         VisualError::Platform("owned promo target did not expose window bounds".to_owned())
     })?;
-    let mut controlled_window = ControlledPromoWindowGuard::new(target);
     let capture_target = OwnedWindowCaptureTarget::new(native_window_id, target_bounds)?;
     wait_until_unix_millis(start_unix_ms);
     let backend = PrintWindowCaptureBackend;

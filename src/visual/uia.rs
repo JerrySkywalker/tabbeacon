@@ -46,6 +46,18 @@ pub struct ExactOwnedWindow {
 }
 
 impl ExactOwnedWindow {
+    /// Returns the HWND extracted from the already-admitted exact window.
+    #[must_use]
+    pub const fn native_window_id(&self) -> Option<isize> {
+        self.dump.native_window_id
+    }
+
+    /// Returns the bounds extracted from the already-admitted exact window.
+    #[must_use]
+    pub const fn window_bounds(&self) -> Option<ScreenRect> {
+        self.dump.window_bounds
+    }
+
     /// Closes exactly the window captured by UIA admission.
     ///
     /// # Errors
