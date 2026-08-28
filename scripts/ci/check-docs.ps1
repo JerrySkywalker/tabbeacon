@@ -149,9 +149,21 @@ $currentFacingPaths = @(
 )
 foreach ($path in $currentFacingPaths) {
     $content = Get-Content -LiteralPath $path -Raw
-    Assert-Docs ($content -notmatch '(?i)(current|latest|supported)\s+(public\s+)?release[^\n]{0,80}v?0\.2\.') "$path contains a stale current release marker"
+    Assert-Docs ($content -notmatch '(?i)(current|latest|supported)\s+(public\s+|published\s+)?release[^\n]{0,80}v?0\.(2|6\.0|6\.1)') "$path contains a stale current release marker"
     Assert-Docs ($content -notmatch '(?i)TabBeacon\s+0\.6\.0\s+(supports|is|includes)') "$path contains stale v0.6.0 current-product wording"
-    Assert-Docs ($content -notmatch '(?i)current public release[^\n]{0,80}v?0\.7\.0') "$path incorrectly presents v0.7.0 as public"
+}
+
+$currentReleaseProofs = @(
+    @{ Path = 'README.md'; Pattern = 'Current public release:\s+\*\*v0\.7\.0\*\*' },
+    @{ Path = 'README.zh-CN.md'; Pattern = '当前公开版本：\*\*v0\.7\.0\*\*' },
+    @{ Path = 'SECURITY.md'; Pattern = 'current published release is \*\*v0\.7\.0\*\*' },
+    @{ Path = 'docs/README.md'; Pattern = 'Current public release:\s+\*\*v0\.7\.0\*\*' },
+    @{ Path = 'docs/getting-started.md'; Pattern = 'current public release is \*\*v0\.7\.0\*\*' },
+    @{ Path = 'docs/development/release-process.md'; Pattern = 'current public release is \*\*v0\.7\.0\*\*' }
+)
+foreach ($proof in $currentReleaseProofs) {
+    $content = Get-Content -LiteralPath $proof.Path -Raw
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not declare v0.7.0 as the current public release"
 }
 
 Write-Host 'README_BADGE_COUNT=2'
