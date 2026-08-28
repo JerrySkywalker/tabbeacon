@@ -747,8 +747,12 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    #[ignore = "explicit release-mode TabBeacon HSIP producer latency qualification"]
-    fn actual_hsip_producer_meets_the_v031_latency_budget() {
+    #[ignore = "explicit release-mode HSIP producer transport latency qualification"]
+    fn hsip_producer_transport_meets_the_v031_latency_budget() {
+        // This deliberately isolates the bounded local producer exchange. The
+        // end-to-end Codex/MCP path is covered separately by
+        // `system_hook_reducer_reaches_an_admitted_external_broker`; do not
+        // represent this transport-only timing as whole-Hook latency.
         const RUNS: usize = 5;
         const SAMPLES_PER_RUN: usize = 100;
 
@@ -839,12 +843,12 @@ mod tests {
         drop(child);
         std::fs::remove_dir_all(&directory).unwrap();
         println!(
-            "TABBEACON_HSIP_PRODUCER_P50_MS={p50_ms:.4} P95_MS={worst_p95_ms:.4} P99_MS={worst_p99_ms:.4} ACCEPTED_FRAMES={} OBSERVATION_GAPS={observation_gaps}",
+            "TABBEACON_HSIP_PRODUCER_TRANSPORT_P50_MS={p50_ms:.4} P95_MS={worst_p95_ms:.4} P99_MS={worst_p99_ms:.4} ACCEPTED_FRAMES={} OBSERVATION_GAPS={observation_gaps}",
             all_samples.len()
         );
         assert!(
             worst_p95_ms <= 1.0 && worst_p99_ms <= 2.0 && observation_gaps == 0,
-            "actual TabBeacon HSIP producer did not satisfy the frozen budget"
+            "TabBeacon HSIP producer transport did not satisfy the frozen budget"
         );
     }
 }

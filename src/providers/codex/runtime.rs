@@ -73,6 +73,11 @@ pub struct CodexHookRuntime {
     root_workspace_anchors: RootWorkspaceAnchorStore,
     renderer: TitleMarkBackend,
     activity: ActivityCoordinator,
+    // The injected runtime constructors are test/fixture seams.  They must
+    // never discover or write to a separately configured production HookStat
+    // root merely because an observer happens to be live on the developer
+    // machine.  Only the system-owned Codex transports enable cooperation.
+    cooperative_observation: bool,
 }
 
 impl CodexHookRuntime {
@@ -110,6 +115,7 @@ impl CodexHookRuntime {
                 settings,
             ),
             activity: ActivityCoordinator::disabled(&state_root),
+            cooperative_observation: false,
         }
     }
 
@@ -135,6 +141,7 @@ impl CodexHookRuntime {
         let mut runtime = Self::with_settings(&state_root, frame_color_supported, settings);
         runtime.activity = ActivityCoordinator::system(&state_root)
             .unwrap_or_else(|_| ActivityCoordinator::disabled(&state_root));
+        runtime.cooperative_observation = true;
         Ok(runtime)
     }
 
@@ -178,6 +185,7 @@ impl CodexHookRuntime {
         let mut runtime = Self::with_settings(&state_root, frame_color_supported, settings);
         runtime.activity = ActivityCoordinator::system(&state_root)
             .unwrap_or_else(|_| ActivityCoordinator::disabled(&state_root));
+        runtime.cooperative_observation = true;
         timing.record("runtime_initialization", started);
 
         let started = Instant::now();
@@ -262,7 +270,7 @@ impl CodexHookRuntime {
         };
         timing.record("normalization", started);
         let started = Instant::now();
-        let observation = if observe_hsip {
+        let observation = if observe_hsip && self.cooperative_observation {
             match &normalized {
                 CodexNormalization::Evidence(value) => {
                     CooperativeInvocation::start(value.context())
@@ -749,6 +757,14 @@ mod tests {
     use crate::repo::WorkspaceIdentityResolver;
 
     use super::{CodexHookRuntime, HookDispatchOutcome, write_timing_line_once};
+
+    #[test]
+    fn injected_runtime_never_enables_cooperative_observation() {
+        let state = test_root("runtime-no-hsip-observation");
+        let runtime = CodexHookRuntime::new(&state, true);
+        assert!(!runtime.cooperative_observation);
+        fs::remove_dir_all(state).expect("owned test root cleans up");
+    }
 
     fn test_root(label: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
