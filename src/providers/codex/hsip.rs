@@ -744,4 +744,105 @@ mod tests {
             }
         }
     }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "explicit release-mode TabBeacon HSIP producer latency qualification"]
+    fn actual_hsip_producer_meets_the_v031_latency_budget() {
+        const RUNS: usize = 5;
+        const SAMPLES_PER_RUN: usize = 100;
+
+        struct ExternalBroker(std::process::Child);
+        impl Drop for ExternalBroker {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        fn percentile_ms(samples: &mut [f64], percentile: usize) -> f64 {
+            samples.sort_by(f64::total_cmp);
+            samples[samples
+                .len()
+                .saturating_mul(percentile)
+                .div_ceil(100)
+                .saturating_sub(1)]
+        }
+
+        let broker = std::env::var_os("TABBEACON_HSIP_TEST_BROKER")
+            .expect("test requires TABBEACON_HSIP_TEST_BROKER");
+        let directory = std::env::temp_dir().join(format!(
+            "tabbeacon-hsip-performance-{}-{}",
+            std::process::id(),
+            INVOCATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let hookstat_root = directory.join("HookStat");
+        std::fs::create_dir_all(&directory).unwrap();
+        let child = ExternalBroker(
+            std::process::Command::new(broker)
+                .args(["--state-root", hookstat_root.to_str().unwrap()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !hookstat_root.join("ipc").is_dir() {
+            assert!(Instant::now() < deadline, "broker did not create IPC state");
+            thread::sleep(Duration::from_millis(1));
+        }
+        thread::sleep(Duration::from_millis(50));
+
+        let producer = Producer {
+            endpoint: Endpoint::from_state_root(&hookstat_root).unwrap(),
+            connection: Arc::new(Mutex::new(None)),
+        };
+        let warmup = Lifecycle {
+            runtime_instance: "tabbeacon-hsip-performance-runtime".into(),
+            invocation: "tabbeacon-hsip-performance-warmup".into(),
+            event: "UserPromptSubmit".into(),
+            observed_at: 1,
+        };
+        assert_eq!(producer.emit(&encode_start(&warmup)), Disposition::Accepted);
+
+        let mut all_samples = Vec::with_capacity(RUNS * SAMPLES_PER_RUN);
+        let mut worst_p95_ms = 0.0_f64;
+        let mut worst_p99_ms = 0.0_f64;
+        let mut observation_gaps = 0_usize;
+        for run in 1..=RUNS {
+            let mut samples = Vec::with_capacity(SAMPLES_PER_RUN);
+            for sample in 1..=SAMPLES_PER_RUN {
+                let lifecycle = Lifecycle {
+                    runtime_instance: "tabbeacon-hsip-performance-runtime".into(),
+                    invocation: format!("tabbeacon-hsip-performance-{run}-{sample}"),
+                    event: "UserPromptSubmit".into(),
+                    observed_at: i64::try_from(sample).unwrap(),
+                };
+                let started = Instant::now();
+                if producer.emit(&encode_start(&lifecycle)) == Disposition::Accepted {
+                    samples.push(started.elapsed().as_secs_f64() * 1_000.0);
+                } else {
+                    observation_gaps += 1;
+                }
+            }
+            if !samples.is_empty() {
+                worst_p95_ms = worst_p95_ms.max(percentile_ms(&mut samples.clone(), 95));
+                worst_p99_ms = worst_p99_ms.max(percentile_ms(&mut samples.clone(), 99));
+                all_samples.extend(samples);
+            }
+        }
+        let p50_ms = (!all_samples.is_empty())
+            .then(|| percentile_ms(&mut all_samples, 50))
+            .unwrap_or(0.0);
+        drop(child);
+        std::fs::remove_dir_all(&directory).unwrap();
+        println!(
+            "TABBEACON_HSIP_PRODUCER_P50_MS={p50_ms:.4} P95_MS={worst_p95_ms:.4} P99_MS={worst_p99_ms:.4} ACCEPTED_FRAMES={} OBSERVATION_GAPS={observation_gaps}",
+            all_samples.len()
+        );
+        assert!(
+            worst_p95_ms <= 1.0 && worst_p99_ms <= 2.0 && observation_gaps == 0,
+            "actual TabBeacon HSIP producer did not satisfy the frozen budget"
+        );
+    }
 }
