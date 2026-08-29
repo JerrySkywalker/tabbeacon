@@ -154,16 +154,22 @@ The migration may touch `hooks.json`, `config.toml` when title ownership changes
 and the ownership manifest. Per-file atomic writes alone are not a transaction
 across those files. Before the first write, persist an exact-owned, durable
 migration journal recording only source/target digests, the approved target
-digest, the ordered member files, and a phase marker; use the existing exact
-backups rather than persisting unrelated configuration content in a new receipt.
+digest, the ordered member files, and a phase marker. In addition, take a
+private migration-time snapshot of the exact current bytes (or absence marker)
+for every member file before mutation. Store those snapshots only under the
+owned integration recovery root with their digest metadata; they are recovery
+material, never an evidence receipt, and therefore must not be emitted or
+uploaded. An installation-time backup cannot substitute for this snapshot
+because later third-party Hook or MCP additions must survive recovery.
 
 On setup/repair startup, detect an incomplete journal before normal reconciliation.
-Recover only when every recorded current file matches an admitted pre- or
-post-write digest and the target is still exact-owned. Deterministically restore
-the exact pre-migration state or complete the exact approved target, then verify
-all member-file digests and remove the journal. Any missing, altered, ambiguous,
-or third-party-drifted member file is a hard stop that preserves state and the
-journal for inspection. Recovery must never rewrite unrelated Hooks, MCP servers,
+Recover only when every recorded current file and private snapshot matches an
+admitted digest and the target is still exact-owned. Deterministically restore
+the exact migration-time pre-state from the snapshots or complete the exact
+approved target, then verify all member-file digests and remove the journal and
+snapshots. Any missing, altered, ambiguous, or third-party-drifted member file
+or snapshot is a hard stop that preserves state and recovery material for
+inspection. Recovery must never rewrite unrelated Hooks, MCP servers,
 configuration, or trust.
 
 ## G. Required tests
@@ -185,8 +191,9 @@ At minimum cover:
     declarations while preserving third-party Hooks, MCP servers, and unrelated
     Codex configuration.
 13. fault injection after every migration persistence step recovers to exactly
-    one admitted pre- or post-migration state without third-party loss;
-    altered/missing journal members block recovery.
+    one admitted migration-time pre- or post-migration state without third-party
+    loss, including third-party Hook/MCP additions made after initial install;
+    altered/missing journal members or snapshots block recovery.
 14. a disposable active exact-owned legacy MCP child is reported by the existing
     ownership-qualified upgrade preflight, then only the exact child is safely
     drained or allowed to exit naturally before package replacement; Codex,
