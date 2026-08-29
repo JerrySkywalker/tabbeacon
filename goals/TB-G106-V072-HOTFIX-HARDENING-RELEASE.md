@@ -5,6 +5,25 @@
 Release the Codex subagent Hook stability hotfix as public `v0.7.2` after the
 legacy transport migration and real subagent qualification are accepted.
 
+## Changed-risk vector and required gates
+
+```text
+CODE_CHANGED=false_expected
+PRESENTATION_CHANGED=false
+PROVIDER_CHANGED=false_release_metadata_only
+USER_PERSISTENT_CONFIG_CHANGED=true_disposable_consumer_only
+SECURITY_OR_PRIVACY_CHANGED=true_package_artifact_and_public_boundary
+RELEASE_BOUNDARY=true
+```
+
+G106 requires fresh package/release/consumer evidence, artifact audit, release
+security/ownership review, and exact-head hosted CI. The G105 real-provider,
+Visual, trust, and migration evidence may be reused only when the release
+candidate changes no Hook/profile/runtime/normalizer/config-ownership source and
+the receipt records an empty bounded relevant-risk diff. Any such source change
+requires fresh applicable G105 evidence. No Owner production mutation is in the
+G106 source or consumer scope.
+
 ## Preconditions
 
 Required:
@@ -294,15 +313,17 @@ explicit qualification step under G105/G106 required a narrowly authorized
 Owner-present operation.
 
 `RELEASE_CRITERIA.md` separately requires Owner official-channel convergence
-after every public release. This Goal explicitly excludes that Owner production
-mutation and supplies no Owner-adoption authorization. Therefore complete the
-public release and its disposable consumers when their gates pass, but do not
-claim Owner-convergence closeout: record
-`OWNER_OFFICIAL_CHANNEL_CUTOVER=BLOCKED` with reason
-`NOT_AUTHORIZED`, preserve the Owner
-configuration and trust, and leave only that separate adoption action blocked
-for explicit Owner direction. Public release evidence must not be relabelled as
-Owner installation or Hook-runtime proof.
+after every public release. Use this Goal's production-non-adoption exception
+only when Section G has recorded
+`OWNER_PRODUCTION_NON_ADOPTION_AUTHORIZATION=EXPLICIT` from the same external
+Owner authority that authorizes publication. If that field is absent, the default
+official-channel convergence rule remains applicable and public closeout stops.
+When the field is present, complete the public release and disposable consumers
+but do not claim Owner-convergence closeout: record
+`OWNER_OFFICIAL_CHANNEL_CUTOVER=BLOCKED` with reason `NOT_AUTHORIZED`, preserve
+the Owner configuration and trust, and leave only that separate adoption action
+blocked for explicit Owner direction. Public release evidence must not be
+relabeled as Owner installation or Hook-runtime proof.
 
 ```text
 OWNER_OFFICIAL_CHANNEL_CUTOVER=BLOCKED
@@ -310,6 +331,7 @@ OWNER_OFFICIAL_CHANNEL_CUTOVER_REASON=NOT_AUTHORIZED
 OWNER_INSTALL_SOURCE=UNPROVEN_NOT_INSPECTED
 OWNER_INSTALL_SOURCE_PROVEN=false
 OWNER_GIT_REV_INSTALL=UNPROVEN
+OWNER_PRODUCTION_NON_ADOPTION_AUTHORIZATION=EXPLICIT
 PRODUCTION_HOOK_TRUST_MUTATED=false_expected
 PRODUCTION_AGY_CONFIGURATION_MUTATED=false
 ```

@@ -8,6 +8,24 @@ mutate the parent/root TabBeacon presentation.
 
 Unit tests are necessary but insufficient for this Goal.
 
+## Changed-risk vector and required gates
+
+```text
+CODE_CHANGED=false_expected
+PRESENTATION_CHANGED=true_qualification_proof
+PROVIDER_CHANGED=true_command_hook_transport_qualification
+USER_PERSISTENT_CONFIG_CHANGED=true_disposable_only
+SECURITY_OR_PRIVACY_CHANGED=true_manual_trust_boundary
+RELEASE_BOUNDARY=false
+```
+
+G105 requires the real-provider L4-style qualification, final owned parent
+UIA/Visual proof, focused disposable ownership/configuration safety evidence,
+and manual disposable trust review. A failed qualification may authorize only a
+narrow G104 transport correction; that correction changes `CODE_CHANGED` to
+true, requires a fresh G104/G105 risk admission, and invalidates affected
+evidence. No Owner production configuration/trust mutation is admitted.
+
 ## Preconditions
 
 Required:
@@ -183,6 +201,7 @@ path.
 ```text
 REAL_CODEX_SUBAGENT_QUALIFICATION=PASS
 REAL_MIGRATED_LEGACY_SUBAGENT_QUALIFICATION=PASS
+G105=COMPLETE
 DISPOSABLE_COMMAND_HOOK_TRUST_REVIEW=PASS
 TABBEACON_COMMAND_HOOK_DELIVERY_OBSERVED=true
 CHILD_PRETOOLUSE_COMMAND_DELIVERY_COUNT>=1
