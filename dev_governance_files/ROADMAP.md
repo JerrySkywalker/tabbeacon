@@ -33,11 +33,15 @@ TAG=v0.6.1
 
 CURRENT_PUBLIC_RELEASE=v0.7.1
 CURRENT_PUBLIC_TARGET=v0.7.1
+ACTIVE_FEATURE_DEVELOPMENT=PAUSED_EXCEPT_TB_V072_HOTFIX
 
 The v0.7.1 maintenance closeout is publicly distributed. Active feature
-development is paused for the Owner's extended dogfood period. Historical
-production evidence remains below; it is retained as the record for each
-release line and does not supersede the current public baseline.
+development remains paused for the Owner's extended dogfood period except the
+explicitly admitted `TB-V072-FULL-SUBAGENT-HOOK-HOTFIX-TO-PUBLIC-RELEASE-001`
+sequence (G103-G106). `ROADMAP_V072.md` and `DEVELOPMENT_PAUSE.md` are the
+authoritative current-scope documents for that narrow exception. Historical
+production evidence remains below; it is retained as the record for each release
+line and does not supersede the current public baseline.
 
 ## Historical v0.4 production baseline
 

@@ -86,10 +86,13 @@ OWNER_OFFICIAL_CHANNEL=crates.io
 
 ### TB-V072 explicit production-non-adoption exception
 
-The default convergence requirement remains mandatory except for
-`TB-V072-FULL-SUBAGENT-HOOK-HOTFIX-TO-PUBLIC-RELEASE-001`. That Goal explicitly
-authorizes the public v0.7.2 transaction while prohibiting any Owner production
-Codex/configuration/trust mutation. For that exact Goal only, public release and
+The default convergence requirement remains mandatory except for an externally
+Owner-authorized execution of
+`TB-V072-FULL-SUBAGENT-HOOK-HOTFIX-TO-PUBLIC-RELEASE-001`. The Goal ID alone
+never supplies that authorization: the executor must verify current external
+Owner authority for the exact public transaction under the Goal's release
+admission before this exception applies. When that authority also prohibits any
+Owner production Codex/configuration/trust mutation, public release and
 current-truth closeout may proceed after all applicable public gates pass, while
 the Owner-convergence portion is truthfully recorded as:
 
