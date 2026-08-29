@@ -78,8 +78,9 @@ Every public-release closeout receipt reports:
 ```text
 OWNER_INSTALL_SOURCE=<content-minimal-cargo-source-proof>
 OWNER_INSTALL_SOURCE_PROVEN=<true|false>
-OWNER_GIT_REV_INSTALL=false
+OWNER_GIT_REV_INSTALL=<true|false|UNPROVEN>
 OWNER_OFFICIAL_CHANNEL_CUTOVER=<PASS|FAIL|BLOCKED|UNPROVEN>
+OWNER_OFFICIAL_CHANNEL_CUTOVER_REASON=<none-or-bounded-reason>
 OWNER_OFFICIAL_CHANNEL=crates.io
 ```
 
@@ -93,7 +94,8 @@ current-truth closeout may proceed after all applicable public gates pass, while
 the Owner-convergence portion is truthfully recorded as:
 
 ```text
-OWNER_OFFICIAL_CHANNEL_CUTOVER=BLOCKED_NOT_AUTHORIZED
+OWNER_OFFICIAL_CHANNEL_CUTOVER=BLOCKED
+OWNER_OFFICIAL_CHANNEL_CUTOVER_REASON=NOT_AUTHORIZED
 OWNER_INSTALL_SOURCE_PROVEN=false
 OWNER_GIT_REV_INSTALL=UNPROVEN
 ```

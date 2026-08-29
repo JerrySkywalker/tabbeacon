@@ -1,5 +1,9 @@
 # TabBeacon v0.7.2 — Codex Subagent Hook Stability Hotfix
 
+```text
+GOAL_ID=TB-V072-FULL-SUBAGENT-HOOK-HOTFIX-TO-PUBLIC-RELEASE-001
+```
+
 ## Purpose
 
 Ship a narrow production hotfix for legacy upgraded Codex installations that
@@ -99,9 +103,9 @@ Agy behavior is outside the hotfix scope and must remain unchanged.
 This Goal records, but does not create, Owner authorization for public `v0.7.2`
 publication after all G103-G106 acceptance gates pass. Before the public
 transaction, the executor must verify that the admitted execution Goal carries
-explicit Owner authorization for crates.io, immutable tag, GitHub Release,
-Windows x64 ZIP/SHA-256 assets, public consumer verification, and a focused
-post-release truth closeout if repository convention requires it.
+this `GOAL_ID` and explicit Owner authorization for crates.io, immutable tag,
+GitHub Release, Windows x64 ZIP/SHA-256 assets, public consumer verification,
+and a focused post-release truth closeout if repository convention requires it.
 
 If that explicit authorization is absent, stale, or does not cover the proposed
 public mutation, stop with `OWNER_RELEASE_AUTHORIZATION=UNPROVEN`. When it is

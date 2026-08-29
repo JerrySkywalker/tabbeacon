@@ -25,8 +25,7 @@ merge or rebase promotional PR #100 into this release candidate.
 
 ## Fresh phase admission
 
-Before creating the release branch and again immediately before each public
-mutation, record the fresh post-implementation state:
+Before creating the release branch, record the fresh post-implementation state:
 
 ```text
 REPOSITORY=JerrySkywalker/tabbeacon
@@ -174,9 +173,10 @@ RELEASE_SHA=<exact admitted release source>
 
 This planning document does not itself authorize a public mutation. Before the
 public transaction, verify that the admitted execution Goal carries explicit,
-current Owner authorization for the exact v0.7.2 crates.io publication,
-immutable tag, GitHub Release, Windows assets, and public-consumer proofs.
-Record `PUBLIC_RELEASE_AUTHORIZATION=EXPLICIT` with that admission. If the
+current Owner authorization for `GOAL_ID=TB-V072-FULL-SUBAGENT-HOOK-HOTFIX-TO-PUBLIC-RELEASE-001`
+and the exact v0.7.2 crates.io publication, immutable tag, GitHub Release,
+Windows assets, and public-consumer proofs. Record
+`PUBLIC_RELEASE_AUTHORIZATION=EXPLICIT` with that admission. If the
 authorization is absent, stale, or narrower than the proposed transaction,
 hard-stop with `OWNER_RELEASE_AUTHORIZATION=UNPROVEN`.
 
@@ -187,7 +187,22 @@ This does not authorize bypassing a failed gate.
 
 ## H. Public release transaction
 
-After post-merge exact-main verification:
+After the release PR merge, re-fetch and bind every public mutation to the
+actual release source, not the earlier post-implementation predecessor:
+
+```text
+GOAL_ID=TB-V072-FULL-SUBAGENT-HOOK-HOTFIX-TO-PUBLIC-RELEASE-001
+RELEASE_SHA=<exact merged release source>
+EXPECTED_REMOTE_MAIN=RELEASE_SHA
+CHECKED_OUT_HEAD=RELEASE_SHA
+PUBLIC_RELEASE_AUTHORIZATION=EXPLICIT
+```
+
+If `origin/main` differs, hard-stop the public transaction and reconcile before
+any irreversible action. The package, tag, GitHub Release, assets, and consumer
+proofs must all bind to `RELEASE_SHA`.
+
+Then:
 
 1. publish crates.io `tabbeacon 0.7.2`;
 2. create/push immutable `v0.7.2` tag at `RELEASE_SHA`;
@@ -267,13 +282,15 @@ after every public release. This Goal explicitly excludes that Owner production
 mutation and supplies no Owner-adoption authorization. Therefore complete the
 public release and its disposable consumers when their gates pass, but do not
 claim Owner-convergence closeout: record
-`OWNER_OFFICIAL_CHANNEL_CUTOVER=BLOCKED_NOT_AUTHORIZED`, preserve the Owner
+`OWNER_OFFICIAL_CHANNEL_CUTOVER=BLOCKED` with reason
+`NOT_AUTHORIZED`, preserve the Owner
 configuration and trust, and leave only that separate adoption action blocked
 for explicit Owner direction. Public release evidence must not be relabelled as
 Owner installation or Hook-runtime proof.
 
 ```text
-OWNER_OFFICIAL_CHANNEL_CUTOVER=BLOCKED_NOT_AUTHORIZED
+OWNER_OFFICIAL_CHANNEL_CUTOVER=BLOCKED
+OWNER_OFFICIAL_CHANNEL_CUTOVER_REASON=NOT_AUTHORIZED
 OWNER_INSTALL_SOURCE_PROVEN=false
 OWNER_GIT_REV_INSTALL=UNPROVEN
 PRODUCTION_HOOK_TRUST_MUTATED=false_expected
