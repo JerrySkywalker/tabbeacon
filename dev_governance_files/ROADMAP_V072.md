@@ -2,316 +2,244 @@
 
 ## Status
 
-**OWNER-ADMITTED ROADMAP WITH A NARROW FIRST IMPLEMENTATION SLICE** from public
-`v0.7.1` and post-release closeout on `main` at
-`21181ecd3a3d3dc2f3de57548677d4a667f64be7`.
+**OWNER-ADMITTED HOTFIX ROADMAP** from the public `v0.7.1` dogfood baseline.
+The current repository baseline before this planning transaction is
+`ef47127a1fb957db515aac818f4577e1d34a5b83`.
 
-The Owner's broader feature-development pause remains in force. v0.7.2 is a
-narrow roadmap exception for discoverability, deterministic promotional
-evidence, and Rust/crates.io distribution polish. The active implementation
-scope of this first slice is **TB-G99 and TB-G100 only**. TB-G101 and TB-G102
-remain planning-only until a separate explicit Owner admission. This does
-**not** admit v0.8 feature work.
+A real dogfood defect now takes priority over the previously admitted
+Discoverability & Automated Demo maintenance train. The former v0.7.2
+promotion scope is retargeted to **v0.7.3** and frozen while this hotfix is
+implemented and released.
 
 ```text
 CURRENT_PUBLIC_RELEASE=v0.7.1
 TARGET_PUBLIC_RELEASE=v0.7.2
-ACTIVE_FEATURE_DEVELOPMENT=PAUSED_EXCEPT_V072_MAINTENANCE
-ACTIVE_IMPLEMENTATION_SCOPE=TB-G99_TB-G100_ONLY
-G101_G102_EXECUTION=SEPARATE_OWNER_ADMISSION_REQUIRED
+V072_THEME=CODEX_SUBAGENT_HOOK_STABILITY_HOTFIX
+PROMOTION_TARGET_RELEASE=v0.7.3
+PROMO_PR=100
+PROMO_PR_STATE=FROZEN_DRAFT
 ROADMAP_V08_CREATED=false
-NEW_PROVIDER_ADDED=false
-RUNTIME_BEHAVIOR_CHANGED=false_expected
-PROVIDER_BEHAVIOR_CHANGED=false_expected
 ```
 
 ## Product theme
 
-**v0.7.2 — Discoverability & Automated Demo**
+**v0.7.2 — Codex Subagent Hook Stability Hotfix**
 
-The release addresses three product-distribution gaps only:
-
-1. make the repository easier to discover and understand through GitHub-native
-   metadata and a coherent social-preview asset;
-2. generate a short, privacy-safe, deterministic animated demo using a real
-   Windows Terminal and TabBeacon's real presentation renderer; and
-3. make the public Rust installation contract unambiguous and prove both the
-   normal latest-version install and the exact release consumer.
-
-The user-facing primary install command is permanently simple:
-
-```powershell
-cargo install tabbeacon
-```
-
-The exact release-engineering verification command for this train is separate:
-
-```powershell
-cargo install tabbeacon --version 0.7.2 --locked
-```
-
-`--version` and `--locked` are release/reproducibility controls, not requirements
-for the README's primary user path.
-
-## Explicit non-goals
-
-v0.7.2 does not add or admit:
-
-- a Windows installer or installation PowerShell script;
-- a Winget or Scoop package for TabBeacon;
-- PATH mutation, auto-update, or system-wide installation behavior;
-- a new coding-agent provider;
-- Operational Reliability v2 or Provider Platform v2;
-- new production terminal/runtime semantics;
-- Native Tab Icon implementation or XAML Diagnostics;
-- Codex App Server;
-- Claude Code or OpenCode production support;
-- real-model traffic for promotional evidence.
-
-Existing GitHub Windows ZIP release artifacts may continue under the established
-release process, but v0.7.2 does not build a new installation system around
-them.
-
-## External promotional tooling
-
-Only one new external promotional tool is admitted:
+The release fixes a production dogfood regression in upgraded installations
+that still carry the legacy `codex-hooks-mcp-hybrid-v1` transport. When Codex
+subagents execute tools, Hook delivery can fail before TabBeacon receives the
+payload, producing visible errors such as:
 
 ```text
-TOOL=FFmpeg
-INSTALL_SOURCE=Microsoft Winget
-PACKAGE_ID=Gyan.FFmpeg
-PURPOSE=encode exact-owned PNG frame sequences into optimized GIF assets
+PreToolUse hook (failed)
+error: tool call failed for `tabbeacon-hook/tabbeacon_hook_event`
 ```
 
-The generator must reuse a working `ffmpeg` already on `PATH`. If unavailable,
-the admitted Windows development flow may install `Gyan.FFmpeg` through Winget
-with package/source agreements accepted non-interactively. No FFmpeg binary is
-vendored, linked, or redistributed by TabBeacon.
+The hotfix does not add a new Hook design. It converges exact-owned legacy MCP
+Hybrid installations onto the conservative `codex-hooks-command-v1` transport
+already used for new compatible installations since v0.6.1.
 
-The GIF pipeline must be:
+## Source-truth basis
+
+Current product/source truth establishes:
+
+1. `CodexHookNormalizer` already classifies any event carrying `agent_id` or
+   `agent_type`, and explicit `SubagentStart`/`SubagentStop`, as
+   `IgnoreSubagent`; subagents must not mutate root-session presentation.
+2. `codex-hooks-command-v1` is the conservative current profile for newly
+   discovered compatible Codex installations.
+3. `profile_for_manifest()` currently selects `mcp_hybrid_v1()` whenever an
+   existing ownership manifest contains a TabBeacon MCP server, keeping old
+   upgraded installations on the legacy transport indefinitely.
+4. The legacy MCP input template does not preserve subagent identity on generic
+   `PreToolUse`/`PostToolUse` events, and subagent-side MCP availability is an
+   external Codex runtime prerequisite that TabBeacon cannot safely guarantee.
+
+The defect is therefore treated as a **legacy transport convergence problem**,
+not as a reason to broaden the MCP transport.
+
+## Hotfix strategy
+
+The desired current state is:
 
 ```text
-controlled typed showcase fixture
-  -> real exact-owned Windows Terminal window
-  -> UIA/exact-window correlation
-  -> TabBeacon-owned Windows window capture to PNG sequence
-  -> crop/scale
-  -> FFmpeg palettegen
-  -> FFmpeg paletteuse
-  -> looping GIF
+compatible Codex
+  -> codex-hooks-command-v1
+  -> one-shot fail-open command Hooks
+  -> existing normalizer
+  -> root event: normal presentation
+  -> subagent event: IgnoreSubagent
 ```
 
-Desktop-wide `gdigrab` or equivalent capture is not admitted. FFmpeg is an
-encoder, not the authority for which window is captured.
-
-## Demo truth boundary
-
-The promotional demo is not a fake live Codex session. It is deterministic
-product evidence using the real renderer and a controlled fixture.
+Legacy exact-owned state is migration input only:
 
 ```text
-PROMO_REAL_WINDOWS_TERMINAL=true
-PROMO_REAL_TABBEACON_RENDERER=true
-PROMO_REAL_MODEL_SESSION=false
-PROMO_REAL_CODEX_PROCESS=false
-PROMO_CONTROLLED_FIXTURE_ONLY=true
-PROMO_SEMANTICS_SUBSET_OF_PRODUCTION=true
+10 TabBeacon mcp_tool Hooks
++ TabBeacon MCP server
++ SessionEnd command Hook
+        |
+        v
+exact ownership/admission proof
+        |
+        v
+command_v1 Hook declarations
++ no new TabBeacon MCP server declaration
++ unrelated Hooks/MCP/config preserved
++ manual Hook trust review required
 ```
 
-The primary demo should use only Codex-compatible presentation semantics unless
-an independently proven reason requires another admitted provider. It must not
-invent Agy or deferred-provider states for visual effect.
-
-Recommended deterministic aliases are synthetic values such as `API`, `WEB`,
-and `DOCS`; no private repository path or Owner content belongs in the demo.
+The legacy MCP runtime code may remain temporarily for already-running sessions
+and historical/upgrade recognition. v0.7.2 must not newly admit or recreate an
+MCP Hybrid installation after successful migration.
 
 ## Dependency sequence
 
 ```text
-PUBLIC v0.7.1 + DOGFOOD PAUSE
+PUBLIC v0.7.1
         |
         v
-TB-G99  GitHub Discovery Surface
+TB-G103  Hotfix Admission & Exact Reproduction
         |
         v
-TB-G100 Automated Real-WT Promo Demo
+TB-G104  Legacy MCP Hybrid -> Command v1 Migration
         |
         v
-TB-G101 README & crates.io Distribution Polish
+TB-G105  Real Codex Subagent Qualification
         |
         v
-TB-G102 v0.7.2 Hardening & Release
+TB-G106  v0.7.2 Hardening & Public Release
         |
         v
 PUBLIC v0.7.2
         |
         v
-DOGFOOD PAUSE RESUMES
+DOGFOOD PAUSE
+
+FROZEN IN PARALLEL:
+TB-G99..TB-G102 / PR #100 -> retargeted to v0.7.3
 ```
 
 ## Goal index
 
 | Goal | Scope | Estimated effective effort |
 | --- | --- | ---: |
-| G99 | repository description/topics audit and mutation; deterministic 1280x640 social-preview source/render | 2–4 h |
-| G100 | typed showcase fixture; exact-owned real WT orchestration/capture; FFmpeg GIF; poster; privacy/visual evidence | 6–10 h |
-| G101 | README English/Chinese demo placement; simple Cargo install contract; crates.io package surface audit and marketing-asset separation | 3–5 h |
-| G102 | full maintenance gates; public `0.7.2`; default and exact crates.io consumers; post-release truth; resume dogfood pause | 3–5 h |
-| **Total** | **v0.7.2** | **14–24 h** |
+| G103 | reproduce/classify the real subagent Hook failure; freeze transport truth and migration safety boundary | 1–2 h |
+| G104 | separate existing-vs-desired transport; migrate only exact-owned TabBeacon MCP declarations to command v1; preserve third-party state | 2–4 h |
+| G105 | unit/migration/real Codex subagent regression proving zero Hook failures and no root-state mutation from child events | 2–4 h |
+| G106 | full release gates, v0.7.2 publication, fresh consumers, post-release truth, resume dogfood pause | 2–4 h |
+| **Total** | **v0.7.2 hotfix** | **7–14 h** |
 
-## G99 acceptance summary
+## Migration invariants
 
-Required outcomes:
-
-```text
-GITHUB_DESCRIPTION=PASS
-GITHUB_TOPICS_COUNT=6..10
-GITHUB_TOPICS_RELEVANT=true
-SOCIAL_PREVIEW_SVG=PASS
-SOCIAL_PREVIEW_PNG=PASS
-SOCIAL_PREVIEW_DIMENSIONS=1280x640
-```
-
-Topic selection must be based on current GitHub usage and semantic accuracy,
-not keyword stuffing. Candidate families may include coding agents, Codex CLI,
-Windows Terminal, terminal/developer tools, Rust, and Windows, but the exact set
-is an implementation-time evidence decision.
-
-The social-preview source must use only TabBeacon-owned visual identity, fixed
-text/state examples, and no provider trademark imitation or external fonts.
-Use the existing local Edge/headless rendering approach when practical.
-
-If GitHub still provides no supported API for social-preview upload, generation
-of the final asset is sufficient for G99 code acceptance. The repository UI
-upload is an optional Owner action and must not be automated through browser
-session/cookie hacks.
-
-## G100 acceptance summary
-
-The demo generator must create at least:
+Required:
 
 ```text
-docs/assets/demo/tabbeacon-demo.gif
-docs/assets/demo/tabbeacon-demo-poster.png
-```
+DESIRED_CODEX_TRANSPORT=command_v1
+LEGACY_MCP_HYBRID_NEW_ADMISSION=false
+LEGACY_MCP_RUNTIME_COMPATIBILITY=retained_if_needed
 
-Recommended media target:
+THIRD_PARTY_HOOKS_PRESERVED=true
+THIRD_PARTY_MCP_SERVERS_PRESERVED=true
+UNRELATED_CODEX_CONFIG_PRESERVED=true
+HOOK_TRUST_BYPASS=false
+TRUST_REVIEW_REQUIRED_AFTER_MIGRATION=true
 
-```text
-DURATION=8..12 seconds
-FPS=10
-LOOP=infinite
-WIDTH=960..1100 px
-GIF_TARGET_SIZE<=4 MiB
-GIF_HARD_LIMIT<=6 MiB
-```
-
-Temporary PNG frames and FFmpeg palette intermediates remain build evidence and
-must not be committed.
-
-Required safety/truth gates:
-
-```text
-NO_DESKTOP_CAPTURE=true
-TARGET_WINDOW_MATCH_COUNT=1
-PROMO_PRIVACY_REVIEW=PASS
-PRIVATE_CONTENT_VISIBLE=false
-REAL_MODEL_REQUEST=false
-PRODUCTION_CONFIG_MUTATION=false
-HOOK_TRUST_MUTATION=false
-NATIVE_ICON_RESEARCH=false
-```
-
-Normal CI validates the committed assets and feature-gated promo code; it does
-not regenerate the real-WT GIF on every PR. Regeneration is an interactive
-visual-evidence operation when promo tooling/timeline/presentation materially
-changes or during an explicit release refresh.
-
-## G101 acceptance summary
-
-README English and Chinese primary Quick Start must lead with:
-
-```powershell
-cargo install tabbeacon
-tabbeacon setup
-```
-
-No primary-install version pin or `--locked` flag.
-
-The release engineering path separately proves:
-
-```powershell
-cargo install tabbeacon --version 0.7.2 --locked
-```
-
-Marketing media should remain GitHub-hosted presentation assets rather than
-inflating the crates.io runtime package.
-
-Required package policy:
-
-```text
-PROMO_GIF_IN_CRATE=false
-SOCIAL_PREVIEW_IN_CRATE=false
-PROMO_BUILD_EVIDENCE_IN_CRATE=false
-CARGO_PACKAGE=PASS
-```
-
-The README may use an appropriate stable GitHub-hosted absolute asset reference
-so both GitHub and crates.io render the demo without embedding the GIF in the
-crate archive.
-
-## G102 acceptance summary
-
-Normal release discipline remains mandatory:
-
-```text
-TESTS=PASS
-CLIPPY=PASS
-CARGO_PACKAGE=PASS
-DOCS_CI=PASS
-HOSTED_EXACT_HEAD_CI=PASS
-RELEASE_REVIEW_FINDINGS=0
-HIGH_RISK_FINDINGS=0
-```
-
-After publication, prove two separate clean public consumers:
-
-```text
-DEFAULT_CRATES_IO_INSTALL=PASS
-  command: cargo install tabbeacon
-
-EXACT_CRATES_IO_INSTALL=PASS
-  command: cargo install tabbeacon --version 0.7.2 --locked
-  installed version: 0.7.2
-```
-
-Public release surfaces remain the established TabBeacon set: crates.io,
-immutable `v0.7.2` tag, GitHub Release, Windows x64 ZIP, and SHA-256 sidecar.
-
-## Product invariants
-
-Throughout the train:
-
-```text
 DAILY_COMMAND_CODEX=codex
-DAILY_COMMAND_AGY=agy
 FAIL_OPEN=true
 NO_WRAPPER=true
 NO_PATH_SHADOW=true
 NO_PTY_HOST=true
 GLOBAL_DAEMON_ADDED=false
-NEW_PROVIDER_ADDED=false
-RUNTIME_BEHAVIOR_CHANGED=false_expected
-PROVIDER_BEHAVIOR_CHANGED=false_expected
-CLAUDE_PROVIDER=DEFERRED
-OPENCODE_PROVIDER=DEFERRED
-CODEX_APP_SERVER=DEFERRED
-NATIVE_TAB_ICON_DISPOSITION=NO_GO
-ROADMAP_V08_CREATED=false
 ```
 
-A feature-gated visual/showcase helper is development/release tooling and must
-not become a normal installed runtime surface.
+Do not remove or rewrite an MCP server or Hook group unless exact TabBeacon
+ownership is proven by the current ownership manifest and target digest.
+Ambiguous TabBeacon-like state remains fail-closed for mutation.
+
+## Subagent semantic invariants
+
+For real and synthetic subagent events:
+
+```text
+SUBAGENT_PRETOOLUSE=IgnoreSubagent
+SUBAGENT_POSTTOOLUSE=IgnoreSubagent
+SUBAGENT_START=IgnoreSubagent
+SUBAGENT_STOP=IgnoreSubagent
+ROOT_PRESENTATION_MUTATED_BY_SUBAGENT=false
+```
+
+The command transport must preserve the source-audited `agent_id` and
+`agent_type` fields when Codex supplies them. Unknown/new fields remain ignored
+under the existing bounded input policy; raw tool/prompt/model content remains
+outside TabBeacon persistence and presentation.
+
+## Real qualification requirement
+
+The hotfix is not accepted from unit tests alone. A disposable real Codex
+qualification must launch a parent session, create at least one subagent, and
+exercise multiple child tool calls under the migrated command-Hook profile.
+
+Required real evidence:
+
+```text
+REAL_CODEX_SUBAGENT_QUALIFICATION=PASS
+SUBAGENT_TOOL_CALLS_SUCCEED=true
+PRETOOLUSE_HOOK_FAILED_COUNT=0
+POSTTOOLUSE_HOOK_FAILED_COUNT=0
+ROOT_PRESENTATION_MUTATED_BY_CHILD=false
+PARENT_PRESENTATION=PASS
+```
+
+Use disposable configuration/state where practical. Do not mutate Owner Hook
+trust automatically.
+
+## Release boundary
+
+The Owner has authorized implementation and public release of this hotfix if all
+applicable G103-G106 gates pass. The release transaction must remain exact-head
+and forward-safe:
+
+```text
+PACKAGE_VERSION=0.7.2
+CRATES_IO_VERSION=0.7.2
+TAG=v0.7.2
+GITHUB_RELEASE=v0.7.2
+```
+
+Public failure after any irreversible surface succeeds must be reported as a
+truthful partial-public-release state; never move a public tag or overwrite a
+crates.io version to simulate rollback.
+
+## Promotion train retarget
+
+The previously admitted Discoverability & Automated Demo work is not discarded.
+It is frozen and retargeted to **v0.7.3**:
+
+- PR #100 remains Draft and must not merge during the hotfix.
+- Remote PR #100 head at hotfix admission was
+  `4731a3ffbca643a4e3d3afcd3b61f1d849eaa434`.
+- The Owner-reported local UIA recovery commit
+  `31c076d4458a4c0606e494c1dea452946a92fb15` should be preserved if it still
+  exists locally; it is not public truth until pushed/reconciled.
+- The UIA diagnosis `TOPLEVEL_WINDOW_NAME_ASSUMPTION_INVALID` and the safer
+  `EXACT_TABITEM_TO_ANCESTOR_WINDOW` direction remain useful v0.7.3 evidence.
+- GitHub description/topics remain unapplied until the promotion train is later
+  accepted.
+
+See [`ROADMAP_V073.md`](ROADMAP_V073.md).
+
+## Explicit non-goals
+
+v0.7.2 hotfix does not add:
+
+- promotional GIF/social-preview merge from PR #100;
+- GitHub metadata changes;
+- a third provider;
+- Operational Reliability v2 or Provider Platform v2;
+- Native Tab Icon or XAML Diagnostics;
+- Codex App Server;
+- installer/Winget/Scoop distribution for TabBeacon;
+- new presentation semantics.
 
 ## Final state
 
@@ -320,7 +248,10 @@ After successful public v0.7.2 closeout:
 ```text
 CURRENT_PUBLIC_RELEASE=v0.7.2
 ACTIVE_FEATURE_DEVELOPMENT=PAUSED
+PROMOTION_TARGET_RELEASE=v0.7.3
+PROMO_PR=100
+PROMO_PR_STATE=FROZEN_DRAFT
 V08_OPTIONS_STATUS=NON_AUTHORITATIVE
 ROADMAP_V08_CREATED=false
-NEXT_RECOMMENDED_GOAL=DOGFOOD_ONLY_NO_ACTIVE_DEVELOPMENT
+NEXT_RECOMMENDED_GOAL=DOGFOOD_OR_EXPLICIT_V073_RESUME
 ```
