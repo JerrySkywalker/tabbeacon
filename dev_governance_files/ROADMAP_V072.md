@@ -195,9 +195,14 @@ trust automatically.
 
 ## Release boundary
 
-The Owner has authorized implementation and public release of this hotfix if all
-applicable G103-G106 gates pass. The release transaction must remain exact-head
-and forward-safe:
+This roadmap admits hotfix planning and does not itself authorize a public
+mutation. Before the release transaction, the executor must verify that the
+admitted execution Goal carries explicit, current Owner authorization for the
+exact v0.7.2 public surfaces and record
+`PUBLIC_RELEASE_AUTHORIZATION=EXPLICIT`; otherwise hard-stop with
+`OWNER_RELEASE_AUTHORIZATION=UNPROVEN`. With that admission and all applicable
+G103-G106 gates passing, the release transaction must remain exact-head and
+forward-safe:
 
 ```text
 PACKAGE_VERSION=0.7.2
