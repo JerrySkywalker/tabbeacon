@@ -86,13 +86,19 @@ DISPOSABLE_COMMAND_HOOK_TRUST_REVIEW=PASS
 TABBEACON_COMMAND_HOOK_DELIVERY_OBSERVED=true
 CHILD_PRETOOLUSE_COMMAND_DELIVERY_COUNT>=1
 CHILD_POSTTOOLUSE_COMMAND_DELIVERY_COUNT>=1
-CHILD_AGENT_IDENTITY_OBSERVED=true
+CHILD_PRETOOLUSE_AGENT_IDENTITY_OBSERVED=true
+CHILD_POSTTOOLUSE_AGENT_IDENTITY_OBSERVED=true
+CHILD_PRETOOLUSE_NORMALIZATION=IgnoreSubagent
+CHILD_POSTTOOLUSE_NORMALIZATION=IgnoreSubagent
 ```
 
 Do not infer this only from source; inspect the disposable effective config and
 runtime observations. A session with untrusted or skipped Hook declarations
-cannot satisfy this gate. Record only counts, the presence of child identity,
-and normalization outcomes; never retain a raw child payload or tool content.
+cannot satisfy this gate. For each generic child event independently, prove that
+both `agent_id` and `agent_type` were observed and that normalization returned
+`IgnoreSubagent`; lifecycle-event identity cannot satisfy this generic-event
+proof. Record only counts, identity presence, and normalization outcomes; never
+retain a raw child payload or tool content.
 
 ## D. Subagent failure gate
 
@@ -163,7 +169,10 @@ DISPOSABLE_COMMAND_HOOK_TRUST_REVIEW=PASS
 TABBEACON_COMMAND_HOOK_DELIVERY_OBSERVED=true
 CHILD_PRETOOLUSE_COMMAND_DELIVERY_COUNT>=1
 CHILD_POSTTOOLUSE_COMMAND_DELIVERY_COUNT>=1
-CHILD_AGENT_IDENTITY_OBSERVED=true
+CHILD_PRETOOLUSE_AGENT_IDENTITY_OBSERVED=true
+CHILD_POSTTOOLUSE_AGENT_IDENTITY_OBSERVED=true
+CHILD_PRETOOLUSE_NORMALIZATION=IgnoreSubagent
+CHILD_POSTTOOLUSE_NORMALIZATION=IgnoreSubagent
 SUBAGENT_TOOL_CALLS_SUCCEED=true
 PRETOOLUSE_HOOK_FAILED_COUNT=0
 POSTTOOLUSE_HOOK_FAILED_COUNT=0

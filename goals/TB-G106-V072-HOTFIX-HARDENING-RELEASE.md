@@ -37,12 +37,14 @@ WORKTREE=<one clean owned release worktree>
 ```
 
 The release-branch source boundary is package/version metadata, changelog,
-v0.7.2 release/upgrade notes, required current-facing release truth, standard
-artifact/consumer procedures, and no more. No migration/profile/runtime change,
-new provider, PR #100 content, or production Codex configuration/trust mutation
-is admitted by G106. A changed release head requires fresh exact-head CI/review;
-a public tag, crate version, or release already observed to exist is a hard stop
-for that mutation and must be reconciled rather than replayed.
+and v0.7.2 release/upgrade notes, standard artifact/consumer procedures, and no
+more. `CURRENT_PUBLIC_RELEASE` and `CURRENT_PUBLIC_TARGET` remain v0.7.1 until
+all public surfaces succeed; update them only in the post-publication closeout.
+No migration/profile/runtime change, new provider, PR #100 content, or
+production Codex configuration/trust mutation is admitted by G106. A changed
+release head requires fresh exact-head CI/review; a public tag, crate version,
+or release already observed to exist is a hard stop for that mutation and must
+be reconciled rather than replayed.
 
 ## A. Version/release metadata
 
@@ -52,8 +54,9 @@ Only in this Goal bump:
 0.7.1 -> 0.7.2
 ```
 
-Update Cargo metadata/lockfile if required, changelog, release notes, upgrade
-notes/current-facing truth according to existing repository convention.
+Update Cargo metadata/lockfile if required, changelog, release notes, and
+upgrade notes according to existing repository convention. Do not claim a new
+current public release in this pre-publication PR.
 
 Release notes must describe:
 
