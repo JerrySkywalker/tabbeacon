@@ -76,9 +76,35 @@ exact hybrid runtime probe.
 Every public-release closeout receipt reports:
 
 ```text
-OWNER_INSTALL_SOURCE=<content-minimal-cargo-source-proof>
+OWNER_INSTALL_SOURCE=<content-minimal-cargo-source-proof|UNPROVEN_NOT_INSPECTED>
 OWNER_INSTALL_SOURCE_PROVEN=<true|false>
-OWNER_GIT_REV_INSTALL=false
+OWNER_GIT_REV_INSTALL=<true|false|UNPROVEN>
 OWNER_OFFICIAL_CHANNEL_CUTOVER=<PASS|FAIL|BLOCKED|UNPROVEN>
+OWNER_OFFICIAL_CHANNEL_CUTOVER_REASON=<none-or-bounded-reason>
 OWNER_OFFICIAL_CHANNEL=crates.io
 ```
+
+### TB-V072 explicit production-non-adoption exception
+
+The default convergence requirement remains mandatory except for an externally
+Owner-authorized execution of
+`TB-V072-FULL-SUBAGENT-HOOK-HOTFIX-TO-PUBLIC-RELEASE-001`. The Goal ID alone
+never supplies that authorization: the executor must verify current external
+Owner authority for the exact public transaction under the Goal's release
+admission before this exception applies. When that authority also prohibits any
+Owner production Codex/configuration/trust mutation, public release and
+current-truth closeout may proceed after all applicable public gates pass, while
+the Owner-convergence portion is truthfully recorded as:
+
+```text
+OWNER_OFFICIAL_CHANNEL_CUTOVER=BLOCKED
+OWNER_OFFICIAL_CHANNEL_CUTOVER_REASON=NOT_AUTHORIZED
+OWNER_INSTALL_SOURCE=UNPROVEN_NOT_INSPECTED
+OWNER_INSTALL_SOURCE_PROVEN=false
+OWNER_GIT_REV_INSTALL=UNPROVEN
+OWNER_PRODUCTION_NON_ADOPTION_AUTHORIZATION=EXPLICIT
+```
+
+This narrow exception neither authorizes an Owner cutover nor alters the default
+for another release. It preserves a separate explicit-Owner-admission action for
+official-channel adoption and its `setup codex`/Doctor/runtime proof.
