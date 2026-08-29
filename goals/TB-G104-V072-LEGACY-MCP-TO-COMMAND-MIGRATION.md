@@ -14,7 +14,7 @@ CODE_CHANGED=true
 PRESENTATION_CHANGED=false
 PROVIDER_CHANGED=true
 USER_PERSISTENT_CONFIG_CHANGED=true
-SECURITY_OR_PRIVACY_CHANGED=false
+SECURITY_OR_PRIVACY_CHANGED=true
 RELEASE_BOUNDARY=false
 ```
 
@@ -24,8 +24,8 @@ refusal, idempotence, and uninstall restoration. Because it changes a real
 Codex provider/profile and command-Hook trust boundary, it also requires the
 focused real-provider qualification in G105. The settled implementation
 candidate additionally requires one fresh hosted exact-head code CI and a
-focused review of ownership, trust, and migration behavior. Presentation and
-public-release gates are N/A for G104 itself; G106 selects the release boundary.
+focused ownership/trust/migration safety review. Presentation and public-release
+gates are N/A for G104 itself; G106 selects the release boundary.
 
 ## Design correction
 
