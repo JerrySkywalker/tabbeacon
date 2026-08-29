@@ -11,7 +11,7 @@ unrelated user state.
 
 ```text
 CODE_CHANGED=true
-PRESENTATION_CHANGED=false
+PRESENTATION_CHANGED=true
 PROVIDER_CHANGED=true
 USER_PERSISTENT_CONFIG_CHANGED=true
 SECURITY_OR_PRIVACY_CHANGED=true
@@ -24,8 +24,10 @@ refusal, idempotence, and uninstall restoration. Because it changes a real
 Codex provider/profile and command-Hook trust boundary, it also requires the
 focused real-provider qualification in G105. The settled implementation
 candidate additionally requires one fresh hosted exact-head code CI and a
-focused ownership/trust/migration safety review. Presentation and public-release
-gates are N/A for G104 itself; G106 selects the release boundary.
+focused ownership/trust/migration safety review. It also requires the final
+owned parent UIA/Visual proof selected in G105 because replacing lifecycle Hook
+transport can affect visible parent title/progress updates. The public-release
+gate is N/A for G104 itself; G106 selects the release boundary.
 
 ## Fresh phase admission
 

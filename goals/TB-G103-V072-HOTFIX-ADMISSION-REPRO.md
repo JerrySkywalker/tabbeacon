@@ -7,6 +7,32 @@ changing transport/migration logic. Establish whether the failure occurs before
 TabBeacon's MCP server receives a call, inside TabBeacon MCP dispatch, or in a
 later reducer/presentation stage.
 
+## Fresh phase admission
+
+Before G103 source inspection or disposable-fixture work, record an exact,
+read-only admission. This phase does not authorize later migration writes.
+
+```text
+REPOSITORY=JerrySkywalker/tabbeacon
+EXPECTED_START_HEAD=<exact post-planning-merge origin/main head>
+CHECKED_OUT_HEAD=EXPECTED_START_HEAD
+EXPECTED_REMOTE_MAIN=EXPECTED_START_HEAD
+WORKTREE=<one clean owned hotfix worktree>
+CODE_CHANGED=false_expected
+PRESENTATION_CHANGED=false
+PROVIDER_CHANGED=true_diagnostic_only
+USER_PERSISTENT_CONFIG_CHANGED=true_disposable_fixture_only
+SECURITY_OR_PRIVACY_CHANGED=false
+RELEASE_BOUNDARY=false
+```
+
+The source boundary is read-only Codex transport/normalizer/capability audit
+plus focused tests. The only configuration target is one exact-owned disposable
+fixture root recorded in the receipt; no Owner configuration, trust store,
+release metadata, PR #100 content, new provider, or presentation feature is
+admitted. Any G103 code change or source-head drift requires a fresh admission
+and reclassification before it can be used by G104.
+
 ## Required starting truth
 
 ```text
