@@ -29,6 +29,11 @@ Owner production Hook declarations or trust.
 The fixture must install/reconcile TabBeacon through the same supported
 ownership path used by users, but against disposable configuration.
 
+Before the real scenario, complete the ordinary manual Codex Hook trust review
+for the changed command declarations in that disposable environment. Record
+only the resulting trusted/deliverable state and content-minimal event counts;
+do not copy trust state, hashes, or sessions from an Owner configuration.
+
 If real Codex authentication/session prerequisites cannot be safely isolated,
 use the minimum Owner-present boundary required by repository policy and record
 it. Do not silently substitute a pure unit test for real qualification.
@@ -56,10 +61,13 @@ Hook delivery:
 TABBEACON_MCP_TOOL_HOOKS_ACTIVE=false
 TABBEACON_COMMAND_HOOKS_ACTIVE=true
 TABBEACON_MCP_SERVER_REQUIRED_FOR_HOOK_DELIVERY=false
+DISPOSABLE_COMMAND_HOOK_TRUST_REVIEW=PASS
+TABBEACON_COMMAND_HOOK_DELIVERY_OBSERVED=true
 ```
 
 Do not infer this only from source; inspect the disposable effective config and
-runtime observations.
+runtime observations. A session with untrusted or skipped Hook declarations
+cannot satisfy this gate.
 
 ## D. Subagent failure gate
 
@@ -99,9 +107,10 @@ persist model/tool bodies.
 
 ## F. Fail-open behavior
 
-Exercise a missing/unavailable TabBeacon command Hook binary or bounded failure
-fixture according to current test conventions and prove Codex progression is not
-blocked.
+Exercise a bounded malformed-input or runtime-failure fixture only after the
+verified TabBeacon command Hook handler has started, and prove Codex progression
+is not blocked. A missing/unavailable binary is diagnostic-only because it does
+not reach TabBeacon's fail-open handler; it cannot satisfy this gate.
 
 ```text
 FAIL_OPEN=PASS
@@ -124,6 +133,8 @@ At minimum include:
 
 ```text
 REAL_CODEX_SUBAGENT_QUALIFICATION=PASS
+DISPOSABLE_COMMAND_HOOK_TRUST_REVIEW=PASS
+TABBEACON_COMMAND_HOOK_DELIVERY_OBSERVED=true
 SUBAGENT_TOOL_CALLS_SUCCEED=true
 PRETOOLUSE_HOOK_FAILED_COUNT=0
 POSTTOOLUSE_HOOK_FAILED_COUNT=0

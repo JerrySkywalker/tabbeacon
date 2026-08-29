@@ -116,6 +116,9 @@ At minimum cover:
 9. post-migration second run is idempotent;
 10. a fresh compatible installation remains command v1;
 11. migration never grants Hook trust.
+12. migration followed by ownership-safe uninstall removes only TabBeacon
+    declarations while preserving third-party Hooks, MCP servers, and unrelated
+    Codex configuration.
 
 ## G. Acceptance
 
@@ -132,6 +135,7 @@ THIRD_PARTY_HOOKS_PRESERVED=true
 UNRELATED_CODEX_CONFIG_PRESERVED=true
 HOOK_TRUST_BYPASS=false
 MIGRATION_IDEMPOTENT=true
+MIGRATION_UNINSTALL_RESTORE=PASS
 ```
 
 Next: `TB-G105-V072-REAL-SUBAGENT-QUALIFICATION.md`.
