@@ -242,6 +242,17 @@ PROMO_PR_STATE=FROZEN_DRAFT
 If repository convention requires a metadata-only closeout PR, create, validate,
 and merge it separately.
 
+For this repository, the post-publication closeout is required: after all public
+surfaces pass, open a metadata-only PR that updates only current-facing release
+truth and its deterministic docs contract. Its admitted scope is the current
+release declarations in `README.md`, `README.zh-CN.md`, `SECURITY.md`,
+`docs/README.md`, `docs/getting-started.md`,
+`docs/development/release-process.md`, `dev_governance_files/ROADMAP.md`, and
+`dev_governance_files/DEVELOPMENT_PAUSE.md`; the v0.7.2 release record/notes;
+and the exact v0.7.2 patterns in `scripts/ci/check-docs.ps1`. Do not rewrite
+historical receipts. Run the docs checker, a fresh exact-head hosted docs CI,
+and focused review before merging this closeout.
+
 Do not resume v0.7.3 automatically.
 
 ## K. Production boundary
@@ -251,7 +262,20 @@ release succeeds. Production adoption is a separate user action unless an
 explicit qualification step under G105/G106 required a narrowly authorized
 Owner-present operation.
 
+`RELEASE_CRITERIA.md` separately requires Owner official-channel convergence
+after every public release. This Goal explicitly excludes that Owner production
+mutation and supplies no Owner-adoption authorization. Therefore complete the
+public release and its disposable consumers when their gates pass, but do not
+claim Owner-convergence closeout: record
+`OWNER_OFFICIAL_CHANNEL_CUTOVER=BLOCKED_NOT_AUTHORIZED`, preserve the Owner
+configuration and trust, and leave only that separate adoption action blocked
+for explicit Owner direction. Public release evidence must not be relabelled as
+Owner installation or Hook-runtime proof.
+
 ```text
+OWNER_OFFICIAL_CHANNEL_CUTOVER=BLOCKED_NOT_AUTHORIZED
+OWNER_INSTALL_SOURCE_PROVEN=false
+OWNER_GIT_REV_INSTALL=UNPROVEN
 PRODUCTION_HOOK_TRUST_MUTATED=false_expected
 PRODUCTION_AGY_CONFIGURATION_MUTATED=false
 ```
