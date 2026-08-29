@@ -1948,6 +1948,228 @@ fn legacy_mcp_migration_blocks_modified_owned_and_missing_manifest_states() {
 }
 
 #[test]
+fn unrecognized_owned_mcp_manifest_is_refused_without_mutating_targets() {
+    let root = TestRoot::new("unrecognized-owned-mcp-manifest");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("current command setup succeeds");
+
+    let hooks_path = root.child("codex-home/hooks.json");
+    let config_path = root.child("codex-home/config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest reads"))
+            .expect("manifest parses");
+    let executable = manifest["executable"]
+        .as_str()
+        .expect("manifest executable is a string")
+        .to_owned();
+    manifest["mcp_server"] = json!({
+        "name": "tabbeacon-hook",
+        "command": executable,
+        "args": ["__mcp-hook-stdio-v1"],
+        "env_vars": ["WT_SESSION"],
+        "omit_tools_from": ["code_mode", "deferred", "direct"]
+    });
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("ambiguous manifest serializes"),
+    )
+    .expect("ambiguous manifest writes");
+
+    let mut config = fs::read_to_string(&config_path)
+        .expect("config reads")
+        .parse::<DocumentMut>()
+        .expect("config parses");
+    config["mcp_servers"] = Item::Table(Table::new());
+    let mut server = Table::new();
+    server.insert("command", value(executable));
+    let mut args = Array::new();
+    args.push("__mcp-hook-stdio-v1");
+    server.insert("args", value(args));
+    let mut env_vars = Array::new();
+    env_vars.push("WT_SESSION");
+    server.insert("env_vars", value(env_vars));
+    let mut omitted = Array::new();
+    omitted.push("code_mode");
+    omitted.push("deferred");
+    omitted.push("direct");
+    server.insert("omit_tools_from", value(omitted));
+    config["mcp_servers"]
+        .as_table_like_mut()
+        .expect("MCP server table is writable")
+        .insert("tabbeacon-hook", Item::Table(server));
+    fs::write(&config_path, config.to_string()).expect("ambiguous MCP config writes");
+
+    let hooks_before = fs::read(&hooks_path).expect("hooks snapshot reads");
+    let config_before = fs::read(&config_path).expect("config snapshot reads");
+    let manifest_before = fs::read(&manifest_path).expect("manifest snapshot reads");
+    assert!(matches!(
+        integration.setup(),
+        Err(CodexIntegrationError::StaleOwnedHook)
+    ));
+    assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
+    assert_eq!(
+        fs::read(&config_path).expect("config reread"),
+        config_before
+    );
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest reread"),
+        manifest_before
+    );
+}
+
+#[test]
+fn mcp_hook_manifest_without_owned_server_is_refused_without_mutating_targets() {
+    let root = TestRoot::new("mcp-hook-manifest-without-owned-server");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    install_exact_existing_hybrid(&integration, &root);
+
+    let hooks_path = root.child("codex-home/hooks.json");
+    let config_path = root.child("codex-home/config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest reads"))
+            .expect("manifest parses");
+    manifest["mcp_server"] = Value::Null;
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("ambiguous manifest serializes"),
+    )
+    .expect("ambiguous manifest writes");
+
+    let mut config = fs::read_to_string(&config_path)
+        .expect("config reads")
+        .parse::<DocumentMut>()
+        .expect("config parses");
+    config["mcp_servers"]
+        .as_table_like_mut()
+        .expect("MCP server table is writable")
+        .remove("tabbeacon-hook");
+    config.as_table_mut().remove("mcp_servers");
+    fs::write(&config_path, config.to_string()).expect("MCP server removal writes");
+
+    let hooks_before = fs::read(&hooks_path).expect("hooks snapshot reads");
+    let config_before = fs::read(&config_path).expect("config snapshot reads");
+    let manifest_before = fs::read(&manifest_path).expect("manifest snapshot reads");
+    assert!(matches!(
+        integration.setup(),
+        Err(CodexIntegrationError::StaleOwnedHook)
+    ));
+    assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
+    assert_eq!(
+        fs::read(&config_path).expect("config reread"),
+        config_before
+    );
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest reread"),
+        manifest_before
+    );
+}
+
+#[test]
+fn legacy_mcp_migration_rekeys_all_trailing_third_party_trust_state() {
+    let root = TestRoot::new("legacy-mcp-trailing-third-party-trust");
+    let codex_home = root.child("codex-home");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    install_exact_existing_hybrid(&integration, &root);
+
+    let hooks_path = codex_home.join("hooks.json");
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("legacy hooks read"))
+            .expect("legacy hooks parse");
+    let external = json!({
+        "hooks": [{"type": "command", "command": "owner-safe-hook"}],
+        "plugin": "owner.plugin"
+    });
+    let second_external = json!({
+        "hooks": [{"type": "command", "command": "owner-safe-hook-two"}],
+        "plugin": "owner.plugin.two"
+    });
+    hooks["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .expect("PostToolUse groups are present")
+        .push(external.clone());
+    hooks["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .expect("PostToolUse groups are present")
+        .push(second_external.clone());
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("legacy hooks serialize"),
+    )
+    .expect("legacy hooks write");
+
+    install_current_codex_trust_state(&codex_home);
+    let config_path = codex_home.join("config.toml");
+    let first_old_key = format!("{}:post_tool_use:1:0", hooks_path.display());
+    let second_old_key = format!("{}:post_tool_use:2:0", hooks_path.display());
+    let first_new_key = format!("{}:post_tool_use:0:0", hooks_path.display());
+    let second_new_key = format!("{}:post_tool_use:1:0", hooks_path.display());
+    let mut config = fs::read_to_string(&config_path)
+        .expect("config reads")
+        .parse::<DocumentMut>()
+        .expect("config parses");
+    let mut third_party_state = Table::new();
+    third_party_state.insert("trusted_hash", value("sha256:third-party-preserve"));
+    config["hooks"]["state"]
+        .as_table_like_mut()
+        .expect("trust state is writable")
+        .insert(&first_old_key, Item::Table(third_party_state));
+    let mut second_third_party_state = Table::new();
+    second_third_party_state.insert("trusted_hash", value("sha256:third-party-preserve-two"));
+    config["hooks"]["state"]
+        .as_table_like_mut()
+        .expect("trust state is writable")
+        .insert(&second_old_key, Item::Table(second_third_party_state));
+    fs::write(&config_path, config.to_string()).expect("third-party trust writes");
+
+    assert_eq!(
+        integration
+            .setup()
+            .expect("exact legacy migration succeeds"),
+        SetupOutcome::Upgraded
+    );
+    let migrated: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("migrated hooks read"))
+            .expect("migrated hooks parse");
+    assert_eq!(migrated["hooks"]["PostToolUse"][0], external);
+    assert_eq!(migrated["hooks"]["PostToolUse"][1], second_external);
+    assert_eq!(
+        migrated["hooks"]["PostToolUse"][2]["hooks"][0]["type"],
+        "command"
+    );
+    let migrated_config = fs::read_to_string(&config_path)
+        .expect("migrated config reads")
+        .parse::<DocumentMut>()
+        .expect("migrated config parses");
+    let state = migrated_config["hooks"]["state"]
+        .as_table_like()
+        .expect("migrated trust state is present");
+    assert!(state.get(&second_old_key).is_none());
+    assert_eq!(
+        state
+            .get(&first_new_key)
+            .and_then(Item::as_table_like)
+            .and_then(|entry| entry.get("trusted_hash"))
+            .and_then(Item::as_str),
+        Some("sha256:third-party-preserve")
+    );
+    assert_eq!(
+        state
+            .get(&second_new_key)
+            .and_then(Item::as_table_like)
+            .and_then(|entry| entry.get("trusted_hash"))
+            .and_then(Item::as_str),
+        Some("sha256:third-party-preserve-two")
+    );
+    let new_owned_key = format!("{}:post_tool_use:2:0", hooks_path.display());
+    assert!(
+        state.get(&new_owned_key).is_none(),
+        "changed command declaration must require fresh trust review"
+    );
+}
+
+#[test]
 fn codex_0149_mcp_extension_is_preserved_during_owned_command_reconciliation() {
     let root = TestRoot::new("codex-0149-mcp-extension");
     let codex_home = root.child("codex-home");
