@@ -106,11 +106,14 @@ transaction, the executor must verify that the admitted execution Goal carries
 this `GOAL_ID` and explicit Owner authorization for crates.io, immutable tag,
 GitHub Release, Windows x64 ZIP/SHA-256 assets, public consumer verification,
 and a focused post-release truth closeout if repository convention requires it.
+For the narrow production-non-adoption exception, that external authority must
+also explicitly prohibit Owner production Codex/configuration/trust mutation.
 
 If that explicit authorization is absent, stale, or does not cover the proposed
-public mutation, stop with `OWNER_RELEASE_AUTHORIZATION=UNPROVEN`. When it is
-verified and all applicable gates pass, no additional generic authorization wait
-is required. A failed gate is not waived by this authorization.
+public mutation or the explicit non-adoption prohibition, stop with
+`OWNER_RELEASE_AUTHORIZATION=UNPROVEN`. When it is verified and all applicable
+gates pass, no additional generic authorization wait is required. A failed gate
+is not waived by this authorization.
 
 ## Deferred promotion work
 

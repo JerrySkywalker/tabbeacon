@@ -170,12 +170,19 @@ At minimum include:
 3. multiple subagents sequentially if supported by the current real fixture;
 4. subagent stop followed by parent tool call;
 5. session end/cleanup;
-6. command-v1 fresh install and migrated legacy install parity where practical.
+6. a disposable exact legacy ten-MCP (and SessionEnd when present) integration
+   migrated through the supported ownership path to command v1, followed by the
+   full real parent/subagent scenario after manual disposable trust review.
+
+The migrated-legacy run is mandatory. A fresh command-v1 installation may add
+coverage but cannot substitute for runtime qualification of the affected upgrade
+path.
 
 ## Acceptance
 
 ```text
 REAL_CODEX_SUBAGENT_QUALIFICATION=PASS
+REAL_MIGRATED_LEGACY_SUBAGENT_QUALIFICATION=PASS
 DISPOSABLE_COMMAND_HOOK_TRUST_REVIEW=PASS
 TABBEACON_COMMAND_HOOK_DELIVERY_OBSERVED=true
 CHILD_PRETOOLUSE_COMMAND_DELIVERY_COUNT>=1

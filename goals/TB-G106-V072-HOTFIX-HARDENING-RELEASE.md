@@ -139,6 +139,7 @@ Final required truth:
 
 ```text
 REAL_CODEX_SUBAGENT_QUALIFICATION=PASS
+REAL_MIGRATED_LEGACY_SUBAGENT_QUALIFICATION=PASS
 PRETOOLUSE_HOOK_FAILED_COUNT=0
 POSTTOOLUSE_HOOK_FAILED_COUNT=0
 ROOT_PRESENTATION_MUTATED_BY_CHILD=false
@@ -179,6 +180,19 @@ Windows assets, and public-consumer proofs. Record
 `PUBLIC_RELEASE_AUTHORIZATION=EXPLICIT` with that admission. If the
 authorization is absent, stale, or narrower than the proposed transaction,
 hard-stop with `OWNER_RELEASE_AUTHORIZATION=UNPROVEN`.
+
+For the production-non-adoption exception, also verify that the same external
+authority explicitly prohibits Owner production Codex/configuration/trust
+mutation and record:
+
+```text
+OWNER_PRODUCTION_NON_ADOPTION_AUTHORIZATION=EXPLICIT
+PRODUCTION_CODEX_CONFIGURATION_MUTATED=false_expected
+PRODUCTION_HOOK_TRUST_MUTATED=false_expected
+```
+
+If public-release authority is silent about Owner adoption, the default
+official-channel convergence rule remains applicable; do not use the exception.
 
 When that verification and all applicable G103-G106 gates pass, do not stop
 again solely for generic release authorization.
