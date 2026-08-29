@@ -23,6 +23,27 @@ PR100_MERGED=false
 Start from exact fresh remote `main` after accepted hotfix implementation. Do not
 merge or rebase promotional PR #100 into this release candidate.
 
+## Fresh phase admission
+
+Before creating the release branch and again immediately before each public
+mutation, record the fresh post-implementation state:
+
+```text
+REPOSITORY=JerrySkywalker/tabbeacon
+EXPECTED_START_HEAD=<exact HOTFIX_IMPL_MERGE_SHA on origin/main>
+CHECKED_OUT_HEAD=EXPECTED_START_HEAD
+EXPECTED_REMOTE_MAIN=EXPECTED_START_HEAD
+WORKTREE=<one clean owned release worktree>
+```
+
+The release-branch source boundary is package/version metadata, changelog,
+v0.7.2 release/upgrade notes, required current-facing release truth, standard
+artifact/consumer procedures, and no more. No migration/profile/runtime change,
+new provider, PR #100 content, or production Codex configuration/trust mutation
+is admitted by G106. A changed release head requires fresh exact-head CI/review;
+a public tag, crate version, or release already observed to exist is a hard stop
+for that mutation and must be reconciled rather than replayed.
+
 ## A. Version/release metadata
 
 Only in this Goal bump:

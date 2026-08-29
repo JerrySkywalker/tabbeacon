@@ -21,6 +21,27 @@ LEGACY_MCP_HYBRID_NEW_ADMISSION=false
 
 Use the exact candidate head that contains the accepted migration logic.
 
+## Fresh phase admission
+
+Immediately before G105, record the exact accepted G104 candidate rather than
+assuming a planning-era SHA remains current:
+
+```text
+REPOSITORY=JerrySkywalker/tabbeacon
+EXPECTED_START_HEAD=<exact accepted G104 candidate head>
+CHECKED_OUT_HEAD=EXPECTED_START_HEAD
+EXPECTED_REMOTE_MAIN=<freshly fetched origin/main>
+WORKTREE=<one clean owned implementation worktree>
+QUALIFICATION_ROOT=<one exact-owned disposable Codex/config/workspace root>
+```
+
+The admitted source boundary is G105-focused tests, fixtures, and only a
+correction required by failed qualification in the G104 Codex transport scope;
+any such correction requires a new G104/G105 admission and gates. The
+qualification root must never be an Owner production configuration, session, or
+trust store. No package/release metadata, PR #100, provider expansion, or
+presentation feature is admitted by this phase.
+
 ## A. Qualification environment
 
 Prefer a disposable isolated Codex HOME/config/state root that does not mutate

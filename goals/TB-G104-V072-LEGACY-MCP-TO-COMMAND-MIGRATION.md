@@ -27,6 +27,29 @@ candidate additionally requires one fresh hosted exact-head code CI and a
 focused ownership/trust/migration safety review. Presentation and public-release
 gates are N/A for G104 itself; G106 selects the release boundary.
 
+## Fresh phase admission
+
+Immediately before any G104 source or disposable-fixture mutation, record a
+fresh admission. This document is not itself a mutation authority for an
+arbitrary later head.
+
+```text
+REPOSITORY=JerrySkywalker/tabbeacon
+EXPECTED_START_HEAD=<exact accepted G103 predecessor head>
+CHECKED_OUT_HEAD=EXPECTED_START_HEAD
+EXPECTED_REMOTE_MAIN=<freshly fetched origin/main>
+WORKTREE=<one clean owned implementation worktree>
+```
+
+The allowed source boundary is the Codex transport/ownership implementation
+(`src/providers/codex/{profile,config,mcp,mod,runtime,capability}.rs`), its
+focused tests/fixtures, and a minimal current diagnostic document if needed.
+The allowed external target is one exact-owned disposable Codex configuration
+root named in the admission receipt. The phase must not touch an Owner
+configuration, package/release metadata, PR #100, another provider, or any
+source outside the admitted migration boundary. Re-admit after every candidate
+head change and immediately before a configuration apply.
+
 ## Design correction
 
 The implementation must separate two concepts that are currently coupled:
