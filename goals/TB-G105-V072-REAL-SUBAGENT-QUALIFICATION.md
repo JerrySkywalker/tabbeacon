@@ -31,10 +31,16 @@ assuming a planning-era SHA remains current:
 REPOSITORY=JerrySkywalker/tabbeacon
 EXPECTED_START_HEAD=<exact accepted G104 candidate head>
 CHECKED_OUT_HEAD=EXPECTED_START_HEAD
-EXPECTED_REMOTE_MAIN=<freshly fetched origin/main>
+G104_PREDECESSOR_MAIN=<exact main head admitted for G104>
+EXPECTED_REMOTE_MAIN=G104_PREDECESSOR_MAIN
 WORKTREE=<one clean owned implementation worktree>
 QUALIFICATION_ROOT=<one exact-owned disposable Codex/config/workspace root>
 ```
+
+If fresh `origin/main` differs from `G104_PREDECESSOR_MAIN`, do not assume the
+G104 candidate remains admissible. Re-admit the candidate against the new main
+with a bounded G104/G105 source-risk diff, or create a fresh candidate from the
+new main and rerun the affected gates before real qualification.
 
 The admitted source boundary is G105-focused tests, fixtures, and only a
 correction required by failed qualification in the G104 Codex transport scope;

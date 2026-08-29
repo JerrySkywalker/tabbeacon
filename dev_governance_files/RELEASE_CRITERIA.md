@@ -82,3 +82,22 @@ OWNER_GIT_REV_INSTALL=false
 OWNER_OFFICIAL_CHANNEL_CUTOVER=<PASS|FAIL|BLOCKED|UNPROVEN>
 OWNER_OFFICIAL_CHANNEL=crates.io
 ```
+
+### TB-V072 explicit production-non-adoption exception
+
+The default convergence requirement remains mandatory except for
+`TB-V072-FULL-SUBAGENT-HOOK-HOTFIX-TO-PUBLIC-RELEASE-001`. That Goal explicitly
+authorizes the public v0.7.2 transaction while prohibiting any Owner production
+Codex/configuration/trust mutation. For that exact Goal only, public release and
+current-truth closeout may proceed after all applicable public gates pass, while
+the Owner-convergence portion is truthfully recorded as:
+
+```text
+OWNER_OFFICIAL_CHANNEL_CUTOVER=BLOCKED_NOT_AUTHORIZED
+OWNER_INSTALL_SOURCE_PROVEN=false
+OWNER_GIT_REV_INSTALL=UNPROVEN
+```
+
+This narrow exception neither authorizes an Owner cutover nor alters the default
+for another release. It preserves a separate explicit-Owner-admission action for
+official-channel adoption and its `setup codex`/Doctor/runtime proof.

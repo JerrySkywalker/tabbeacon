@@ -41,9 +41,14 @@ arbitrary later head.
 REPOSITORY=JerrySkywalker/tabbeacon
 EXPECTED_START_HEAD=<exact accepted G103 predecessor head>
 CHECKED_OUT_HEAD=EXPECTED_START_HEAD
-EXPECTED_REMOTE_MAIN=<freshly fetched origin/main>
+EXPECTED_REMOTE_MAIN=EXPECTED_START_HEAD
 WORKTREE=<one clean owned implementation worktree>
 ```
+
+If fresh `origin/main` differs, do not start a configuration mutation from the
+old predecessor. Either restart this phase from the newly admitted main head or
+record the exact predecessor, main head, and bounded source-risk diff proving
+the divergence is outside the G104 scope; then obtain fresh candidate gates.
 
 The allowed source boundary is the Codex transport/ownership implementation
 (`src/providers/codex/{profile,config,mcp,mod,runtime,capability}.rs`), its
@@ -52,7 +57,9 @@ The allowed external target is one exact-owned disposable Codex configuration
 root named in the admission receipt. The phase must not touch an Owner
 configuration, package/release metadata, PR #100, another provider, or any
 source outside the admitted migration boundary. Re-admit after every candidate
-head change and immediately before a configuration apply.
+head change and immediately before a configuration apply. The second admission
+must re-fetch `origin/main` and repeat this exact-head or bounded-risk-diff
+decision.
 
 ## Design correction
 
