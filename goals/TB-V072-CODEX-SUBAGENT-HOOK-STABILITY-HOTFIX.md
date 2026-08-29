@@ -96,12 +96,17 @@ Agy behavior is outside the hotfix scope and must remain unchanged.
 
 ## Release authorization
 
-The Owner explicitly authorizes public `v0.7.2` publication after all G103-G106
-acceptance gates pass. This includes crates.io, immutable tag, GitHub Release,
+This Goal records, but does not create, Owner authorization for public `v0.7.2`
+publication after all G103-G106 acceptance gates pass. Before the public
+transaction, the executor must verify that the admitted execution Goal carries
+explicit Owner authorization for crates.io, immutable tag, GitHub Release,
 Windows x64 ZIP/SHA-256 assets, public consumer verification, and a focused
 post-release truth closeout if repository convention requires it.
 
-A failed gate is not waived by this authorization.
+If that explicit authorization is absent, stale, or does not cover the proposed
+public mutation, stop with `OWNER_RELEASE_AUTHORIZATION=UNPROVEN`. When it is
+verified and all applicable gates pass, no additional generic authorization wait
+is required. A failed gate is not waived by this authorization.
 
 ## Deferred promotion work
 

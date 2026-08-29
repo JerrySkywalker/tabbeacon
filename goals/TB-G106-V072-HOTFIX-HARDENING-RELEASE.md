@@ -151,8 +151,16 @@ RELEASE_SHA=<exact admitted release source>
 
 ## G. Public authorization
 
-The Owner has explicitly authorized public v0.7.2 release once all applicable
-G103-G106 gates pass. Do not stop again solely for generic release authorization.
+This planning document does not itself authorize a public mutation. Before the
+public transaction, verify that the admitted execution Goal carries explicit,
+current Owner authorization for the exact v0.7.2 crates.io publication,
+immutable tag, GitHub Release, Windows assets, and public-consumer proofs.
+Record `PUBLIC_RELEASE_AUTHORIZATION=EXPLICIT` with that admission. If the
+authorization is absent, stale, or narrower than the proposed transaction,
+hard-stop with `OWNER_RELEASE_AUTHORIZATION=UNPROVEN`.
+
+When that verification and all applicable G103-G106 gates pass, do not stop
+again solely for generic release authorization.
 
 This does not authorize bypassing a failed gate.
 
