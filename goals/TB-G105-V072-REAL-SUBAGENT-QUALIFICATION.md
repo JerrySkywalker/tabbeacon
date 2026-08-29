@@ -15,6 +15,7 @@ Required:
 ```text
 G103=COMPLETE
 G104=COMPLETE
+G104_MIGRATION_CANDIDATE=PASS
 DESIRED_CODEX_TRANSPORT=command_v1
 LEGACY_MCP_HYBRID_NEW_ADMISSION=false
 ```
@@ -40,7 +41,10 @@ correction required by failed qualification in the G104 Codex transport scope;
 any such correction requires a new G104/G105 admission and gates. The
 qualification root must never be an Owner production configuration, session, or
 trust store. No package/release metadata, PR #100, provider expansion, or
-presentation feature is admitted by this phase.
+presentation feature is admitted by this phase. G105 owns the real-provider
+qualification and final owned parent UIA/Visual proof for the exact
+`G104_MIGRATION_CANDIDATE`; those proofs are not prerequisites for producing
+that candidate.
 
 ## A. Qualification environment
 

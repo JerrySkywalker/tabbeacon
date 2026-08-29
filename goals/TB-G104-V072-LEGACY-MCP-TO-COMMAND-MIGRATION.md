@@ -21,13 +21,15 @@ RELEASE_BOUNDARY=false
 This Goal requires one focused migration/ownership-safety family proving exact
 ownership, minimal mutation, third-party preservation, concurrent-drift
 refusal, idempotence, and uninstall restoration. Because it changes a real
-Codex provider/profile and command-Hook trust boundary, it also requires the
-focused real-provider qualification in G105. The settled implementation
-candidate additionally requires one fresh hosted exact-head code CI and a
-focused ownership/trust/migration safety review. It also requires the final
-owned parent UIA/Visual proof selected in G105 because replacing lifecycle Hook
-transport can affect visible parent title/progress updates. The public-release
-gate is N/A for G104 itself; G106 selects the release boundary.
+Codex provider/profile and command-Hook trust boundary, G104 produces a
+migration-ready candidate only after its focused tests, exact-head code CI, and
+ownership/trust/migration safety review pass. G105 then qualifies that exact
+candidate against real Codex and owns the final parent UIA/Visual proof because
+replacing lifecycle Hook transport can affect visible parent title/progress
+updates. G104 must not wait for those G105 proofs before producing its candidate;
+G106 cannot release until both scoped G104 completion and G105 completion are
+recorded. The public-release gate is N/A for G104 itself; G106 selects the
+release boundary.
 
 ## Fresh phase admission
 
@@ -146,7 +148,25 @@ A future command-v1 compatible Codex discovery must not be overridden back to
 MCP Hybrid solely because a stale historical manifest field survived. The
 manifest/current owned state must be reconciled atomically and truthfully.
 
-## F. Required tests
+## F. Interruption recovery
+
+The migration may touch `hooks.json`, `config.toml` when title ownership changes,
+and the ownership manifest. Per-file atomic writes alone are not a transaction
+across those files. Before the first write, persist an exact-owned, durable
+migration journal recording only source/target digests, the approved target
+digest, the ordered member files, and a phase marker; use the existing exact
+backups rather than persisting unrelated configuration content in a new receipt.
+
+On setup/repair startup, detect an incomplete journal before normal reconciliation.
+Recover only when every recorded current file matches an admitted pre- or
+post-write digest and the target is still exact-owned. Deterministically restore
+the exact pre-migration state or complete the exact approved target, then verify
+all member-file digests and remove the journal. Any missing, altered, ambiguous,
+or third-party-drifted member file is a hard stop that preserves state and the
+journal for inspection. Recovery must never rewrite unrelated Hooks, MCP servers,
+configuration, or trust.
+
+## G. Required tests
 
 At minimum cover:
 
@@ -164,8 +184,15 @@ At minimum cover:
 12. migration followed by ownership-safe uninstall removes only TabBeacon
     declarations while preserving third-party Hooks, MCP servers, and unrelated
     Codex configuration.
+13. fault injection after every migration persistence step recovers to exactly
+    one admitted pre- or post-migration state without third-party loss;
+    altered/missing journal members block recovery.
+14. a disposable active exact-owned legacy MCP child is reported by the existing
+    ownership-qualified upgrade preflight, then only the exact child is safely
+    drained or allowed to exit naturally before package replacement; Codex,
+    third-party MCP children, and unproven processes remain untouched.
 
-## G. Acceptance
+## H. Migration-candidate acceptance
 
 Required:
 
@@ -181,6 +208,9 @@ UNRELATED_CODEX_CONFIG_PRESERVED=true
 HOOK_TRUST_BYPASS=false
 MIGRATION_IDEMPOTENT=true
 MIGRATION_UNINSTALL_RESTORE=PASS
+MIGRATION_INTERRUPTION_RECOVERY=PASS
+G104_MIGRATION_CANDIDATE=PASS
+G105_REAL_PROVIDER_AND_VISUAL_REQUIRED=true
 ```
 
 Next: `TB-G105-V072-REAL-SUBAGENT-QUALIFICATION.md`.

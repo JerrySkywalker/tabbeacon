@@ -111,6 +111,24 @@ MIGRATION_IDEMPOTENT=true
 ```
 
 A disposable v0.7.1 representative consumer should exercise the upgrade path.
+It must also cover the Windows live-child replacement boundary: from a disposable
+legacy MCP installation with an active exact-owned MCP child, first run the
+existing read-only `tabbeacon upgrade-preflight --plain`. If it reports
+`REPLACEABILITY=blocked_by_owned_tabbeacon_mcp`, either use the existing
+ownership-qualified `--drain` path for only that exact child or allow it to exit
+naturally and restart the consumer before replacement. Re-run preflight before
+the package replacement and prove Codex, third-party MCP children, and any
+unproven process were not terminated. Never exercise drain against Owner
+production state.
+
+Required additional release-consumer truth:
+
+```text
+LIVE_LEGACY_MCP_UPGRADE=PASS
+LIVE_MCP_PREFLIGHT=PASS
+LIVE_MCP_DRAIN_OR_NATURAL_EXIT=PASS
+NONOWNED_PROCESSES_PRESERVED=true
+```
 
 ## D. Real subagent regression
 
