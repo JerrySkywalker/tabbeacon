@@ -7,6 +7,26 @@ recorded by an older TabBeacon ownership manifest. Migrate only exact-owned
 legacy MCP Hybrid integrations to `codex-hooks-command-v1` while preserving all
 unrelated user state.
 
+## Changed-risk vector and required gates
+
+```text
+CODE_CHANGED=true
+PRESENTATION_CHANGED=false
+PROVIDER_CHANGED=true
+USER_PERSISTENT_CONFIG_CHANGED=true
+SECURITY_OR_PRIVACY_CHANGED=false
+RELEASE_BOUNDARY=false
+```
+
+This Goal requires one focused migration/ownership-safety family proving exact
+ownership, minimal mutation, third-party preservation, concurrent-drift
+refusal, idempotence, and uninstall restoration. Because it changes a real
+Codex provider/profile and command-Hook trust boundary, it also requires the
+focused real-provider qualification in G105. The settled implementation
+candidate additionally requires one fresh hosted exact-head code CI and a
+focused review of ownership, trust, and migration behavior. Presentation and
+public-release gates are N/A for G104 itself; G106 selects the release boundary.
+
 ## Design correction
 
 The implementation must separate two concepts that are currently coupled:
