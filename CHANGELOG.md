@@ -4,6 +4,13 @@ All notable changes to TabBeacon will be documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Migrated only exact owned historical Codex MCP Hook integrations to the
+  current command-Hook transport. The upgrade preserves unrelated Hooks, MCP
+  servers, and configuration, requires a fresh manual `/hooks` trust review,
+  and keeps subagent events out of root presentation state.
+
 ## [0.7.1] - 2026-08-28
 
 ### Changed

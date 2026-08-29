@@ -1048,6 +1048,7 @@ fn repair_codex(
     print_codex_repair_report(&report, output_mode)
 }
 
+#[allow(clippy::too_many_lines)] // Plain, JSON, and human output remain one compatible management contract.
 fn print_codex_repair_report(report: &CodexRepairReport, output_mode: OutputMode) -> ExitCode {
     if output_mode == OutputMode::Json {
         return match serde_json::to_string(&report) {
@@ -1072,6 +1073,11 @@ fn print_codex_repair_report(report: &CodexRepairReport, output_mode: OutputMode
         );
         println!("MISSING_DECLARATIONS={}", report.missing_declarations);
         println!("TARGET_DIGEST={}", report.target_digest);
+        println!("LEGACY_MCP_MIGRATION={}", report.legacy_mcp_migration);
+        println!(
+            "OWNED_TABBEACON_MCP_SERVER_REMOVAL_REQUIRED={}",
+            report.owned_mcp_server_removal_required
+        );
         println!(
             "THIRD_PARTY_GROUPS_PRESERVED={}",
             report.third_party_groups_preserved
@@ -1109,18 +1115,34 @@ fn print_codex_repair_report(report: &CodexRepairReport, output_mode: OutputMode
     let (tone, summary, next) = match report.disposition {
         CodexRepairDisposition::ReadyToApply => (
             HumanTone::Attention,
-            format!(
-                "Repair preview found {} exact missing TabBeacon Hook declarations and will preserve {} third-party Hook groups.",
-                report.missing_declarations, report.third_party_groups_preserved
-            ),
-            "Run `tabbeacon repair codex --apply --expected-target-digest <TARGET_DIGEST>` to restore only those declarations.",
+            if report.legacy_mcp_migration {
+                format!(
+                    "Migration preview found an exact legacy TabBeacon MCP integration. It will replace {} owned declarations, remove the exact owned MCP server, and preserve {} third-party Hook groups.",
+                    report.missing_declarations, report.third_party_groups_preserved
+                )
+            } else {
+                format!(
+                    "Repair preview found {} exact missing TabBeacon Hook declarations and will preserve {} third-party Hook groups.",
+                    report.missing_declarations, report.third_party_groups_preserved
+                )
+            },
+            if report.legacy_mcp_migration {
+                "Run `tabbeacon repair codex --apply --expected-target-digest <TARGET_DIGEST>` to migrate only that exact owned legacy transport, then review the command Hooks in `/hooks`."
+            } else {
+                "Run `tabbeacon repair codex --apply --expected-target-digest <TARGET_DIGEST>` to restore only those declarations."
+            },
         ),
         CodexRepairDisposition::RepairedTrustReviewRequired => (
             HumanTone::Success,
-            format!(
-                "Restored {} exact TabBeacon Hook declarations.",
-                report.missing_declarations
-            ),
+            if report.legacy_mcp_migration {
+                "Migrated the exact owned legacy TabBeacon MCP transport to command Hooks."
+                    .to_owned()
+            } else {
+                format!(
+                    "Restored {} exact TabBeacon Hook declarations.",
+                    report.missing_declarations
+                )
+            },
             "Launch `codex`, review the TabBeacon Hooks in `/hooks`, then run `tabbeacon doctor`.",
         ),
         CodexRepairDisposition::AlreadyExact => (
