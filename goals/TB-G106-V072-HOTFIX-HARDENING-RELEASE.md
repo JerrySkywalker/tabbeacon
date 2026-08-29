@@ -116,9 +116,10 @@ existing read-only `tabbeacon upgrade-preflight --plain`. If it reports
 `REPLACEABILITY=blocked_by_owned_tabbeacon_mcp`, either use the existing
 ownership-qualified `--drain` path for only that exact child or allow it to exit
 naturally and restart the consumer before replacement. Re-run preflight before
-the package replacement and prove Codex, third-party MCP children, and any
-unproven process were not terminated. Never exercise drain against Owner
-production state.
+the package replacement and require `REPLACEABILITY=ready` or
+`REPLACEABILITY=no_known_tab_beacon_lock`; every other result hard-stops package
+replacement. Prove Codex, third-party MCP children, and any unproven process
+were not terminated. Never exercise drain against Owner production state.
 
 Required additional release-consumer truth:
 
@@ -126,6 +127,7 @@ Required additional release-consumer truth:
 LIVE_LEGACY_MCP_UPGRADE=PASS
 LIVE_MCP_PREFLIGHT=PASS
 LIVE_MCP_DRAIN_OR_NATURAL_EXIT=PASS
+LIVE_MCP_REPLACEABILITY=<ready|no_known_tab_beacon_lock>
 NONOWNED_PROCESSES_PRESERVED=true
 ```
 
@@ -305,6 +307,7 @@ Owner installation or Hook-runtime proof.
 ```text
 OWNER_OFFICIAL_CHANNEL_CUTOVER=BLOCKED
 OWNER_OFFICIAL_CHANNEL_CUTOVER_REASON=NOT_AUTHORIZED
+OWNER_INSTALL_SOURCE=UNPROVEN_NOT_INSPECTED
 OWNER_INSTALL_SOURCE_PROVEN=false
 OWNER_GIT_REV_INSTALL=UNPROVEN
 PRODUCTION_HOOK_TRUST_MUTATED=false_expected
