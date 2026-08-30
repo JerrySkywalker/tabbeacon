@@ -648,7 +648,25 @@ function Initialize-RootEventState {
     $start = Invoke-ProductionHook -State $State -Event 'SessionStart' -Session $Session -TerminalToken $Terminal -Turn ''
     $prompt = Invoke-ProductionHook -State $State -Event 'UserPromptSubmit' -Session $Session -TerminalToken $Terminal -Turn $Turn
     if (-not $start.success -or $start.process_total_ms -eq $null -or -not $prompt.success -or $prompt.process_total_ms -eq $null) {
-        throw 'Root-event setup did not complete inside the one-second production Hook budget.'
+        $startReceipt = Write-G105FailureReceipt -State $State -CaseId 'setup-session-start' -SampleKind 'cold' -SampleIndex 0 -Sample $start
+        $promptReceipt = Write-G105FailureReceipt -State $State -CaseId 'setup-user-prompt-submit' -SampleKind 'cold' -SampleIndex 0 -Sample $prompt
+        $cleanup = Invoke-ProductionHook -State $State -Event 'SessionEnd' -Session $Session -TerminalToken $Terminal -Turn ''
+        $setupReceiptPath = Join-Path $State 'g105-setup-boundary-v1.json'
+        $setupReceipt = [ordered]@{
+            schema = 'tabbeacon-g105-setup-boundary-v1'
+            expected_head = $ExpectedHead
+            session_start_failure_receipt = $startReceipt
+            user_prompt_submit_failure_receipt = $promptReceipt
+            cleanup_success = $cleanup.success
+            cleanup_root_process_timeout = $cleanup.root_process_timeout
+            cleanup_stream_eof_timeout = $cleanup.stream_eof_timeout
+        }
+        [System.IO.File]::WriteAllText(
+            $setupReceiptPath,
+            ($setupReceipt | ConvertTo-Json -Depth 4 -Compress),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        throw "Root-event setup did not complete inside the one-second production Hook budget. Receipt: $setupReceiptPath"
     }
 }
 
