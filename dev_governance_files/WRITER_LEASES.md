@@ -103,8 +103,9 @@ expired. The original proof remains durable provenance; the final receipt record
 the fresh proof used to complete recovery. It either resumes the exact archive or
 finalizes the already-verified archived bytes. If the only interrupted step was
 the task-marker finalization after a valid final external receipt, recovery
-validates that receipt and archive then finalizes the marker without rewriting
-either artifact. A legacy prepared record created
+validates that receipt and archive against the prepared operation, disposition,
+final phase, writer count, writer-proof binding, schema, Goal, and source phase,
+then finalizes the marker without rewriting either artifact. A legacy prepared record created
 by an earlier tool build requires explicit final phase and disposition; it is
 accepted only through `RecoverPrepared` and is immediately converted to the
 current final receipt. No state needs a manual JSON rewrite to recover.
@@ -131,6 +132,7 @@ It covers normal acquire/settle, second-acquire refusal, prepared-acquire refusa
 exact orphan reclaim,
 digest/phase/holder/drift/reparse/collision rejection, byte preservation,
 prepared-transaction resume/finalization (including final receipt before marker),
-cross-task prepared-scope exclusion, receipt generation, fresh acquire after
-recovery, normal closure without an active holderless lease, explicit holder
-confirmation for normal settlement, and cleanup of all active v1 test fixtures.
+cross-task prepared-scope exclusion, final-receipt tamper rejection, receipt
+generation, fresh acquire after recovery, normal closure without an active
+holderless lease, explicit holder confirmation for normal settlement, and
+finally-path cleanup assertions for all active v1 fixtures and prepared markers.

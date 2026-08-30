@@ -20,6 +20,7 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($branch) -or $sourceHea
 $testRoot = 'V:\build\tabbeacon'
 $testPrefix = 'TB-WRITER-LEASE-TEST-' + [Guid]::NewGuid().ToString('N')
 $script:fixtureLedger = @()
+$script:markerLedger = @()
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -265,19 +266,6 @@ try {
     )
     $acquired = Invoke-ToolJson -ToolArguments $normalAcquire
     Assert-True -Condition ($acquired.operation -eq 'acquire') -Message 'normal acquire did not report acquire'
-    $normalBytes = [IO.File]::ReadAllBytes($normalLease)
-    $normalDigest = Get-Digest -Path $normalLease
-    Assert-ToolFails -ToolArguments $normalAcquire -ExpectedToken 'WRITER_LEASE_ACQUIRE_BLOCKED_ACTIVE_LEASE_EXISTS'
-    $scopeConflictDirectory = Join-Path $testRoot ($testPrefix + '-second-lease-path')
-    New-Item -ItemType Directory -Path $scopeConflictDirectory -ErrorAction Stop | Out-Null
-    $scopeConflictAcquire = @(
-        '-Operation', 'Acquire', '-LeasePath', (Join-Path $scopeConflictDirectory 'writer-lease.json'),
-        '-Goal', 'test-scope-conflict', '-Phase', 'ACTIVE_TEST_SCOPE_CONFLICT',
-        '-Repository', 'JerrySkywalker/tabbeacon', '-SourceHead', $sourceHead,
-        '-Worktree', $worktree, '-Branch', $branch
-    )
-    Assert-ToolFails -ToolArguments $scopeConflictAcquire -ExpectedToken 'WRITER_LEASE_ACQUIRE_BLOCKED_SCOPE_CONFLICT'
-
     $normalFixture = [pscustomobject]@{
         LeasePath = $normalLease
         ArchiveRoot = $normalArchiveRoot
@@ -291,6 +279,20 @@ try {
         Branch = $branch
         SourceHead = $sourceHead
     }
+    $script:fixtureLedger += $normalFixture
+    $normalBytes = [IO.File]::ReadAllBytes($normalLease)
+    $normalDigest = Get-Digest -Path $normalLease
+    Assert-ToolFails -ToolArguments $normalAcquire -ExpectedToken 'WRITER_LEASE_ACQUIRE_BLOCKED_ACTIVE_LEASE_EXISTS'
+    $scopeConflictDirectory = Join-Path $testRoot ($testPrefix + '-second-lease-path')
+    New-Item -ItemType Directory -Path $scopeConflictDirectory -ErrorAction Stop | Out-Null
+    $scopeConflictAcquire = @(
+        '-Operation', 'Acquire', '-LeasePath', (Join-Path $scopeConflictDirectory 'writer-lease.json'),
+        '-Goal', 'test-scope-conflict', '-Phase', 'ACTIVE_TEST_SCOPE_CONFLICT',
+        '-Repository', 'JerrySkywalker/tabbeacon', '-SourceHead', $sourceHead,
+        '-Worktree', $worktree, '-Branch', $branch
+    )
+    Assert-ToolFails -ToolArguments $scopeConflictAcquire -ExpectedToken 'WRITER_LEASE_ACQUIRE_BLOCKED_SCOPE_CONFLICT'
+
     $normalIdentity = Get-IdentityArguments -Fixture $normalFixture -Digest $normalDigest
     $settled = Invoke-ToolJson -ToolArguments (@('-Operation', 'Settle', '-LeasePath', $normalLease) + $normalIdentity + @(
         '-ArchiveRoot', $normalFixture.ArchiveRoot,
@@ -313,6 +315,7 @@ try {
     New-Item -ItemType Directory -Path $pendingRoot -ErrorAction Stop | Out-Null
     $pendingLease = Join-Path $pendingRoot 'writer-lease.json'
     $pendingTransaction = Join-Path $pendingRoot 'writer-lease.transaction.v1.txt'
+    $script:markerLedger += $pendingTransaction
     [IO.File]::WriteAllText($pendingTransaction, "TRANSACTION=PREPARED$([Environment]::NewLine)", [Text.UTF8Encoding]::new($false))
     $pendingAcquire = @(
         '-Operation', 'Acquire', '-LeasePath', $pendingLease,
@@ -331,6 +334,7 @@ try {
     New-Item -ItemType Directory -Path $crossScopeMarkerRoot -ErrorAction Stop | Out-Null
     New-Item -ItemType Directory -Path $crossScopeLeaseRoot -ErrorAction Stop | Out-Null
     $crossScopeMarker = Join-Path $crossScopeMarkerRoot 'writer-lease.transaction.v1.txt'
+    $script:markerLedger += $crossScopeMarker
     $crossScopeContent = @(
         'TRANSACTION=PREPARED',
         'OPERATION=settle',
@@ -415,6 +419,7 @@ try {
     $finalReceiptBytes = [IO.File]::ReadAllBytes($finalReceiptFixture.LeasePath)
     $finalReceiptDigest = Get-Digest -Path $finalReceiptFixture.LeasePath
     $finalReceiptMarker = Join-Path $finalReceiptFixture.Root 'writer-lease.transaction.v1.txt'
+    $script:markerLedger += $finalReceiptMarker
     $finalReceiptPrepared = @(
         'TRANSACTION=PREPARED',
         'OPERATION=settle',
@@ -437,20 +442,82 @@ try {
         ('ORIGINAL_LEASE_SHA256=' + $finalReceiptDigest),
         ('ARCHIVED_LEASE_PATH=' + $finalReceiptFixture.ArchivePath),
         ('ARCHIVED_LEASE_SHA256=' + $finalReceiptDigest),
+        ('SCHEMA=' + $finalReceiptFixture.Schema),
+        ('GOAL=' + $finalReceiptFixture.Goal),
+        ('PHASE=' + $finalReceiptFixture.Phase),
         'FINAL_PHASE=SETTLED_TEST_FINAL_RECEIPT',
-        'ACTIVE_WRITER_COUNT=N/A'
+        'ACTIVE_WRITER_COUNT=N/A',
+        'LEASE_CONTENT_MODIFIED=false'
     ) -join [Environment]::NewLine
     [IO.File]::WriteAllText($finalReceiptFixture.ReceiptPath, $finalReceiptContent + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
     $finalReceiptIdentity = Get-IdentityArguments -Fixture $finalReceiptFixture -Digest $finalReceiptDigest
-    $finalReceiptRecovered = Invoke-ToolJson -ToolArguments (@('-Operation', 'RecoverPrepared', '-PreparedOperation', 'Settle', '-LeasePath', $finalReceiptFixture.LeasePath) + $finalReceiptIdentity + @(
+    $finalReceiptRecoveryArguments = @('-Operation', 'RecoverPrepared', '-PreparedOperation', 'Settle', '-LeasePath', $finalReceiptFixture.LeasePath) + $finalReceiptIdentity + @(
         '-ArchiveRoot', $finalReceiptFixture.ArchiveRoot,
         '-ArchivePath', $finalReceiptFixture.ArchivePath,
         '-ReceiptPath', $finalReceiptFixture.ReceiptPath
-    ))
+    )
+    $tamperedFinalReceipt = $finalReceiptContent.Replace('DISPOSITION=SETTLED_TEST_FINAL_RECEIPT', 'DISPOSITION=TAMPERED_TEST_FINAL_RECEIPT')
+    [IO.File]::WriteAllText($finalReceiptFixture.ReceiptPath, $tamperedFinalReceipt + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    Assert-ToolFails -ToolArguments $finalReceiptRecoveryArguments -ExpectedToken 'WRITER_LEASE_FINAL_RECEIPT_IDENTITY_MISMATCH'
+    [IO.File]::WriteAllText($finalReceiptFixture.ReceiptPath, $finalReceiptContent + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $finalReceiptRecovered = Invoke-ToolJson -ToolArguments $finalReceiptRecoveryArguments
     Assert-True -Condition ($finalReceiptRecovered.recovery_state -eq 'finalized-existing-receipt') -Message 'final receipt recovery did not finalize marker'
     Assert-True -Condition (Test-ExactBytes -First $finalReceiptBytes -Second ([IO.File]::ReadAllBytes($finalReceiptFixture.ArchivePath))) -Message 'final receipt recovery changed archive bytes'
     Assert-True -Condition ((Get-Content -LiteralPath $finalReceiptMarker -Raw).IndexOf('TRANSACTION=FINALIZED', [StringComparison]::Ordinal) -ge 0) -Message 'final receipt recovery did not finalize task marker'
     'WRITER_LEASE_TEST_FINAL_RECEIPT_MARKER_RECOVERY=PASS'
+
+    # A final orphan receipt must carry precisely the proof binding recorded by
+    # its prepared transaction; a substituted proof cannot finalize the marker.
+    $proofFinalFixture = New-FixtureLease -Name 'prepared-final-proof-mismatch'
+    New-ArchiveRoot -Fixture $proofFinalFixture
+    $proofFinalDigest = Get-Digest -Path $proofFinalFixture.LeasePath
+    $proofFinalProof = New-ActiveWriterProof -Fixture $proofFinalFixture -LeaseDigest $proofFinalDigest
+    $proofFinalMarker = Join-Path $proofFinalFixture.Root 'writer-lease.transaction.v1.txt'
+    $script:markerLedger += $proofFinalMarker
+    $proofFinalPrepared = @(
+        'TRANSACTION=PREPARED',
+        'OPERATION=reclaim-orphan',
+        ('ORIGINAL_LEASE_SHA256=' + $proofFinalDigest),
+        ('ARCHIVE_PATH=' + $proofFinalFixture.ArchivePath),
+        ('RECEIPT_PATH=' + $proofFinalFixture.ReceiptPath),
+        ('REPOSITORY=' + $proofFinalFixture.Repository),
+        ('WORKTREE=' + $proofFinalFixture.Worktree),
+        ('BRANCH=' + $proofFinalFixture.Branch),
+        'DISPOSITION=ORPHAN_RECLAIMED',
+        'FINAL_PHASE=RECLAIMED_ORPHAN',
+        'ACTIVE_WRITER_COUNT=0',
+        ('ACTIVE_WRITER_PROOF_PATH=' + $proofFinalProof.Path),
+        ('ACTIVE_WRITER_PROOF_SHA256=' + $proofFinalProof.Sha256)
+    ) -join [Environment]::NewLine
+    [IO.File]::WriteAllText($proofFinalMarker, $proofFinalPrepared + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $proofFinalFixture.LeasePath -Destination $proofFinalFixture.ArchivePath -ErrorAction Stop
+    $proofFinalReceipt = @(
+        'DISPOSITION=ORPHAN_RECLAIMED',
+        'OPERATION=reclaim-orphan',
+        ('ORIGINAL_LEASE_PATH=' + $proofFinalFixture.LeasePath),
+        ('ORIGINAL_LEASE_SHA256=' + $proofFinalDigest),
+        ('ARCHIVED_LEASE_PATH=' + $proofFinalFixture.ArchivePath),
+        ('ARCHIVED_LEASE_SHA256=' + $proofFinalDigest),
+        ('SCHEMA=' + $proofFinalFixture.Schema),
+        ('GOAL=' + $proofFinalFixture.Goal),
+        ('PHASE=' + $proofFinalFixture.Phase),
+        'FINAL_PHASE=RECLAIMED_ORPHAN',
+        'ACTIVE_WRITER_COUNT=0',
+        'LEASE_CONTENT_MODIFIED=false',
+        ('ACTIVE_WRITER_PROOF_PATH=' + $proofFinalProof.Path),
+        ('ACTIVE_WRITER_PROOF_SHA256=' + ('0' * 64 -join ''))
+    ) -join [Environment]::NewLine
+    [IO.File]::WriteAllText($proofFinalFixture.ReceiptPath, $proofFinalReceipt + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $proofFinalIdentity = Get-IdentityArguments -Fixture $proofFinalFixture -Digest $proofFinalDigest
+    Assert-ToolFails -ToolArguments (@('-Operation', 'RecoverPrepared', '-PreparedOperation', 'ReclaimOrphan', '-LeasePath', $proofFinalFixture.LeasePath) + $proofFinalIdentity + @(
+        '-ExpectedHolderless',
+        '-ArchiveRoot', $proofFinalFixture.ArchiveRoot,
+        '-ArchivePath', $proofFinalFixture.ArchivePath,
+        '-ReceiptPath', $proofFinalFixture.ReceiptPath,
+        '-ActiveWriterProofPath', $proofFinalProof.Path,
+        '-ExpectedActiveWriterProofSha256', $proofFinalProof.Sha256
+    )) -ExpectedToken 'WRITER_LEASE_FINAL_RECEIPT_IDENTITY_MISMATCH'
+    'WRITER_LEASE_TEST_FINAL_RECEIPT_PROOF_TAMPER=PASS'
     'WRITER_LEASE_TEST_PREPARED_RECOVERY=PASS'
 
     # 4, 11, 12, and 13: exact orphan reclaim preserves bytes, produces a receipt, and releases a path for a fresh acquire.
@@ -468,7 +535,6 @@ try {
         '-Repository', 'JerrySkywalker/tabbeacon', '-SourceHead', $sourceHead,
         '-Worktree', $worktree, '-Branch', $branch
     )
-    Assert-True -Condition ($postReclaimAcquire.operation -eq 'acquire') -Message 'fresh acquire after reclaim failed'
     $postReclaimFixture = [pscustomobject]@{
         LeasePath = $reclaimFixture.LeasePath
         ArchiveRoot = $reclaimFixture.ArchiveRoot
@@ -482,6 +548,8 @@ try {
         Branch = $branch
         SourceHead = $sourceHead
     }
+    $script:fixtureLedger += $postReclaimFixture
+    Assert-True -Condition ($postReclaimAcquire.operation -eq 'acquire') -Message 'fresh acquire after reclaim failed'
     $postReclaimDigest = Get-Digest -Path $postReclaimFixture.LeasePath
     $postReclaimIdentity = Get-IdentityArguments -Fixture $postReclaimFixture -Digest $postReclaimDigest
     [void](Invoke-ToolJson -ToolArguments (@('-Operation', 'Settle', '-LeasePath', $postReclaimFixture.LeasePath) + $postReclaimIdentity + @(
@@ -610,6 +678,11 @@ try {
     "WRITER_LEASE_TEST_ARTIFACT_PREFIX=$testPrefix"
     throw
 } finally {
+    foreach ($markerPath in $script:markerLedger) {
+        if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
+            [IO.File]::WriteAllText($markerPath, "TRANSACTION=FINALIZED$([Environment]::NewLine)", [Text.UTF8Encoding]::new($false))
+        }
+    }
     foreach ($fixture in $script:fixtureLedger) {
         Settle-FixtureForTestCleanup -Fixture $fixture
     }
@@ -629,5 +702,18 @@ try {
         }
     )
     Assert-True -Condition ($residualActiveV1Fixtures.Count -eq 0) -Message 'focused test left active v1 fixture leases'
+    $residualPreparedMarkers = @(
+        foreach ($taskRoot in Get-ChildItem -LiteralPath $testRoot -Directory -Force -ErrorAction Stop) {
+            if (-not $taskRoot.Name.StartsWith($testPrefix, [StringComparison]::Ordinal)) {
+                continue
+            }
+            $markerPath = Join-Path $taskRoot.FullName 'writer-lease.transaction.v1.txt'
+            if ((Test-Path -LiteralPath $markerPath -PathType Leaf) -and (Get-Content -LiteralPath $markerPath -Raw).IndexOf('TRANSACTION=PREPARED', [StringComparison]::Ordinal) -ge 0) {
+                $markerPath
+            }
+        }
+    )
+    Assert-True -Condition ($residualPreparedMarkers.Count -eq 0) -Message 'focused test left prepared transaction markers'
     'WRITER_LEASE_TEST_ACTIVE_FIXTURE_LEAKS=0'
+    'WRITER_LEASE_TEST_PREPARED_MARKER_LEAKS=0'
 }
