@@ -163,6 +163,13 @@ BLOCKER_LATCHED=true
 
 Do not repeatedly rerun the blocked lane until the relevant prerequisite changes.
 
+## Writer leases
+
+The canonical single-writer lifecycle, deterministic orphan recovery contract,
+and Owner break-glass boundary are documented in
+[WRITER_LEASES.md](WRITER_LEASES.md). Lease JSON is never edited or deleted by
+hand; use the canonical acquire, settle, or fully proven reclaim operation.
+
 ## Current v0.3 application
 
 For TB-G18:
