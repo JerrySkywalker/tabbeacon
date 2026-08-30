@@ -1091,6 +1091,9 @@ function Invoke-ArchiveLease {
         Publish-NewUtf8FileAtomically -Path $transactionPath -Content ($prepared + [Environment]::NewLine)
         $transactionPrepared = $true
     }
+    if ($transactionPrepared -and $null -eq $transactionReceipt) {
+        $transactionReceipt = Get-PreparedReceiptMetadata -Path $transactionPath
+    }
 
     $refreshedPrepared = $prepared
     if ($AllowRecoveryProofRefresh -and $null -ne $transactionReceipt) {
@@ -1123,6 +1126,12 @@ function Invoke-ArchiveLease {
             if (-not $AllowLegacyPreparedReceipt) {
                 throw 'WRITER_LEASE_PREPARED_RECEIPT_LEGACY_REQUIRES_RECOVER_OPERATION'
             }
+            # RecoverPrepared can have just published the current task marker
+            # before an interruption. Upgrade the older external receipt before
+            # moving the still-live source lease, so that mixed state is
+            # resumable without a manual rewrite.
+            Write-ExistingUtf8File -Path $safeReceiptPath -Content ($prepared + [Environment]::NewLine)
+            $preparedReceipt = Get-PreparedReceiptMetadata -Path $safeReceiptPath
         } elseif ($preparedReceipt.Disposition -ne $ReceiptDisposition -or $preparedReceipt.FinalPhase -ne $SettlementFinalPhase -or $preparedReceipt.WriterCount -ne $WriterCount) {
             throw 'WRITER_LEASE_PREPARED_RECEIPT_IDENTITY_MISMATCH'
         }
@@ -1461,7 +1470,10 @@ switch ($Operation) {
                     $externalMetadataMatchesMarker = $externalMetadataMatchesMarker -and -not [string]::IsNullOrWhiteSpace($preparedReceipt.ReceiptPath) -and [string]::Equals((Get-FullPath -Path $preparedReceipt.ReceiptPath), (Get-FullPath -Path $transactionReceipt.ReceiptPath), [StringComparison]::OrdinalIgnoreCase)
                 }
                 if (-not $externalMetadataMatchesMarker) {
-                    throw 'WRITER_LEASE_PREPARED_RECEIPT_IDENTITY_MISMATCH'
+                    $recoverableLegacySettle = $sourceExists -and $PreparedOperation -eq 'Settle' -and ($preparedReceipt.LegacyFormat -or $transactionReceipt.LegacyFormat) -and $transactionReceipt.Disposition -eq $Disposition -and $transactionReceipt.FinalPhase -eq $FinalPhase
+                    if (-not $recoverableLegacySettle) {
+                        throw 'WRITER_LEASE_PREPARED_RECEIPT_IDENTITY_MISMATCH'
+                    }
                 }
                 $externalProofBindingMatchesMarker = $preparedReceipt.WriterProofPath -eq $transactionReceipt.WriterProofPath -and $preparedReceipt.WriterProofSha256 -eq $transactionReceipt.WriterProofSha256 -and $preparedReceipt.RecoveryProofRefreshed -eq $transactionReceipt.RecoveryProofRefreshed -and $preparedReceipt.PreparedWriterProofPath -eq $transactionReceipt.PreparedWriterProofPath -and $preparedReceipt.PreparedWriterProofSha256 -eq $transactionReceipt.PreparedWriterProofSha256
                 if (-not $externalProofBindingMatchesMarker -and -not $sourceExists) {

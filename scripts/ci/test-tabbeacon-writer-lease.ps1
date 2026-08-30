@@ -567,6 +567,48 @@ try {
     Assert-True -Condition ($preparedRecovered.recovery_state -eq 'resumed-archive') -Message 'prepared recovery did not resume archive'
     Assert-True -Condition (Test-ExactBytes -First $preparedBytes -Second ([IO.File]::ReadAllBytes($preparedFixture.ArchivePath))) -Message 'prepared recovery archive changed bytes'
 
+    # A crash after a current marker is published for a legacy Settle receipt,
+    # but before the receipt upgrade/archive move, must resume from the live
+    # source without leaving a permanently blocking mixed PREPARED state.
+    $legacyMixedFixture = New-FixtureLease -Name 'legacy-settle-mixed-marker'
+    New-ArchiveRoot -Fixture $legacyMixedFixture
+    $legacyMixedBytes = [IO.File]::ReadAllBytes($legacyMixedFixture.LeasePath)
+    $legacyMixedDigest = Get-Digest -Path $legacyMixedFixture.LeasePath
+    $legacyMixedMarker = Join-Path $legacyMixedFixture.Root 'writer-lease.transaction.v1.txt'
+    $legacyMixedCurrentMarker = @(
+        'TRANSACTION=PREPARED',
+        'OPERATION=settle',
+        ('ORIGINAL_LEASE_SHA256=' + $legacyMixedDigest),
+        ('ARCHIVE_PATH=' + $legacyMixedFixture.ArchivePath),
+        ('RECEIPT_PATH=' + $legacyMixedFixture.ReceiptPath),
+        ('REPOSITORY=' + $legacyMixedFixture.Repository),
+        ('WORKTREE=' + $legacyMixedFixture.Worktree),
+        ('BRANCH=' + $legacyMixedFixture.Branch),
+        'DISPOSITION=SETTLED_TEST_LEGACY_MIXED',
+        'FINAL_PHASE=SETTLED_TEST_LEGACY_MIXED',
+        'ACTIVE_WRITER_COUNT=N/A'
+    ) -join [Environment]::NewLine
+    $legacyMixedReceipt = @(
+        'TRANSACTION=PREPARED',
+        'OPERATION=settle',
+        ('ORIGINAL_LEASE_SHA256=' + $legacyMixedDigest),
+        ('ARCHIVE_PATH=' + $legacyMixedFixture.ArchivePath)
+    ) -join [Environment]::NewLine
+    [IO.File]::WriteAllText($legacyMixedMarker, $legacyMixedCurrentMarker + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($legacyMixedFixture.ReceiptPath, $legacyMixedReceipt + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $legacyMixedIdentity = Get-IdentityArguments -Fixture $legacyMixedFixture -Digest $legacyMixedDigest
+    $legacyMixedRecovered = Invoke-ToolJson -ToolArguments (@('-Operation', 'RecoverPrepared', '-PreparedOperation', 'Settle', '-LeasePath', $legacyMixedFixture.LeasePath) + $legacyMixedIdentity + @(
+        '-ArchiveRoot', $legacyMixedFixture.ArchiveRoot,
+        '-ArchivePath', $legacyMixedFixture.ArchivePath,
+        '-ReceiptPath', $legacyMixedFixture.ReceiptPath,
+        '-FinalPhase', 'SETTLED_TEST_LEGACY_MIXED',
+        '-Disposition', 'SETTLED_TEST_LEGACY_MIXED'
+    ))
+    Assert-True -Condition ($legacyMixedRecovered.recovery_state -eq 'resumed-archive') -Message 'mixed legacy Settle state did not resume archive'
+    Assert-True -Condition (Test-ExactBytes -First $legacyMixedBytes -Second ([IO.File]::ReadAllBytes($legacyMixedFixture.ArchivePath))) -Message 'mixed legacy Settle archive changed bytes'
+    Assert-True -Condition ((Get-Content -LiteralPath $legacyMixedFixture.ReceiptPath -Raw).IndexOf('DISPOSITION=SETTLED_TEST_LEGACY_MIXED', [StringComparison]::Ordinal) -ge 0) -Message 'mixed legacy Settle receipt was not upgraded'
+    'WRITER_LEASE_TEST_LEGACY_SETTLE_MIXED_PREPARED_RECOVERY=PASS'
+
     $finalizeFixture = New-FixtureLease -Name 'prepared-finalize'
     New-ArchiveRoot -Fixture $finalizeFixture
     $finalizeBytes = [IO.File]::ReadAllBytes($finalizeFixture.LeasePath)

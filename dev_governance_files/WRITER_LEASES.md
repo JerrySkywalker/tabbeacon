@@ -117,7 +117,11 @@ while the source lease remains present and a fresh proof has passed. It either r
 finalizes the already-verified archived bytes. A legacy prepared record created
 by an earlier tool build requires explicit final phase and disposition; it is
 accepted only through `RecoverPrepared` and is immediately converted to the
-current final receipt. No state needs a manual JSON rewrite to recover.
+current final receipt. If an interruption leaves a current task marker beside
+that legacy Settle receipt while the source lease still exists, recovery admits
+only matching explicit caller disposition/final phase, upgrades the receipt
+atomically, and then archives; it never relaxes reclaim proof requirements or
+repairs an archived mixed state. No state needs a manual JSON rewrite to recover.
 
 ## Owner break-glass
 
