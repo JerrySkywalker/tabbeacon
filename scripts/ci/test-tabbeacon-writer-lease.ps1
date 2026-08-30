@@ -870,6 +870,55 @@ try {
         '-ExpectedActiveWriterProofSha256', $proofFinalProof.Sha256
     )) -ExpectedToken 'WRITER_LEASE_FINAL_RECEIPT_IDENTITY_MISMATCH'
     'WRITER_LEASE_TEST_FINAL_RECEIPT_PROOF_TAMPER=PASS'
+
+    # Reclaim receipts cannot omit their zero-writer proof binding. Blank values
+    # must not compare equal across a PREPARED marker and final receipt.
+    $proofFinalMissingReceipt = (($proofFinalValidReceipt -split [Environment]::NewLine | Where-Object { -not $_.StartsWith('ACTIVE_WRITER_PROOF_', [StringComparison]::Ordinal) }) -join [Environment]::NewLine)
+    [IO.File]::WriteAllText($proofFinalFixture.ReceiptPath, $proofFinalMissingReceipt + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    Assert-ToolFails -ToolArguments (@('-Operation', 'RecoverPrepared', '-PreparedOperation', 'ReclaimOrphan', '-LeasePath', $proofFinalFixture.LeasePath) + $proofFinalIdentity + @(
+        '-ExpectedHolderless',
+        '-ArchiveRoot', $proofFinalFixture.ArchiveRoot,
+        '-ArchivePath', $proofFinalFixture.ArchivePath,
+        '-ReceiptPath', $proofFinalFixture.ReceiptPath
+    )) -ExpectedToken 'WRITER_LEASE_FINAL_RECEIPT_INVALID'
+    'WRITER_LEASE_TEST_RECLAIM_FINAL_PROOF_REQUIRED=PASS'
+
+    # After the source has moved, an ordinary PREPARED receipt must be exactly
+    # proof-bound to its task marker; a different B proof cannot replace A.
+    $preparedProofSubstitutionFixture = New-FixtureLease -Name 'prepared-archive-proof-substitution'
+    New-ArchiveRoot -Fixture $preparedProofSubstitutionFixture
+    $preparedProofSubstitutionDigest = Get-Digest -Path $preparedProofSubstitutionFixture.LeasePath
+    $preparedProofA = New-ActiveWriterProof -Fixture $preparedProofSubstitutionFixture -LeaseDigest $preparedProofSubstitutionDigest -ProofFileName 'proof-a.txt'
+    $preparedProofB = New-ActiveWriterProof -Fixture $preparedProofSubstitutionFixture -LeaseDigest $preparedProofSubstitutionDigest -ProofFileName 'proof-b.txt'
+    $preparedProofSubstitutionMarker = Join-Path $preparedProofSubstitutionFixture.Root 'writer-lease.transaction.v1.txt'
+    $preparedProofSubstitutionMarkerContent = @(
+        'TRANSACTION=PREPARED',
+        'OPERATION=reclaim-orphan',
+        ('ORIGINAL_LEASE_SHA256=' + $preparedProofSubstitutionDigest),
+        ('ARCHIVE_PATH=' + $preparedProofSubstitutionFixture.ArchivePath),
+        ('RECEIPT_PATH=' + $preparedProofSubstitutionFixture.ReceiptPath),
+        ('REPOSITORY=' + $preparedProofSubstitutionFixture.Repository),
+        ('WORKTREE=' + $preparedProofSubstitutionFixture.Worktree),
+        ('BRANCH=' + $preparedProofSubstitutionFixture.Branch),
+        'DISPOSITION=ORPHAN_RECLAIMED',
+        'FINAL_PHASE=RECLAIMED_ORPHAN',
+        'ACTIVE_WRITER_COUNT=0',
+        ('ACTIVE_WRITER_PROOF_PATH=' + $preparedProofA.Path),
+        ('ACTIVE_WRITER_PROOF_SHA256=' + $preparedProofA.Sha256)
+    ) -join [Environment]::NewLine
+    $preparedProofSubstitutionReceipt = $preparedProofSubstitutionMarkerContent.Replace(('ACTIVE_WRITER_PROOF_PATH=' + $preparedProofA.Path), ('ACTIVE_WRITER_PROOF_PATH=' + $preparedProofB.Path)).Replace(('ACTIVE_WRITER_PROOF_SHA256=' + $preparedProofA.Sha256), ('ACTIVE_WRITER_PROOF_SHA256=' + $preparedProofB.Sha256))
+    [IO.File]::WriteAllText($preparedProofSubstitutionMarker, $preparedProofSubstitutionMarkerContent + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($preparedProofSubstitutionFixture.ReceiptPath, $preparedProofSubstitutionReceipt + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $preparedProofSubstitutionFixture.LeasePath -Destination $preparedProofSubstitutionFixture.ArchivePath -ErrorAction Stop
+    $preparedProofSubstitutionIdentity = Get-IdentityArguments -Fixture $preparedProofSubstitutionFixture -Digest $preparedProofSubstitutionDigest
+    Assert-ToolFails -ToolArguments (@('-Operation', 'RecoverPrepared', '-PreparedOperation', 'ReclaimOrphan', '-LeasePath', $preparedProofSubstitutionFixture.LeasePath) + $preparedProofSubstitutionIdentity + @(
+        '-ExpectedHolderless',
+        '-ArchiveRoot', $preparedProofSubstitutionFixture.ArchiveRoot,
+        '-ArchivePath', $preparedProofSubstitutionFixture.ArchivePath,
+        '-ReceiptPath', $preparedProofSubstitutionFixture.ReceiptPath
+    )) -ExpectedToken 'WRITER_LEASE_PREPARED_RECOVERY_PROOF_MISMATCH'
+    [IO.File]::WriteAllText($preparedProofSubstitutionFixture.ReceiptPath, $preparedProofSubstitutionMarkerContent + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    'WRITER_LEASE_TEST_ARCHIVED_PREPARED_PROOF_SUBSTITUTION=PASS'
     'WRITER_LEASE_TEST_PREPARED_RECOVERY=PASS'
 
     # 4, 11, 12, and 13: exact orphan reclaim preserves bytes, produces a receipt, and releases a path for a fresh acquire.

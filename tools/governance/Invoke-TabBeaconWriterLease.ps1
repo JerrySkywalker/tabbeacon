@@ -947,10 +947,13 @@ function Get-PreparedReceiptMetadata {
     $transaction = Get-TransactionFields -Path $Path
     $safePath = $transaction.Path
     $fields = $transaction.Fields
+    $writerProofPath = if ($null -eq $fields['ACTIVE_WRITER_PROOF_PATH']) { '' } else { $fields['ACTIVE_WRITER_PROOF_PATH'] }
+    $writerProofSha256 = if ($null -eq $fields['ACTIVE_WRITER_PROOF_SHA256']) { '' } else { $fields['ACTIVE_WRITER_PROOF_SHA256'] }
+    $hasWriterProof = -not [string]::IsNullOrWhiteSpace($writerProofPath) -or -not [string]::IsNullOrWhiteSpace($writerProofSha256)
     $preparedProofPath = if ($null -eq $fields['PREPARED_WRITER_PROOF_PATH']) { '' } else { $fields['PREPARED_WRITER_PROOF_PATH'] }
     $preparedProofSha256 = if ($null -eq $fields['PREPARED_WRITER_PROOF_SHA256']) { '' } else { $fields['PREPARED_WRITER_PROOF_SHA256'] }
     $hasPreparedProofProvenance = -not [string]::IsNullOrWhiteSpace($preparedProofPath) -or -not [string]::IsNullOrWhiteSpace($preparedProofSha256)
-    if ($fields['TRANSACTION'] -ne 'PREPARED' -or [string]::IsNullOrWhiteSpace($fields['OPERATION']) -or [string]::IsNullOrWhiteSpace($fields['ORIGINAL_LEASE_SHA256']) -or [string]::IsNullOrWhiteSpace($fields['ARCHIVE_PATH']) -or ($hasPreparedProofProvenance -and ([string]::IsNullOrWhiteSpace($preparedProofPath) -or [string]::IsNullOrWhiteSpace($preparedProofSha256) -or $fields['RECOVERY_PROOF_REFRESH'] -ne 'true')) -or (-not $hasPreparedProofProvenance -and $null -ne $fields['RECOVERY_PROOF_REFRESH'])) {
+    if ($fields['TRANSACTION'] -ne 'PREPARED' -or [string]::IsNullOrWhiteSpace($fields['OPERATION']) -or [string]::IsNullOrWhiteSpace($fields['ORIGINAL_LEASE_SHA256']) -or [string]::IsNullOrWhiteSpace($fields['ARCHIVE_PATH']) -or ($hasWriterProof -and ([string]::IsNullOrWhiteSpace($writerProofPath) -or [string]::IsNullOrWhiteSpace($writerProofSha256))) -or ($fields['OPERATION'] -eq 'reclaim-orphan' -and ([string]::IsNullOrWhiteSpace($writerProofPath) -or [string]::IsNullOrWhiteSpace($writerProofSha256) -or $writerProofSha256 -notmatch '^[0-9a-fA-F]{64}$' -or $fields['ACTIVE_WRITER_COUNT'] -ne '0')) -or ($hasPreparedProofProvenance -and ([string]::IsNullOrWhiteSpace($preparedProofPath) -or [string]::IsNullOrWhiteSpace($preparedProofSha256) -or $fields['RECOVERY_PROOF_REFRESH'] -ne 'true')) -or (-not $hasPreparedProofProvenance -and $null -ne $fields['RECOVERY_PROOF_REFRESH'])) {
         throw 'WRITER_LEASE_PREPARED_RECEIPT_INVALID'
     }
     return [pscustomobject]@{
@@ -961,8 +964,8 @@ function Get-PreparedReceiptMetadata {
         Disposition = $fields['DISPOSITION']
         FinalPhase = $fields['FINAL_PHASE']
         WriterCount = $fields['ACTIVE_WRITER_COUNT']
-        WriterProofPath = if ($null -eq $fields['ACTIVE_WRITER_PROOF_PATH']) { '' } else { $fields['ACTIVE_WRITER_PROOF_PATH'] }
-        WriterProofSha256 = if ($null -eq $fields['ACTIVE_WRITER_PROOF_SHA256']) { '' } else { $fields['ACTIVE_WRITER_PROOF_SHA256'] }
+        WriterProofPath = $writerProofPath
+        WriterProofSha256 = $writerProofSha256
         PreparedWriterProofPath = $preparedProofPath
         PreparedWriterProofSha256 = $preparedProofSha256
         RecoveryProofRefreshed = $hasPreparedProofProvenance
@@ -976,10 +979,13 @@ function Get-FinalReceiptMetadata {
 
     $transaction = Get-TransactionFields -Path $Path
     $fields = $transaction.Fields
+    $writerProofPath = if ($null -eq $fields['ACTIVE_WRITER_PROOF_PATH']) { '' } else { $fields['ACTIVE_WRITER_PROOF_PATH'] }
+    $writerProofSha256 = if ($null -eq $fields['ACTIVE_WRITER_PROOF_SHA256']) { '' } else { $fields['ACTIVE_WRITER_PROOF_SHA256'] }
+    $hasWriterProof = -not [string]::IsNullOrWhiteSpace($writerProofPath) -or -not [string]::IsNullOrWhiteSpace($writerProofSha256)
     $preparedProofPath = if ($null -eq $fields['PREPARED_WRITER_PROOF_PATH']) { '' } else { $fields['PREPARED_WRITER_PROOF_PATH'] }
     $preparedProofSha256 = if ($null -eq $fields['PREPARED_WRITER_PROOF_SHA256']) { '' } else { $fields['PREPARED_WRITER_PROOF_SHA256'] }
     $hasPreparedProofProvenance = -not [string]::IsNullOrWhiteSpace($preparedProofPath) -or -not [string]::IsNullOrWhiteSpace($preparedProofSha256)
-    if ($fields['TRANSACTION'] -eq 'PREPARED' -or [string]::IsNullOrWhiteSpace($fields['DISPOSITION']) -or [string]::IsNullOrWhiteSpace($fields['OPERATION']) -or [string]::IsNullOrWhiteSpace($fields['ORIGINAL_LEASE_SHA256']) -or [string]::IsNullOrWhiteSpace($fields['ARCHIVED_LEASE_PATH']) -or [string]::IsNullOrWhiteSpace($fields['ARCHIVED_LEASE_SHA256']) -or [string]::IsNullOrWhiteSpace($fields['SCHEMA']) -or [string]::IsNullOrWhiteSpace($fields['GOAL']) -or [string]::IsNullOrWhiteSpace($fields['PHASE']) -or [string]::IsNullOrWhiteSpace($fields['FINAL_PHASE']) -or [string]::IsNullOrWhiteSpace($fields['ACTIVE_WRITER_COUNT']) -or $fields['LEASE_CONTENT_MODIFIED'] -ne 'false' -or ($hasPreparedProofProvenance -and ([string]::IsNullOrWhiteSpace($preparedProofPath) -or [string]::IsNullOrWhiteSpace($preparedProofSha256) -or $fields['RECOVERY_PROOF_REFRESH'] -ne 'true')) -or (-not $hasPreparedProofProvenance -and $null -ne $fields['RECOVERY_PROOF_REFRESH'])) {
+    if ($fields['TRANSACTION'] -eq 'PREPARED' -or [string]::IsNullOrWhiteSpace($fields['DISPOSITION']) -or [string]::IsNullOrWhiteSpace($fields['OPERATION']) -or [string]::IsNullOrWhiteSpace($fields['ORIGINAL_LEASE_SHA256']) -or [string]::IsNullOrWhiteSpace($fields['ARCHIVED_LEASE_PATH']) -or [string]::IsNullOrWhiteSpace($fields['ARCHIVED_LEASE_SHA256']) -or [string]::IsNullOrWhiteSpace($fields['SCHEMA']) -or [string]::IsNullOrWhiteSpace($fields['GOAL']) -or [string]::IsNullOrWhiteSpace($fields['PHASE']) -or [string]::IsNullOrWhiteSpace($fields['FINAL_PHASE']) -or [string]::IsNullOrWhiteSpace($fields['ACTIVE_WRITER_COUNT']) -or $fields['LEASE_CONTENT_MODIFIED'] -ne 'false' -or ($hasWriterProof -and ([string]::IsNullOrWhiteSpace($writerProofPath) -or [string]::IsNullOrWhiteSpace($writerProofSha256))) -or ($fields['OPERATION'] -eq 'reclaim-orphan' -and ([string]::IsNullOrWhiteSpace($writerProofPath) -or [string]::IsNullOrWhiteSpace($writerProofSha256) -or $writerProofSha256 -notmatch '^[0-9a-fA-F]{64}$' -or $fields['ACTIVE_WRITER_COUNT'] -ne '0')) -or ($hasPreparedProofProvenance -and ([string]::IsNullOrWhiteSpace($preparedProofPath) -or [string]::IsNullOrWhiteSpace($preparedProofSha256) -or $fields['RECOVERY_PROOF_REFRESH'] -ne 'true')) -or (-not $hasPreparedProofProvenance -and $null -ne $fields['RECOVERY_PROOF_REFRESH'])) {
         throw 'WRITER_LEASE_FINAL_RECEIPT_INVALID'
     }
     return [pscustomobject]@{
@@ -994,8 +1000,8 @@ function Get-FinalReceiptMetadata {
         Phase = $fields['PHASE']
         FinalPhase = $fields['FINAL_PHASE']
         WriterCount = $fields['ACTIVE_WRITER_COUNT']
-        WriterProofPath = if ($null -eq $fields['ACTIVE_WRITER_PROOF_PATH']) { '' } else { $fields['ACTIVE_WRITER_PROOF_PATH'] }
-        WriterProofSha256 = if ($null -eq $fields['ACTIVE_WRITER_PROOF_SHA256']) { '' } else { $fields['ACTIVE_WRITER_PROOF_SHA256'] }
+        WriterProofPath = $writerProofPath
+        WriterProofSha256 = $writerProofSha256
         PreparedWriterProofPath = $preparedProofPath
         PreparedWriterProofSha256 = $preparedProofSha256
         RecoveryProofRefreshed = $hasPreparedProofProvenance
@@ -1446,9 +1452,19 @@ switch ($Operation) {
             if (-not $sourceExists -and -not $archiveExists) {
                 throw 'WRITER_LEASE_PREPARED_TRANSACTION_UNRECOVERABLE_NO_LEASE'
             }
-            if ($null -ne $transactionReceipt -and $transactionReceipt.RecoveryProofRefreshed -and -not $receiptAlreadyFinal) {
-                $externalMatchesRefreshedMarker = $preparedReceipt.WriterProofPath -eq $transactionReceipt.WriterProofPath -and $preparedReceipt.WriterProofSha256 -eq $transactionReceipt.WriterProofSha256 -and $preparedReceipt.RecoveryProofRefreshed -and $preparedReceipt.PreparedWriterProofPath -eq $transactionReceipt.PreparedWriterProofPath -and $preparedReceipt.PreparedWriterProofSha256 -eq $transactionReceipt.PreparedWriterProofSha256
-                if (-not $externalMatchesRefreshedMarker -and -not $sourceExists) {
+            if (-not $sourceExists -and $null -eq $transactionReceipt -and $PreparedOperation -eq 'ReclaimOrphan') {
+                throw 'WRITER_LEASE_PREPARED_TRANSACTION_MARKER_MISSING'
+            }
+            if ($null -ne $transactionReceipt -and -not $receiptAlreadyFinal) {
+                $externalMetadataMatchesMarker = $preparedReceipt.Disposition -eq $transactionReceipt.Disposition -and $preparedReceipt.FinalPhase -eq $transactionReceipt.FinalPhase -and $preparedReceipt.WriterCount -eq $transactionReceipt.WriterCount -and $preparedReceipt.LegacyFormat -eq $transactionReceipt.LegacyFormat
+                if (-not [string]::IsNullOrWhiteSpace($transactionReceipt.ReceiptPath)) {
+                    $externalMetadataMatchesMarker = $externalMetadataMatchesMarker -and -not [string]::IsNullOrWhiteSpace($preparedReceipt.ReceiptPath) -and [string]::Equals((Get-FullPath -Path $preparedReceipt.ReceiptPath), (Get-FullPath -Path $transactionReceipt.ReceiptPath), [StringComparison]::OrdinalIgnoreCase)
+                }
+                if (-not $externalMetadataMatchesMarker) {
+                    throw 'WRITER_LEASE_PREPARED_RECEIPT_IDENTITY_MISMATCH'
+                }
+                $externalProofBindingMatchesMarker = $preparedReceipt.WriterProofPath -eq $transactionReceipt.WriterProofPath -and $preparedReceipt.WriterProofSha256 -eq $transactionReceipt.WriterProofSha256 -and $preparedReceipt.RecoveryProofRefreshed -eq $transactionReceipt.RecoveryProofRefreshed -and $preparedReceipt.PreparedWriterProofPath -eq $transactionReceipt.PreparedWriterProofPath -and $preparedReceipt.PreparedWriterProofSha256 -eq $transactionReceipt.PreparedWriterProofSha256
+                if (-not $externalProofBindingMatchesMarker -and -not $sourceExists) {
                     throw 'WRITER_LEASE_PREPARED_RECOVERY_PROOF_MISMATCH'
                 }
             }

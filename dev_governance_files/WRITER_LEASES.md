@@ -94,7 +94,10 @@ refuses that marker even when the original lease pathname has disappeared, at
 the same task root or a conflicting recorded scope.
 The operation then creates a `TRANSACTION=PREPARED` receipt that
 binds the operation, original digest, archive path, final disposition, final
-phase, writer count, and any writer proof. It atomically replaces that receipt
+phase, writer count, and any writer proof. Every `reclaim-orphan` PREPARED and
+final receipt must contain a complete hash-shaped zero-writer proof pair and
+`ACTIVE_WRITER_COUNT=0`; missing proof fields are invalid, not equivalent to a
+matching blank. It atomically replaces that receipt
 with the final receipt only after the exact opened source file has been renamed,
 then atomically converts the task-root marker to `TRANSACTION=FINALIZED`.
 `RecoverPrepared` revalidates all expected lease identities and, for an orphan
@@ -107,7 +110,10 @@ the durable PREPARED marker and prepared receipt. Once the source lease is
 already archived, the matching marker-bound proof is historical transaction
 evidence: final-marker recovery validates the final receipt, archive, proof
 binding, provenance, schema, Goal, and source phase without requiring the old
-proof to remain temporally fresh. It either resumes the exact archive or
+proof to remain temporally fresh. An archived nonlegacy reclaim requires exact
+task-marker/receipt agreement for disposition, final phase, writer count,
+current proof, refresh state, and provenance; mismatch repair is permitted only
+while the source lease remains present and a fresh proof has passed. It either resumes the exact archive or
 finalizes the already-verified archived bytes. A legacy prepared record created
 by an earlier tool build requires explicit final phase and disposition; it is
 accepted only through `RecoverPrepared` and is immediately converted to the
