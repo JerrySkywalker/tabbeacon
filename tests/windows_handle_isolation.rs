@@ -17,8 +17,9 @@ use serde_json::{Value, json};
 use tabbeacon::activity::{
     ACTIVITY_OBSERVER_PROBE_PROCESS_FILE, ACTIVITY_WORKER_PROBE_PROCESS_FILE,
     ACTIVITY_WORKER_PROBE_RECEIPT_ENV, ACTIVITY_WORKER_PROBE_RECEIPT_FILE,
-    ACTIVITY_WORKER_PROBE_STARTED_FILE,
+    ACTIVITY_WORKER_PROBE_RESULT_READY_FILE, ACTIVITY_WORKER_PROBE_STARTED_FILE,
 };
+use tabbeacon::worker_runtime::WorkerRuntimeStore;
 use windows::Win32::{
     Foundation::{
         CloseHandle, ERROR_BROKEN_PIPE, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS,
@@ -31,8 +32,10 @@ use windows::core::HRESULT;
 
 // This is an OS-fixture watchdog, not the Codex Hook declaration. Keep it
 // long enough to observe handle/EOF correctness even on a saturated Windows
-// host where process scheduling itself can exceed the product timeout.
-const STAGE_TIMEOUT: Duration = Duration::from_mins(1);
+// host where first execution of a newly built debug worker image can spend
+// minutes in system process-start inspection. Release-mode Hook timing has a
+// separate one-second acceptance gate; this watchdog must not impersonate it.
+const STAGE_TIMEOUT: Duration = Duration::from_mins(5);
 static TEST_ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct TestRoot(PathBuf);
@@ -280,6 +283,12 @@ fn hook_payload(event: &str, session: &str, turn: Option<&str>, cwd: &Path) -> V
     .expect("Hook payload serializes")
 }
 
+fn prewarm_worker_runtime(local_app_data: &Path, executable: &Path) {
+    WorkerRuntimeStore::new(local_app_data.join("TabBeacon").join("repository-identity"))
+        .publish(executable)
+        .expect("setup-prewarmed immutable worker image publishes");
+}
+
 #[test]
 fn worker_and_observer_exclude_ambient_handles_and_release_runner_streams() {
     let root = TestRoot::new();
@@ -310,6 +319,7 @@ fn worker_and_observer_exclude_ambient_handles_and_release_runner_streams() {
         ),
     )
     .expect("isolated settings are written");
+    prewarm_worker_runtime(&local_app_data, &executable);
     let terminal_session = "00000000-0000-0000-0000-000000000063";
     let probe_receipt = local_app_data.join(ACTIVITY_WORKER_PROBE_RECEIPT_FILE);
 
@@ -407,6 +417,7 @@ fn root_stop_publishes_a_bounded_static_result_ready_worker() {
         ),
     )
     .expect("isolated settings are written");
+    prewarm_worker_runtime(&local_app_data, &executable);
     let terminal_session = "00000000-0000-0000-0000-000000000072";
     let probe_receipt = local_app_data.join(ACTIVITY_WORKER_PROBE_RECEIPT_FILE);
 
@@ -454,9 +465,17 @@ fn root_stop_publishes_a_bounded_static_result_ready_worker() {
         "Stop",
     );
 
-    wait_for_file(&local_app_data.join(ACTIVITY_WORKER_PROBE_PROCESS_FILE));
-    wait_for_file(&local_app_data.join(ACTIVITY_OBSERVER_PROBE_PROCESS_FILE));
-    wait_for_file(&local_app_data.join(ACTIVITY_WORKER_PROBE_STARTED_FILE));
+    wait_for_file(&local_app_data.join(ACTIVITY_WORKER_PROBE_RESULT_READY_FILE));
+    for marker in [
+        ACTIVITY_WORKER_PROBE_PROCESS_FILE,
+        ACTIVITY_OBSERVER_PROBE_PROCESS_FILE,
+        ACTIVITY_WORKER_PROBE_STARTED_FILE,
+    ] {
+        assert!(
+            !local_app_data.join(marker).exists(),
+            "ResultReady handoff must reuse the existing worker, marker={marker}"
+        );
+    }
     let sessions = Command::new(&executable)
         .args(["sessions", "--json"])
         .env("LOCALAPPDATA", &local_app_data)

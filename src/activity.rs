@@ -57,6 +57,9 @@ pub const ACTIVITY_WORKER_PROBE_RECEIPT_FILE: &str = "activity-worker-probe.json
 /// Required basename for the non-content worker-start marker used when a
 /// probe must distinguish a spawn failure from a missing rendered frame.
 pub const ACTIVITY_WORKER_PROBE_STARTED_FILE: &str = "activity-worker-probe-started.json";
+/// Required basename for the content-minimal proof that the existing worker
+/// rendered a lease transition to static `ResultReady`.
+pub const ACTIVITY_WORKER_PROBE_RESULT_READY_FILE: &str = "activity-worker-probe-result-ready.json";
 /// Required basename for the non-content process-entry marker used by the
 /// isolated MCP activity probe.
 pub const ACTIVITY_WORKER_PROBE_PROCESS_FILE: &str = "activity-worker-probe-process.json";
@@ -161,6 +164,22 @@ impl ActivityWorkerProbeCapture {
         {
             self.published = true;
         }
+    }
+
+    fn record_result_ready_frame(&self) {
+        let path = self
+            .path
+            .with_file_name(ACTIVITY_WORKER_PROBE_RESULT_READY_FILE);
+        let Ok(file) = OpenOptions::new().write(true).create_new(true).open(path) else {
+            return;
+        };
+        let _ = serde_json::to_writer(
+            file,
+            &serde_json::json!({
+                "schema": "tabbeacon-activity-worker-probe-v1",
+                "result_ready_rendered": true,
+            }),
+        );
     }
 }
 
@@ -724,6 +743,15 @@ impl WorkerPresentation {
             _ => LEASE_TTL_MS,
         }
     }
+
+    fn can_handoff_working_to_result_ready(&self, next: &Self) -> bool {
+        self.semantic_state == "working"
+            && next.semantic_state == "result-ready"
+            && self.workspace_alias == next.workspace_alias
+            && self.provider == next.provider
+            && self.provider_identity_visible == next.provider_identity_visible
+            && self.spinner_preset == next.spinner_preset
+    }
 }
 
 /// Returns a persistent worker presentation only for events that may spend
@@ -949,6 +977,12 @@ impl ActivityCoordinator {
                 Ok(Some(LeaseTransition::AlreadyActive)) => {
                     return (already_active_worker_render(), timing);
                 }
+                Ok(Some(LeaseTransition::UpdatedActive)) => {
+                    // The one-shot Hook emits the complete ResultReady frame.
+                    // The same working worker observes the in-place update on
+                    // its next bounded animation tick.
+                    return (ActivityRender::Full, timing);
+                }
                 Ok(None) => {}
                 Ok(Some(LeaseTransition::Published { .. } | LeaseTransition::Stopped { .. })) => {
                     unreachable!("existing runtime refresh only returns stale or active")
@@ -977,6 +1011,9 @@ impl ActivityCoordinator {
             match transition {
                 LeaseTransition::Stale => (ActivityRender::Suppress, timing),
                 LeaseTransition::AlreadyActive => (already_active_worker_render(), timing),
+                LeaseTransition::UpdatedActive => {
+                    unreachable!("publication cannot update an active worker in place")
+                }
                 LeaseTransition::Published { lease, .. } => {
                     // Publishing this lease atomically revokes the predecessor.
                     // It is safe to start the successor immediately because
@@ -1029,7 +1066,9 @@ impl ActivityCoordinator {
                 // A stopped predecessor has already been atomically revoked.
                 // Do not spend the synchronous Hook budget observing its exit.
                 LeaseTransition::Stopped { .. } => (ActivityRender::Full, timing),
-                LeaseTransition::AlreadyActive | LeaseTransition::Published { .. } => {
+                LeaseTransition::AlreadyActive
+                | LeaseTransition::UpdatedActive
+                | LeaseTransition::Published { .. } => {
                     unreachable!("stop publication cannot return an active transition")
                 }
             }
@@ -1425,6 +1464,7 @@ fn cleanup_observer_action(
 enum LeaseTransition {
     Stale,
     AlreadyActive,
+    UpdatedActive,
     Published {
         lease: Box<WorkerLease>,
         predecessor: Option<WorkerOwnership>,
@@ -1545,15 +1585,25 @@ impl ActivityLeaseStore {
                 || current.generation != key.generation
                 || current.owner_sha256 != owner_sha256
                 || current.runtime_image_sha256.is_none()
-                || current.presentation.as_ref() != Some(presentation)
             {
                 return Ok(None);
             }
+            let transition =
+                if current.presentation.as_ref() == Some(presentation) {
+                    LeaseTransition::AlreadyActive
+                } else if current.presentation.as_ref().is_some_and(|current| {
+                    current.can_handoff_working_to_result_ready(presentation)
+                }) {
+                    current.presentation = Some(presentation.clone());
+                    LeaseTransition::UpdatedActive
+                } else {
+                    return Ok(None);
+                };
             current.event_sequence = current.event_sequence.max(event_sequence);
             current.updated_unix_ms = now;
             current.expires_unix_ms = expires_unix_ms;
             self.write(&current)?;
-            Ok(Some(LeaseTransition::AlreadyActive))
+            Ok(Some(transition))
         })
     }
 
@@ -1728,18 +1778,14 @@ impl ActivityLeaseStore {
         else {
             return;
         };
-        let Some(presentation) = initial.presentation.clone() else {
+        let Some(presentation) = initial.presentation.as_ref() else {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
             return;
         };
-        let Some(spinner) = presentation.spinner() else {
+        if presentation.spinner().is_none() || presentation.semantic_input().is_none() {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
             return;
-        };
-        let Some((phase, attention)) = presentation.semantic_input() else {
-            let _ = self.deactivate_if_owned(&initial, unix_ms());
-            return;
-        };
+        }
         let mut probe = ActivityWorkerProbeCapture::from_environment();
         let Ok(mut console) = open_owned_console(probe.is_some()) else {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
@@ -1756,46 +1802,53 @@ impl ActivityLeaseStore {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
             return;
         }
-        let settings = PresentationSettings::new(
-            TitleMode::TabBeacon,
-            TabColorMode::Off,
-            ActivityMode::TitleSpinner,
-            spinner,
-            PresentationTheme::MutedDark,
-        );
-        let renderer = WindowsTerminalRenderer::with_settings(
-            WindowsTerminalCapabilities::new(false),
-            settings,
-        );
-        let action = presentation.presentation_action(phase, attention);
-        let state = match &action {
-            PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
-        };
         let mut frame_index = 0_usize;
         let mut next_frame_deadline = Instant::now();
-        let animated = presentation.semantic_state == "working";
-        loop {
-            let bytes = renderer.render_title_spinner_frame(state, frame_index);
+        while let Ok(Some((bytes, animated))) = self.with_lock(|| {
             // Keep lease validation and the terminal write in one critical section:
             // a newer event cannot supersede this worker between its authorization
             // check and the title write.
-            match self.with_lock(|| {
-                let Some(_) =
-                    self.load_worker_lease_locked(&ownership, terminal_binding_sha256, unix_ms())?
-                else {
-                    return Ok(None);
-                };
-                console.write_all(&bytes)?;
-                console.flush()?;
-                Ok(Some(()))
-            }) {
-                Ok(Some(())) => {}
-                Ok(None) | Err(_) => break,
-            }
+            let Some(lease) =
+                self.load_worker_lease_locked(&ownership, terminal_binding_sha256, unix_ms())?
+            else {
+                return Ok(None);
+            };
+            let Some(presentation) = lease.presentation.as_ref() else {
+                return Ok(None);
+            };
+            let Some(spinner) = presentation.spinner() else {
+                return Ok(None);
+            };
+            let Some((phase, attention)) = presentation.semantic_input() else {
+                return Ok(None);
+            };
+            let settings = PresentationSettings::new(
+                TitleMode::TabBeacon,
+                TabColorMode::Off,
+                ActivityMode::TitleSpinner,
+                spinner,
+                PresentationTheme::MutedDark,
+            );
+            let renderer = WindowsTerminalRenderer::with_settings(
+                WindowsTerminalCapabilities::new(false),
+                settings,
+            );
+            let action = presentation.presentation_action(phase, attention);
+            let state = match &action {
+                PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
+            };
+            let bytes = renderer.render_title_spinner_frame(state, frame_index);
+            console.write_all(&bytes)?;
+            console.flush()?;
+            Ok(Some((bytes, presentation.semantic_state == "working")))
+        }) {
             if let Some(probe) = probe.as_mut() {
                 // The recorder runs only after the real owned-console write
-                // and flush succeeded. It stores no rendered title content.
+                // and flush succeeded. It stores no title text.
                 probe.record_frame(&bytes);
+                if !animated {
+                    probe.record_result_ready_frame();
+                }
             }
             frame_index = frame_index.saturating_add(1);
             if animated {
@@ -3544,6 +3597,51 @@ mod tests {
             .expect("stopped lease reads")
             .expect("stopped lease exists");
         assert!(!stopped.active);
+    }
+
+    #[test]
+    fn result_ready_reuses_the_generation_matched_working_worker() {
+        let root = TestRoot::new("result-ready-worker-handoff");
+        let store = ActivityLeaseStore::new(&root.0);
+        let key = key(7, 'a', 'c');
+        let owner = digest('d');
+        let runtime_image = digest('e');
+        let working = presentation();
+        let result = WorkerPresentation::result_ready("OWH", SpinnerPreset::Braille);
+        let LeaseTransition::Published { lease: initial, .. } = store
+            .publish_active_with_runtime_image(
+                &key,
+                10,
+                &owner,
+                Some(&runtime_image),
+                &working,
+                1_000,
+            )
+            .expect("working worker publishes")
+        else {
+            panic!("working worker must publish");
+        };
+
+        let transition = store
+            .refresh_runtime_backed_active_if_current(&key, 11, &owner, &result, 1_100)
+            .expect("result handoff reconciles");
+        assert_eq!(
+            transition,
+            Some(LeaseTransition::UpdatedActive),
+            "ResultReady must reuse the exact current working worker rather than synchronously spawning a successor"
+        );
+        let updated = store
+            .load(key.digest())
+            .expect("updated lease reads")
+            .expect("updated lease exists");
+        assert_eq!(updated.revision, initial.revision);
+        assert_eq!(updated.presentation.as_ref(), Some(&result));
+        assert_eq!(
+            updated
+                .expires_unix_ms
+                .saturating_sub(updated.updated_unix_ms),
+            STATIC_ATTENTION_LEASE_TTL_MS
+        );
     }
 
     #[test]
