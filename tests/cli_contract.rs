@@ -86,6 +86,14 @@ fn isolated_command(root: &TestRoot) -> Command {
     command
 }
 
+fn isolated_command_without_external_providers(root: &TestRoot) -> Command {
+    let provider_free_path = root.child("provider-free-path");
+    fs::create_dir_all(&provider_free_path).expect("provider-free PATH creates");
+    let mut command = isolated_command(root);
+    command.env("PATH", provider_free_path);
+    command
+}
+
 fn isolated_command_with_codex(root: &TestRoot, codex_directory: &Path) -> Command {
     let mut command = isolated_command(root);
     let path = env::join_paths([codex_directory, inherited_path()])
@@ -716,11 +724,11 @@ fn hooks_cli_is_machine_stable_localized_for_humans_and_never_reveals_commands()
 fn machine_transports_are_locale_independent() {
     let root = TestRoot::new("localized-human-output");
 
-    let status_json_en = isolated_command(&root)
+    let status_json_en = isolated_command_without_external_providers(&root)
         .args(["status", "--json", "--lang", "en-US"])
         .output()
         .expect("English JSON status starts");
-    let status_json_zh = isolated_command(&root)
+    let status_json_zh = isolated_command_without_external_providers(&root)
         .args(["status", "--json", "--lang", "zh-CN"])
         .output()
         .expect("Chinese JSON status starts");
@@ -734,11 +742,11 @@ fn machine_transports_are_locale_independent() {
         "machine JSON must not depend on Human locale"
     );
 
-    let status_plain_en = isolated_command(&root)
+    let status_plain_en = isolated_command_without_external_providers(&root)
         .args(["status", "--plain", "--lang", "en-US"])
         .output()
         .expect("English plain status starts");
-    let status_plain_zh = isolated_command(&root)
+    let status_plain_zh = isolated_command_without_external_providers(&root)
         .args(["status", "--plain", "--lang", "zh-CN"])
         .output()
         .expect("Chinese plain status starts");
@@ -747,11 +755,11 @@ fn machine_transports_are_locale_independent() {
         "legacy key/value output must not depend on Human locale"
     );
 
-    let doctor_plain_en = isolated_command(&root)
+    let doctor_plain_en = isolated_command_without_external_providers(&root)
         .args(["doctor", "--plain", "--lang", "en-US"])
         .output()
         .expect("English plain doctor starts");
-    let doctor_plain_zh = isolated_command(&root)
+    let doctor_plain_zh = isolated_command_without_external_providers(&root)
         .args(["doctor", "--plain", "--lang", "zh-CN"])
         .output()
         .expect("Chinese plain doctor starts");
@@ -760,11 +768,11 @@ fn machine_transports_are_locale_independent() {
         "plain doctor receipts must not depend on Human locale"
     );
 
-    let doctor_json_en = isolated_command(&root)
+    let doctor_json_en = isolated_command_without_external_providers(&root)
         .args(["doctor", "--json", "--lang", "en-US"])
         .output()
         .expect("English JSON doctor starts");
-    let doctor_json_zh = isolated_command(&root)
+    let doctor_json_zh = isolated_command_without_external_providers(&root)
         .args(["doctor", "--json", "--lang", "zh-CN"])
         .output()
         .expect("Chinese JSON doctor starts");
@@ -776,11 +784,11 @@ fn machine_transports_are_locale_independent() {
         "doctor JSON must not depend on Human locale"
     );
 
-    let sessions_json_en = isolated_command(&root)
+    let sessions_json_en = isolated_command_without_external_providers(&root)
         .args(["sessions", "--json", "--lang", "en-US"])
         .output()
         .expect("English JSON sessions starts");
-    let sessions_json_zh = isolated_command(&root)
+    let sessions_json_zh = isolated_command_without_external_providers(&root)
         .args(["sessions", "--json", "--lang", "zh-CN"])
         .output()
         .expect("Chinese JSON sessions starts");
@@ -792,11 +800,11 @@ fn machine_transports_are_locale_independent() {
         "sessions JSON must not depend on Human locale"
     );
 
-    let sessions_plain_en = isolated_command(&root)
+    let sessions_plain_en = isolated_command_without_external_providers(&root)
         .args(["sessions", "--plain", "--lang", "en-US"])
         .output()
         .expect("English plain sessions starts");
-    let sessions_plain_zh = isolated_command(&root)
+    let sessions_plain_zh = isolated_command_without_external_providers(&root)
         .args(["sessions", "--plain", "--lang", "zh-CN"])
         .output()
         .expect("Chinese plain sessions starts");
@@ -805,11 +813,11 @@ fn machine_transports_are_locale_independent() {
         "sessions plain receipts must not depend on Human locale"
     );
 
-    let config_plain_en = isolated_command(&root)
+    let config_plain_en = isolated_command_without_external_providers(&root)
         .args(["config", "show", "--plain", "--lang", "en-US"])
         .output()
         .expect("English plain config starts");
-    let config_plain_zh = isolated_command(&root)
+    let config_plain_zh = isolated_command_without_external_providers(&root)
         .args(["config", "show", "--plain", "--lang", "zh-CN"])
         .output()
         .expect("Chinese plain config starts");
