@@ -119,8 +119,10 @@ by an earlier tool build requires explicit final phase and disposition; it is
 accepted only through `RecoverPrepared` and is immediately converted to the
 current final receipt. If an interruption leaves a current task marker beside
 that legacy Settle receipt while the source lease still exists, recovery admits
-only matching explicit caller disposition/final phase, upgrades the receipt
-atomically, and then archives; it never relaxes reclaim proof requirements or
+only a proofless legacy external receipt paired with a current proofless marker
+whose `N/A` writer count and explicit caller disposition/final phase match;
+it upgrades the receipt atomically, and then archives. It never relaxes reclaim
+proof requirements, admits a reversed legacy-marker/current-receipt state, or
 repairs an archived mixed state. No state needs a manual JSON rewrite to recover.
 
 ## Owner break-glass

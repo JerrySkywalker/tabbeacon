@@ -609,6 +609,50 @@ try {
     Assert-True -Condition ((Get-Content -LiteralPath $legacyMixedFixture.ReceiptPath -Raw).IndexOf('DISPOSITION=SETTLED_TEST_LEGACY_MIXED', [StringComparison]::Ordinal) -ge 0) -Message 'mixed legacy Settle receipt was not upgraded'
     'WRITER_LEASE_TEST_LEGACY_SETTLE_MIXED_PREPARED_RECOVERY=PASS'
 
+    # The reverse mixed state is unsafe: a legacy marker cannot authorize a
+    # current external receipt with a substituted disposition/final phase.
+    $legacyReversedFixture = New-FixtureLease -Name 'legacy-settle-reversed-marker'
+    New-ArchiveRoot -Fixture $legacyReversedFixture
+    $legacyReversedDigest = Get-Digest -Path $legacyReversedFixture.LeasePath
+    $legacyReversedMarker = Join-Path $legacyReversedFixture.Root 'writer-lease.transaction.v1.txt'
+    $legacyReversedMarkerContent = @(
+        'TRANSACTION=PREPARED',
+        'OPERATION=settle',
+        ('ORIGINAL_LEASE_SHA256=' + $legacyReversedDigest),
+        ('ARCHIVE_PATH=' + $legacyReversedFixture.ArchivePath),
+        ('RECEIPT_PATH=' + $legacyReversedFixture.ReceiptPath),
+        ('REPOSITORY=' + $legacyReversedFixture.Repository),
+        ('WORKTREE=' + $legacyReversedFixture.Worktree),
+        ('BRANCH=' + $legacyReversedFixture.Branch),
+        'DISPOSITION=SETTLED_TEST_LEGACY_MARKER',
+        'FINAL_PHASE=SETTLED_TEST_LEGACY_MARKER'
+    ) -join [Environment]::NewLine
+    $legacyReversedCurrentReceipt = @(
+        'TRANSACTION=PREPARED',
+        'OPERATION=settle',
+        ('ORIGINAL_LEASE_SHA256=' + $legacyReversedDigest),
+        ('ARCHIVE_PATH=' + $legacyReversedFixture.ArchivePath),
+        ('RECEIPT_PATH=' + $legacyReversedFixture.ReceiptPath),
+        ('REPOSITORY=' + $legacyReversedFixture.Repository),
+        ('WORKTREE=' + $legacyReversedFixture.Worktree),
+        ('BRANCH=' + $legacyReversedFixture.Branch),
+        'DISPOSITION=SETTLED_TEST_SUBSTITUTED_RECEIPT',
+        'FINAL_PHASE=SETTLED_TEST_SUBSTITUTED_RECEIPT',
+        'ACTIVE_WRITER_COUNT=N/A'
+    ) -join [Environment]::NewLine
+    [IO.File]::WriteAllText($legacyReversedMarker, $legacyReversedMarkerContent + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($legacyReversedFixture.ReceiptPath, $legacyReversedCurrentReceipt + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $legacyReversedIdentity = Get-IdentityArguments -Fixture $legacyReversedFixture -Digest $legacyReversedDigest
+    Assert-ToolFails -ToolArguments (@('-Operation', 'RecoverPrepared', '-PreparedOperation', 'Settle', '-LeasePath', $legacyReversedFixture.LeasePath) + $legacyReversedIdentity + @(
+        '-ArchiveRoot', $legacyReversedFixture.ArchiveRoot,
+        '-ArchivePath', $legacyReversedFixture.ArchivePath,
+        '-ReceiptPath', $legacyReversedFixture.ReceiptPath,
+        '-FinalPhase', 'SETTLED_TEST_LEGACY_MARKER',
+        '-Disposition', 'SETTLED_TEST_LEGACY_MARKER'
+    )) -ExpectedToken 'WRITER_LEASE_PREPARED_RECEIPT_IDENTITY_MISMATCH'
+    [IO.File]::WriteAllText($legacyReversedMarker, $legacyReversedCurrentReceipt + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    'WRITER_LEASE_TEST_LEGACY_SETTLE_REVERSED_STATE_BLOCKED=PASS'
+
     $finalizeFixture = New-FixtureLease -Name 'prepared-finalize'
     New-ArchiveRoot -Fixture $finalizeFixture
     $finalizeBytes = [IO.File]::ReadAllBytes($finalizeFixture.LeasePath)
