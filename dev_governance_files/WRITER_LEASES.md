@@ -25,8 +25,8 @@ machine-readable JSON result on success. `RecoverPrepared` is only for the
 durable `TRANSACTION=PREPARED` state left by an interrupted tool operation; it
 is not an alternate way to settle an ordinary active lease.
 
-The tool creates a lease with atomic create, serializes tool mutations with a
-lease-specific OS mutex, rechecks the exact digest immediately before archive,
+The tool creates a lease with atomic create, serializes acquire, settle, reclaim,
+and recovery through the same lease-specific OS mutex, rechecks the exact digest immediately before archive,
 rejects reparse-point paths, and refuses to replace an existing lease, archive,
 or receipt. Archive moves read and rename the exact opened source file and use
 an already-open, identity-checked archive-directory handle; there is no
@@ -81,12 +81,18 @@ original bytes and writes a receipt; it never edits the lease to mark it closed.
 
 Leases are first flushed to an adjacent unique staging name and then atomically
 published, so interruption cannot leave a partial canonical JSON lease that
-blocks recovery. Settlement first creates a `TRANSACTION=PREPARED` receipt that
+blocks recovery. Settlement first creates a durable task-root
+`writer-lease.transaction.v1.txt` marker with `TRANSACTION=PREPARED`; acquire
+refuses that marker even when the original lease pathname has disappeared.
+The operation then creates a `TRANSACTION=PREPARED` receipt that
 binds the operation, original digest, archive path, final disposition, final
 phase, writer count, and any writer proof. It atomically replaces that receipt
-with the final receipt only after the exact opened source file has been renamed.
+with the final receipt only after the exact opened source file has been renamed,
+then atomically converts the task-root marker to `TRANSACTION=FINALIZED`.
 `RecoverPrepared` revalidates all expected lease identities and, for orphan
-reclaims, repeats the fresh writer proof. It either resumes the exact archive or
+reclaims, requires a fresh replacement writer proof if the original proof has
+expired. The original proof remains durable provenance; the final receipt records
+the fresh proof used to complete recovery. It either resumes the exact archive or
 finalizes the already-verified archived bytes. A legacy prepared record created
 by an earlier tool build requires explicit final phase and disposition; it is
 accepted only through `RecoverPrepared` and is immediately converted to the
@@ -110,7 +116,9 @@ fully proven `ReclaimOrphan`; otherwise stop for the required Owner decision.
 ## Validation
 
 Run `scripts/ci/test-tabbeacon-writer-lease.ps1` after any lifecycle-tool change.
-It covers normal acquire/settle, second-acquire refusal, exact orphan reclaim,
+It covers normal acquire/settle, second-acquire refusal, prepared-acquire refusal,
+exact orphan reclaim,
 digest/phase/holder/drift/reparse/collision rejection, byte preservation,
 prepared-transaction resume/finalization, receipt generation, fresh acquire
-after recovery, and normal closure without an active holderless lease.
+after recovery, normal closure without an active holderless lease, and cleanup of
+all active v1 test fixtures.

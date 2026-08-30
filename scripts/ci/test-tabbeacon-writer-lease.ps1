@@ -19,6 +19,7 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($branch) -or $sourceHea
 
 $testRoot = 'V:\build\tabbeacon'
 $testPrefix = 'TB-WRITER-LEASE-TEST-' + [Guid]::NewGuid().ToString('N')
+$script:fixtureLedger = @()
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -130,7 +131,7 @@ function New-FixtureLease {
         $lease.holder = $Holder
     }
     [IO.File]::WriteAllText($leasePath, (($lease | ConvertTo-Json -Depth 3) + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
-    return [pscustomobject]@{
+    $fixture = [pscustomobject]@{
         Root = $root
         LeasePath = $leasePath
         ArchiveRoot = (Join-Path $root 'archive')
@@ -144,6 +145,8 @@ function New-FixtureLease {
         Branch = $fixtureBranch
         SourceHead = $sourceHead
     }
+    $script:fixtureLedger += $fixture
+    return $fixture
 }
 
 function Get-IdentityArguments {
@@ -205,6 +208,43 @@ function New-ArchiveRoot {
     New-Item -ItemType Directory -Path $Fixture.ArchiveRoot -ErrorAction Stop | Out-Null
 }
 
+function Settle-FixtureForTestCleanup {
+    param($Fixture)
+
+    if (-not (Test-Path -LiteralPath $Fixture.LeasePath -PathType Leaf)) {
+        return
+    }
+    $lease = Get-Content -LiteralPath $Fixture.LeasePath -Raw | ConvertFrom-Json -ErrorAction Stop
+    if ($lease.schema -ne 'tabbeacon-writer-lease.v1') {
+        return
+    }
+    $cleanupRoot = Join-Path $Fixture.Root 'cleanup-archive'
+    if (-not (Test-Path -LiteralPath $cleanupRoot -PathType Container)) {
+        New-Item -ItemType Directory -Path $cleanupRoot -ErrorAction Stop | Out-Null
+    }
+    $cleanupFixture = [pscustomobject]@{
+        LeasePath = $Fixture.LeasePath
+        ArchiveRoot = $cleanupRoot
+        ArchivePath = (Join-Path $cleanupRoot 'writer-lease.test-cleanup.v1.json')
+        ReceiptPath = (Join-Path $cleanupRoot 'test-cleanup-receipt.txt')
+        Goal = $lease.goal_id
+        Phase = $lease.state
+        Schema = $lease.schema
+        Repository = $lease.repository
+        Worktree = $lease.worktree
+        Branch = $lease.branch
+        SourceHead = $lease.start_remote_main
+    }
+    $identity = Get-IdentityArguments -Fixture $cleanupFixture -Digest (Get-Digest -Path $cleanupFixture.LeasePath)
+    [void](Invoke-ToolJson -ToolArguments (@('-Operation', 'Settle', '-LeasePath', $cleanupFixture.LeasePath) + $identity + @(
+        '-ArchiveRoot', $cleanupFixture.ArchiveRoot,
+        '-ArchivePath', $cleanupFixture.ArchivePath,
+        '-ReceiptPath', $cleanupFixture.ReceiptPath,
+        '-FinalPhase', 'SETTLED_TEST_FIXTURE_CLEANUP',
+        '-Disposition', 'SETTLED_TEST_FIXTURE_CLEANUP'
+    )))
+}
+
 try {
     # 1-3 and 14: atomic acquire, second acquire refusal, exact settle, and no active holderless normal lease.
     $normalRoot = Join-Path $testRoot ($testPrefix + '-normal')
@@ -259,6 +299,25 @@ try {
     Assert-True -Condition ((Get-Content -LiteralPath $normalFixture.ReceiptPath -Raw).IndexOf('DISPOSITION=SETTLED_TEST_NORMAL', [StringComparison]::Ordinal) -ge 0) -Message 'normal settle receipt missing'
     $normalStatus = Invoke-ToolJson -ToolArguments @('-Operation', 'Status', '-LeasePath', $normalLease)
     Assert-True -Condition ((-not $normalStatus.exists) -and (-not $normalStatus.active_holderless)) -Message 'normal lifecycle left active holderless lease'
+    $normalTransaction = Join-Path $normalRoot 'writer-lease.transaction.v1.txt'
+    Assert-True -Condition ((Get-Content -LiteralPath $normalTransaction -Raw).IndexOf('TRANSACTION=FINALIZED', [StringComparison]::Ordinal) -ge 0) -Message 'normal settlement did not finalize its task transaction marker'
+
+    # A durable transaction marker blocks Acquire even when the source pathname
+    # is absent, preventing a new writer from bypassing interrupted recovery.
+    $pendingRoot = Join-Path $testRoot ($testPrefix + '-prepared-acquire-block')
+    New-Item -ItemType Directory -Path $pendingRoot -ErrorAction Stop | Out-Null
+    $pendingLease = Join-Path $pendingRoot 'writer-lease.json'
+    $pendingTransaction = Join-Path $pendingRoot 'writer-lease.transaction.v1.txt'
+    [IO.File]::WriteAllText($pendingTransaction, "TRANSACTION=PREPARED$([Environment]::NewLine)", [Text.UTF8Encoding]::new($false))
+    $pendingAcquire = @(
+        '-Operation', 'Acquire', '-LeasePath', $pendingLease,
+        '-Goal', 'test-prepared-acquire-block', '-Phase', 'ACTIVE_TEST_PREPARED_BLOCK',
+        '-Repository', 'JerrySkywalker/tabbeacon', '-SourceHead', $sourceHead,
+        '-Worktree', $worktree, '-Branch', $branch
+    )
+    Assert-ToolFails -ToolArguments $pendingAcquire -ExpectedToken 'WRITER_LEASE_ACQUIRE_BLOCKED_PREPARED_TRANSACTION'
+    [IO.File]::WriteAllText($pendingTransaction, "TRANSACTION=FINALIZED$([Environment]::NewLine)", [Text.UTF8Encoding]::new($false))
+    'WRITER_LEASE_TEST_PREPARED_ACQUIRE_BLOCK=PASS'
     'WRITER_LEASE_TEST_NORMAL_LIFECYCLE=PASS'
 
     # A durable PREPARED receipt either resumes its exact source archive or, after a simulated
@@ -329,6 +388,29 @@ try {
         '-Worktree', $worktree, '-Branch', $branch
     )
     Assert-True -Condition ($postReclaimAcquire.operation -eq 'acquire') -Message 'fresh acquire after reclaim failed'
+    $postReclaimFixture = [pscustomobject]@{
+        LeasePath = $reclaimFixture.LeasePath
+        ArchiveRoot = $reclaimFixture.ArchiveRoot
+        ArchivePath = (Join-Path $reclaimFixture.ArchiveRoot 'writer-lease.post-reclaim.settled.v1.json')
+        ReceiptPath = (Join-Path $reclaimFixture.ArchiveRoot 'post-reclaim-settlement-receipt.txt')
+        Goal = 'test-post-reclaim-acquire'
+        Phase = 'ACTIVE_TEST_POST_RECLAIM'
+        Schema = 'tabbeacon-writer-lease.v1'
+        Repository = 'JerrySkywalker/tabbeacon'
+        Worktree = $worktree
+        Branch = $branch
+        SourceHead = $sourceHead
+    }
+    $postReclaimDigest = Get-Digest -Path $postReclaimFixture.LeasePath
+    $postReclaimIdentity = Get-IdentityArguments -Fixture $postReclaimFixture -Digest $postReclaimDigest
+    [void](Invoke-ToolJson -ToolArguments (@('-Operation', 'Settle', '-LeasePath', $postReclaimFixture.LeasePath) + $postReclaimIdentity + @(
+        '-ArchiveRoot', $postReclaimFixture.ArchiveRoot,
+        '-ArchivePath', $postReclaimFixture.ArchivePath,
+        '-ReceiptPath', $postReclaimFixture.ReceiptPath,
+        '-FinalPhase', 'SETTLED_TEST_POST_RECLAIM',
+        '-Disposition', 'SETTLED_TEST_POST_RECLAIM'
+    )))
+    Assert-True -Condition (-not (Test-Path -LiteralPath $postReclaimFixture.LeasePath -PathType Leaf)) -Message 'fresh acquire cleanup left an active lease'
     'WRITER_LEASE_TEST_RECLAIM_ARCHIVE_AND_FRESH_ACQUIRE=PASS'
 
     # 5: stale expected digest must block reclaim before any archive mutation.
@@ -354,7 +436,7 @@ try {
     'WRITER_LEASE_TEST_NONEMPTY_HOLDER=PASS'
 
     # Unsupported schemas cannot be reclaimed just because a caller repeats their string.
-    $unsupportedFixture = New-FixtureLease -Name 'unsupported-schema' -Schema 'tabbeacon-writer-lease.future'
+    $unsupportedFixture = New-FixtureLease -Name 'unsupported-schema' -State 'CLOSED_TEST_UNSUPPORTED_SCHEMA' -Schema 'tabbeacon-writer-lease.future'
     New-ArchiveRoot -Fixture $unsupportedFixture
     $unsupportedDigest = Get-Digest -Path $unsupportedFixture.LeasePath
     Assert-ToolFails -ToolArguments (Get-ReclaimArguments -Fixture $unsupportedFixture -Digest $unsupportedDigest) -ExpectedToken 'WRITER_LEASE_UNSUPPORTED_SCHEMA'
@@ -411,6 +493,19 @@ try {
     } catch [System.NotSupportedException] {
         'WRITER_LEASE_TEST_REPARSE_TARGET=N_A_PLATFORM_UNSUPPORTED'
     }
+
+    foreach ($fixture in $script:fixtureLedger) {
+        Settle-FixtureForTestCleanup -Fixture $fixture
+    }
+    $residualActiveV1Fixtures = @($script:fixtureLedger | Where-Object {
+        if (-not (Test-Path -LiteralPath $_.LeasePath -PathType Leaf)) {
+            return $false
+        }
+        $lease = Get-Content -LiteralPath $_.LeasePath -Raw | ConvertFrom-Json -ErrorAction Stop
+        return $lease.schema -eq 'tabbeacon-writer-lease.v1' -and $lease.state -like 'ACTIVE*'
+    })
+    Assert-True -Condition ($residualActiveV1Fixtures.Count -eq 0) -Message 'focused test left active v1 fixture leases'
+    'WRITER_LEASE_TEST_ACTIVE_FIXTURE_LEAKS=0'
 
     "WRITER_LEASE_TEST_ARTIFACT_PREFIX=$testPrefix"
     'WRITER_LEASE_FOCUSED_TESTS=PASS'
