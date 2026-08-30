@@ -13,6 +13,7 @@ param(
     [string]$SourceHead,
     [string]$Worktree,
     [string]$Branch,
+    [string]$LeaseRegistryRoot,
     [string]$ExpectedLeaseSha256,
     [string]$ExpectedSchema,
     [string]$ExpectedGoal,
@@ -24,6 +25,8 @@ param(
     [string]$ArchiveRoot,
     [string]$ArchivePath,
     [string]$ReceiptPath,
+    [string]$ActiveWriterProofPath,
+    [string]$ExpectedActiveWriterProofSha256,
     [string]$FinalPhase,
     [string]$Disposition = 'SETTLED',
     [switch]$ExpectedHolderless,
@@ -34,6 +37,93 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $LeaseSchema = 'tabbeacon-writer-lease.v1'
+
+if ($env:OS -ne 'Windows_NT') {
+    throw 'WRITER_LEASE_WINDOWS_ONLY'
+}
+
+if ($null -eq ('TabBeacon.WriterLease.Native' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+namespace TabBeacon.WriterLease {
+    public static class Native {
+        private const uint GENERIC_READ = 0x80000000;
+        private const uint DELETE = 0x00010000;
+        private const uint FILE_SHARE_READ = 0x00000001;
+        private const uint OPEN_EXISTING = 3;
+        private const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
+        private const int FileRenameInfo = 3;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct FILE_RENAME_INFO {
+            [MarshalAs(UnmanagedType.Bool)] public bool ReplaceIfExists;
+            public IntPtr RootDirectory;
+            public uint FileNameLength;
+            public char FileName;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFile(
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            IntPtr securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileInformationByHandle(
+            SafeFileHandle file,
+            int fileInformationClass,
+            IntPtr fileInformation,
+            uint bufferSize);
+
+        public static SafeFileHandle OpenForExactMove(string path) {
+            SafeFileHandle handle = CreateFile(
+                path,
+                GENERIC_READ | DELETE,
+                FILE_SHARE_READ,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                IntPtr.Zero);
+            if (handle.IsInvalid) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateFile exact-move open failed");
+            }
+            return handle;
+        }
+
+        public static void MoveExactHandle(SafeFileHandle handle, string destinationPath) {
+            byte[] destination = System.Text.Encoding.Unicode.GetBytes(destinationPath);
+            int nameOffset = Marshal.OffsetOf(typeof(FILE_RENAME_INFO), "FileName").ToInt32();
+            int size = checked(nameOffset + destination.Length);
+            IntPtr buffer = Marshal.AllocHGlobal(size);
+            try {
+                FILE_RENAME_INFO rename = new FILE_RENAME_INFO {
+                    ReplaceIfExists = false,
+                    RootDirectory = IntPtr.Zero,
+                    FileNameLength = checked((uint)destination.Length),
+                    FileName = '\0'
+                };
+                Marshal.StructureToPtr(rename, buffer, false);
+                Marshal.Copy(destination, 0, IntPtr.Add(buffer, nameOffset), destination.Length);
+                if (!SetFileInformationByHandle(handle, FileRenameInfo, buffer, checked((uint)size))) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "SetFileInformationByHandle exact rename failed");
+                }
+            } finally {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+    }
+}
+'@ -ErrorAction Stop
+}
 
 function Assert-RequiredString {
     param([string]$Name, [string]$Value)
@@ -182,10 +272,14 @@ function Assert-LeaseIdentity {
         Assert-RequiredString -Name $required.Name -Value $required.Value
     }
 
+    if ($Schema -ne $LeaseSchema) {
+        throw 'WRITER_LEASE_UNSUPPORTED_SCHEMA'
+    }
+
     if (-not [string]::Equals($Snapshot.Sha256, $Sha256.ToLowerInvariant(), [StringComparison]::Ordinal)) {
         throw 'WRITER_LEASE_EXPECTED_DIGEST_MISMATCH'
     }
-    if ((Get-LeaseProperty -Lease $Snapshot.Lease -Name 'schema') -ne $Schema) {
+    if ((Get-LeaseProperty -Lease $Snapshot.Lease -Name 'schema') -ne $LeaseSchema) {
         throw 'WRITER_LEASE_EXPECTED_SCHEMA_MISMATCH'
     }
     if ((Get-LeaseProperty -Lease $Snapshot.Lease -Name 'goal_id') -ne $GoalId) {
@@ -225,6 +319,89 @@ function Enter-LeaseMutex {
     return $mutex
 }
 
+function Enter-WriterScopeMutexes {
+    param([string]$RepositoryId, [string]$WorktreePath, [string]$BranchName)
+
+    $scopeSeeds = @(
+        ('worktree|' + $RepositoryId.ToLowerInvariant() + '|' + (Get-FullPath -Path $WorktreePath).ToLowerInvariant()),
+        ('branch|' + $RepositoryId.ToLowerInvariant() + '|' + $BranchName.ToLowerInvariant())
+    ) | Sort-Object -Unique
+    $mutexes = [Collections.Generic.List[Threading.Mutex]]::new()
+    try {
+        foreach ($seed in $scopeSeeds) {
+            $nameBytes = [Text.Encoding]::UTF8.GetBytes($seed)
+            $name = 'Global\TabBeaconWriterScope-' + (Get-Sha256Hex -Bytes $nameBytes).Substring(0, 24)
+            $mutex = [Threading.Mutex]::new($false, $name)
+            try {
+                if (-not $mutex.WaitOne(0)) {
+                    throw 'WRITER_LEASE_OPERATION_BUSY'
+                }
+            } catch [Threading.AbandonedMutexException] {
+                # Ownership transfers after an interrupted caller; all identity checks still run.
+            }
+            $mutexes.Add($mutex)
+        }
+        return $mutexes.ToArray()
+    } catch {
+        foreach ($mutex in $mutexes) {
+            $mutex.ReleaseMutex()
+            $mutex.Dispose()
+        }
+        throw
+    }
+}
+
+function Exit-WriterScopeMutexes {
+    param([Threading.Mutex[]]$Mutexes)
+
+    for ($index = $Mutexes.Count - 1; $index -ge 0; $index--) {
+        $mutex = $Mutexes[$index]
+        $mutex.ReleaseMutex()
+        $mutex.Dispose()
+    }
+}
+
+function Assert-NoActiveScopeConflict {
+    param(
+        [string]$RegistryRoot,
+        [string]$LeaseFilePath,
+        [string]$RepositoryId,
+        [string]$WorktreePath,
+        [string]$BranchName
+    )
+
+    Assert-SafeExistingDirectory -Path $RegistryRoot
+    $candidatePath = Get-FullPath -Path $LeaseFilePath
+    $candidateWorktree = Get-FullPath -Path $WorktreePath
+    $files = Get-ChildItem -LiteralPath $RegistryRoot -Filter 'writer-lease.json' -File -Recurse -Force -ErrorAction Stop
+    foreach ($file in $files) {
+        $existingPath = Get-FullPath -Path $file.FullName
+        if ([string]::Equals($existingPath, $candidatePath, [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        try {
+            $snapshot = Get-LeaseSnapshot -Path $existingPath
+        } catch {
+            throw "WRITER_LEASE_REGISTRY_ENTRY_UNSAFE_OR_INVALID=$existingPath"
+        }
+        if ((Get-LeaseProperty -Lease $snapshot.Lease -Name 'schema') -ne $LeaseSchema) {
+            throw "WRITER_LEASE_REGISTRY_ENTRY_UNSUPPORTED_SCHEMA=$existingPath"
+        }
+        $state = [string](Get-LeaseProperty -Lease $snapshot.Lease -Name 'state')
+        if ($state -notlike 'ACTIVE*') {
+            continue
+        }
+        if ((Get-LeaseProperty -Lease $snapshot.Lease -Name 'repository') -ne $RepositoryId) {
+            continue
+        }
+        $existingWorktree = Get-FullPath -Path ([string](Get-LeaseProperty -Lease $snapshot.Lease -Name 'worktree'))
+        $existingBranch = [string](Get-LeaseProperty -Lease $snapshot.Lease -Name 'branch')
+        if ([string]::Equals($existingWorktree, $candidateWorktree, [StringComparison]::OrdinalIgnoreCase) -or $existingBranch -eq $BranchName) {
+            throw "WRITER_LEASE_ACQUIRE_BLOCKED_SCOPE_CONFLICT=$existingPath"
+        }
+    }
+}
+
 function Write-NewUtf8File {
     param([string]$Path, [string]$Content)
 
@@ -245,16 +422,64 @@ function Write-NewUtf8File {
 function Write-ExistingUtf8File {
     param([string]$Path, [string]$Content)
 
-    $encoding = [Text.UTF8Encoding]::new($false)
-    $bytes = $encoding.GetBytes($Content)
-    $stream = $null
+    $parent = Split-Path -Parent $Path
+    $leaf = Split-Path -Leaf $Path
+    $stagingPath = Join-Path $parent ('.' + $leaf + '.' + [Guid]::NewGuid().ToString('N') + '.staging')
+    $backupPath = Join-Path $parent ('.' + $leaf + '.' + [Guid]::NewGuid().ToString('N') + '.backup')
     try {
-        $stream = [IO.File]::Open($Path, [IO.FileMode]::Truncate, [IO.FileAccess]::Write, [IO.FileShare]::None)
-        $stream.Write($bytes, 0, $bytes.Length)
-        $stream.Flush($true)
+        Write-NewUtf8File -Path $stagingPath -Content $Content
+        [IO.File]::Replace($stagingPath, $Path, $backupPath, $true)
     } finally {
+        if (Test-Path -LiteralPath $stagingPath) {
+            Remove-Item -LiteralPath $stagingPath -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $backupPath) {
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Publish-NewLeaseAtomically {
+    param([string]$Path, [string]$Content)
+
+    $parent = Split-Path -Parent $Path
+    $leaf = Split-Path -Leaf $Path
+    $stagingPath = Join-Path $parent ('.' + $leaf + '.' + [Guid]::NewGuid().ToString('N') + '.staging')
+    try {
+        Write-NewUtf8File -Path $stagingPath -Content $Content
+        [IO.File]::Move($stagingPath, $Path)
+    } finally {
+        if (Test-Path -LiteralPath $stagingPath) {
+            Remove-Item -LiteralPath $stagingPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Move-ExactLeaseByHandle {
+    param($Snapshot, [string]$DestinationPath)
+
+    $handle = $null
+    $stream = $null
+    $memory = $null
+    try {
+        $handle = [TabBeacon.WriterLease.Native]::OpenForExactMove($Snapshot.Path)
+        $stream = [IO.FileStream]::new($handle, [IO.FileAccess]::Read)
+        $memory = [IO.MemoryStream]::new()
+        $stream.CopyTo($memory)
+        $currentBytes = $memory.ToArray()
+        if ((Get-Sha256Hex -Bytes $currentBytes) -ne $Snapshot.Sha256) {
+            throw 'WRITER_LEASE_CONCURRENT_DRIFT_BLOCKED'
+        }
+        [TabBeacon.WriterLease.Native]::MoveExactHandle($handle, $DestinationPath)
+        return $currentBytes
+    } finally {
+        if ($null -ne $memory) {
+            $memory.Dispose()
+        }
         if ($null -ne $stream) {
             $stream.Dispose()
+        } elseif ($null -ne $handle) {
+            $handle.Dispose()
         }
     }
 }
@@ -286,6 +511,50 @@ function Assert-WorktreeBinding {
     }
 }
 
+function Assert-ActiveWriterProof {
+    param(
+        [string]$ProofPath,
+        [string]$ExpectedProofSha256,
+        [string]$ExpectedLeasePath,
+        [string]$ExpectedLeaseSha256
+    )
+
+    Assert-RequiredString -Name 'ActiveWriterProofPath' -Value $ProofPath
+    Assert-RequiredString -Name 'ExpectedActiveWriterProofSha256' -Value $ExpectedProofSha256
+    $safeProofPath = Assert-SafeExistingFile -Path $ProofPath
+    $proofBytes = [IO.File]::ReadAllBytes($safeProofPath)
+    $proofSha256 = Get-Sha256Hex -Bytes $proofBytes
+    if (-not [string]::Equals($proofSha256, $ExpectedProofSha256.ToLowerInvariant(), [StringComparison]::Ordinal)) {
+        throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_DIGEST_MISMATCH'
+    }
+    $proofText = [Text.UTF8Encoding]::new($false).GetString($proofBytes)
+    $fields = @{}
+    foreach ($line in ($proofText -split "`r?`n")) {
+        if ($line -match '^(?<name>[A-Z0-9_]+)=(?<value>.*)$') {
+            $fields[$Matches.name] = $Matches.value
+        }
+    }
+    if ($fields['PROOF_SCHEMA'] -ne 'tabbeacon-writer-active-proof.v1') {
+        throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_SCHEMA_MISMATCH'
+    }
+    if ($fields['ACTIVE_WRITER_COUNT'] -ne '0') {
+        throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_COUNT_NOT_ZERO'
+    }
+    if ($fields['ACTIVE_LEASE_HOLDER_PROVEN'] -ne 'false') {
+        throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_HOLDER_STATE_MISMATCH'
+    }
+    if (-not [string]::Equals($fields['LEASE_PATH'], (Get-FullPath -Path $ExpectedLeasePath), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_LEASE_PATH_MISMATCH'
+    }
+    if (-not [string]::Equals($fields['LEASE_SHA256'], $ExpectedLeaseSha256.ToLowerInvariant(), [StringComparison]::Ordinal)) {
+        throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_LEASE_DIGEST_MISMATCH'
+    }
+    return [pscustomobject]@{
+        Path = $safeProofPath
+        Sha256 = $proofSha256
+    }
+}
+
 function Get-ReceiptText {
     param(
         [string]$ReceiptDisposition,
@@ -294,7 +563,9 @@ function Get-ReceiptText {
         [string]$ArchivedPath,
         [string]$ArchivedSha256,
         [string]$FinalState,
-        [string]$WriterCount
+        [string]$WriterCount,
+        [string]$WriterProofPath = '',
+        [string]$WriterProofSha256 = ''
     )
 
     $lines = @(
@@ -311,6 +582,10 @@ function Get-ReceiptText {
         "ACTIVE_WRITER_COUNT=$WriterCount",
         'LEASE_CONTENT_MODIFIED=false'
     )
+    if (-not [string]::IsNullOrWhiteSpace($WriterProofPath)) {
+        $lines += "ACTIVE_WRITER_PROOF_PATH=$WriterProofPath"
+        $lines += "ACTIVE_WRITER_PROOF_SHA256=$WriterProofSha256"
+    }
     return ($lines -join [Environment]::NewLine) + [Environment]::NewLine
 }
 
@@ -323,7 +598,9 @@ function Invoke-ArchiveLease {
         [string]$SettlementReceiptPath,
         [string]$ReceiptDisposition,
         [string]$SettlementFinalPhase,
-        [string]$WriterCount
+        [string]$WriterCount,
+        [string]$WriterProofPath = '',
+        [string]$WriterProofSha256 = ''
     )
 
     Assert-SafeExistingDirectory -Path $ArchiveRootPath
@@ -347,11 +624,7 @@ function Invoke-ArchiveLease {
     ) -join [Environment]::NewLine
     Write-NewUtf8File -Path $safeReceiptPath -Content ($prepared + [Environment]::NewLine)
 
-    $beforeMove = Get-LeaseSnapshot -Path $Snapshot.Path
-    if ($beforeMove.Sha256 -ne $Snapshot.Sha256) {
-        throw 'WRITER_LEASE_CONCURRENT_DRIFT_BLOCKED'
-    }
-    [IO.File]::Move($Snapshot.Path, $safeArchivePath)
+    [void](Move-ExactLeaseByHandle -Snapshot $Snapshot -DestinationPath $safeArchivePath)
 
     if (Test-Path -LiteralPath $Snapshot.Path) {
         throw 'WRITER_LEASE_SOURCE_REMAINS_AFTER_ARCHIVE'
@@ -361,7 +634,7 @@ function Invoke-ArchiveLease {
         throw 'WRITER_LEASE_ARCHIVE_INTEGRITY_FAILURE'
     }
 
-    $receipt = Get-ReceiptText -ReceiptDisposition $ReceiptDisposition -ReceiptOperation $ArchiveOperation -Snapshot $Snapshot -ArchivedPath $safeArchivePath -ArchivedSha256 $archived.Sha256 -FinalState $SettlementFinalPhase -WriterCount $WriterCount
+    $receipt = Get-ReceiptText -ReceiptDisposition $ReceiptDisposition -ReceiptOperation $ArchiveOperation -Snapshot $Snapshot -ArchivedPath $safeArchivePath -ArchivedSha256 $archived.Sha256 -FinalState $SettlementFinalPhase -WriterCount $WriterCount -WriterProofPath $WriterProofPath -WriterProofSha256 $WriterProofSha256
     Write-ExistingUtf8File -Path $safeReceiptPath -Content $receipt
 
     return [pscustomobject]@{
@@ -412,7 +685,8 @@ switch ($Operation) {
             @{ Name = 'Repository'; Value = $Repository },
             @{ Name = 'SourceHead'; Value = $SourceHead },
             @{ Name = 'Worktree'; Value = $Worktree },
-            @{ Name = 'Branch'; Value = $Branch }
+            @{ Name = 'Branch'; Value = $Branch },
+            @{ Name = 'LeaseRegistryRoot'; Value = $LeaseRegistryRoot }
         )) {
             Assert-RequiredString -Name $required.Name -Value $required.Value
         }
@@ -425,13 +699,15 @@ switch ($Operation) {
 
         $fullLeasePath = Get-FullPath -Path $LeasePath
         Assert-SafeExistingDirectory -Path (Split-Path -Parent $fullLeasePath)
+        Assert-SafeExistingDirectory -Path $LeaseRegistryRoot
         if (Test-Path -LiteralPath $fullLeasePath) {
             throw 'WRITER_LEASE_ACQUIRE_BLOCKED_ACTIVE_LEASE_EXISTS'
         }
         Assert-WorktreeBinding -Path $Worktree -ExpectedBranch $Branch -SourceCommit $SourceHead
 
-        $mutex = Enter-LeaseMutex -Path $fullLeasePath
+        $scopeMutexes = Enter-WriterScopeMutexes -RepositoryId $Repository -WorktreePath $Worktree -BranchName $Branch
         try {
+            Assert-NoActiveScopeConflict -RegistryRoot $LeaseRegistryRoot -LeaseFilePath $fullLeasePath -RepositoryId $Repository -WorktreePath $Worktree -BranchName $Branch
             $lease = [ordered]@{
                 schema = $LeaseSchema
                 goal_id = $Goal
@@ -447,7 +723,7 @@ switch ($Operation) {
             }
             $json = ($lease | ConvertTo-Json -Depth 3) + [Environment]::NewLine
             try {
-                Write-NewUtf8File -Path $fullLeasePath -Content $json
+                Publish-NewLeaseAtomically -Path $fullLeasePath -Content $json
             } catch [IO.IOException] {
                 throw 'WRITER_LEASE_ACQUIRE_BLOCKED_ACTIVE_LEASE_EXISTS'
             }
@@ -465,8 +741,7 @@ switch ($Operation) {
                 expiry = 'unsupported-by-v1-schema'
             })
         } finally {
-            $mutex.ReleaseMutex()
-            $mutex.Dispose()
+            Exit-WriterScopeMutexes -Mutexes $scopeMutexes
         }
     }
     'Settle' {
@@ -509,6 +784,8 @@ switch ($Operation) {
         Assert-RequiredString -Name 'ArchiveRoot' -Value $ArchiveRoot
         Assert-RequiredString -Name 'ArchivePath' -Value $ArchivePath
         Assert-RequiredString -Name 'ReceiptPath' -Value $ReceiptPath
+        Assert-RequiredString -Name 'ActiveWriterProofPath' -Value $ActiveWriterProofPath
+        Assert-RequiredString -Name 'ExpectedActiveWriterProofSha256' -Value $ExpectedActiveWriterProofSha256
 
         $mutex = Enter-LeaseMutex -Path $LeasePath
         try {
@@ -517,7 +794,8 @@ switch ($Operation) {
             if (-not (Test-HolderlessLease -Lease $snapshot.Lease)) {
                 throw 'WRITER_LEASE_RECLAIM_NONEMPTY_HOLDER_BLOCKED'
             }
-            $archive = Invoke-ArchiveLease -ArchiveOperation 'reclaim-orphan' -Snapshot $snapshot -ArchiveRootPath $ArchiveRoot -ArchiveLeasePath $ArchivePath -SettlementReceiptPath $ReceiptPath -ReceiptDisposition 'ORPHAN_RECLAIMED' -SettlementFinalPhase 'RECLAIMED_ORPHAN' -WriterCount $ActiveWriterCount
+            $writerProof = Assert-ActiveWriterProof -ProofPath $ActiveWriterProofPath -ExpectedProofSha256 $ExpectedActiveWriterProofSha256 -ExpectedLeasePath $snapshot.Path -ExpectedLeaseSha256 $snapshot.Sha256
+            $archive = Invoke-ArchiveLease -ArchiveOperation 'reclaim-orphan' -Snapshot $snapshot -ArchiveRootPath $ArchiveRoot -ArchiveLeasePath $ArchivePath -SettlementReceiptPath $ReceiptPath -ReceiptDisposition 'ORPHAN_RECLAIMED' -SettlementFinalPhase 'RECLAIMED_ORPHAN' -WriterCount $ActiveWriterCount -WriterProofPath $writerProof.Path -WriterProofSha256 $writerProof.Sha256
             Write-MachineResult ([ordered]@{
                 operation = 'reclaim-orphan'
                 disposition = 'ORPHAN_RECLAIMED'

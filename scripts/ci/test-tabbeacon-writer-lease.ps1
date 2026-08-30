@@ -89,14 +89,15 @@ function New-FixtureLease {
     param(
         [string]$Name,
         [string]$State = 'ACTIVE_TEST_LEASE',
-        [string]$Holder = ''
+        [string]$Holder = '',
+        [string]$Schema = 'tabbeacon-writer-lease.v1'
     )
 
     $root = Join-Path $testRoot $Name
     New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
     $leasePath = Join-Path $root 'writer-lease.json'
     $lease = [ordered]@{
-        schema = 'tabbeacon-writer-lease.v1'
+        schema = $Schema
         goal_id = "test-$Name"
         repository = 'JerrySkywalker/tabbeacon'
         writer_role = 'implementer'
@@ -120,6 +121,7 @@ function New-FixtureLease {
         ReceiptPath = (Join-Path $root 'archive\lease-settlement-receipt.txt')
         Goal = "test-$Name"
         Phase = $State
+        Schema = $Schema
     }
 }
 
@@ -128,7 +130,7 @@ function Get-IdentityArguments {
 
     return @(
         '-ExpectedLeaseSha256', $Digest,
-        '-ExpectedSchema', 'tabbeacon-writer-lease.v1',
+        '-ExpectedSchema', $Fixture.Schema,
         '-ExpectedGoal', $Fixture.Goal,
         '-ExpectedPhase', $ExpectedPhase,
         '-ExpectedRepository', 'JerrySkywalker/tabbeacon',
@@ -142,13 +144,31 @@ function Get-ReclaimArguments {
     param($Fixture, [string]$Digest, [string]$ExpectedPhase = $Fixture.Phase)
 
     $identity = Get-IdentityArguments -Fixture $Fixture -Digest $Digest -ExpectedPhase $ExpectedPhase
+    $proof = New-ActiveWriterProof -Fixture $Fixture -LeaseDigest $Digest
     return @('-Operation', 'ReclaimOrphan', '-LeasePath', $Fixture.LeasePath) + $identity + @(
         '-ExpectedHolderless',
         '-ActiveWriterCount', '0',
         '-ArchiveRoot', $Fixture.ArchiveRoot,
         '-ArchivePath', $Fixture.ArchivePath,
-        '-ReceiptPath', $Fixture.ReceiptPath
+        '-ReceiptPath', $Fixture.ReceiptPath,
+        '-ActiveWriterProofPath', $proof.Path,
+        '-ExpectedActiveWriterProofSha256', $proof.Sha256
     )
+}
+
+function New-ActiveWriterProof {
+    param($Fixture, [string]$LeaseDigest)
+
+    $proofPath = Join-Path $Fixture.Root 'active-writer-proof.txt'
+    $content = @(
+        'PROOF_SCHEMA=tabbeacon-writer-active-proof.v1',
+        'ACTIVE_WRITER_COUNT=0',
+        'ACTIVE_LEASE_HOLDER_PROVEN=false',
+        ('LEASE_PATH=' + $Fixture.LeasePath),
+        ('LEASE_SHA256=' + $LeaseDigest)
+    ) -join [Environment]::NewLine
+    [IO.File]::WriteAllText($proofPath, $content + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    return [pscustomobject]@{ Path = $proofPath; Sha256 = Get-Digest -Path $proofPath }
 }
 
 function New-ArchiveRoot {
@@ -167,13 +187,24 @@ try {
         '-Operation', 'Acquire', '-LeasePath', $normalLease,
         '-Goal', 'test-normal-acquire', '-Phase', 'ACTIVE_TEST_NORMAL',
         '-Repository', 'JerrySkywalker/tabbeacon', '-SourceHead', $sourceHead,
-        '-Worktree', $worktree, '-Branch', $branch
+        '-Worktree', $worktree, '-Branch', $branch,
+        '-LeaseRegistryRoot', $testRoot
     )
     $acquired = Invoke-ToolJson -ToolArguments $normalAcquire
     Assert-True -Condition ($acquired.operation -eq 'acquire') -Message 'normal acquire did not report acquire'
     $normalBytes = [IO.File]::ReadAllBytes($normalLease)
     $normalDigest = Get-Digest -Path $normalLease
     Assert-ToolFails -ToolArguments $normalAcquire -ExpectedToken 'WRITER_LEASE_ACQUIRE_BLOCKED_ACTIVE_LEASE_EXISTS'
+    $scopeConflictDirectory = Join-Path $normalRoot 'second-lease-path'
+    New-Item -ItemType Directory -Path $scopeConflictDirectory -ErrorAction Stop | Out-Null
+    $scopeConflictAcquire = @(
+        '-Operation', 'Acquire', '-LeasePath', (Join-Path $scopeConflictDirectory 'writer-lease.json'),
+        '-Goal', 'test-scope-conflict', '-Phase', 'ACTIVE_TEST_SCOPE_CONFLICT',
+        '-Repository', 'JerrySkywalker/tabbeacon', '-SourceHead', $sourceHead,
+        '-Worktree', $worktree, '-Branch', $branch,
+        '-LeaseRegistryRoot', $testRoot
+    )
+    Assert-ToolFails -ToolArguments $scopeConflictAcquire -ExpectedToken 'WRITER_LEASE_ACQUIRE_BLOCKED_SCOPE_CONFLICT'
 
     $normalFixture = [pscustomobject]@{
         LeasePath = $normalLease
@@ -182,6 +213,7 @@ try {
         ReceiptPath = (Join-Path $normalArchiveRoot 'lease-settlement-receipt.txt')
         Goal = 'test-normal-acquire'
         Phase = 'ACTIVE_TEST_NORMAL'
+        Schema = 'tabbeacon-writer-lease.v1'
     }
     $normalIdentity = Get-IdentityArguments -Fixture $normalFixture -Digest $normalDigest
     $settled = Invoke-ToolJson -ToolArguments (@('-Operation', 'Settle', '-LeasePath', $normalLease) + $normalIdentity + @(
@@ -211,7 +243,8 @@ try {
         '-Operation', 'Acquire', '-LeasePath', $reclaimFixture.LeasePath,
         '-Goal', 'test-post-reclaim-acquire', '-Phase', 'ACTIVE_TEST_POST_RECLAIM',
         '-Repository', 'JerrySkywalker/tabbeacon', '-SourceHead', $sourceHead,
-        '-Worktree', $worktree, '-Branch', $branch
+        '-Worktree', $worktree, '-Branch', $branch,
+        '-LeaseRegistryRoot', $testRoot
     )
     Assert-True -Condition ($postReclaimAcquire.operation -eq 'acquire') -Message 'fresh acquire after reclaim failed'
     'WRITER_LEASE_TEST_RECLAIM_ARCHIVE_AND_FRESH_ACQUIRE=PASS'
@@ -237,6 +270,26 @@ try {
     $holderDigest = Get-Digest -Path $holderFixture.LeasePath
     Assert-ToolFails -ToolArguments (Get-ReclaimArguments -Fixture $holderFixture -Digest $holderDigest) -ExpectedToken 'WRITER_LEASE_RECLAIM_NONEMPTY_HOLDER_BLOCKED'
     'WRITER_LEASE_TEST_NONEMPTY_HOLDER=PASS'
+
+    # Unsupported schemas cannot be reclaimed just because a caller repeats their string.
+    $unsupportedFixture = New-FixtureLease -Name 'unsupported-schema' -Schema 'tabbeacon-writer-lease.future'
+    New-ArchiveRoot -Fixture $unsupportedFixture
+    $unsupportedDigest = Get-Digest -Path $unsupportedFixture.LeasePath
+    Assert-ToolFails -ToolArguments (Get-ReclaimArguments -Fixture $unsupportedFixture -Digest $unsupportedDigest) -ExpectedToken 'WRITER_LEASE_UNSUPPORTED_SCHEMA'
+    'WRITER_LEASE_TEST_UNSUPPORTED_SCHEMA=PASS'
+
+    # The zero-writer assertion must be a hash-bound evidence record, not a loose command-line value.
+    $proofFixture = New-FixtureLease -Name 'writer-proof'
+    New-ArchiveRoot -Fixture $proofFixture
+    $proofDigest = Get-Digest -Path $proofFixture.LeasePath
+    $proofArguments = [Collections.Generic.List[string]](Get-ReclaimArguments -Fixture $proofFixture -Digest $proofDigest)
+    $proofPathIndex = $proofArguments.IndexOf('-ActiveWriterProofPath') + 1
+    $proofHashIndex = $proofArguments.IndexOf('-ExpectedActiveWriterProofSha256') + 1
+    $proofContent = (Get-Content -LiteralPath $proofArguments[$proofPathIndex] -Raw).Replace('ACTIVE_WRITER_COUNT=0', 'ACTIVE_WRITER_COUNT=1')
+    [IO.File]::WriteAllText($proofArguments[$proofPathIndex], $proofContent, [Text.UTF8Encoding]::new($false))
+    $proofArguments[$proofHashIndex] = Get-Digest -Path $proofArguments[$proofPathIndex]
+    Assert-ToolFails -ToolArguments $proofArguments.ToArray() -ExpectedToken 'WRITER_LEASE_ACTIVE_WRITER_PROOF_COUNT_NOT_ZERO'
+    'WRITER_LEASE_TEST_ACTIVE_WRITER_PROOF=PASS'
 
     # 8: a changed lease after its caller's recorded digest is concurrent drift and must block reclaim.
     $driftFixture = New-FixtureLease -Name 'concurrent-drift'

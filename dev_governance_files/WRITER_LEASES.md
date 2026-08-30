@@ -28,6 +28,11 @@ lease-specific OS mutex, rechecks the exact digest immediately before archive,
 rejects reparse-point paths, and refuses to replace an existing lease, archive,
 or receipt.
 
+`Acquire` also requires an explicit safe lease-registry root. Under two global
+scope mutexes, it scans that registry fail-closed and refuses any active v1 lease
+for the same repository and either the same worktree or the same branch. This
+prevents a second task-root pathname from bypassing the one-writer boundary.
+
 ## Normal acquire and settle
 
 Create an exact task root before acquire. Supply an active phase, full source
@@ -50,12 +55,28 @@ known; the schema supports no holder or the holder is explicitly empty; relevant
 bounded process/worktree checks prove `ACTIVE_WRITER_COUNT=0`; and no active
 holder evidence exists in the schema or task record.
 
+That zero-writer result must be a separate hash-bound proof record, not an
+unbound `-ActiveWriterCount 0` assertion. The record uses
+`PROOF_SCHEMA=tabbeacon-writer-active-proof.v1` and binds the exact lease path
+and SHA-256 while recording `ACTIVE_WRITER_COUNT=0` and
+`ACTIVE_LEASE_HOLDER_PROVEN=false`. `ReclaimOrphan` verifies the proof path and
+its expected SHA-256, records both in the settlement receipt, and rejects a
+malformed, stale, or non-zero proof.
+
 `ReclaimOrphan` requires every expected identity field, `-ExpectedHolderless`,
 `-ActiveWriterCount 0`, and exact non-existing archive and receipt destinations
 inside a safe explicit archive root. It refuses wrong digests, schema, Goal, or
 phase; a non-empty holder; concurrent drift; reparse targets; and archive
 collisions. Successful reclaim archives the original bytes and writes a receipt;
 it never edits the lease to mark it closed.
+
+Leases are first flushed to an adjacent unique staging name and then atomically
+published, so interruption cannot leave a partial canonical JSON lease that
+blocks recovery. Settlement first creates a `TRANSACTION=PREPARED` receipt and
+replaces it atomically with the final receipt only after the exact opened source
+file has been renamed. An interrupted transaction therefore leaves either a
+classifiable prepared record and source lease, or a classifiable prepared record
+and archived lease; it never needs a manual JSON rewrite to recover.
 
 ## Owner break-glass
 
