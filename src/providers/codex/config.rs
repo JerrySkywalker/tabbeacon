@@ -3081,8 +3081,14 @@ fn run_windows_hook_runtime_probe(command_line: &str) -> RuntimeProbeOutcome {
             Err(_) => break Some(false),
         }
     };
-    let marker_present = fs::read_to_string(&marker)
-        .is_ok_and(|contents| contents.starts_with("TABBEACON_HOOK_TIMING_V1 "));
+    // The isolated runtime probe accepts the established V1 marker as well as
+    // the content-free V2 receipt emitted by the current command Hook.  The
+    // marker's schema is the proof here; its timing values and Hook payload
+    // remain intentionally outside the diagnostic surface.
+    let marker_present = fs::read_to_string(&marker).is_ok_and(|contents| {
+        contents.starts_with("TABBEACON_HOOK_TIMING_V1 ")
+            || contents.starts_with("TABBEACON_HOOK_TIMING_V2 ")
+    });
     let _ = fs::remove_dir_all(&probe_root);
 
     match (write_succeeded, exited_successfully, marker_present) {

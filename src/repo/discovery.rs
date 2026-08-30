@@ -91,6 +91,26 @@ impl RepositoryDiscovery {
         &self,
         cwd: impl AsRef<Path>,
     ) -> Result<DiscoveredRepository, RepositoryIdentityError> {
+        let mut discovered = self.discover_without_root_commits(cwd.as_ref())?;
+        discovered.root_commits = self.discover_root_commits(cwd.as_ref())?;
+        Ok(discovered)
+    }
+
+    /// Discovers the worktree layout and local remotes without walking history.
+    ///
+    /// Callers that establish a remote-backed identity can safely avoid the
+    /// root-history query; callers needing a local-history fallback must call
+    /// [`Self::discover_root_commits`] before canonicalization.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepositoryIdentityError::NotRepository`] when `cwd` is not a
+    /// Git worktree, or a typed metadata/I/O error for malformed local layout
+    /// or remote evidence.
+    pub fn discover_without_root_commits(
+        &self,
+        cwd: impl AsRef<Path>,
+    ) -> Result<DiscoveredRepository, RepositoryIdentityError> {
         let cwd = cwd.as_ref();
         let layout = self
             .run(cwd, "layout", LAYOUT_ARGS, false)
@@ -118,6 +138,28 @@ impl RepositoryDiscovery {
         } else {
             Vec::new()
         };
+
+        Ok(DiscoveredRepository {
+            worktree_root,
+            git_dir,
+            git_common_dir,
+            remotes,
+            root_commits: Vec::new(),
+        })
+    }
+
+    /// Reads the local root-history fallback only when no usable remote
+    /// identity was established.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed Git, UTF-8, or metadata error when the local root
+    /// history cannot be read or contains an invalid object ID.
+    pub fn discover_root_commits(
+        &self,
+        cwd: impl AsRef<Path>,
+    ) -> Result<Vec<String>, RepositoryIdentityError> {
+        let cwd = cwd.as_ref();
         let roots_output = self.run(cwd, "root-commits", ROOT_COMMIT_ARGS, false)?;
         let roots = decode_utf8(roots_output.stdout, "root commits")?;
         let mut root_commits = roots
@@ -133,14 +175,7 @@ impl RepositoryDiscovery {
         }
         root_commits.sort_unstable();
         root_commits.dedup();
-
-        Ok(DiscoveredRepository {
-            worktree_root,
-            git_dir,
-            git_common_dir,
-            remotes,
-            root_commits,
-        })
+        Ok(root_commits)
     }
 
     fn run(
@@ -245,7 +280,26 @@ fn is_object_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{LAYOUT_ARGS, REMOTE_ARGS, ROOT_COMMIT_ARGS, parse_remotes};
+    use std::{
+        fs,
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{LAYOUT_ARGS, REMOTE_ARGS, ROOT_COMMIT_ARGS, RepositoryDiscovery, parse_remotes};
+
+    fn test_root(label: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock follows Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "tabbeacon-discovery-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("test root creates");
+        root
+    }
 
     #[test]
     fn admitted_git_operations_are_local_only() {
@@ -278,5 +332,35 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].name(), "origin");
         assert_eq!(parsed[1].name(), "zeta");
+    }
+
+    #[test]
+    fn remote_backed_discovery_can_omit_root_history() {
+        let root = test_root("remote-without-history");
+        let initialize = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .status()
+            .expect("Git initializes test repository");
+        assert!(initialize.success());
+        let remote = Command::new("git")
+            .args([
+                "remote",
+                "add",
+                "origin",
+                "https://example.invalid/acme/fixture.git",
+            ])
+            .current_dir(&root)
+            .status()
+            .expect("Git configures local test remote");
+        assert!(remote.success());
+
+        let discovered = RepositoryDiscovery::default()
+            .discover_without_root_commits(&root)
+            .expect("layout and local remotes discover without history walk");
+
+        assert_eq!(discovered.remotes.len(), 1);
+        assert!(discovered.root_commits.is_empty());
+        fs::remove_dir_all(root).expect("owned test root removes");
     }
 }

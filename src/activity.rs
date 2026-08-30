@@ -586,8 +586,8 @@ impl WorkerPresentation {
         }
     }
 
-    /// Creates a static result title that remains owned after a one-shot Hook
-    /// returns control to its shell host.
+    /// Creates a persistent static result title for lifecycle paths that admit
+    /// the optional worker after a one-shot Hook returns to its shell host.
     #[must_use]
     #[allow(dead_code)]
     fn result_ready(workspace_alias: &str, spinner: SpinnerPreset) -> Self {
@@ -726,6 +726,30 @@ impl WorkerPresentation {
     }
 }
 
+/// Returns a persistent worker presentation only for events that may spend
+/// the optional decoration budget. A Hook can still render the same static
+/// action without creating a worker.
+fn persistent_worker_presentation(
+    allow_persistent_worker: bool,
+    provider: &str,
+    workspace_alias: &str,
+    action: &PresentationAction,
+    settings: PresentationSettings,
+    workspace_observability: SessionWorkspaceObservability,
+) -> Option<WorkerPresentation> {
+    allow_persistent_worker
+        .then(|| {
+            WorkerPresentation::from_action(
+                provider,
+                workspace_alias,
+                action,
+                settings,
+                workspace_observability,
+            )
+        })
+        .flatten()
+}
+
 fn default_worker_provider() -> String {
     "codex".to_owned()
 }
@@ -753,6 +777,17 @@ pub(crate) enum ActivityRender {
     WithoutTitle,
     /// Ownership could not be proved, so decoration is suppressed fail-open.
     Suppress,
+}
+
+/// Content-free durations collected while a one-shot Hook reconciles activity
+/// ownership. These optional diagnostic facts never affect the lease, worker,
+/// or presentation decision.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ActivityReconciliationTiming {
+    pub(crate) lease_refresh: Option<u128>,
+    pub(crate) runtime_image_preparation: Option<u128>,
+    pub(crate) worker_launch: Option<u128>,
+    pub(crate) stop_cleanup: Option<u128>,
 }
 
 /// Bounded outcome of the asynchronous worker handoff after a lease is
@@ -853,7 +888,9 @@ impl ActivityCoordinator {
             action,
             settings,
             SessionWorkspaceObservability::default(),
+            true,
         )
+        .0
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -868,17 +905,19 @@ impl ActivityCoordinator {
         action: &PresentationAction,
         settings: PresentationSettings,
         workspace_observability: SessionWorkspaceObservability,
-    ) -> ActivityRender {
+        allow_persistent_worker: bool,
+    ) -> (ActivityRender, ActivityReconciliationTiming) {
+        let mut timing = ActivityReconciliationTiming::default();
         let ActivityExecution::System {
             executable,
             owner_sha256,
             terminal_binding_sha256,
         } = &self.execution
         else {
-            return ActivityRender::UncoordinatedFull;
+            return (ActivityRender::UncoordinatedFull, timing);
         };
         if !is_safe_worker_provider(provider) {
-            return ActivityRender::UncoordinatedFull;
+            return (ActivityRender::UncoordinatedFull, timing);
         }
         let key = WorkerKey::new(
             session_sha256,
@@ -886,7 +925,8 @@ impl ActivityCoordinator {
             generation,
             terminal_binding_sha256,
         );
-        let worker_presentation = WorkerPresentation::from_action(
+        let worker_presentation = persistent_worker_presentation(
+            allow_persistent_worker,
             provider,
             workspace_alias,
             action,
@@ -895,29 +935,33 @@ impl ActivityCoordinator {
         );
         let now = unix_ms();
         if let Some(presentation) = worker_presentation {
-            match self.store.refresh_runtime_backed_active_if_current(
+            let refresh_started = Instant::now();
+            let refresh = self.store.refresh_runtime_backed_active_if_current(
                 &key,
                 event_sequence,
                 owner_sha256,
                 &presentation,
                 now,
-            ) {
-                Ok(Some(LeaseTransition::Stale)) => return ActivityRender::Suppress,
+            );
+            timing.lease_refresh = Some(refresh_started.elapsed().as_millis());
+            match refresh {
+                Ok(Some(LeaseTransition::Stale)) => return (ActivityRender::Suppress, timing),
                 Ok(Some(LeaseTransition::AlreadyActive)) => {
-                    return already_active_worker_render();
+                    return (already_active_worker_render(), timing);
                 }
                 Ok(None) => {}
                 Ok(Some(LeaseTransition::Published { .. } | LeaseTransition::Stopped { .. })) => {
                     unreachable!("existing runtime refresh only returns stale or active")
                 }
-                Err(_) => return ActivityRender::UncoordinatedFull,
+                Err(_) => return (ActivityRender::UncoordinatedFull, timing),
             }
             // A long-lived worker must never map the package-installed CLI.
             // Publishing is deliberately completed before its lease becomes
             // active, so an interrupted copy cannot authorize an ambiguous
             // process. A publication failure is decoration-only fail-open.
             let runtime_store = WorkerRuntimeStore::new(self.store.state_root());
-            let Ok((runtime_image, transition)) = self.store.publish_runtime_backed_active(
+            let runtime_image_started = Instant::now();
+            let published = self.store.publish_runtime_backed_active(
                 &runtime_store,
                 executable,
                 &key,
@@ -925,20 +969,25 @@ impl ActivityCoordinator {
                 owner_sha256,
                 &presentation,
                 now,
-            ) else {
-                return ActivityRender::UncoordinatedFull;
+            );
+            timing.runtime_image_preparation = Some(runtime_image_started.elapsed().as_millis());
+            let Ok((runtime_image, transition)) = published else {
+                return (ActivityRender::UncoordinatedFull, timing);
             };
             match transition {
-                LeaseTransition::Stale => ActivityRender::Suppress,
-                LeaseTransition::AlreadyActive => already_active_worker_render(),
+                LeaseTransition::Stale => (ActivityRender::Suppress, timing),
+                LeaseTransition::AlreadyActive => (already_active_worker_render(), timing),
                 LeaseTransition::Published { lease, .. } => {
                     // Publishing this lease atomically revokes the predecessor.
                     // It is safe to start the successor immediately because
                     // every worker validates the current lease before writing;
                     // waiting for the old worker's exit would consume most of
                     // the synchronous one-second Hook budget.
-                    match start_published_worker(|| spawn_worker(&runtime_image.executable, &lease))
-                    {
+                    let worker_launch_started = Instant::now();
+                    let startup =
+                        start_published_worker(|| spawn_worker(&runtime_image.executable, &lease));
+                    timing.worker_launch = Some(worker_launch_started.elapsed().as_millis());
+                    match startup {
                         PublishedWorkerStartup::Started => {
                             // Runtime-image collection is retention-only.  It
                             // re-enumerates state and hashes image files, so it
@@ -951,11 +1000,14 @@ impl ActivityCoordinator {
                             // opened the console or rendered its first frame.
                             // Keep this Hook's complete frame authoritative
                             // until a later event observes the active lease.
-                            PublishedWorkerStartup::Started.hook_render()
+                            (PublishedWorkerStartup::Started.hook_render(), timing)
                         }
                         PublishedWorkerStartup::WorkerSpawnFailed => {
                             let _ = self.store.deactivate_if_owned(&lease, unix_ms());
-                            PublishedWorkerStartup::WorkerSpawnFailed.hook_render()
+                            (
+                                PublishedWorkerStartup::WorkerSpawnFailed.hook_render(),
+                                timing,
+                            )
                         }
                     }
                 }
@@ -964,17 +1016,19 @@ impl ActivityCoordinator {
                 }
             }
         } else {
-            let Ok(transition) =
-                self.store
-                    .publish_stopped(&key, event_sequence, owner_sha256, now)
-            else {
-                return ActivityRender::UncoordinatedFull;
+            let stop_cleanup_started = Instant::now();
+            let stopped = self
+                .store
+                .publish_stopped(&key, event_sequence, owner_sha256, now);
+            timing.stop_cleanup = Some(stop_cleanup_started.elapsed().as_millis());
+            let Ok(transition) = stopped else {
+                return (ActivityRender::UncoordinatedFull, timing);
             };
             match transition {
-                LeaseTransition::Stale => ActivityRender::Suppress,
+                LeaseTransition::Stale => (ActivityRender::Suppress, timing),
                 // A stopped predecessor has already been atomically revoked.
                 // Do not spend the synchronous Hook budget observing its exit.
-                LeaseTransition::Stopped { .. } => ActivityRender::Full,
+                LeaseTransition::Stopped { .. } => (ActivityRender::Full, timing),
                 LeaseTransition::AlreadyActive | LeaseTransition::Published { .. } => {
                     unreachable!("stop publication cannot return an active transition")
                 }
@@ -2851,8 +2905,8 @@ mod tests {
         already_active_worker_render, cleanup_identity_recheck_due, cleanup_observer_action,
         cleanup_observer_poll_ms, command_output_with_timeout, inspect_activity_leases_read_only,
         inspect_sessions_read_only, next_animation_frame_deadline, normalized_windows_path,
-        record_provider_session_observation, start_published_worker, system_powershell_path,
-        tasklist_output_reports_absence,
+        persistent_worker_presentation, record_provider_session_observation,
+        start_published_worker, system_powershell_path, tasklist_output_reports_absence,
     };
     use crate::{
         core::{Attention, Health, Phase},
@@ -3013,6 +3067,37 @@ mod tests {
             assert_eq!(state.title_status(), expected_status);
             assert!(rendered_worker_title(&presentation).contains("Codex"));
         }
+    }
+
+    #[test]
+    fn result_ready_can_render_without_starting_a_persistent_worker() {
+        let action = source_action(
+            Phase::WaitingUser,
+            Attention::ResultReady,
+            Some(ProviderVisualIdentity::codex()),
+        );
+        assert!(
+            persistent_worker_presentation(
+                true,
+                "codex",
+                "OWH",
+                &action,
+                worker_settings(),
+                SessionWorkspaceObservability::default(),
+            )
+            .is_some()
+        );
+        assert!(
+            persistent_worker_presentation(
+                false,
+                "codex",
+                "OWH",
+                &action,
+                worker_settings(),
+                SessionWorkspaceObservability::default(),
+            )
+            .is_none()
+        );
     }
 
     #[test]
