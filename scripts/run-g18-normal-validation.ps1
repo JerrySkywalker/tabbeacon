@@ -136,12 +136,20 @@ $receipt = [ordered]@{
     PERMISSION_REQUEST = 'UNPROVEN'
     TITLE_AUTHORITY = 'UNPROVEN'
     CLEANUP = 'UNPROVEN'
+    TEMP_WT_CLEANUP = 'UNPROVEN'
+    TEMP_WINDOWS_CREATED = 0
+    TEMP_WINDOWS_CLOSED = 0
+    OWNED_TEMP_WT_REMAINING = 0
+    OWNER_WINDOWS_CLOSED = 0
+    BROAD_WINDOW_KILL_USED = $false
     PIXEL_CAPTURE = 'REUSED_BLOCKER'
     OWNER_CONFIG_MUTATED = $false
     OWNER_SHELL_PROFILE_MUTATED = $false
     OWNER_WINDOWS_TERMINAL_SETTINGS_MUTATED = $false
 }
 $scratchRoot = $null
+$ownershipPath = $null
+$temporaryWindowCreated = $false
 $exitCode = 3
 
 Push-Location $repoRoot
@@ -205,6 +213,10 @@ try {
     if (-not (Test-Path -LiteralPath $tabbeaconExecutable -PathType Leaf)) {
         Stop-Validation 'BLOCKED_FIXTURE_BUILD'
     }
+    & $tabbeaconExecutable '__temporary-wt-recover-v1' $EvidenceRoot | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Stop-Validation 'BLOCKED_STALE_TEMP_WT_RECOVERY'
+    }
 
     $scratchRoot = Join-Path $runRoot 'scratch'
     $workspace = Join-Path $scratchRoot 'workspace'
@@ -224,7 +236,9 @@ try {
     $sessionId = "g18-$($RunId.ToLowerInvariant())"
     $turnId = "turn-$($identityToken.Substring(0, 12))"
     $env:LOCALAPPDATA = $localAppData
-    $windowName = "tabbeacon-g18-$($RunId.ToLowerInvariant())"
+    $lifecycleRunId = "TBWT-$($identityToken.Substring(0, 32))"
+    $anchorTitle = "TB-WT-ANCHOR-$lifecycleRunId"
+    $windowName = "tabbeacon-$lifecycleRunId"
     $childTemplate = @'
 $ErrorActionPreference = 'Stop'
 $env:LOCALAPPDATA = __LOCALAPPDATA__
@@ -255,8 +269,28 @@ Invoke-G18Hook 'SessionEnd'
         Replace('__TURN_ID__', (ConvertTo-PowerShellLiteral -Value $turnId)).
         Replace('__TABBEACON__', (ConvertTo-PowerShellLiteral -Value $tabbeaconExecutable))
     $encodedChildCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
-    & $wtCommand.Source '-w' $windowName 'new-tab' 'powershell.exe' '-NoLogo' '-NoProfile' '-NonInteractive' '-EncodedCommand' $encodedChildCommand
+    $wtArguments = @(
+        '-w', $windowName,
+        'new-tab', '--title', $anchorTitle, '--suppressApplicationTitle',
+        'powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive',
+        '-Command', 'Start-Sleep -Milliseconds 60000',
+        ';',
+        'new-tab', 'powershell.exe', '-NoLogo', '-NoProfile', '-NonInteractive',
+        '-EncodedCommand', $encodedChildCommand
+    )
+    & $wtCommand.Source @wtArguments
     if ($LASTEXITCODE -ne 0) { Stop-Validation 'BLOCKED_WINDOWS_TERMINAL_LAUNCH' }
+    $temporaryWindowCreated = $true
+    $receipt.TEMP_WINDOWS_CREATED = 1
+    $registrationOutput = & $tabbeaconExecutable '__temporary-wt-register-v1' `
+        $runRoot $lifecycleRunId $anchorTitle $windowName 2>&1
+    if ($LASTEXITCODE -ne 0) { Stop-Validation 'BLOCKED_TEMP_WT_REGISTRATION' }
+    $ownershipPath = @($registrationOutput | ForEach-Object { $_.ToString().Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) | Select-Object -Last 1
+    if ([string]::IsNullOrWhiteSpace($ownershipPath) -or `
+        -not (Test-Path -LiteralPath $ownershipPath -PathType Leaf)) {
+        Stop-Validation 'BLOCKED_TEMP_WT_REGISTRATION'
+    }
 
     $workingTitles = @(0x280B, 0x2819, 0x2839, 0x2838, 0x283C, 0x2834, 0x2826, 0x2827, 0x2807, 0x280F) |
         ForEach-Object { "$([char]$_) $workspaceAlias" }
@@ -300,6 +334,46 @@ catch {
     $exitCode = 3
 }
 finally {
+    if ($null -ne $ownershipPath) {
+        $productDisposition = if ($exitCode -eq 0) {
+            'PASS'
+        }
+        elseif ($receipt.NORMAL_POWERSHELL -like 'BLOCKED_*') {
+            'BLOCKED'
+        }
+        else {
+            'FAIL'
+        }
+        try {
+            $cleanupOutput = & $tabbeaconExecutable '__temporary-wt-cleanup-v1' `
+                $ownershipPath $productDisposition 2>&1
+            $cleanupExitCode = $LASTEXITCODE
+            $cleanupLine = @($cleanupOutput | ForEach-Object { $_.ToString() } |
+                Where-Object { $_.TrimStart().StartsWith('{') }) | Select-Object -Last 1
+            if ($null -eq $cleanupLine) { throw 'temporary_wt_cleanup_receipt_missing' }
+            $cleanupReceipt = $cleanupLine | ConvertFrom-Json
+            $receipt.TEMP_WT_CLEANUP = $cleanupReceipt.temporary_wt_cleanup
+            $receipt.TEMP_WINDOWS_CREATED = $cleanupReceipt.temporary_windows_created
+            $receipt.TEMP_WINDOWS_CLOSED = $cleanupReceipt.temporary_windows_closed
+            $receipt.OWNED_TEMP_WT_REMAINING = $cleanupReceipt.owned_temporary_wt_remaining
+            $receipt.OWNER_WINDOWS_CLOSED = $cleanupReceipt.owner_windows_closed
+            $receipt.BROAD_WINDOW_KILL_USED = $cleanupReceipt.broad_window_kill_used
+            if ($cleanupExitCode -ne 0 -or $receipt.TEMP_WT_CLEANUP -ne 'PASS') {
+                $exitCode = 3
+            }
+        }
+        catch {
+            $receipt.TEMP_WT_CLEANUP = 'FAIL'
+            $exitCode = 3
+        }
+    }
+    elseif ($temporaryWindowCreated) {
+        # Registration performs a fresh exact-anchor emergency close on error,
+        # but without an immutable record cleanup cannot be claimed as proved.
+        $receipt.TEMP_WT_CLEANUP = 'FAIL'
+        $receipt.OWNED_TEMP_WT_REMAINING = 1
+        $exitCode = 3
+    }
     if ($null -ne $scratchRoot -and (Test-Path -LiteralPath $scratchRoot)) {
         try {
             $resolvedRunRoot = [IO.Path]::GetFullPath($runRoot).TrimEnd('\', '/')

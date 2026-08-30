@@ -19,8 +19,9 @@ use super::{
     EvidenceBundle, EvidenceIntegrity, EvidenceManifest, EvidenceWriter, FixtureDriver,
     MachineEnvironment, OwnedWindowCaptureTarget, PreflightBlocker, PreflightProbe,
     PrintWindowCaptureBackend, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME, RgbaFrame, Roi, ScreenRect,
-    SessionKind, TerminalTestSessionLauncher, UiaDump, VisualDisposition, VisualError,
-    VisualResult, WindowsUiaLocator, assess_animation, classify_color_for_theme, matches_baseline,
+    SessionKind, TemporaryWindowProductDisposition, TerminalTestSessionLauncher, UiaDump,
+    VisualDisposition, VisualError, VisualResult, WindowsUiaLocator, assess_animation,
+    classify_color_for_theme, matches_baseline, recover_stale_temporary_windows_terminals,
     select_background_roi,
 };
 
@@ -114,6 +115,7 @@ pub fn run_live(request: &LiveVisualRunRequest) -> VisualResult<LiveVisualRunSum
         && is_exact_sha(&checked_out_head)
         && request.expected_head == checked_out_head;
     let (worker_root, worker_directory, final_directory) = worker_paths(request)?;
+    recover_stale_temporary_windows_terminals(&WindowsUiaLocator, &worker_root)?;
     let Ok(completion) = run_authorized_worker(request, &worker_root) else {
         return write_worker_failure(
             request,
@@ -869,73 +871,103 @@ fn observe_replay(
     observation: &mut Observation,
 ) -> VisualResult<()> {
     let launcher = TerminalTestSessionLauncher::default();
-    if let Err(error) = launcher.launch(fixture_executable, replay, run_id) {
-        observation.record_uia_blocked(&replay.case.fixture_name, error.to_string());
-        return Ok(());
-    }
-    let locator = WindowsUiaLocator;
-    let target = match locate_activated_with_retry(locator, run_id, replay) {
-        Ok(target) => target,
-        Err(failure) => {
-            if let Some(target) = failure.last_target {
-                observation.record_target(writer, replay, &target)?;
-                observation.record_capture_blocked(
-                    &replay.case.fixture_name,
-                    format!("owned-window activation was refused: {}", failure.error),
-                );
-            } else {
-                observation
-                    .record_uia_failure(&replay.case.fixture_name, failure.error.to_string());
-            }
-            return Ok(());
-        }
-    };
-    observation.record_target(writer, replay, &target.dump)?;
-    if replay.case.expects_title_animation
-        && let Some(reader) = target.title_reader.as_ref()
-    {
-        observe_title_animation(writer, reader, replay, observation)?;
-    }
-    if !target_has_capturable_geometry(&target.dump) {
-        observation.record_capture_blocked(
-            &replay.case.fixture_name,
-            "UIA did not provide capturable owned window/tab geometry",
-        );
-        return Ok(());
-    }
-    let Some((window_bounds, tab_bounds)) = capture_bounds(&target.dump) else {
-        observation.record_capture_blocked(
-            &replay.case.fixture_name,
-            "UIA did not provide owned window/tab bounds",
-        );
-        return Ok(());
-    };
-    if !target
-        .dump
-        .activation
-        .as_ref()
-        .is_some_and(|activation| activation.set_foreground)
-    {
-        observation.record_capture_blocked(
-            &replay.case.fixture_name,
-            "owned Terminal window did not confirm foreground activation; visibility-dependent capture refused",
-        );
-        return Ok(());
-    }
-    let capture_target_result = match target.dump.native_window_id {
-        Some(window_handle) => OwnedWindowCaptureTarget::new(window_handle, window_bounds),
-        None => Err(VisualError::Platform(
-            "owned UIA target did not expose a native HWND".to_owned(),
-        )),
-    };
-    let capture_target = match capture_target_result {
-        Ok(target) => target,
+    let session = match launcher.launch(fixture_executable, replay, run_id, writer.directory()) {
+        Ok(session) => session,
         Err(error) => {
-            observation.record_capture_blocked(&replay.case.fixture_name, error.to_string());
+            observation.record_uia_blocked(&replay.case.fixture_name, error.to_string());
             return Ok(());
         }
     };
-    observe_capture(writer, replay, &capture_target, tab_bounds, observation)
+    let body_result = (|| -> VisualResult<()> {
+        let locator = WindowsUiaLocator;
+        let target = match locate_activated_with_retry(locator, run_id, replay) {
+            Ok(target) => target,
+            Err(failure) => {
+                if let Some(target) = failure.last_target {
+                    observation.record_target(writer, replay, &target)?;
+                    observation.record_capture_blocked(
+                        &replay.case.fixture_name,
+                        format!("owned-window activation was refused: {}", failure.error),
+                    );
+                } else {
+                    observation
+                        .record_uia_failure(&replay.case.fixture_name, failure.error.to_string());
+                }
+                return Ok(());
+            }
+        };
+        observation.record_target(writer, replay, &target.dump)?;
+        if replay.case.expects_title_animation
+            && let Some(reader) = target.title_reader.as_ref()
+        {
+            observe_title_animation(writer, reader, replay, observation)?;
+        }
+        if !target_has_capturable_geometry(&target.dump) {
+            observation.record_capture_blocked(
+                &replay.case.fixture_name,
+                "UIA did not provide capturable owned window/tab geometry",
+            );
+            return Ok(());
+        }
+        let Some((window_bounds, tab_bounds)) = capture_bounds(&target.dump) else {
+            observation.record_capture_blocked(
+                &replay.case.fixture_name,
+                "UIA did not provide owned window/tab bounds",
+            );
+            return Ok(());
+        };
+        if !target
+            .dump
+            .activation
+            .as_ref()
+            .is_some_and(|activation| activation.set_foreground)
+        {
+            observation.record_capture_blocked(
+                &replay.case.fixture_name,
+                "owned Terminal window did not confirm foreground activation; visibility-dependent capture refused",
+            );
+            return Ok(());
+        }
+        let capture_target_result = match target.dump.native_window_id {
+            Some(window_handle) => OwnedWindowCaptureTarget::new(window_handle, window_bounds),
+            None => Err(VisualError::Platform(
+                "owned UIA target did not expose a native HWND".to_owned(),
+            )),
+        };
+        let capture_target = match capture_target_result {
+            Ok(target) => target,
+            Err(error) => {
+                observation.record_capture_blocked(&replay.case.fixture_name, error.to_string());
+                return Ok(());
+            }
+        };
+        observe_capture(writer, replay, &capture_target, tab_bounds, observation)
+    })();
+
+    let product_disposition = if body_result.is_err() {
+        TemporaryWindowProductDisposition::Exception
+    } else if observation.lanes.has_failure() {
+        TemporaryWindowProductDisposition::Fail
+    } else if observation.lanes.has_blocker() {
+        TemporaryWindowProductDisposition::Blocked
+    } else {
+        TemporaryWindowProductDisposition::Pass
+    };
+    match session.cleanup(product_disposition) {
+        Ok(receipt) if receipt.temporary_wt_cleanup == "PASS" => {}
+        Ok(receipt) => observation.record_uia_blocked(
+            &replay.case.fixture_name,
+            format!(
+                "exact-owned temporary Windows Terminal cleanup failed: {}",
+                receipt.detail
+            ),
+        ),
+        Err(error) => observation.record_uia_blocked(
+            &replay.case.fixture_name,
+            format!("exact-owned temporary Windows Terminal cleanup was unproven: {error}"),
+        ),
+    }
+    body_result
 }
 
 struct ActivationRetryFailure {

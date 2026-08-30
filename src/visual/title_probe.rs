@@ -6,7 +6,7 @@
 //! restore terminal presentation and exit.
 
 use std::{
-    env,
+    env, fs,
     io::{self, Write},
     process, thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -16,7 +16,7 @@ use crate::{
     title_authority::{ActiveTitleProbeResult, TitleProbeBoundary, classify_visible_title_samples},
     visual::{
         FixtureDriver, OwnedTabActivation, OwnedTabTitleReader, OwnedWindowTabReader,
-        TerminalTestSessionLauncher, WindowsUiaLocator,
+        TemporaryWindowProductDisposition, TerminalTestSessionLauncher, WindowsUiaLocator,
     },
 };
 
@@ -53,6 +53,10 @@ pub fn run_title_authority_probe() -> ActiveTitleProbeResult {
     };
     let anchor_title = &anchor_replay.case.expected_title;
     let launcher = TerminalTestSessionLauncher::default();
+    let lifecycle_root = env::temp_dir().join("tabbeacon-temporary-wt-lifecycle");
+    if fs::create_dir_all(&lifecycle_root).is_err() {
+        return ActiveTitleProbeResult::unavailable(TitleProbeBoundary::FixturePreparation);
+    }
     let anchor_started_at = Instant::now();
     let anchor = launcher.launch_title_authority_anchor(
         &executable,
@@ -60,6 +64,7 @@ pub fn run_title_authority_probe() -> ActiveTitleProbeResult {
         &anchor_run_id,
         anchor_title,
         millis(PROBE_FIXTURE_HOLD),
+        &lifecycle_root,
     );
     let Ok(anchor) = anchor else {
         return ActiveTitleProbeResult::unavailable(TitleProbeBoundary::AnchorLaunch);
@@ -121,7 +126,15 @@ pub fn run_title_authority_probe() -> ActiveTitleProbeResult {
         },
         |window_reader| wait_for_probe_tab_cleanup(&window_reader, anchor_title, cleanup_deadline),
     );
-    if cleaned_up {
+    let product_disposition = if probe.boundary == TitleProbeBoundary::Complete {
+        TemporaryWindowProductDisposition::Pass
+    } else {
+        TemporaryWindowProductDisposition::Blocked
+    };
+    let exact_cleanup = anchor
+        .cleanup(product_disposition)
+        .is_ok_and(|receipt| receipt.temporary_wt_cleanup == "PASS");
+    if cleaned_up && exact_cleanup {
         probe
     } else {
         ActiveTitleProbeResult::unavailable(TitleProbeBoundary::FixtureCleanup)

@@ -46,6 +46,14 @@ fn smoke_completion_is_durable_bounded_and_owner_correlated() {
         "the child completion receipt must bind the owned run, candidate, and binary"
     );
     assert!(
+        script.contains("__temporary-wt-register-v1")
+            && script.contains("__temporary-wt-cleanup-v1")
+            && script.contains("TEMP_WT_CLEANUP=")
+            && script.contains("OWNER_WINDOWS_CLOSED=")
+            && script.contains("BROAD_WINDOW_KILL_USED="),
+        "the exact-owned temporary window must register and clean up on a separate receipt lane"
+    );
+    assert!(
         script.contains("WaitForSingleObject")
             && script.contains("RESIDUAL_OWNED_PROCESS_OBSERVATION=")
             && script.contains("if ($durableCompletionProven)"),

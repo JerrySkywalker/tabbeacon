@@ -42,6 +42,8 @@ pub mod session;
 mod title_probe;
 #[cfg(windows)]
 pub mod uia;
+#[cfg(windows)]
+mod wt_lifecycle;
 
 #[cfg(windows)]
 pub use capture::{CaptureBackend, OwnedWindowCaptureTarget, PrintWindowCaptureBackend};
@@ -54,6 +56,14 @@ pub use title_probe::{emit_title_authority_fixture, run_title_authority_probe};
 #[cfg(windows)]
 pub use uia::{
     OwnedTabActivation, OwnedTabTitleReader, OwnedWindowTabReader, TargetLocator, WindowsUiaLocator,
+};
+#[cfg(windows)]
+pub use wt_lifecycle::{
+    ExactOwnedWindowBackend, ExactWindowObservation, TemporaryWindowProductDisposition,
+    TemporaryWindowsTerminalCleanupReceipt, TemporaryWindowsTerminalOwnership,
+    cleanup_temporary_windows_terminal, close_unregistered_exact_anchor,
+    recover_stale_temporary_windows_terminals, register_temporary_windows_terminal,
+    register_temporary_windows_terminal_with_retry,
 };
 
 #[cfg(not(windows))]

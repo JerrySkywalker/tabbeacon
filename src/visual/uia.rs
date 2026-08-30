@@ -8,14 +8,16 @@ use std::{
 
 use uiautomation::{
     UIAutomation, UIElement,
+    actions::Window,
     controls::WindowControl,
     types::{ControlType, Rect},
 };
 use windows::Win32::Foundation::HWND;
+use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 
 use super::{
-    ScreenRect, UiaDump, VisualError, VisualResult, WindowActivation,
-    root_workspace_anchor_fixture_alias,
+    ExactOwnedWindowBackend, ExactWindowObservation, ScreenRect, UiaDump, VisualError,
+    VisualResult, WindowActivation, root_workspace_anchor_fixture_alias,
 };
 use crate::title_authority::TitleProbeSample;
 
@@ -318,6 +320,113 @@ impl TargetLocator for WindowsUiaLocator {
         let (window, tab) = owned_window_and_tab(run_id, expected_title)?;
         uia_dump(&window, &tab, None)
     }
+}
+
+impl ExactOwnedWindowBackend for WindowsUiaLocator {
+    fn observe_exact_anchor(&self, anchor_title: &str) -> VisualResult<ExactWindowObservation> {
+        exact_anchor_window(anchor_title).map(|(observation, _)| observation)
+    }
+
+    fn close_exact_anchor(&self, anchor_title: &str, expected_hwnd: isize) -> VisualResult<()> {
+        let (observation, window) = exact_anchor_window(anchor_title)?;
+        if observation.anchor_tab_match_count != 1
+            || observation.target_window_match_count != 1
+            || observation.native_window_id != Some(expected_hwnd)
+        {
+            return Err(VisualError::Platform(format!(
+                "exact Windows Terminal close refused: anchor_matches={} window_matches={} hwnd_match={}",
+                observation.anchor_tab_match_count,
+                observation.target_window_match_count,
+                observation.native_window_id == Some(expected_hwnd)
+            )));
+        }
+        let window = window.ok_or_else(|| {
+            VisualError::Platform(
+                "exact Windows Terminal close refused because the ancestor window vanished"
+                    .to_owned(),
+            )
+        })?;
+        let control = WindowControl::try_from(window).map_err(platform_error)?;
+        let close_result = control.close();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while native_window_exists(expected_hwnd) {
+            if Instant::now() >= deadline {
+                let detail = close_result.as_ref().err().map_or_else(
+                    || "exact close returned but its admitted HWND remained".to_owned(),
+                    |error| {
+                        format!("exact close was refused and its admitted HWND remained: {error}")
+                    },
+                );
+                return Err(VisualError::Platform(detail));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        Ok(())
+    }
+}
+
+#[allow(unsafe_code)]
+fn native_window_exists(native_window_id: isize) -> bool {
+    // UIA may retain a stale element immediately after WindowPattern.Close.
+    // The native handle was admitted through the exact anchor correlation, so
+    // checking only that handle is a narrower and fresher disappearance proof.
+    unsafe { IsWindow(Some(HWND(native_window_id as *mut core::ffi::c_void))).as_bool() }
+}
+
+fn exact_anchor_window(
+    anchor_title: &str,
+) -> VisualResult<(ExactWindowObservation, Option<UIElement>)> {
+    if anchor_title.is_empty() || anchor_title.chars().any(char::is_control) {
+        return Err(VisualError::InvalidIdentifier(anchor_title.to_owned()));
+    }
+    let automation = UIAutomation::new().map_err(platform_error)?;
+    let tabs = automation
+        .create_matcher()
+        .name(anchor_title)
+        .control_type(ControlType::TabItem)
+        .timeout(0)
+        .find_all()
+        .map_err(platform_error)?;
+    let anchor_tab_match_count = u32::try_from(tabs.len()).map_err(|_| {
+        VisualError::Platform("UIA anchor count does not fit the receipt contract".to_owned())
+    })?;
+    let walker = automation
+        .get_control_view_walker()
+        .map_err(platform_error)?;
+    let mut windows = std::collections::BTreeMap::<isize, UIElement>::new();
+    for tab in tabs {
+        let mut current = tab;
+        for _ in 0..16 {
+            current = walker.get_parent(&current).map_err(platform_error)?;
+            if current.get_control_type().map_err(platform_error)? == ControlType::Window {
+                let handle = current.get_native_window_handle().map_err(platform_error)?;
+                let hwnd: HWND = handle.into();
+                windows.entry(hwnd.0 as isize).or_insert(current);
+                break;
+            }
+        }
+    }
+    let target_window_match_count = u32::try_from(windows.len()).map_err(|_| {
+        VisualError::Platform("UIA window count does not fit the receipt contract".to_owned())
+    })?;
+    let (native_window_id, window) = if windows.len() == 1 {
+        let (hwnd, window) = windows
+            .into_iter()
+            .next()
+            .expect("one exact entry was checked");
+        (Some(hwnd), Some(window))
+    } else {
+        (None, None)
+    };
+    Ok((
+        ExactWindowObservation {
+            anchor_tab_match_count,
+            target_window_match_count,
+            native_window_id,
+        },
+        window,
+    ))
 }
 
 fn uia_dump(

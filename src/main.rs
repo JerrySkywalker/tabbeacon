@@ -152,6 +152,17 @@ fn dispatch(cli: Cli) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Some(Command::TemporaryWtRegister {
+            evidence_root,
+            run_id,
+            anchor_title,
+            window_routing_id,
+        }) => temporary_wt_register(&evidence_root, &run_id, &anchor_title, &window_routing_id),
+        Some(Command::TemporaryWtCleanup {
+            ownership_path,
+            product_disposition,
+        }) => temporary_wt_cleanup(&ownership_path, &product_disposition),
+        Some(Command::TemporaryWtRecover { registry_root }) => temporary_wt_recover(&registry_root),
         Some(Command::Setup {
             command: None,
             quick,
@@ -249,6 +260,110 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Preview(arguments)) => preview(arguments),
         Some(Command::Completions { shell }) => completions(shell),
     }
+}
+
+#[cfg(windows)]
+fn temporary_wt_register(
+    evidence_root: &std::path::Path,
+    run_id: &str,
+    anchor_title: &str,
+    window_routing_id: &str,
+) -> ExitCode {
+    let result = tabbeacon::visual::register_temporary_windows_terminal_with_retry(
+        &tabbeacon::visual::WindowsUiaLocator,
+        evidence_root,
+        run_id,
+        anchor_title,
+        window_routing_id,
+        Duration::from_secs(5),
+    );
+    match result {
+        Ok(path) => {
+            println!("{}", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            let _ = tabbeacon::visual::close_unregistered_exact_anchor(
+                &tabbeacon::visual::WindowsUiaLocator,
+                anchor_title,
+            );
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn temporary_wt_register(
+    _evidence_root: &std::path::Path,
+    _run_id: &str,
+    _anchor_title: &str,
+    _window_routing_id: &str,
+) -> ExitCode {
+    ExitCode::FAILURE
+}
+
+#[cfg(windows)]
+fn temporary_wt_cleanup(ownership_path: &std::path::Path, product_disposition: &str) -> ExitCode {
+    use tabbeacon::visual::TemporaryWindowProductDisposition as Disposition;
+
+    let disposition = match product_disposition.to_ascii_uppercase().as_str() {
+        "PASS" => Disposition::Pass,
+        "FAIL" => Disposition::Fail,
+        "BLOCKED" => Disposition::Blocked,
+        "TIMEOUT" => Disposition::Timeout,
+        "EXCEPTION" => Disposition::Exception,
+        "CANCELLED" => Disposition::Cancelled,
+        _ => return ExitCode::FAILURE,
+    };
+    match tabbeacon::visual::cleanup_temporary_windows_terminal(
+        &tabbeacon::visual::WindowsUiaLocator,
+        ownership_path,
+        disposition,
+    ) {
+        Ok(receipt) => match serde_json::to_string(&receipt) {
+            Ok(json) => {
+                println!("{json}");
+                if receipt.temporary_wt_cleanup == "PASS" {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+            Err(_) => ExitCode::FAILURE,
+        },
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(windows)]
+fn temporary_wt_recover(registry_root: &std::path::Path) -> ExitCode {
+    match tabbeacon::visual::recover_stale_temporary_windows_terminals(
+        &tabbeacon::visual::WindowsUiaLocator,
+        registry_root,
+    ) {
+        Ok(receipts) => {
+            println!("STALE_EXACT_OWNED_WINDOWS_RECOVERED={}", receipts.len());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn temporary_wt_recover(_registry_root: &std::path::Path) -> ExitCode {
+    ExitCode::FAILURE
+}
+
+#[cfg(not(windows))]
+fn temporary_wt_cleanup(_ownership_path: &std::path::Path, _product_disposition: &str) -> ExitCode {
+    ExitCode::FAILURE
 }
 
 fn config_command(
