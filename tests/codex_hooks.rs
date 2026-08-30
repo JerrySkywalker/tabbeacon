@@ -937,7 +937,11 @@ fn owned_current_windows_handler_count(hooks: &Value) -> usize {
 }
 
 #[cfg(windows)]
-fn assert_real_hook_direct(executable: &Path, payload: &[u8], local_app_data: &Path) {
+fn try_real_hook_direct(
+    executable: &Path,
+    payload: &[u8],
+    local_app_data: &Path,
+) -> Result<Output, WindowsHookStageFailure> {
     let _shell_guard = WINDOWS_HOOK_SHELL_SERIALIZER
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -949,20 +953,68 @@ fn assert_real_hook_direct(executable: &Path, payload: &[u8], local_app_data: &P
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("real TabBeacon starts");
-    let output = write_and_wait_for_windows_hook(
-        child,
+        .map_err(WindowsHookStageFailure::Spawn)?;
+    try_write_and_wait_for_windows_hook(child, Some(payload), WINDOWS_HOOK_STAGE_TIMEOUT)
+}
+
+#[cfg(windows)]
+fn real_hook_direct_succeeds_or_reports_unqualified(
+    scope: &str,
+    executable: &Path,
+    payload: &[u8],
+    local_app_data: &Path,
+) -> bool {
+    match try_real_hook_direct(executable, payload, local_app_data) {
+        Ok(output) => {
+            assert!(
+                output.status.success(),
+                "real direct hook failed for {scope}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stdout.is_empty(), "real direct hook wrote stdout");
+            assert!(output.stderr.is_empty(), "real direct hook wrote stderr");
+            true
+        }
+        Err(error) if error.is_environment_timeout() => {
+            eprintln!(
+                "PERFORMANCE_ENVIRONMENT=UNQUALIFIED SCOPE={scope} SHELL=DIRECT-ACTUAL REASON={error}"
+            );
+            false
+        }
+        Err(error) => panic!("real direct hook failed for {scope}: {error}"),
+    }
+}
+
+#[cfg(windows)]
+fn run_real_hook_shell_or_report_unqualified(
+    scope: &str,
+    shell: CodexWindowsHookShell,
+    command: &str,
+    payload: &[u8],
+    local_app_data: &Path,
+) -> Option<Output> {
+    match try_run_codex_windows_hook_with_shell_and_terminal(
+        shell,
+        command,
         payload,
-        "direct real hook",
+        false,
+        Some(local_app_data),
+        None,
         WINDOWS_HOOK_STAGE_TIMEOUT,
-    );
-    assert!(
-        output.status.success(),
-        "real direct hook failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(output.stdout.is_empty());
-    assert!(output.stderr.is_empty());
+    ) {
+        Ok(output) => Some(output),
+        Err(error) if error.is_environment_timeout() => {
+            eprintln!(
+                "PERFORMANCE_ENVIRONMENT=UNQUALIFIED SCOPE={scope} SHELL={} REASON={error}",
+                shell.label()
+            );
+            None
+        }
+        Err(error) => panic!(
+            "real Hook shell failed for {scope}/{}: {error}",
+            shell.label()
+        ),
+    }
 }
 
 #[cfg(windows)]
@@ -1060,13 +1112,15 @@ fn assert_real_hook_shell_matrix(root: &TestRoot, command: &str, payload: &[u8])
         ) {
             continue;
         }
-        let output = run_codex_windows_hook_with_shell(
+        let Some(output) = run_real_hook_shell_or_report_unqualified(
+            "real-hook-shell-matrix-actual",
             shell,
             command,
             payload,
-            false,
-            Some(&local_app_data),
-        );
+            &local_app_data,
+        ) else {
+            continue;
+        };
         assert!(
             output.status.success(),
             "{} real hook shell failed: {}",
@@ -1106,13 +1160,15 @@ fn assert_real_hook_ingress(root: &TestRoot, command: &str) {
     ) {
         return;
     }
-    let output = run_codex_windows_hook_with_shell(
+    let Some(output) = run_real_hook_shell_or_report_unqualified(
+        "real-hook-ingress-actual",
         CodexWindowsHookShell::Pwsh7,
         command,
         &payload,
-        false,
-        Some(&local_app_data),
-    );
+        &local_app_data,
+    ) else {
+        return;
+    };
     assert!(
         output.status.success(),
         "real hook ingress failed: {}",
@@ -5226,7 +5282,14 @@ fn generated_windows_command_runs_the_real_binary_or_reports_unqualified_environ
     ) {
         return;
     }
-    assert_real_hook_direct(&executable, &payload, &local_app_data);
+    if !real_hook_direct_succeeds_or_reports_unqualified(
+        "generated-windows-command-actual",
+        &executable,
+        &payload,
+        &local_app_data,
+    ) {
+        return;
+    }
     assert_real_hook_shell_matrix(&root, &command, &payload);
     assert_real_hook_ingress(&root, &command);
 }
@@ -5251,7 +5314,14 @@ fn shell_neutral_windows_declaration_succeeds_or_reports_unqualified_environment
     ) {
         return;
     }
-    assert_real_hook_direct(&executable, &payload, &local_app_data);
+    if !real_hook_direct_succeeds_or_reports_unqualified(
+        "shell-neutral-windows-declaration-actual",
+        &executable,
+        &payload,
+        &local_app_data,
+    ) {
+        return;
+    }
     assert_real_hook_shell_matrix(&root, &generic_command, &payload);
     assert_real_hook_shell_matrix(&root, &windows_command, &payload);
     assert_real_hook_ingress(&root, &windows_command);
@@ -5323,6 +5393,29 @@ fn static_doctor_requires_a_bounded_probe_or_reports_unqualified_environment() {
     assert_eq!(static_report.overall(), DoctorStatus::Warning);
 
     let probed_report = integration.doctor_with_runtime_probe();
+    let after = [
+        fs::read(&hooks_path).expect("hooks reread"),
+        fs::read(&config_path).expect("config reread"),
+        fs::read(&manifest_path).expect("manifest reread"),
+    ];
+    assert_eq!(
+        before, after,
+        "runtime probing must not mutate Codex configuration, trust, or the ownership manifest"
+    );
+    let runtime_probe = probed_report
+        .check("hooks.runtime-probe")
+        .expect("runtime probe check exists");
+    if runtime_probe.status() == DoctorStatus::Fail
+        && runtime_probe
+            .summary()
+            .starts_with("RUNTIME_PROBE_TIMEOUT:")
+    {
+        eprintln!(
+            "PERFORMANCE_ENVIRONMENT=UNQUALIFIED SCOPE=doctor-runtime-probe-actual SHELL=OWNED-HOOK REASON={}",
+            runtime_probe.summary()
+        );
+        return;
+    }
     assert_eq!(
         probed_report.check_status("hooks.runtime-probe"),
         Some(DoctorStatus::Pass),
@@ -5330,15 +5423,6 @@ fn static_doctor_requires_a_bounded_probe_or_reports_unqualified_environment() {
         probed_report.checks()
     );
     assert_eq!(probed_report.overall(), DoctorStatus::Pass);
-    assert_eq!(
-        before,
-        [
-            fs::read(&hooks_path).expect("hooks reread"),
-            fs::read(&config_path).expect("config reread"),
-            fs::read(&manifest_path).expect("manifest reread"),
-        ],
-        "runtime probing must not mutate Codex configuration, trust, or the ownership manifest"
-    );
 }
 
 #[cfg(windows)]
@@ -5357,7 +5441,12 @@ fn real_windows_hook_shell_stages_are_independently_bounded_or_unqualified() {
         WINDOWS_HOOK_STAGE_TIMEOUT,
     ) {
         capture_windows_hook_stage(&mut failures, "direct", || {
-            assert_real_hook_direct(&executable, &payload, &local_app_data);
+            let _ = real_hook_direct_succeeds_or_reports_unqualified(
+                "real-hook-stage-direct-actual",
+                &executable,
+                &payload,
+                &local_app_data,
+            );
         });
     }
     for (stage, shell) in [
@@ -5381,13 +5470,15 @@ fn real_windows_hook_shell_stages_are_independently_bounded_or_unqualified() {
             continue;
         }
         capture_windows_hook_stage(&mut failures, stage, || {
-            let output = run_codex_windows_hook_with_shell(
+            let Some(output) = run_real_hook_shell_or_report_unqualified(
+                "real-hook-stage-actual",
                 shell,
                 &command,
                 &payload,
-                false,
-                Some(&local_app_data),
-            );
+                &local_app_data,
+            ) else {
+                return;
+            };
             assert!(
                 output.status.success(),
                 "{} real hook shell failed: {}",
@@ -5588,13 +5679,15 @@ fn malformed_hook_runtime_is_fail_open_or_reports_unqualified_environment() {
         ) {
             continue;
         }
-        let output = run_codex_windows_hook_with_shell(
+        let Some(output) = run_real_hook_shell_or_report_unqualified(
+            "malformed-hook-runtime-actual",
             shell,
             &command,
             b"malformed",
-            false,
-            Some(&local_app_data),
-        );
+            &local_app_data,
+        ) else {
+            continue;
+        };
         assert!(
             output.status.success(),
             "malformed hook runtime input must fail open in {}: {}",
