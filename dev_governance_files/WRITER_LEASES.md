@@ -101,7 +101,10 @@ then atomically converts the task-root marker to `TRANSACTION=FINALIZED`.
 reclaims, requires a fresh replacement writer proof if the original proof has
 expired. The original proof remains durable provenance; the final receipt records
 the fresh proof used to complete recovery and, when they differ, carries the
-original prepared-proof path/digest plus `RECOVERY_PROOF_REFRESH=true`. It either resumes the exact archive or
+original prepared-proof path/digest plus `RECOVERY_PROOF_REFRESH=true`. Before
+the archive move, that fresh proof and provenance are atomically bound into the
+durable PREPARED marker and prepared receipt; final-marker recovery requires the
+final receipt to match that binding and the caller's fresh proof. It either resumes the exact archive or
 finalizes the already-verified archived bytes. If the only interrupted step was
 the task-marker finalization after a valid final external receipt, recovery
 validates that receipt and archive against the prepared operation, disposition,

@@ -271,7 +271,13 @@ function Complete-FixturePreparedTransactionForTestCleanup {
         $recoverArguments += @('-ExpectedHolder', [string]$holderProperty.Value)
     }
     if ($preparedOperation -eq 'ReclaimOrphan') {
-        $proof = New-ActiveWriterProof -Fixture $cleanupFixture -LeaseDigest ([string]$Fields['ORIGINAL_LEASE_SHA256'])
+        $recordedProofPath = [string]$Fields['ACTIVE_WRITER_PROOF_PATH']
+        $recordedProofSha256 = [string]$Fields['ACTIVE_WRITER_PROOF_SHA256']
+        if (-not (Test-Path -LiteralPath $cleanupFixture.LeasePath -PathType Leaf) -and -not [string]::IsNullOrWhiteSpace($recordedProofPath) -and -not [string]::IsNullOrWhiteSpace($recordedProofSha256) -and (Test-Path -LiteralPath $recordedProofPath -PathType Leaf) -and (Get-Digest -Path $recordedProofPath) -eq $recordedProofSha256) {
+            $proof = [pscustomobject]@{ Path = $recordedProofPath; Sha256 = $recordedProofSha256 }
+        } else {
+            $proof = New-ActiveWriterProof -Fixture $cleanupFixture -LeaseDigest ([string]$Fields['ORIGINAL_LEASE_SHA256'])
+        }
         $recoverArguments += @('-ExpectedHolderless', '-ActiveWriterProofPath', $proof.Path, '-ExpectedActiveWriterProofSha256', $proof.Sha256)
     }
     [void](Invoke-ToolJson -ToolArguments $recoverArguments)
@@ -676,7 +682,20 @@ try {
     Assert-True -Condition ($refreshProofFinalReceipt.IndexOf('RECOVERY_PROOF_REFRESH=true', [StringComparison]::Ordinal) -ge 0) -Message 'fresh reclaim receipt omitted refresh provenance marker'
     Assert-True -Condition ($refreshProofFinalReceipt.IndexOf(('PREPARED_WRITER_PROOF_SHA256=' + $originalRefreshProof.Sha256), [StringComparison]::Ordinal) -ge 0) -Message 'fresh reclaim receipt omitted original prepared proof'
     Assert-True -Condition ($refreshProofFinalReceipt.IndexOf(('ACTIVE_WRITER_PROOF_SHA256=' + $freshRefreshProof.Sha256), [StringComparison]::Ordinal) -ge 0) -Message 'fresh reclaim receipt omitted recovery proof'
-    [IO.File]::WriteAllText($refreshProofMarker, $refreshProofPrepared + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $refreshProofFixture | Add-Member -NotePropertyName CleanupFinalReceiptContent -NotePropertyValue ($refreshProofFinalReceipt)
+    $refreshProofPreparedForFinalization = $refreshProofPrepared.Replace(('ACTIVE_WRITER_PROOF_SHA256=' + $originalRefreshProof.Sha256), ('ACTIVE_WRITER_PROOF_SHA256=' + $freshRefreshProof.Sha256)) + [Environment]::NewLine + ('PREPARED_WRITER_PROOF_PATH=' + $originalRefreshProof.Path) + [Environment]::NewLine + ('PREPARED_WRITER_PROOF_SHA256=' + $originalRefreshProof.Sha256) + [Environment]::NewLine + 'RECOVERY_PROOF_REFRESH=true'
+    [IO.File]::WriteAllText($refreshProofMarker, $refreshProofPreparedForFinalization + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $tamperedRefreshProofFinalReceipt = $refreshProofFinalReceipt.Replace(('ACTIVE_WRITER_PROOF_SHA256=' + $freshRefreshProof.Sha256), ('ACTIVE_WRITER_PROOF_SHA256=' + ('0' * 64 -join '')))
+    [IO.File]::WriteAllText($refreshProofFixture.ReceiptPath, $tamperedRefreshProofFinalReceipt, [Text.UTF8Encoding]::new($false))
+    Assert-ToolFails -ToolArguments (@('-Operation', 'RecoverPrepared', '-PreparedOperation', 'ReclaimOrphan', '-LeasePath', $refreshProofFixture.LeasePath) + $refreshProofIdentity + @(
+        '-ExpectedHolderless',
+        '-ArchiveRoot', $refreshProofFixture.ArchiveRoot,
+        '-ArchivePath', $refreshProofFixture.ArchivePath,
+        '-ReceiptPath', $refreshProofFixture.ReceiptPath,
+        '-ActiveWriterProofPath', $freshRefreshProof.Path,
+        '-ExpectedActiveWriterProofSha256', $freshRefreshProof.Sha256
+    )) -ExpectedToken 'WRITER_LEASE_FINAL_RECEIPT_IDENTITY_MISMATCH'
+    [IO.File]::WriteAllText($refreshProofFixture.ReceiptPath, $refreshProofFinalReceipt, [Text.UTF8Encoding]::new($false))
     $refreshProofRecovered = Invoke-ToolJson -ToolArguments (@('-Operation', 'RecoverPrepared', '-PreparedOperation', 'ReclaimOrphan', '-LeasePath', $refreshProofFixture.LeasePath) + $refreshProofIdentity + @(
         '-ExpectedHolderless',
         '-ArchiveRoot', $refreshProofFixture.ArchiveRoot,
