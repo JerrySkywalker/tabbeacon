@@ -104,7 +104,12 @@ TB-G103  Hotfix Admission & Exact Reproduction
 TB-G104  Legacy MCP Hybrid -> Command v1 Migration
         |
         v
-TB-G105  Real Codex Subagent Qualification
+TB-G105A Real Codex Hook / Subagent Semantics
+        +
+TB-G105B Windows Terminal Presentation / UIA
+        |
+        v
+TB-G105  Composite qualification complete
         |
         v
 TB-G106  v0.7.2 Hardening & Public Release
@@ -125,7 +130,9 @@ TB-G99..TB-G102 / PR #100 -> retargeted to v0.7.3
 | --- | --- | ---: |
 | G103 | reproduce/classify the real subagent Hook failure; freeze transport truth and migration safety boundary | 1–2 h |
 | G104 | separate existing-vs-desired transport; migrate only exact-owned TabBeacon MCP declarations to command v1; preserve third-party state | 2–4 h |
-| G105 | unit/migration/real Codex subagent regression proving zero Hook failures and no root-state mutation from child events | 2–4 h |
+| G105A | real Codex command-Hook/subagent semantics: migrated legacy scenario, child identity/IgnoreSubagent, zero failures/timeouts, root isolation, and fail-open | 1–4 h |
+| G105B | same-binary stock Windows Terminal presentation: fixed TabItem-to-HWND ownership, deterministic root fixtures, Working/ResultReady, and final UIA proof | 1–2 h |
+| G105 | composite completion only when G105A and G105B both pass against the identical candidate binary | 2–6 h |
 | G106 | full release gates, v0.7.2 publication, fresh consumers, post-release truth, resume dogfood pause | 2–4 h |
 | **Total** | **v0.7.2 hotfix** | **7–14 h** |
 
@@ -173,25 +180,41 @@ The command transport must preserve the source-audited `agent_id` and
 under the existing bounded input policy; raw tool/prompt/model content remains
 outside TabBeacon persistence and presentation.
 
-## Real qualification requirement
+## Split real qualification requirement
 
-The hotfix is not accepted from unit tests alone. A disposable real Codex
-qualification must launch a parent session, create at least one subagent, and
-exercise multiple child tool calls under the migrated command-Hook profile.
-
-Required real evidence:
+The hotfix is not accepted from unit tests, benchmarks, source inspection, or
+presentation fixtures alone. The adopted independent audit separates the
+terminal-independent product proof from the terminal-specific visual oracle:
 
 ```text
-REAL_CODEX_SUBAGENT_QUALIFICATION=PASS
-SUBAGENT_TOOL_CALLS_SUCCEED=true
-PRETOOLUSE_HOOK_FAILED_COUNT=0
-POSTTOOLUSE_HOOK_FAILED_COUNT=0
-ROOT_PRESENTATION_MUTATED_BY_CHILD=false
-PARENT_PRESENTATION=PASS
+G105A=real Codex 0.151.x `codex exec`, parent plus real subagent, at least two
+      child read-only tool calls, command-v1 delivery, generic child identity,
+      IgnoreSubagent normalization, zero Hook failures/timeouts, root isolation,
+      migrated-legacy proof, and handler-reached fail-open.
+G105B=the same exact binary in stock Windows Terminal, owned through one fixed
+      TabItem to its ancestor HWND, deterministic valid root Hook fixtures,
+      Working/ResultReady/final UIA evidence, and no desktop capture.
+G105_COMPLETE=G105A_PASS_AND_G105B_PASS_WITH_SAME_SOURCE_AND_BINARY_SHA256
 ```
 
-Use disposable configuration/state where practical. Do not mutate Owner Hook
-trust automatically.
+The same settled candidate and binary bind both proofs. No Windows Terminal,
+UIA, keyboard, foreground-focus, or Codex sandbox-helper condition belongs to
+G105A. No real model, subagent, or Codex sandbox-helper condition belongs to
+G105B. Foreground focus, synthetic keyboard delivery, controller shell
+injection, and sandbox-helper startup are not product requirements unless a
+future authoritative specification expressly adds them.
+
+For the observed Codex elevated-helper cancellation:
+
+```text
+WINDOWS_1223_CLASS=MIXED
+WINDOWS_1223_PRODUCT_GATE=false
+WINDOWS_1223_QUALIFICATION_INFRASTRUCTURE=true
+```
+
+The child shell did not start and `PostToolUse` did not begin, so this event is
+not TabBeacon Hook-failure evidence. It neither accepts nor rejects the real
+post-fix G105A proof.
 
 ## Release boundary
 
