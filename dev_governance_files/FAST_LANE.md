@@ -169,6 +169,8 @@ The canonical single-writer lifecycle, deterministic orphan recovery contract,
 and Owner break-glass boundary are documented in
 [WRITER_LEASES.md](WRITER_LEASES.md). Lease JSON is never edited or deleted by
 hand; use the canonical acquire, settle, or fully proven reclaim operation.
+An interrupted canonical settlement is resumed only with the documented
+`RecoverPrepared` operation; it is never repaired by editing a lease or receipt.
 
 ## Current v0.3 application
 

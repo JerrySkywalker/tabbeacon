@@ -24,7 +24,7 @@ function Get-RequiredContent {
     param([Parameter(Mandatory = $true)][string]$Path)
 
     Assert-Docs (Test-Path -LiteralPath $Path -PathType Leaf) "missing required file: $Path"
-    return Get-Content -LiteralPath $Path -Raw
+    return Get-Content -LiteralPath $Path -Raw -Encoding UTF8
 }
 
 function Test-RelativeMarkdownLinks {
@@ -204,7 +204,7 @@ foreach ($path in $currentFacingPaths) {
 
 $currentReleaseProofs = @(
     @{ Path = 'README.md'; Pattern = 'Current public release:\s+\*\*v0\.7\.1\*\*' },
-    @{ Path = 'README.zh-CN.md'; Pattern = '当前公开版本：\*\*v0\.7\.1\*\*' },
+    @{ Path = 'README.zh-CN.md'; Pattern = '\u5f53\u524d\u516c\u5f00\u7248\u672c\uff1a\*\*v0\.7\.1\*\*' },
     @{ Path = 'SECURITY.md'; Pattern = 'current published release is \*\*v0\.7\.1\*\*' },
     @{ Path = 'docs/README.md'; Pattern = 'Current public release:\s+\*\*v0\.7\.1\*\*' },
     @{ Path = 'docs/getting-started.md'; Pattern = 'current public release is \*\*v0\.7\.1\*\*' },
@@ -213,7 +213,7 @@ $currentReleaseProofs = @(
     @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.7\.1' }
 )
 foreach ($proof in $currentReleaseProofs) {
-    $content = Get-Content -LiteralPath $proof.Path -Raw
+    $content = Get-Content -LiteralPath $proof.Path -Raw -Encoding UTF8
     Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not declare v0.7.1 as the current public release"
 }
 

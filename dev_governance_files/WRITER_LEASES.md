@@ -20,18 +20,25 @@ Its `writer_role=implementer`, `worktree`, `branch`, `start_remote_main`, and
 
 The only lease lifecycle primitive is
 `tools/governance/Invoke-TabBeaconWriterLease.ps1`. It supports `Status`,
-`Acquire`, `Settle`, and `ReclaimOrphan` and emits one machine-readable JSON
-result on success.
+`Acquire`, `Settle`, `ReclaimOrphan`, and `RecoverPrepared`, and emits one
+machine-readable JSON result on success. `RecoverPrepared` is only for the
+durable `TRANSACTION=PREPARED` state left by an interrupted tool operation; it
+is not an alternate way to settle an ordinary active lease.
 
 The tool creates a lease with atomic create, serializes tool mutations with a
 lease-specific OS mutex, rechecks the exact digest immediately before archive,
 rejects reparse-point paths, and refuses to replace an existing lease, archive,
-or receipt.
+or receipt. Archive moves read and rename the exact opened source file and use
+an already-open, identity-checked archive-directory handle; there is no
+path-based move fallback.
 
-`Acquire` also requires an explicit safe lease-registry root. Under two global
-scope mutexes, it scans that registry fail-closed and refuses any active v1 lease
-for the same repository and either the same worktree or the same branch. This
-prevents a second task-root pathname from bypassing the one-writer boundary.
+`Acquire` uses the fixed safe registry `V:\build\tabbeacon`; a caller-supplied
+registry root is accepted only when it resolves to that exact value. A canonical
+lease path is exactly `V:\build\tabbeacon\<task-root>\writer-lease.json`.
+Under two global scope mutexes, acquire scans its direct task roots and refuses
+any active v1 lease for the same repository and either the same worktree or the
+same branch. This prevents a second registry or task-root pathname from bypassing
+the one-writer boundary.
 
 ## Normal acquire and settle
 
@@ -56,27 +63,34 @@ bounded process/worktree checks prove `ACTIVE_WRITER_COUNT=0`; and no active
 holder evidence exists in the schema or task record.
 
 That zero-writer result must be a separate hash-bound proof record, not an
-unbound `-ActiveWriterCount 0` assertion. The record uses
-`PROOF_SCHEMA=tabbeacon-writer-active-proof.v1` and binds the exact lease path
-and SHA-256 while recording `ACTIVE_WRITER_COUNT=0` and
-`ACTIVE_LEASE_HOLDER_PROVEN=false`. `ReclaimOrphan` verifies the proof path and
-its expected SHA-256, records both in the settlement receipt, and rejects a
-malformed, stale, or non-zero proof.
+unbound command-line assertion. The record uses
+`PROOF_SCHEMA=tabbeacon-writer-active-proof.v1`, binds the exact lease path and
+SHA-256, and records `ACTIVE_WRITER_COUNT=0`,
+`ACTIVE_LEASE_HOLDER_PROVEN=false`, repository, worktree, branch, bounded
+observation scope, observer identity, and UTC observation/expiry timestamps.
+The proof is valid for at most five minutes. `ReclaimOrphan` verifies the proof
+path and its expected SHA-256, records both in the settlement receipt, and
+rejects a malformed, stale, non-zero, mismatched, or unscoped proof.
 
-`ReclaimOrphan` requires every expected identity field, `-ExpectedHolderless`,
-`-ActiveWriterCount 0`, and exact non-existing archive and receipt destinations
-inside a safe explicit archive root. It refuses wrong digests, schema, Goal, or
-phase; a non-empty holder; concurrent drift; reparse targets; and archive
-collisions. Successful reclaim archives the original bytes and writes a receipt;
-it never edits the lease to mark it closed.
+`ReclaimOrphan` requires every expected identity field, an active expected
+phase, `-ExpectedHolderless`, the fresh proof record, and exact non-existing
+archive and receipt destinations inside a safe explicit archive root. It refuses
+wrong digests, schema, Goal, or phase; a non-empty holder; concurrent drift;
+reparse targets; and archive collisions. Successful reclaim archives the
+original bytes and writes a receipt; it never edits the lease to mark it closed.
 
 Leases are first flushed to an adjacent unique staging name and then atomically
 published, so interruption cannot leave a partial canonical JSON lease that
-blocks recovery. Settlement first creates a `TRANSACTION=PREPARED` receipt and
-replaces it atomically with the final receipt only after the exact opened source
-file has been renamed. An interrupted transaction therefore leaves either a
-classifiable prepared record and source lease, or a classifiable prepared record
-and archived lease; it never needs a manual JSON rewrite to recover.
+blocks recovery. Settlement first creates a `TRANSACTION=PREPARED` receipt that
+binds the operation, original digest, archive path, final disposition, final
+phase, writer count, and any writer proof. It atomically replaces that receipt
+with the final receipt only after the exact opened source file has been renamed.
+`RecoverPrepared` revalidates all expected lease identities and, for orphan
+reclaims, repeats the fresh writer proof. It either resumes the exact archive or
+finalizes the already-verified archived bytes. A legacy prepared record created
+by an earlier tool build requires explicit final phase and disposition; it is
+accepted only through `RecoverPrepared` and is immediately converted to the
+current final receipt. No state needs a manual JSON rewrite to recover.
 
 ## Owner break-glass
 
@@ -97,6 +111,6 @@ fully proven `ReclaimOrphan`; otherwise stop for the required Owner decision.
 
 Run `scripts/ci/test-tabbeacon-writer-lease.ps1` after any lifecycle-tool change.
 It covers normal acquire/settle, second-acquire refusal, exact orphan reclaim,
-digest/phase/holder/drift/reparse/collision rejection, byte preservation, receipt
-generation, fresh acquire after recovery, and normal closure without an active
-holderless lease.
+digest/phase/holder/drift/reparse/collision rejection, byte preservation,
+prepared-transaction resume/finalization, receipt generation, fresh acquire
+after recovery, and normal closure without an active holderless lease.

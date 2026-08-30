@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Status', 'Acquire', 'Settle', 'ReclaimOrphan')]
+    [ValidateSet('Status', 'Acquire', 'Settle', 'ReclaimOrphan', 'RecoverPrepared')]
     [string]$Operation,
 
     [Parameter(Mandatory = $true)]
@@ -27,16 +27,18 @@ param(
     [string]$ReceiptPath,
     [string]$ActiveWriterProofPath,
     [string]$ExpectedActiveWriterProofSha256,
+    [ValidateSet('Settle', 'ReclaimOrphan')]
+    [string]$PreparedOperation,
     [string]$FinalPhase,
     [string]$Disposition = 'SETTLED',
-    [switch]$ExpectedHolderless,
-    [int]$ActiveWriterCount = -1
+    [switch]$ExpectedHolderless
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $LeaseSchema = 'tabbeacon-writer-lease.v1'
+$CanonicalLeaseRegistryRoot = 'V:\build\tabbeacon'
 
 if ($env:OS -ne 'Windows_NT') {
     throw 'WRITER_LEASE_WINDOWS_ONLY'
@@ -53,10 +55,16 @@ namespace TabBeacon.WriterLease {
     public static class Native {
         private const uint GENERIC_READ = 0x80000000;
         private const uint DELETE = 0x00010000;
+        private const uint FILE_ADD_FILE = 0x00000002;
         private const uint FILE_SHARE_READ = 0x00000001;
+        private const uint FILE_SHARE_WRITE = 0x00000002;
+        private const uint FILE_SHARE_DELETE = 0x00000004;
         private const uint OPEN_EXISTING = 3;
         private const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
-        private const int FileRenameInfo = 3;
+        private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+        private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+        private const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
+        private const int FileRenameInformation = 10;
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct FILE_RENAME_INFO {
@@ -64,6 +72,20 @@ namespace TabBeacon.WriterLease {
             public IntPtr RootDirectory;
             public uint FileNameLength;
             public char FileName;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct BY_HANDLE_FILE_INFORMATION {
+            public uint FileAttributes;
+            public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime;
+            public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime;
+            public uint VolumeSerialNumber;
+            public uint FileSizeHigh;
+            public uint FileSizeLow;
+            public uint NumberOfLinks;
+            public uint FileIndexHigh;
+            public uint FileIndexLow;
         }
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
@@ -76,45 +98,141 @@ namespace TabBeacon.WriterLease {
             uint flagsAndAttributes,
             IntPtr templateFile);
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IO_STATUS_BLOCK {
+            public IntPtr Status;
+            public IntPtr Information;
+        }
+
+        [DllImport("ntdll.dll")]
+        private static extern int NtSetInformationFile(
+            SafeFileHandle file,
+            out IO_STATUS_BLOCK ioStatusBlock,
+            IntPtr fileInformation,
+            uint length,
+            int fileInformationClass);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SetFileInformationByHandle(
+        private static extern bool GetFileInformationByHandle(
             SafeFileHandle file,
-            int fileInformationClass,
-            IntPtr fileInformation,
-            uint bufferSize);
+            out BY_HANDLE_FILE_INFORMATION fileInformation);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(
+            SafeFileHandle file,
+            System.Text.StringBuilder path,
+            uint pathLength,
+            uint flags);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ReadFile(
+            SafeFileHandle file,
+            byte[] buffer,
+            uint numberOfBytesToRead,
+            out uint numberOfBytesRead,
+            IntPtr overlapped);
+
+        private static BY_HANDLE_FILE_INFORMATION GetInformation(SafeFileHandle handle) {
+            BY_HANDLE_FILE_INFORMATION information;
+            if (!GetFileInformationByHandle(handle, out information)) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "GetFileInformationByHandle failed");
+            }
+            return information;
+        }
+
+        private static void EnsureNotReparse(SafeFileHandle handle) {
+            if ((GetInformation(handle).FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                throw new System.IO.IOException("WRITER_LEASE_UNSAFE_REPARSE_HANDLE");
+            }
+        }
 
         public static SafeFileHandle OpenForExactMove(string path) {
             SafeFileHandle handle = CreateFile(
                 path,
                 GENERIC_READ | DELETE,
-                FILE_SHARE_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 IntPtr.Zero,
                 OPEN_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
                 IntPtr.Zero);
             if (handle.IsInvalid) {
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateFile exact-move open failed");
             }
+            EnsureNotReparse(handle);
             return handle;
         }
 
-        public static void MoveExactHandle(SafeFileHandle handle, string destinationPath) {
-            byte[] destination = System.Text.Encoding.Unicode.GetBytes(destinationPath);
+        public static SafeFileHandle OpenSafeDirectory(string path) {
+            SafeFileHandle handle = CreateFile(
+                path,
+                GENERIC_READ | FILE_ADD_FILE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                IntPtr.Zero);
+            if (handle.IsInvalid) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateFile archive-directory open failed");
+            }
+            EnsureNotReparse(handle);
+            return handle;
+        }
+
+        public static string GetFinalPath(SafeFileHandle handle) {
+            var path = new System.Text.StringBuilder(32768);
+            uint result = GetFinalPathNameByHandle(handle, path, (uint)path.Capacity, 0);
+            if (result == 0 || result >= path.Capacity) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "GetFinalPathNameByHandle failed");
+            }
+            return path.ToString();
+        }
+
+        public static string GetFileIdentity(SafeFileHandle handle) {
+            BY_HANDLE_FILE_INFORMATION information = GetInformation(handle);
+            return information.VolumeSerialNumber.ToString("x8") + ":" + information.FileIndexHigh.ToString("x8") + information.FileIndexLow.ToString("x8");
+        }
+
+        public static byte[] ReadExactBytes(SafeFileHandle handle) {
+            BY_HANDLE_FILE_INFORMATION information = GetInformation(handle);
+            ulong length = ((ulong)information.FileSizeHigh << 32) | information.FileSizeLow;
+            if (length > 1048576) {
+                throw new System.IO.IOException("WRITER_LEASE_SOURCE_TOO_LARGE");
+            }
+            byte[] bytes = new byte[(int)length];
+            int offset = 0;
+            while (offset < bytes.Length) {
+                uint read;
+                if (!ReadFile(handle, bytes, checked((uint)(bytes.Length - offset)), out read, IntPtr.Zero)) {
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "ReadFile exact-source read failed");
+                }
+                if (read == 0) {
+                    throw new System.IO.IOException("WRITER_LEASE_SOURCE_SHORT_READ");
+                }
+                offset += checked((int)read);
+            }
+            return bytes;
+        }
+
+        public static void MoveExactHandle(SafeFileHandle handle, SafeFileHandle rootDirectory, string destinationName) {
+            byte[] destination = System.Text.Encoding.Unicode.GetBytes(destinationName);
             int nameOffset = Marshal.OffsetOf(typeof(FILE_RENAME_INFO), "FileName").ToInt32();
             int size = checked(nameOffset + destination.Length);
             IntPtr buffer = Marshal.AllocHGlobal(size);
             try {
                 FILE_RENAME_INFO rename = new FILE_RENAME_INFO {
                     ReplaceIfExists = false,
-                    RootDirectory = IntPtr.Zero,
+                    RootDirectory = rootDirectory.DangerousGetHandle(),
                     FileNameLength = checked((uint)destination.Length),
                     FileName = '\0'
                 };
                 Marshal.StructureToPtr(rename, buffer, false);
                 Marshal.Copy(destination, 0, IntPtr.Add(buffer, nameOffset), destination.Length);
-                if (!SetFileInformationByHandle(handle, FileRenameInfo, buffer, checked((uint)size))) {
-                    throw new Win32Exception(Marshal.GetLastWin32Error(), "SetFileInformationByHandle exact rename failed");
+                IO_STATUS_BLOCK status;
+                int result = NtSetInformationFile(handle, out status, buffer, checked((uint)size), FileRenameInformation);
+                if (result != 0) {
+                    throw new System.IO.IOException("WRITER_LEASE_RENAME_NATIVE_FAILURE=NTSTATUS_0x" + result.ToString("x8"));
                 }
             } finally {
                 Marshal.FreeHGlobal(buffer);
@@ -138,6 +256,31 @@ function Get-FullPath {
 
     Assert-RequiredString -Name 'path' -Value $Path
     return [IO.Path]::GetFullPath($Path)
+}
+
+function Get-CanonicalLeaseRegistryRoot {
+    param([string]$RepositoryId)
+
+    if ($RepositoryId -ne 'JerrySkywalker/tabbeacon') {
+        throw 'WRITER_LEASE_CANONICAL_REGISTRY_UNKNOWN_REPOSITORY'
+    }
+    Assert-SafeExistingDirectory -Path $CanonicalLeaseRegistryRoot
+    return Get-FullPath -Path $CanonicalLeaseRegistryRoot
+}
+
+function Assert-CanonicalLeasePath {
+    param([string]$Path, [string]$RegistryRoot)
+
+    $fullPath = Get-FullPath -Path $Path
+    $parent = Split-Path -Parent $fullPath
+    $taskRoot = Split-Path -Parent $parent
+    if ((Split-Path -Leaf $fullPath) -ne 'writer-lease.json') {
+        throw 'WRITER_LEASE_NONCANONICAL_FILENAME'
+    }
+    if (-not [string]::Equals($taskRoot, $RegistryRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'WRITER_LEASE_NONCANONICAL_TASK_ROOT'
+    }
+    return $fullPath
 }
 
 function Assert-SafeExistingDirectory {
@@ -213,6 +356,7 @@ function Get-LeaseSnapshot {
     param([string]$Path)
 
     $safePath = Assert-SafeExistingFile -Path $Path
+    $sourceDescriptor = Get-ExactFileDescriptor -Path $safePath
     $bytes = [IO.File]::ReadAllBytes($safePath)
     $text = [Text.UTF8Encoding]::new($false).GetString($bytes)
     try {
@@ -226,6 +370,7 @@ function Get-LeaseSnapshot {
         Bytes = $bytes
         Sha256 = Get-Sha256Hex -Bytes $bytes
         Lease = $lease
+        SourceDescriptor = $sourceDescriptor
     }
 }
 
@@ -373,7 +518,15 @@ function Assert-NoActiveScopeConflict {
     Assert-SafeExistingDirectory -Path $RegistryRoot
     $candidatePath = Get-FullPath -Path $LeaseFilePath
     $candidateWorktree = Get-FullPath -Path $WorktreePath
-    $files = Get-ChildItem -LiteralPath $RegistryRoot -Filter 'writer-lease.json' -File -Recurse -Force -ErrorAction Stop
+    $files = foreach ($taskRoot in Get-ChildItem -LiteralPath $RegistryRoot -Directory -Force -ErrorAction Stop) {
+        if (($taskRoot.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "WRITER_LEASE_REGISTRY_ENTRY_UNSAFE_OR_INVALID=$($taskRoot.FullName)"
+        }
+        $candidate = Join-Path $taskRoot.FullName 'writer-lease.json'
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+            Get-Item -LiteralPath $candidate -Force -ErrorAction Stop
+        }
+    }
     foreach ($file in $files) {
         $existingPath = Get-FullPath -Path $file.FullName
         if ([string]::Equals($existingPath, $candidatePath, [StringComparison]::OrdinalIgnoreCase)) {
@@ -385,7 +538,13 @@ function Assert-NoActiveScopeConflict {
             throw "WRITER_LEASE_REGISTRY_ENTRY_UNSAFE_OR_INVALID=$existingPath"
         }
         if ((Get-LeaseProperty -Lease $snapshot.Lease -Name 'schema') -ne $LeaseSchema) {
-            throw "WRITER_LEASE_REGISTRY_ENTRY_UNSUPPORTED_SCHEMA=$existingPath"
+            $legacyRepository = [string](Get-LeaseProperty -Lease $snapshot.Lease -Name 'repository')
+            $legacyWorktree = [string](Get-LeaseProperty -Lease $snapshot.Lease -Name 'worktree')
+            $legacyBranch = [string](Get-LeaseProperty -Lease $snapshot.Lease -Name 'branch')
+            if ($legacyRepository -eq $RepositoryId -and (($legacyWorktree -and [string]::Equals((Get-FullPath -Path $legacyWorktree), $candidateWorktree, [StringComparison]::OrdinalIgnoreCase)) -or $legacyBranch -eq $BranchName)) {
+                throw "WRITER_LEASE_REGISTRY_ENTRY_UNSUPPORTED_SCHEMA_CONFLICT=$existingPath"
+            }
+            continue
         }
         $state = [string](Get-LeaseProperty -Lease $snapshot.Lease -Name 'state')
         if ($state -notlike 'ACTIVE*') {
@@ -455,31 +614,71 @@ function Publish-NewLeaseAtomically {
     }
 }
 
-function Move-ExactLeaseByHandle {
-    param($Snapshot, [string]$DestinationPath)
+function Get-ExactFileDescriptor {
+    param([string]$Path)
 
     $handle = $null
-    $stream = $null
-    $memory = $null
+    try {
+        $handle = [TabBeacon.WriterLease.Native]::OpenForExactMove($Path)
+        return [pscustomobject]@{
+            FinalPath = [TabBeacon.WriterLease.Native]::GetFinalPath($handle)
+            Identity = [TabBeacon.WriterLease.Native]::GetFileIdentity($handle)
+        }
+    } finally {
+        if ($null -ne $handle) {
+            $handle.Dispose()
+        }
+    }
+}
+
+function Get-ExactDirectoryDescriptor {
+    param([string]$Path)
+
+    $handle = $null
+    try {
+        $handle = [TabBeacon.WriterLease.Native]::OpenSafeDirectory($Path)
+        return [pscustomobject]@{
+            FinalPath = [TabBeacon.WriterLease.Native]::GetFinalPath($handle)
+            Identity = [TabBeacon.WriterLease.Native]::GetFileIdentity($handle)
+        }
+    } finally {
+        if ($null -ne $handle) {
+            $handle.Dispose()
+        }
+    }
+}
+
+function Move-ExactLeaseByHandle {
+    param(
+        $Snapshot,
+        [string]$DestinationPath,
+        $ExpectedSource,
+        $ExpectedDestinationDirectory
+    )
+
+    $handle = $null
+    $destinationDirectoryHandle = $null
     try {
         $handle = [TabBeacon.WriterLease.Native]::OpenForExactMove($Snapshot.Path)
-        $stream = [IO.FileStream]::new($handle, [IO.FileAccess]::Read)
-        $memory = [IO.MemoryStream]::new()
-        $stream.CopyTo($memory)
-        $currentBytes = $memory.ToArray()
+        $destinationDirectoryHandle = [TabBeacon.WriterLease.Native]::OpenSafeDirectory((Split-Path -Parent $DestinationPath))
+        if (-not [string]::Equals([TabBeacon.WriterLease.Native]::GetFinalPath($handle), $ExpectedSource.FinalPath, [StringComparison]::OrdinalIgnoreCase) -or [TabBeacon.WriterLease.Native]::GetFileIdentity($handle) -ne $ExpectedSource.Identity) {
+            throw 'WRITER_LEASE_CONCURRENT_SOURCE_IDENTITY_DRIFT_BLOCKED'
+        }
+        if (-not [string]::Equals([TabBeacon.WriterLease.Native]::GetFinalPath($destinationDirectoryHandle), $ExpectedDestinationDirectory.FinalPath, [StringComparison]::OrdinalIgnoreCase) -or [TabBeacon.WriterLease.Native]::GetFileIdentity($destinationDirectoryHandle) -ne $ExpectedDestinationDirectory.Identity) {
+            throw 'WRITER_LEASE_CONCURRENT_ARCHIVE_DIRECTORY_DRIFT_BLOCKED'
+        }
+        $currentBytes = [TabBeacon.WriterLease.Native]::ReadExactBytes($handle)
         if ((Get-Sha256Hex -Bytes $currentBytes) -ne $Snapshot.Sha256) {
             throw 'WRITER_LEASE_CONCURRENT_DRIFT_BLOCKED'
         }
-        [TabBeacon.WriterLease.Native]::MoveExactHandle($handle, $DestinationPath)
+        [TabBeacon.WriterLease.Native]::MoveExactHandle($handle, $destinationDirectoryHandle, (Split-Path -Leaf $DestinationPath))
         return $currentBytes
     } finally {
-        if ($null -ne $memory) {
-            $memory.Dispose()
-        }
-        if ($null -ne $stream) {
-            $stream.Dispose()
-        } elseif ($null -ne $handle) {
+        if ($null -ne $handle) {
             $handle.Dispose()
+        }
+        if ($null -ne $destinationDirectoryHandle) {
+            $destinationDirectoryHandle.Dispose()
         }
     }
 }
@@ -516,7 +715,10 @@ function Assert-ActiveWriterProof {
         [string]$ProofPath,
         [string]$ExpectedProofSha256,
         [string]$ExpectedLeasePath,
-        [string]$ExpectedLeaseSha256
+        [string]$ExpectedLeaseSha256,
+        [string]$ExpectedWorktreePath,
+        [string]$ExpectedBranchName,
+        [string]$ExpectedRepositoryId
     )
 
     Assert-RequiredString -Name 'ActiveWriterProofPath' -Value $ProofPath
@@ -542,6 +744,30 @@ function Assert-ActiveWriterProof {
     }
     if ($fields['ACTIVE_LEASE_HOLDER_PROVEN'] -ne 'false') {
         throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_HOLDER_STATE_MISMATCH'
+    }
+    if ($fields['OBSERVATION_SCOPE'] -ne 'bounded-process-and-worktree-inspection') {
+        throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_SCOPE_MISMATCH'
+    }
+    if ([string]::IsNullOrWhiteSpace($fields['OBSERVER_ID'])) {
+        throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_OBSERVER_MISSING'
+    }
+    if ($fields['REPOSITORY'] -ne $ExpectedRepositoryId) {
+        throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_REPOSITORY_MISMATCH'
+    }
+    if (-not [string]::Equals($fields['WORKTREE'], (Get-FullPath -Path $ExpectedWorktreePath), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_WORKTREE_MISMATCH'
+    }
+    if ($fields['BRANCH'] -ne $ExpectedBranchName) {
+        throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_BRANCH_MISMATCH'
+    }
+    $observedAt = [DateTimeOffset]::MinValue
+    $expiresAt = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($fields['OBSERVED_AT_UTC'], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$observedAt) -or -not [DateTimeOffset]::TryParse($fields['EXPIRES_AT_UTC'], [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$expiresAt)) {
+        throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_TIMESTAMP_INVALID'
+    }
+    $now = [DateTimeOffset]::UtcNow
+    if ($observedAt -gt $now -or ($now - $observedAt) -gt [TimeSpan]::FromMinutes(5) -or $expiresAt -le $now -or ($expiresAt - $observedAt) -gt [TimeSpan]::FromMinutes(5)) {
+        throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_STALE_OR_INVALID'
     }
     if (-not [string]::Equals($fields['LEASE_PATH'], (Get-FullPath -Path $ExpectedLeasePath), [StringComparison]::OrdinalIgnoreCase)) {
         throw 'WRITER_LEASE_ACTIVE_WRITER_PROOF_LEASE_PATH_MISMATCH'
@@ -589,6 +815,33 @@ function Get-ReceiptText {
     return ($lines -join [Environment]::NewLine) + [Environment]::NewLine
 }
 
+function Get-PreparedReceiptMetadata {
+    param([string]$Path)
+
+    $safePath = Assert-SafeExistingFile -Path $Path
+    $fields = @{}
+    foreach ($line in ([Text.UTF8Encoding]::new($false).GetString([IO.File]::ReadAllBytes($safePath)) -split "`r?`n")) {
+        if ($line -match '^(?<name>[A-Z0-9_]+)=(?<value>.*)$') {
+            $fields[$Matches.name] = $Matches.value
+        }
+    }
+    if ($fields['TRANSACTION'] -ne 'PREPARED' -or [string]::IsNullOrWhiteSpace($fields['OPERATION']) -or [string]::IsNullOrWhiteSpace($fields['ORIGINAL_LEASE_SHA256']) -or [string]::IsNullOrWhiteSpace($fields['ARCHIVE_PATH'])) {
+        throw 'WRITER_LEASE_PREPARED_RECEIPT_INVALID'
+    }
+    return [pscustomobject]@{
+        Path = $safePath
+        OriginalLeaseSha256 = $fields['ORIGINAL_LEASE_SHA256']
+        ArchivePath = $fields['ARCHIVE_PATH']
+        Operation = $fields['OPERATION']
+        Disposition = $fields['DISPOSITION']
+        FinalPhase = $fields['FINAL_PHASE']
+        WriterCount = $fields['ACTIVE_WRITER_COUNT']
+        WriterProofPath = if ($null -eq $fields['ACTIVE_WRITER_PROOF_PATH']) { '' } else { $fields['ACTIVE_WRITER_PROOF_PATH'] }
+        WriterProofSha256 = if ($null -eq $fields['ACTIVE_WRITER_PROOF_SHA256']) { '' } else { $fields['ACTIVE_WRITER_PROOF_SHA256'] }
+        LegacyFormat = [string]::IsNullOrWhiteSpace($fields['DISPOSITION']) -or [string]::IsNullOrWhiteSpace($fields['FINAL_PHASE']) -or [string]::IsNullOrWhiteSpace($fields['ACTIVE_WRITER_COUNT'])
+    }
+}
+
 function Invoke-ArchiveLease {
     param(
         [string]$ArchiveOperation,
@@ -600,7 +853,9 @@ function Invoke-ArchiveLease {
         [string]$SettlementFinalPhase,
         [string]$WriterCount,
         [string]$WriterProofPath = '',
-        [string]$WriterProofSha256 = ''
+        [string]$WriterProofSha256 = '',
+        [switch]$UseExistingPreparedReceipt,
+        [switch]$AllowLegacyPreparedReceipt
     )
 
     Assert-SafeExistingDirectory -Path $ArchiveRootPath
@@ -608,23 +863,51 @@ function Invoke-ArchiveLease {
     $safeReceiptPath = Assert-PathInsideRoot -Root $ArchiveRootPath -Child $SettlementReceiptPath -Name 'RECEIPT_PATH'
     Assert-SafeExistingDirectory -Path (Split-Path -Parent $safeArchivePath)
     Assert-SafeExistingDirectory -Path (Split-Path -Parent $safeReceiptPath)
+    if (-not [string]::Equals((Split-Path -Parent $safeArchivePath), (Split-Path -Parent $safeReceiptPath), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'WRITER_LEASE_RECEIPT_MUST_SHARE_ARCHIVE_DIRECTORY'
+    }
     Assert-SameVolume -First $Snapshot.Path -Second $safeArchivePath
     if (Test-Path -LiteralPath $safeArchivePath) {
         throw 'WRITER_LEASE_ARCHIVE_COLLISION'
     }
     if (Test-Path -LiteralPath $safeReceiptPath) {
-        throw 'WRITER_LEASE_RECEIPT_COLLISION'
+        if (-not $UseExistingPreparedReceipt) {
+            throw 'WRITER_LEASE_RECEIPT_COLLISION'
+        }
+        $preparedReceipt = Get-PreparedReceiptMetadata -Path $safeReceiptPath
+        if ($preparedReceipt.OriginalLeaseSha256 -ne $Snapshot.Sha256 -or -not [string]::Equals((Get-FullPath -Path $preparedReceipt.ArchivePath), $safeArchivePath, [StringComparison]::OrdinalIgnoreCase) -or $preparedReceipt.Operation -ne $ArchiveOperation) {
+            throw 'WRITER_LEASE_PREPARED_RECEIPT_IDENTITY_MISMATCH'
+        }
+        if ($preparedReceipt.LegacyFormat) {
+            if (-not $AllowLegacyPreparedReceipt) {
+                throw 'WRITER_LEASE_PREPARED_RECEIPT_LEGACY_REQUIRES_RECOVER_OPERATION'
+            }
+        } elseif ($preparedReceipt.Disposition -ne $ReceiptDisposition -or $preparedReceipt.FinalPhase -ne $SettlementFinalPhase -or $preparedReceipt.WriterCount -ne $WriterCount -or $preparedReceipt.WriterProofPath -ne $WriterProofPath -or $preparedReceipt.WriterProofSha256 -ne $WriterProofSha256) {
+            throw 'WRITER_LEASE_PREPARED_RECEIPT_IDENTITY_MISMATCH'
+        }
+    } elseif ($UseExistingPreparedReceipt) {
+        throw 'WRITER_LEASE_PREPARED_RECEIPT_MISSING'
     }
 
-    $prepared = @(
-        'TRANSACTION=PREPARED',
-        "OPERATION=$ArchiveOperation",
-        "ORIGINAL_LEASE_SHA256=$($Snapshot.Sha256)",
-        "ARCHIVE_PATH=$safeArchivePath"
-    ) -join [Environment]::NewLine
-    Write-NewUtf8File -Path $safeReceiptPath -Content ($prepared + [Environment]::NewLine)
+    if (-not $UseExistingPreparedReceipt) {
+        $prepared = @(
+            'TRANSACTION=PREPARED',
+            "OPERATION=$ArchiveOperation",
+            "ORIGINAL_LEASE_SHA256=$($Snapshot.Sha256)",
+            "ARCHIVE_PATH=$safeArchivePath",
+            "DISPOSITION=$ReceiptDisposition",
+            "FINAL_PHASE=$SettlementFinalPhase",
+            "ACTIVE_WRITER_COUNT=$WriterCount"
+        ) -join [Environment]::NewLine
+        if (-not [string]::IsNullOrWhiteSpace($WriterProofPath)) {
+            $prepared += [Environment]::NewLine + "ACTIVE_WRITER_PROOF_PATH=$WriterProofPath"
+            $prepared += [Environment]::NewLine + "ACTIVE_WRITER_PROOF_SHA256=$WriterProofSha256"
+        }
+        Write-NewUtf8File -Path $safeReceiptPath -Content ($prepared + [Environment]::NewLine)
+    }
 
-    [void](Move-ExactLeaseByHandle -Snapshot $Snapshot -DestinationPath $safeArchivePath)
+    $expectedArchiveDirectory = Get-ExactDirectoryDescriptor -Path (Split-Path -Parent $safeArchivePath)
+    [void](Move-ExactLeaseByHandle -Snapshot $Snapshot -DestinationPath $safeArchivePath -ExpectedSource $Snapshot.SourceDescriptor -ExpectedDestinationDirectory $expectedArchiveDirectory)
 
     if (Test-Path -LiteralPath $Snapshot.Path) {
         throw 'WRITER_LEASE_SOURCE_REMAINS_AFTER_ARCHIVE'
@@ -685,8 +968,7 @@ switch ($Operation) {
             @{ Name = 'Repository'; Value = $Repository },
             @{ Name = 'SourceHead'; Value = $SourceHead },
             @{ Name = 'Worktree'; Value = $Worktree },
-            @{ Name = 'Branch'; Value = $Branch },
-            @{ Name = 'LeaseRegistryRoot'; Value = $LeaseRegistryRoot }
+            @{ Name = 'Branch'; Value = $Branch }
         )) {
             Assert-RequiredString -Name $required.Name -Value $required.Value
         }
@@ -697,9 +979,12 @@ switch ($Operation) {
             throw 'WRITER_LEASE_SOURCE_HEAD_MUST_BE_FULL_SHA'
         }
 
-        $fullLeasePath = Get-FullPath -Path $LeasePath
+        $canonicalRegistryRoot = Get-CanonicalLeaseRegistryRoot -RepositoryId $Repository
+        if (-not [string]::IsNullOrWhiteSpace($LeaseRegistryRoot) -and -not [string]::Equals((Get-FullPath -Path $LeaseRegistryRoot), $canonicalRegistryRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'WRITER_LEASE_NONCANONICAL_REGISTRY_ROOT'
+        }
+        $fullLeasePath = Assert-CanonicalLeasePath -Path $LeasePath -RegistryRoot $canonicalRegistryRoot
         Assert-SafeExistingDirectory -Path (Split-Path -Parent $fullLeasePath)
-        Assert-SafeExistingDirectory -Path $LeaseRegistryRoot
         if (Test-Path -LiteralPath $fullLeasePath) {
             throw 'WRITER_LEASE_ACQUIRE_BLOCKED_ACTIVE_LEASE_EXISTS'
         }
@@ -707,7 +992,7 @@ switch ($Operation) {
 
         $scopeMutexes = Enter-WriterScopeMutexes -RepositoryId $Repository -WorktreePath $Worktree -BranchName $Branch
         try {
-            Assert-NoActiveScopeConflict -RegistryRoot $LeaseRegistryRoot -LeaseFilePath $fullLeasePath -RepositoryId $Repository -WorktreePath $Worktree -BranchName $Branch
+            Assert-NoActiveScopeConflict -RegistryRoot $canonicalRegistryRoot -LeaseFilePath $fullLeasePath -RepositoryId $Repository -WorktreePath $Worktree -BranchName $Branch
             $lease = [ordered]@{
                 schema = $LeaseSchema
                 goal_id = $Goal
@@ -778,8 +1063,8 @@ switch ($Operation) {
         if (-not $ExpectedHolderless) {
             throw 'WRITER_LEASE_RECLAIM_REQUIRES_EXPLICIT_HOLDERLESS_PROOF'
         }
-        if ($ActiveWriterCount -ne 0) {
-            throw 'WRITER_LEASE_RECLAIM_REQUIRES_ACTIVE_WRITER_COUNT_ZERO'
+        if ($ExpectedPhase -notlike 'ACTIVE*') {
+            throw 'WRITER_LEASE_RECLAIM_PHASE_MUST_BE_ACTIVE'
         }
         Assert-RequiredString -Name 'ArchiveRoot' -Value $ArchiveRoot
         Assert-RequiredString -Name 'ArchivePath' -Value $ArchivePath
@@ -794,8 +1079,8 @@ switch ($Operation) {
             if (-not (Test-HolderlessLease -Lease $snapshot.Lease)) {
                 throw 'WRITER_LEASE_RECLAIM_NONEMPTY_HOLDER_BLOCKED'
             }
-            $writerProof = Assert-ActiveWriterProof -ProofPath $ActiveWriterProofPath -ExpectedProofSha256 $ExpectedActiveWriterProofSha256 -ExpectedLeasePath $snapshot.Path -ExpectedLeaseSha256 $snapshot.Sha256
-            $archive = Invoke-ArchiveLease -ArchiveOperation 'reclaim-orphan' -Snapshot $snapshot -ArchiveRootPath $ArchiveRoot -ArchiveLeasePath $ArchivePath -SettlementReceiptPath $ReceiptPath -ReceiptDisposition 'ORPHAN_RECLAIMED' -SettlementFinalPhase 'RECLAIMED_ORPHAN' -WriterCount $ActiveWriterCount -WriterProofPath $writerProof.Path -WriterProofSha256 $writerProof.Sha256
+            $writerProof = Assert-ActiveWriterProof -ProofPath $ActiveWriterProofPath -ExpectedProofSha256 $ExpectedActiveWriterProofSha256 -ExpectedLeasePath $snapshot.Path -ExpectedLeaseSha256 $snapshot.Sha256 -ExpectedWorktreePath $ExpectedWorktree -ExpectedBranchName $ExpectedBranch -ExpectedRepositoryId $ExpectedRepository
+            $archive = Invoke-ArchiveLease -ArchiveOperation 'reclaim-orphan' -Snapshot $snapshot -ArchiveRootPath $ArchiveRoot -ArchiveLeasePath $ArchivePath -SettlementReceiptPath $ReceiptPath -ReceiptDisposition 'ORPHAN_RECLAIMED' -SettlementFinalPhase 'RECLAIMED_ORPHAN' -WriterCount '0' -WriterProofPath $writerProof.Path -WriterProofSha256 $writerProof.Sha256
             Write-MachineResult ([ordered]@{
                 operation = 'reclaim-orphan'
                 disposition = 'ORPHAN_RECLAIMED'
@@ -804,6 +1089,152 @@ switch ($Operation) {
                 archived_lease_path = $archive.archived_lease_path
                 archived_lease_sha256 = $archive.archived_lease_sha256
                 receipt_path = $archive.receipt_path
+            })
+        } finally {
+            $mutex.ReleaseMutex()
+            $mutex.Dispose()
+        }
+    }
+    'RecoverPrepared' {
+        Assert-RequiredString -Name 'PreparedOperation' -Value $PreparedOperation
+        Assert-RequiredString -Name 'ArchiveRoot' -Value $ArchiveRoot
+        Assert-RequiredString -Name 'ArchivePath' -Value $ArchivePath
+        Assert-RequiredString -Name 'ReceiptPath' -Value $ReceiptPath
+        Assert-RequiredString -Name 'ExpectedLeaseSha256' -Value $ExpectedLeaseSha256
+        Assert-RequiredString -Name 'ExpectedSchema' -Value $ExpectedSchema
+        Assert-RequiredString -Name 'ExpectedGoal' -Value $ExpectedGoal
+        Assert-RequiredString -Name 'ExpectedPhase' -Value $ExpectedPhase
+        Assert-RequiredString -Name 'ExpectedRepository' -Value $ExpectedRepository
+        Assert-RequiredString -Name 'ExpectedSourceHead' -Value $ExpectedSourceHead
+        Assert-RequiredString -Name 'ExpectedWorktree' -Value $ExpectedWorktree
+        Assert-RequiredString -Name 'ExpectedBranch' -Value $ExpectedBranch
+        if ($PreparedOperation -eq 'ReclaimOrphan' -and -not $ExpectedHolderless) {
+            throw 'WRITER_LEASE_RECLAIM_REQUIRES_EXPLICIT_HOLDERLESS_PROOF'
+        }
+        if ($PreparedOperation -eq 'ReclaimOrphan' -and $ExpectedPhase -notlike 'ACTIVE*') {
+            throw 'WRITER_LEASE_RECLAIM_PHASE_MUST_BE_ACTIVE'
+        }
+
+        Assert-SafeExistingDirectory -Path $ArchiveRoot
+        $safeArchivePath = Assert-PathInsideRoot -Root $ArchiveRoot -Child $ArchivePath -Name 'ARCHIVE_PATH'
+        $safeReceiptPath = Assert-PathInsideRoot -Root $ArchiveRoot -Child $ReceiptPath -Name 'RECEIPT_PATH'
+        Assert-SafeExistingDirectory -Path (Split-Path -Parent $safeArchivePath)
+        Assert-SafeExistingDirectory -Path (Split-Path -Parent $safeReceiptPath)
+        if (-not [string]::Equals((Split-Path -Parent $safeArchivePath), (Split-Path -Parent $safeReceiptPath), [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'WRITER_LEASE_RECEIPT_MUST_SHARE_ARCHIVE_DIRECTORY'
+        }
+        Assert-SameVolume -First $LeasePath -Second $safeArchivePath
+
+        $mutex = Enter-LeaseMutex -Path $LeasePath
+        try {
+            $preparedReceipt = Get-PreparedReceiptMetadata -Path $safeReceiptPath
+            $expectedArchiveOperation = if ($PreparedOperation -eq 'Settle') { 'settle' } else { 'reclaim-orphan' }
+            if ($preparedReceipt.Operation -ne $expectedArchiveOperation -or $preparedReceipt.OriginalLeaseSha256 -ne $ExpectedLeaseSha256.ToLowerInvariant() -or -not [string]::Equals((Get-FullPath -Path $preparedReceipt.ArchivePath), $safeArchivePath, [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'WRITER_LEASE_PREPARED_RECEIPT_IDENTITY_MISMATCH'
+            }
+            if ($preparedReceipt.LegacyFormat) {
+                Assert-RequiredString -Name 'FinalPhase' -Value $FinalPhase
+                Assert-RequiredString -Name 'Disposition' -Value $Disposition
+                $receiptDisposition = $Disposition
+                $settlementFinalPhase = $FinalPhase
+                $writerCount = if ($PreparedOperation -eq 'ReclaimOrphan') { '0' } else { 'N/A' }
+            } else {
+                $receiptDisposition = $preparedReceipt.Disposition
+                $settlementFinalPhase = $preparedReceipt.FinalPhase
+                $writerCount = $preparedReceipt.WriterCount
+            }
+
+            $sourcePath = Get-FullPath -Path $LeasePath
+            $sourceExists = Test-Path -LiteralPath $sourcePath -PathType Leaf
+            $archiveExists = Test-Path -LiteralPath $safeArchivePath -PathType Leaf
+            if ($sourceExists -and $archiveExists) {
+                throw 'WRITER_LEASE_PREPARED_TRANSACTION_INCONSISTENT_BOTH_PATHS_EXIST'
+            }
+            if (-not $sourceExists -and -not $archiveExists) {
+                throw 'WRITER_LEASE_PREPARED_TRANSACTION_UNRECOVERABLE_NO_LEASE'
+            }
+
+            if ($PreparedOperation -eq 'ReclaimOrphan') {
+                Assert-RequiredString -Name 'ActiveWriterProofPath' -Value $ActiveWriterProofPath
+                Assert-RequiredString -Name 'ExpectedActiveWriterProofSha256' -Value $ExpectedActiveWriterProofSha256
+                if (-not $preparedReceipt.LegacyFormat -and (-not [string]::Equals((Get-FullPath -Path $preparedReceipt.WriterProofPath), (Get-FullPath -Path $ActiveWriterProofPath), [StringComparison]::OrdinalIgnoreCase) -or $preparedReceipt.WriterProofSha256 -ne $ExpectedActiveWriterProofSha256.ToLowerInvariant())) {
+                    throw 'WRITER_LEASE_PREPARED_RECEIPT_WRITER_PROOF_MISMATCH'
+                }
+            } elseif (-not $preparedReceipt.LegacyFormat -and (-not [string]::IsNullOrWhiteSpace($preparedReceipt.WriterProofPath) -or -not [string]::IsNullOrWhiteSpace($preparedReceipt.WriterProofSha256))) {
+                throw 'WRITER_LEASE_PREPARED_RECEIPT_WRITER_PROOF_MISMATCH'
+            }
+
+            if ($sourceExists) {
+                $snapshot = Get-LeaseSnapshot -Path $sourcePath
+                Assert-LeaseIdentity -Snapshot $snapshot -Sha256 $ExpectedLeaseSha256 -Schema $ExpectedSchema -GoalId $ExpectedGoal -State $ExpectedPhase -RepositoryId $ExpectedRepository -StartRemoteMain $ExpectedSourceHead -WorktreePath $ExpectedWorktree -BranchName $ExpectedBranch
+                if (-not (Test-HolderlessLease -Lease $snapshot.Lease)) {
+                    throw 'WRITER_LEASE_PREPARED_RECOVERY_NONEMPTY_HOLDER_BLOCKED'
+                }
+                if ($PreparedOperation -eq 'ReclaimOrphan') {
+                    $writerProof = Assert-ActiveWriterProof -ProofPath $ActiveWriterProofPath -ExpectedProofSha256 $ExpectedActiveWriterProofSha256 -ExpectedLeasePath $snapshot.Path -ExpectedLeaseSha256 $snapshot.Sha256 -ExpectedWorktreePath $ExpectedWorktree -ExpectedBranchName $ExpectedBranch -ExpectedRepositoryId $ExpectedRepository
+                    $writerProofPath = $writerProof.Path
+                    $writerProofSha256 = $writerProof.Sha256
+                } else {
+                    $writerProofPath = ''
+                    $writerProofSha256 = ''
+                }
+                $archiveArguments = @{
+                    ArchiveOperation = $expectedArchiveOperation
+                    Snapshot = $snapshot
+                    ArchiveRootPath = $ArchiveRoot
+                    ArchiveLeasePath = $safeArchivePath
+                    SettlementReceiptPath = $safeReceiptPath
+                    ReceiptDisposition = $receiptDisposition
+                    SettlementFinalPhase = $settlementFinalPhase
+                    WriterCount = $writerCount
+                    WriterProofPath = $writerProofPath
+                    WriterProofSha256 = $writerProofSha256
+                    UseExistingPreparedReceipt = $true
+                    AllowLegacyPreparedReceipt = $preparedReceipt.LegacyFormat
+                }
+                $archive = Invoke-ArchiveLease @archiveArguments
+                Write-MachineResult ([ordered]@{
+                    operation = 'recover-prepared'
+                    recovery_state = 'resumed-archive'
+                    active_lease_exists = $false
+                    active_holderless_lease = $false
+                    archived_lease_path = $archive.archived_lease_path
+                    archived_lease_sha256 = $archive.archived_lease_sha256
+                    receipt_path = $archive.receipt_path
+                })
+                break
+            }
+
+            $archivedSnapshot = Get-LeaseSnapshot -Path $safeArchivePath
+            Assert-LeaseIdentity -Snapshot $archivedSnapshot -Sha256 $ExpectedLeaseSha256 -Schema $ExpectedSchema -GoalId $ExpectedGoal -State $ExpectedPhase -RepositoryId $ExpectedRepository -StartRemoteMain $ExpectedSourceHead -WorktreePath $ExpectedWorktree -BranchName $ExpectedBranch
+            if (-not (Test-HolderlessLease -Lease $archivedSnapshot.Lease)) {
+                throw 'WRITER_LEASE_PREPARED_RECOVERY_NONEMPTY_HOLDER_BLOCKED'
+            }
+            if ($PreparedOperation -eq 'ReclaimOrphan') {
+                $writerProof = Assert-ActiveWriterProof -ProofPath $ActiveWriterProofPath -ExpectedProofSha256 $ExpectedActiveWriterProofSha256 -ExpectedLeasePath $sourcePath -ExpectedLeaseSha256 $ExpectedLeaseSha256 -ExpectedWorktreePath $ExpectedWorktree -ExpectedBranchName $ExpectedBranch -ExpectedRepositoryId $ExpectedRepository
+                $writerProofPath = $writerProof.Path
+                $writerProofSha256 = $writerProof.Sha256
+            } else {
+                $writerProofPath = ''
+                $writerProofSha256 = ''
+            }
+            $historicalSnapshot = [pscustomobject]@{
+                Path = $sourcePath
+                Bytes = $archivedSnapshot.Bytes
+                Sha256 = $archivedSnapshot.Sha256
+                Lease = $archivedSnapshot.Lease
+                SourceDescriptor = $null
+            }
+            $receipt = Get-ReceiptText -ReceiptDisposition $receiptDisposition -ReceiptOperation $preparedReceipt.Operation -Snapshot $historicalSnapshot -ArchivedPath $safeArchivePath -ArchivedSha256 $archivedSnapshot.Sha256 -FinalState $settlementFinalPhase -WriterCount $writerCount -WriterProofPath $writerProofPath -WriterProofSha256 $writerProofSha256
+            Write-ExistingUtf8File -Path $safeReceiptPath -Content $receipt
+            Write-MachineResult ([ordered]@{
+                operation = 'recover-prepared'
+                recovery_state = 'finalized-existing-archive'
+                active_lease_exists = $false
+                active_holderless_lease = $false
+                archived_lease_path = $safeArchivePath
+                archived_lease_sha256 = $archivedSnapshot.Sha256
+                receipt_path = $safeReceiptPath
             })
         } finally {
             $mutex.ReleaseMutex()

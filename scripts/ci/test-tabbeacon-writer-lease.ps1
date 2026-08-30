@@ -17,8 +17,8 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($branch) -or $sourceHea
     throw 'WRITER_LEASE_TEST_WORKTREE_ADMISSION_FAILED'
 }
 
-$testRoot = Join-Path ([IO.Path]::GetTempPath()) ('tabbeacon-writer-lease-' + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $testRoot -ErrorAction Stop | Out-Null
+$testRoot = 'V:\build\tabbeacon'
+$testPrefix = 'TB-WRITER-LEASE-TEST-' + [Guid]::NewGuid().ToString('N')
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
@@ -26,6 +26,20 @@ function Assert-True {
     if (-not $Condition) {
         throw "WRITER_LEASE_TEST_ASSERTION_FAILED=$Message"
     }
+}
+
+function Test-ExactBytes {
+    param([byte[]]$First, [byte[]]$Second)
+
+    if ($First.Length -ne $Second.Length) {
+        return $false
+    }
+    for ($index = 0; $index -lt $First.Length; $index++) {
+        if ($First[$index] -ne $Second[$index]) {
+            return $false
+        }
+    }
+    return $true
 }
 
 function Get-Digest {
@@ -82,7 +96,7 @@ function Assert-ToolFails {
         $message = $_ | Out-String
     }
     Assert-True -Condition $failed -Message "expected tool failure: $ExpectedToken"
-    Assert-True -Condition ($message.Contains($ExpectedToken, [StringComparison]::Ordinal)) -Message "unexpected tool failure: $message"
+    Assert-True -Condition ($message.IndexOf($ExpectedToken, [StringComparison]::Ordinal) -ge 0) -Message "unexpected tool failure: $message"
 }
 
 function New-FixtureLease {
@@ -93,16 +107,19 @@ function New-FixtureLease {
         [string]$Schema = 'tabbeacon-writer-lease.v1'
     )
 
-    $root = Join-Path $testRoot $Name
+    $root = Join-Path $testRoot ($testPrefix + '-' + $Name)
     New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
     $leasePath = Join-Path $root 'writer-lease.json'
+    $fixtureRepository = 'test/tabbeacon-writer-lease-contract'
+    $fixtureWorktree = $root
+    $fixtureBranch = 'test/writer-lease-contract'
     $lease = [ordered]@{
         schema = $Schema
         goal_id = "test-$Name"
-        repository = 'JerrySkywalker/tabbeacon'
+        repository = $fixtureRepository
         writer_role = 'implementer'
-        worktree = $worktree
-        branch = $branch
+        worktree = $fixtureWorktree
+        branch = $fixtureBranch
         start_remote_main = $sourceHead
         state = $State
         owner_config_mutation = $false
@@ -122,6 +139,10 @@ function New-FixtureLease {
         Goal = "test-$Name"
         Phase = $State
         Schema = $Schema
+        Repository = $fixtureRepository
+        Worktree = $fixtureWorktree
+        Branch = $fixtureBranch
+        SourceHead = $sourceHead
     }
 }
 
@@ -133,10 +154,10 @@ function Get-IdentityArguments {
         '-ExpectedSchema', $Fixture.Schema,
         '-ExpectedGoal', $Fixture.Goal,
         '-ExpectedPhase', $ExpectedPhase,
-        '-ExpectedRepository', 'JerrySkywalker/tabbeacon',
-        '-ExpectedSourceHead', $sourceHead,
-        '-ExpectedWorktree', $worktree,
-        '-ExpectedBranch', $branch
+        '-ExpectedRepository', $Fixture.Repository,
+        '-ExpectedSourceHead', $Fixture.SourceHead,
+        '-ExpectedWorktree', $Fixture.Worktree,
+        '-ExpectedBranch', $Fixture.Branch
     )
 }
 
@@ -147,7 +168,6 @@ function Get-ReclaimArguments {
     $proof = New-ActiveWriterProof -Fixture $Fixture -LeaseDigest $Digest
     return @('-Operation', 'ReclaimOrphan', '-LeasePath', $Fixture.LeasePath) + $identity + @(
         '-ExpectedHolderless',
-        '-ActiveWriterCount', '0',
         '-ArchiveRoot', $Fixture.ArchiveRoot,
         '-ArchivePath', $Fixture.ArchivePath,
         '-ReceiptPath', $Fixture.ReceiptPath,
@@ -160,10 +180,19 @@ function New-ActiveWriterProof {
     param($Fixture, [string]$LeaseDigest)
 
     $proofPath = Join-Path $Fixture.Root 'active-writer-proof.txt'
+    $observedAt = [DateTimeOffset]::UtcNow
+    $expiresAt = $observedAt.AddMinutes(2)
     $content = @(
         'PROOF_SCHEMA=tabbeacon-writer-active-proof.v1',
         'ACTIVE_WRITER_COUNT=0',
         'ACTIVE_LEASE_HOLDER_PROVEN=false',
+        'OBSERVATION_SCOPE=bounded-process-and-worktree-inspection',
+        'OBSERVER_ID=focused-contract-test',
+        ('REPOSITORY=' + $Fixture.Repository),
+        ('WORKTREE=' + $Fixture.Worktree),
+        ('BRANCH=' + $Fixture.Branch),
+        ('OBSERVED_AT_UTC=' + $observedAt.ToString('o')),
+        ('EXPIRES_AT_UTC=' + $expiresAt.ToString('o')),
         ('LEASE_PATH=' + $Fixture.LeasePath),
         ('LEASE_SHA256=' + $LeaseDigest)
     ) -join [Environment]::NewLine
@@ -178,7 +207,7 @@ function New-ArchiveRoot {
 
 try {
     # 1-3 and 14: atomic acquire, second acquire refusal, exact settle, and no active holderless normal lease.
-    $normalRoot = Join-Path $testRoot 'normal'
+    $normalRoot = Join-Path $testRoot ($testPrefix + '-normal')
     New-Item -ItemType Directory -Path $normalRoot -ErrorAction Stop | Out-Null
     $normalLease = Join-Path $normalRoot 'writer-lease.json'
     $normalArchiveRoot = Join-Path $normalRoot 'archive'
@@ -187,22 +216,20 @@ try {
         '-Operation', 'Acquire', '-LeasePath', $normalLease,
         '-Goal', 'test-normal-acquire', '-Phase', 'ACTIVE_TEST_NORMAL',
         '-Repository', 'JerrySkywalker/tabbeacon', '-SourceHead', $sourceHead,
-        '-Worktree', $worktree, '-Branch', $branch,
-        '-LeaseRegistryRoot', $testRoot
+        '-Worktree', $worktree, '-Branch', $branch
     )
     $acquired = Invoke-ToolJson -ToolArguments $normalAcquire
     Assert-True -Condition ($acquired.operation -eq 'acquire') -Message 'normal acquire did not report acquire'
     $normalBytes = [IO.File]::ReadAllBytes($normalLease)
     $normalDigest = Get-Digest -Path $normalLease
     Assert-ToolFails -ToolArguments $normalAcquire -ExpectedToken 'WRITER_LEASE_ACQUIRE_BLOCKED_ACTIVE_LEASE_EXISTS'
-    $scopeConflictDirectory = Join-Path $normalRoot 'second-lease-path'
+    $scopeConflictDirectory = Join-Path $testRoot ($testPrefix + '-second-lease-path')
     New-Item -ItemType Directory -Path $scopeConflictDirectory -ErrorAction Stop | Out-Null
     $scopeConflictAcquire = @(
         '-Operation', 'Acquire', '-LeasePath', (Join-Path $scopeConflictDirectory 'writer-lease.json'),
         '-Goal', 'test-scope-conflict', '-Phase', 'ACTIVE_TEST_SCOPE_CONFLICT',
         '-Repository', 'JerrySkywalker/tabbeacon', '-SourceHead', $sourceHead,
-        '-Worktree', $worktree, '-Branch', $branch,
-        '-LeaseRegistryRoot', $testRoot
+        '-Worktree', $worktree, '-Branch', $branch
     )
     Assert-ToolFails -ToolArguments $scopeConflictAcquire -ExpectedToken 'WRITER_LEASE_ACQUIRE_BLOCKED_SCOPE_CONFLICT'
 
@@ -214,6 +241,10 @@ try {
         Goal = 'test-normal-acquire'
         Phase = 'ACTIVE_TEST_NORMAL'
         Schema = 'tabbeacon-writer-lease.v1'
+        Repository = 'JerrySkywalker/tabbeacon'
+        Worktree = $worktree
+        Branch = $branch
+        SourceHead = $sourceHead
     }
     $normalIdentity = Get-IdentityArguments -Fixture $normalFixture -Digest $normalDigest
     $settled = Invoke-ToolJson -ToolArguments (@('-Operation', 'Settle', '-LeasePath', $normalLease) + $normalIdentity + @(
@@ -224,11 +255,63 @@ try {
         '-Disposition', 'SETTLED_TEST_NORMAL'
     ))
     Assert-True -Condition ($settled.active_holderless_lease -eq $false) -Message 'settle reported an active holderless lease'
-    Assert-True -Condition ([Linq.Enumerable]::SequenceEqual[byte]($normalBytes, [IO.File]::ReadAllBytes($normalFixture.ArchivePath))) -Message 'normal settle archive changed bytes'
-    Assert-True -Condition ((Get-Content -LiteralPath $normalFixture.ReceiptPath -Raw).Contains('DISPOSITION=SETTLED_TEST_NORMAL', [StringComparison]::Ordinal)) -Message 'normal settle receipt missing'
+    Assert-True -Condition (Test-ExactBytes -First $normalBytes -Second ([IO.File]::ReadAllBytes($normalFixture.ArchivePath))) -Message 'normal settle archive changed bytes'
+    Assert-True -Condition ((Get-Content -LiteralPath $normalFixture.ReceiptPath -Raw).IndexOf('DISPOSITION=SETTLED_TEST_NORMAL', [StringComparison]::Ordinal) -ge 0) -Message 'normal settle receipt missing'
     $normalStatus = Invoke-ToolJson -ToolArguments @('-Operation', 'Status', '-LeasePath', $normalLease)
     Assert-True -Condition ((-not $normalStatus.exists) -and (-not $normalStatus.active_holderless)) -Message 'normal lifecycle left active holderless lease'
     'WRITER_LEASE_TEST_NORMAL_LIFECYCLE=PASS'
+
+    # A durable PREPARED receipt either resumes its exact source archive or, after a simulated
+    # post-move crash, finalizes the exact archived bytes.  These fixtures model only the
+    # interrupted transaction boundary; normal lifecycle moves always go through the tool.
+    $preparedFixture = New-FixtureLease -Name 'prepared-resume'
+    New-ArchiveRoot -Fixture $preparedFixture
+    $preparedBytes = [IO.File]::ReadAllBytes($preparedFixture.LeasePath)
+    $preparedDigest = Get-Digest -Path $preparedFixture.LeasePath
+    $preparedContent = @(
+        'TRANSACTION=PREPARED',
+        'OPERATION=settle',
+        ('ORIGINAL_LEASE_SHA256=' + $preparedDigest),
+        ('ARCHIVE_PATH=' + $preparedFixture.ArchivePath),
+        'DISPOSITION=SETTLED_TEST_PREPARED',
+        'FINAL_PHASE=SETTLED_TEST_PREPARED',
+        'ACTIVE_WRITER_COUNT=N/A'
+    ) -join [Environment]::NewLine
+    [IO.File]::WriteAllText($preparedFixture.ReceiptPath, $preparedContent + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $preparedIdentity = Get-IdentityArguments -Fixture $preparedFixture -Digest $preparedDigest
+    $preparedRecovered = Invoke-ToolJson -ToolArguments (@('-Operation', 'RecoverPrepared', '-PreparedOperation', 'Settle', '-LeasePath', $preparedFixture.LeasePath) + $preparedIdentity + @(
+        '-ArchiveRoot', $preparedFixture.ArchiveRoot,
+        '-ArchivePath', $preparedFixture.ArchivePath,
+        '-ReceiptPath', $preparedFixture.ReceiptPath
+    ))
+    Assert-True -Condition ($preparedRecovered.recovery_state -eq 'resumed-archive') -Message 'prepared recovery did not resume archive'
+    Assert-True -Condition (Test-ExactBytes -First $preparedBytes -Second ([IO.File]::ReadAllBytes($preparedFixture.ArchivePath))) -Message 'prepared recovery archive changed bytes'
+
+    $finalizeFixture = New-FixtureLease -Name 'prepared-finalize'
+    New-ArchiveRoot -Fixture $finalizeFixture
+    $finalizeBytes = [IO.File]::ReadAllBytes($finalizeFixture.LeasePath)
+    $finalizeDigest = Get-Digest -Path $finalizeFixture.LeasePath
+    $finalizeContent = @(
+        'TRANSACTION=PREPARED',
+        'OPERATION=settle',
+        ('ORIGINAL_LEASE_SHA256=' + $finalizeDigest),
+        ('ARCHIVE_PATH=' + $finalizeFixture.ArchivePath),
+        'DISPOSITION=SETTLED_TEST_FINALIZE',
+        'FINAL_PHASE=SETTLED_TEST_FINALIZE',
+        'ACTIVE_WRITER_COUNT=N/A'
+    ) -join [Environment]::NewLine
+    [IO.File]::WriteAllText($finalizeFixture.ReceiptPath, $finalizeContent + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $finalizeFixture.LeasePath -Destination $finalizeFixture.ArchivePath -ErrorAction Stop
+    $finalizeIdentity = Get-IdentityArguments -Fixture $finalizeFixture -Digest $finalizeDigest
+    $finalizeRecovered = Invoke-ToolJson -ToolArguments (@('-Operation', 'RecoverPrepared', '-PreparedOperation', 'Settle', '-LeasePath', $finalizeFixture.LeasePath) + $finalizeIdentity + @(
+        '-ArchiveRoot', $finalizeFixture.ArchiveRoot,
+        '-ArchivePath', $finalizeFixture.ArchivePath,
+        '-ReceiptPath', $finalizeFixture.ReceiptPath
+    ))
+    Assert-True -Condition ($finalizeRecovered.recovery_state -eq 'finalized-existing-archive') -Message 'prepared recovery did not finalize existing archive'
+    Assert-True -Condition (Test-ExactBytes -First $finalizeBytes -Second ([IO.File]::ReadAllBytes($finalizeFixture.ArchivePath))) -Message 'prepared finalize archive changed bytes'
+    Assert-True -Condition ((Get-Content -LiteralPath $finalizeFixture.ReceiptPath -Raw).IndexOf('DISPOSITION=SETTLED_TEST_FINALIZE', [StringComparison]::Ordinal) -ge 0) -Message 'prepared finalize receipt missing'
+    'WRITER_LEASE_TEST_PREPARED_RECOVERY=PASS'
 
     # 4, 11, 12, and 13: exact orphan reclaim preserves bytes, produces a receipt, and releases a path for a fresh acquire.
     $reclaimFixture = New-FixtureLease -Name 'reclaim-success'
@@ -237,14 +320,13 @@ try {
     $reclaimDigest = Get-Digest -Path $reclaimFixture.LeasePath
     $reclaimed = Invoke-ToolJson -ToolArguments (Get-ReclaimArguments -Fixture $reclaimFixture -Digest $reclaimDigest)
     Assert-True -Condition ($reclaimed.disposition -eq 'ORPHAN_RECLAIMED') -Message 'orphan reclaim disposition mismatch'
-    Assert-True -Condition ([Linq.Enumerable]::SequenceEqual[byte]($reclaimBytes, [IO.File]::ReadAllBytes($reclaimFixture.ArchivePath))) -Message 'orphan archive changed bytes'
-    Assert-True -Condition ((Get-Content -LiteralPath $reclaimFixture.ReceiptPath -Raw).Contains('DISPOSITION=ORPHAN_RECLAIMED', [StringComparison]::Ordinal)) -Message 'orphan receipt missing'
+    Assert-True -Condition (Test-ExactBytes -First $reclaimBytes -Second ([IO.File]::ReadAllBytes($reclaimFixture.ArchivePath))) -Message 'orphan archive changed bytes'
+    Assert-True -Condition ((Get-Content -LiteralPath $reclaimFixture.ReceiptPath -Raw).IndexOf('DISPOSITION=ORPHAN_RECLAIMED', [StringComparison]::Ordinal) -ge 0) -Message 'orphan receipt missing'
     $postReclaimAcquire = Invoke-ToolJson -ToolArguments @(
         '-Operation', 'Acquire', '-LeasePath', $reclaimFixture.LeasePath,
         '-Goal', 'test-post-reclaim-acquire', '-Phase', 'ACTIVE_TEST_POST_RECLAIM',
         '-Repository', 'JerrySkywalker/tabbeacon', '-SourceHead', $sourceHead,
-        '-Worktree', $worktree, '-Branch', $branch,
-        '-LeaseRegistryRoot', $testRoot
+        '-Worktree', $worktree, '-Branch', $branch
     )
     Assert-True -Condition ($postReclaimAcquire.operation -eq 'acquire') -Message 'fresh acquire after reclaim failed'
     'WRITER_LEASE_TEST_RECLAIM_ARCHIVE_AND_FRESH_ACQUIRE=PASS'
@@ -330,9 +412,9 @@ try {
         'WRITER_LEASE_TEST_REPARSE_TARGET=N_A_PLATFORM_UNSUPPORTED'
     }
 
-    "WRITER_LEASE_TEST_ARTIFACT_ROOT=$testRoot"
+    "WRITER_LEASE_TEST_ARTIFACT_PREFIX=$testPrefix"
     'WRITER_LEASE_FOCUSED_TESTS=PASS'
 } catch {
-    "WRITER_LEASE_TEST_ARTIFACT_ROOT=$testRoot"
+    "WRITER_LEASE_TEST_ARTIFACT_PREFIX=$testPrefix"
     throw
 }
