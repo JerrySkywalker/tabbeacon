@@ -1645,7 +1645,7 @@ fn observed_codex_0149_shape_reconciles_only_exact_owned_declarations() {
 }
 
 #[test]
-fn codex_0149_session_end_upgrade_preserves_ten_mcp_groups_and_trust() {
+fn codex_0149_ten_mcp_groups_migrate_to_command_and_require_fresh_trust() {
     let root = TestRoot::new("codex-0149-session-end-upgrade");
     let codex_home = root.child("codex-home");
     let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
@@ -1697,53 +1697,476 @@ fn codex_0149_session_end_upgrade_preserves_ten_mcp_groups_and_trust() {
 
     let trusted_keys = install_current_codex_trust_state(&codex_home);
     assert_eq!(trusted_keys.len(), ADMITTED_HOOK_EVENTS.len() - 1);
-    let trust_before = fs::read(codex_home.join("config.toml")).expect("trusted config read");
 
     assert_eq!(
         integration.setup().expect("legacy 0.149 upgrade is safe"),
         SetupOutcome::Upgraded
     );
-    assert_eq!(
-        fs::read(codex_home.join("config.toml")).expect("post-upgrade config read"),
-        trust_before,
-        "the ten existing MCP trust entries are byte-for-byte preserved"
+    let upgraded_config = fs::read_to_string(codex_home.join("config.toml"))
+        .expect("post-upgrade config read")
+        .parse::<DocumentMut>()
+        .expect("post-upgrade config parses");
+    assert!(
+        upgraded_config.get("mcp_servers").is_none(),
+        "the exact owned MCP server is removed rather than retained as a desired transport"
+    );
+    assert!(
+        upgraded_config
+            .get("hooks")
+            .and_then(Item::as_table_like)
+            .is_none_or(|hooks| !hooks.contains_key("state")),
+        "legacy MCP trust is revoked; it must not transfer to changed command definitions"
     );
 
     let upgraded_hooks: Value =
         serde_json::from_slice(&fs::read(&hooks_path).expect("upgraded hooks read"))
             .expect("upgraded hooks parse");
-    for declaration in &legacy_mcp {
-        let event = declaration["event"].as_str().expect("legacy event name");
-        let group = &declaration["group"];
+    for event in ADMITTED_HOOK_EVENTS {
+        let groups = upgraded_hooks["hooks"][event]
+            .as_array()
+            .expect("migrated event groups are present");
         assert!(
-            upgraded_hooks["hooks"][event]
-                .as_array()
-                .is_some_and(|groups| groups.contains(group)),
-            "the pre-existing {event} MCP group is preserved"
+            groups.iter().any(|group| {
+                group["hooks"][0]["type"] == "command"
+                    && group["hooks"][0]["commandWindows"]
+                        .as_str()
+                        .is_some_and(is_current_windows_hook_command)
+            }),
+            "the migrated {event} declaration uses the current command transport"
+        );
+        assert!(
+            !groups
+                .iter()
+                .any(|group| group["hooks"][0]["type"] == "mcp_tool"),
+            "the exact owned MCP declaration was removed for {event}"
         );
     }
-    let session_end_groups = upgraded_hooks["hooks"]["SessionEnd"]
-        .as_array()
-        .expect("SessionEnd groups are an array");
-    let owned_session_end = session_end_groups
-        .iter()
-        .filter(|group| group["hooks"][0]["type"] == "command")
-        .filter(|group| {
-            group["hooks"][0]["commandWindows"]
-                .as_str()
-                .is_some_and(is_current_windows_hook_command)
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(owned_session_end.len(), 1);
-    assert_eq!(owned_session_end[0]["hooks"][0]["timeout"], 1);
-    assert_eq!(owned_session_end[0]["hooks"][0]["async"], false);
 
     let report = integration.doctor();
     assert!(report.checks().iter().any(|check| {
         check.id() == "hooks.trust"
             && check.status() == DoctorStatus::Warning
-            && check.summary().contains("TRUST_REVIEW_REQUIRED: 1")
+            && check.summary().contains("TRUST_REVIEW_REQUIRED: 11")
     }));
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One fixture proves preservation across preview, apply, idempotence, and uninstall.
+fn exact_hybrid_migration_preview_preserves_external_state_and_uninstalls_only_owned_parts() {
+    let root = TestRoot::new("legacy-mcp-command-migration-preservation");
+    let codex_home = root.child("codex-home");
+    write_hooks_fixture(&codex_home, "0.149.0-mcp-extension.json");
+    let config_path = codex_home.join("config.toml");
+    fs::write(
+        &config_path,
+        "[workspace]\nlabel = \"keep-me\"\n\n[mcp_servers.owner-audit]\ncommand = \"owner-mcp.exe\"\nargs = [\"--stdio\"]\n",
+    )
+    .expect("external config fixture writes");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    install_exact_existing_hybrid(&integration, &root);
+
+    let hooks_path = codex_home.join("hooks.json");
+    let before_hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("hooks read")).expect("hooks parse");
+    let external_hook = before_hooks["hooks"]["PostToolUse"][0].clone();
+    let before_config = fs::read_to_string(&config_path)
+        .expect("config reads")
+        .parse::<DocumentMut>()
+        .expect("config parses");
+    let external_server = before_config["mcp_servers"]["owner-audit"].to_string();
+
+    let preview = integration
+        .repair(false, None)
+        .expect("exact legacy migration preview succeeds");
+    assert_eq!(preview.disposition, CodexRepairDisposition::ReadyToApply);
+    assert!(preview.legacy_mcp_migration);
+    assert!(preview.owned_mcp_server_removal_required);
+    assert!(preview.manual_hook_trust_review_required);
+
+    let applied = integration
+        .repair(true, Some(&preview.target_digest))
+        .expect("exact legacy migration apply succeeds");
+    assert_eq!(
+        applied.disposition,
+        CodexRepairDisposition::RepairedTrustReviewRequired
+    );
+    assert!(applied.legacy_mcp_migration);
+
+    let migrated_hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("migrated hooks read"))
+            .expect("migrated hooks parse");
+    assert!(
+        migrated_hooks["hooks"]["PostToolUse"]
+            .as_array()
+            .is_some_and(|groups| groups.contains(&external_hook)),
+        "same-event third-party Hook remains exactly present"
+    );
+    assert!(migrated_hooks["hooks"].as_object().is_some_and(|events| {
+        events.values().all(|groups| {
+            groups.as_array().is_some_and(|groups| {
+                groups.iter().all(|group| {
+                    group["hooks"][0]["type"] != "mcp_tool"
+                        || group["hooks"][0]["server"] != "tabbeacon-hook"
+                })
+            })
+        })
+    }));
+    let migrated_config = fs::read_to_string(&config_path)
+        .expect("migrated config reads")
+        .parse::<DocumentMut>()
+        .expect("migrated config parses");
+    assert_eq!(
+        migrated_config["workspace"]["label"].as_str(),
+        Some("keep-me")
+    );
+    assert_eq!(
+        migrated_config["mcp_servers"]["owner-audit"].to_string(),
+        external_server,
+        "the exact owned TabBeacon server is removed without touching third-party servers"
+    );
+    assert!(
+        migrated_config["mcp_servers"]
+            .get("tabbeacon-hook")
+            .is_none()
+    );
+    assert_eq!(
+        integration
+            .setup()
+            .expect("post-migration setup is idempotent"),
+        SetupOutcome::AlreadyInstalled
+    );
+    assert_eq!(
+        integration.uninstall().expect("uninstall succeeds"),
+        UninstallOutcome::Removed
+    );
+    let uninstalled_config = fs::read_to_string(&config_path)
+        .expect("uninstalled config reads")
+        .parse::<DocumentMut>()
+        .expect("uninstalled config parses");
+    assert_eq!(
+        uninstalled_config["workspace"]["label"].as_str(),
+        Some("keep-me")
+    );
+    assert_eq!(
+        uninstalled_config["mcp_servers"]["owner-audit"].to_string(),
+        external_server
+    );
+    let uninstalled_hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("uninstalled hooks read"))
+            .expect("uninstalled hooks parse");
+    assert!(
+        uninstalled_hooks["hooks"]["PostToolUse"]
+            .as_array()
+            .is_some_and(|groups| groups.contains(&external_hook))
+    );
+}
+
+#[test]
+fn legacy_mcp_migration_apply_refuses_a_preview_replayed_after_config_drift() {
+    let root = TestRoot::new("legacy-mcp-command-migration-drift");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    install_exact_existing_hybrid(&integration, &root);
+    let config_path = root.child("codex-home/config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    let hooks_path = root.child("codex-home/hooks.json");
+    let preview = integration
+        .repair(false, None)
+        .expect("exact legacy migration preview succeeds");
+    let hooks_before = fs::read(&hooks_path).expect("hooks before drift read");
+    let manifest_before = fs::read(&manifest_path).expect("manifest before drift read");
+    let mut config = fs::read_to_string(&config_path).expect("config reads");
+    config.push_str("\n[external_after_preview]\nvalue = \"preserve\"\n");
+    fs::write(&config_path, &config).expect("third-party drift writes");
+
+    assert!(matches!(
+        integration.repair(true, Some(&preview.target_digest)),
+        Err(CodexIntegrationError::ConcurrentTargetDrift)
+    ));
+    assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest reread"),
+        manifest_before
+    );
+    assert_eq!(
+        fs::read_to_string(&config_path).expect("config reread"),
+        config
+    );
+}
+
+#[test]
+fn legacy_mcp_migration_blocks_modified_owned_and_missing_manifest_states() {
+    let modified_root = TestRoot::new("legacy-mcp-command-migration-modified");
+    let modified =
+        test_integration_with_codex_fixture(&modified_root, "codex_version_probe_0149.rs");
+    install_exact_existing_hybrid(&modified, &modified_root);
+    let modified_config_path = modified_root.child("codex-home/config.toml");
+    let modified_hooks_path = modified_root.child("codex-home/hooks.json");
+    let modified_manifest_path = modified_root.child("state/integration-v1.json");
+    let mut altered_config = fs::read_to_string(&modified_config_path)
+        .expect("config reads")
+        .parse::<DocumentMut>()
+        .expect("config parses");
+    altered_config["mcp_servers"]["tabbeacon-hook"]["command"] = value("owner-change.exe");
+    fs::write(&modified_config_path, altered_config.to_string()).expect("modified server writes");
+    let hooks_before = fs::read(&modified_hooks_path).expect("hooks read");
+    let manifest_before = fs::read(&modified_manifest_path).expect("manifest read");
+    let config_before = fs::read(&modified_config_path).expect("config read");
+    assert!(matches!(
+        modified.setup(),
+        Err(CodexIntegrationError::ModifiedOwnedHook)
+    ));
+    assert_eq!(
+        fs::read(&modified_hooks_path).expect("hooks reread"),
+        hooks_before
+    );
+    assert_eq!(
+        fs::read(&modified_manifest_path).expect("manifest reread"),
+        manifest_before
+    );
+    assert_eq!(
+        fs::read(&modified_config_path).expect("config reread"),
+        config_before
+    );
+
+    let missing_root = TestRoot::new("legacy-mcp-command-migration-missing-manifest");
+    let missing = test_integration_with_codex_fixture(&missing_root, "codex_version_probe_0149.rs");
+    install_exact_existing_hybrid(&missing, &missing_root);
+    let hooks_path = missing_root.child("codex-home/hooks.json");
+    let config_path = missing_root.child("codex-home/config.toml");
+    let hooks_before = fs::read(&hooks_path).expect("hooks read");
+    let config_before = fs::read(&config_path).expect("config read");
+    fs::remove_file(missing_root.child("state/integration-v1.json")).expect("manifest removal");
+    assert!(matches!(
+        missing.setup(),
+        Err(CodexIntegrationError::TabBeaconLikeAmbiguityBlocked)
+    ));
+    assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
+    assert_eq!(
+        fs::read(&config_path).expect("config reread"),
+        config_before
+    );
+}
+
+#[test]
+fn unrecognized_owned_mcp_manifest_is_refused_without_mutating_targets() {
+    let root = TestRoot::new("unrecognized-owned-mcp-manifest");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    integration.setup().expect("current command setup succeeds");
+
+    let hooks_path = root.child("codex-home/hooks.json");
+    let config_path = root.child("codex-home/config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest reads"))
+            .expect("manifest parses");
+    let executable = manifest["executable"]
+        .as_str()
+        .expect("manifest executable is a string")
+        .to_owned();
+    manifest["mcp_server"] = json!({
+        "name": "tabbeacon-hook",
+        "command": executable,
+        "args": ["__mcp-hook-stdio-v1"],
+        "env_vars": ["WT_SESSION"],
+        "omit_tools_from": ["code_mode", "deferred", "direct"]
+    });
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("ambiguous manifest serializes"),
+    )
+    .expect("ambiguous manifest writes");
+
+    let mut config = fs::read_to_string(&config_path)
+        .expect("config reads")
+        .parse::<DocumentMut>()
+        .expect("config parses");
+    config["mcp_servers"] = Item::Table(Table::new());
+    let mut server = Table::new();
+    server.insert("command", value(executable));
+    let mut args = Array::new();
+    args.push("__mcp-hook-stdio-v1");
+    server.insert("args", value(args));
+    let mut env_vars = Array::new();
+    env_vars.push("WT_SESSION");
+    server.insert("env_vars", value(env_vars));
+    let mut omitted = Array::new();
+    omitted.push("code_mode");
+    omitted.push("deferred");
+    omitted.push("direct");
+    server.insert("omit_tools_from", value(omitted));
+    config["mcp_servers"]
+        .as_table_like_mut()
+        .expect("MCP server table is writable")
+        .insert("tabbeacon-hook", Item::Table(server));
+    fs::write(&config_path, config.to_string()).expect("ambiguous MCP config writes");
+
+    let hooks_before = fs::read(&hooks_path).expect("hooks snapshot reads");
+    let config_before = fs::read(&config_path).expect("config snapshot reads");
+    let manifest_before = fs::read(&manifest_path).expect("manifest snapshot reads");
+    assert!(matches!(
+        integration.setup(),
+        Err(CodexIntegrationError::StaleOwnedHook)
+    ));
+    assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
+    assert_eq!(
+        fs::read(&config_path).expect("config reread"),
+        config_before
+    );
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest reread"),
+        manifest_before
+    );
+}
+
+#[test]
+fn mcp_hook_manifest_without_owned_server_is_refused_without_mutating_targets() {
+    let root = TestRoot::new("mcp-hook-manifest-without-owned-server");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    install_exact_existing_hybrid(&integration, &root);
+
+    let hooks_path = root.child("codex-home/hooks.json");
+    let config_path = root.child("codex-home/config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("manifest reads"))
+            .expect("manifest parses");
+    manifest["mcp_server"] = Value::Null;
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).expect("ambiguous manifest serializes"),
+    )
+    .expect("ambiguous manifest writes");
+
+    let mut config = fs::read_to_string(&config_path)
+        .expect("config reads")
+        .parse::<DocumentMut>()
+        .expect("config parses");
+    config["mcp_servers"]
+        .as_table_like_mut()
+        .expect("MCP server table is writable")
+        .remove("tabbeacon-hook");
+    config.as_table_mut().remove("mcp_servers");
+    fs::write(&config_path, config.to_string()).expect("MCP server removal writes");
+
+    let hooks_before = fs::read(&hooks_path).expect("hooks snapshot reads");
+    let config_before = fs::read(&config_path).expect("config snapshot reads");
+    let manifest_before = fs::read(&manifest_path).expect("manifest snapshot reads");
+    assert!(matches!(
+        integration.setup(),
+        Err(CodexIntegrationError::StaleOwnedHook)
+    ));
+    assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
+    assert_eq!(
+        fs::read(&config_path).expect("config reread"),
+        config_before
+    );
+    assert_eq!(
+        fs::read(&manifest_path).expect("manifest reread"),
+        manifest_before
+    );
+}
+
+#[test]
+fn legacy_mcp_migration_rekeys_all_trailing_third_party_trust_state() {
+    let root = TestRoot::new("legacy-mcp-trailing-third-party-trust");
+    let codex_home = root.child("codex-home");
+    let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
+    install_exact_existing_hybrid(&integration, &root);
+
+    let hooks_path = codex_home.join("hooks.json");
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("legacy hooks read"))
+            .expect("legacy hooks parse");
+    let external = json!({
+        "hooks": [{"type": "command", "command": "owner-safe-hook"}],
+        "plugin": "owner.plugin"
+    });
+    let second_external = json!({
+        "hooks": [{"type": "command", "command": "owner-safe-hook-two"}],
+        "plugin": "owner.plugin.two"
+    });
+    hooks["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .expect("PostToolUse groups are present")
+        .push(external.clone());
+    hooks["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .expect("PostToolUse groups are present")
+        .push(second_external.clone());
+    fs::write(
+        &hooks_path,
+        serde_json::to_vec_pretty(&hooks).expect("legacy hooks serialize"),
+    )
+    .expect("legacy hooks write");
+
+    install_current_codex_trust_state(&codex_home);
+    let config_path = codex_home.join("config.toml");
+    let first_old_key = format!("{}:post_tool_use:1:0", hooks_path.display());
+    let second_old_key = format!("{}:post_tool_use:2:0", hooks_path.display());
+    let first_new_key = format!("{}:post_tool_use:0:0", hooks_path.display());
+    let second_new_key = format!("{}:post_tool_use:1:0", hooks_path.display());
+    let mut config = fs::read_to_string(&config_path)
+        .expect("config reads")
+        .parse::<DocumentMut>()
+        .expect("config parses");
+    let mut third_party_state = Table::new();
+    third_party_state.insert("trusted_hash", value("sha256:third-party-preserve"));
+    config["hooks"]["state"]
+        .as_table_like_mut()
+        .expect("trust state is writable")
+        .insert(&first_old_key, Item::Table(third_party_state));
+    let mut second_third_party_state = Table::new();
+    second_third_party_state.insert("trusted_hash", value("sha256:third-party-preserve-two"));
+    config["hooks"]["state"]
+        .as_table_like_mut()
+        .expect("trust state is writable")
+        .insert(&second_old_key, Item::Table(second_third_party_state));
+    fs::write(&config_path, config.to_string()).expect("third-party trust writes");
+
+    assert_eq!(
+        integration
+            .setup()
+            .expect("exact legacy migration succeeds"),
+        SetupOutcome::Upgraded
+    );
+    let migrated: Value =
+        serde_json::from_slice(&fs::read(&hooks_path).expect("migrated hooks read"))
+            .expect("migrated hooks parse");
+    assert_eq!(migrated["hooks"]["PostToolUse"][0], external);
+    assert_eq!(migrated["hooks"]["PostToolUse"][1], second_external);
+    assert_eq!(
+        migrated["hooks"]["PostToolUse"][2]["hooks"][0]["type"],
+        "command"
+    );
+    let migrated_config = fs::read_to_string(&config_path)
+        .expect("migrated config reads")
+        .parse::<DocumentMut>()
+        .expect("migrated config parses");
+    let state = migrated_config["hooks"]["state"]
+        .as_table_like()
+        .expect("migrated trust state is present");
+    assert!(state.get(&second_old_key).is_none());
+    assert_eq!(
+        state
+            .get(&first_new_key)
+            .and_then(Item::as_table_like)
+            .and_then(|entry| entry.get("trusted_hash"))
+            .and_then(Item::as_str),
+        Some("sha256:third-party-preserve")
+    );
+    assert_eq!(
+        state
+            .get(&second_new_key)
+            .and_then(Item::as_table_like)
+            .and_then(|entry| entry.get("trusted_hash"))
+            .and_then(Item::as_str),
+        Some("sha256:third-party-preserve-two")
+    );
+    let new_owned_key = format!("{}:post_tool_use:2:0", hooks_path.display());
+    assert!(
+        state.get(&new_owned_key).is_none(),
+        "changed command declaration must require fresh trust review"
+    );
 }
 
 #[test]
@@ -1927,7 +2350,7 @@ fn codex_0149_owned_mcp_server_forwards_only_the_terminal_session() {
 }
 
 #[test]
-fn prerelease_mcp_manifest_without_visibility_or_terminal_forwarding_upgrades_exactly_once() {
+fn prerelease_mcp_manifest_without_visibility_or_terminal_forwarding_migrates_once() {
     let root = TestRoot::new("codex-0149-mcp-visibility-upgrade");
     let codex_home = root.child("codex-home");
     write_hooks_fixture(&codex_home, "0.149.0-observed.json");
@@ -1935,14 +2358,12 @@ fn prerelease_mcp_manifest_without_visibility_or_terminal_forwarding_upgrades_ex
     let manifest_path = root.child("state/integration-v1.json");
     let integration = test_integration_with_codex_fixture(&root, "codex_version_probe_0149.rs");
     install_exact_existing_hybrid(&integration, &root);
-    let hooks_before = fs::read(codex_home.join("hooks.json")).expect("installed hooks read");
     install_current_codex_trust_state(&codex_home);
 
     let mut prior_config = fs::read_to_string(&config_path)
         .expect("installed config reads")
         .parse::<DocumentMut>()
         .expect("installed config parses");
-    let trusted_state_before = prior_config["hooks"]["state"].to_string();
     prior_config["mcp_servers"]["tabbeacon-hook"]
         .as_table_like_mut()
         .expect("owned MCP server table")
@@ -1977,42 +2398,37 @@ fn prerelease_mcp_manifest_without_visibility_or_terminal_forwarding_upgrades_ex
     );
 
     assert_eq!(
-        integration.setup().expect("pre-release MCP setup upgrades"),
+        integration.setup().expect("pre-release MCP setup migrates"),
         SetupOutcome::Upgraded
     );
     let upgraded = fs::read_to_string(&config_path)
         .expect("upgraded config reads")
         .parse::<DocumentMut>()
         .expect("upgraded config parses");
-    let omitted = upgraded["mcp_servers"]["tabbeacon-hook"]
-        .get("omit_tools_from")
-        .and_then(Item::as_array)
-        .expect("upgraded MCP server hides its hook tool")
-        .iter()
-        .map(|value| value.as_str())
-        .collect::<Option<Vec<_>>>();
-    assert_eq!(omitted, Some(vec!["code_mode", "deferred", "direct"]));
-    let forwarded = upgraded["mcp_servers"]["tabbeacon-hook"]
-        .get("env_vars")
-        .and_then(Item::as_array)
-        .expect("upgraded MCP server forwards its terminal binding")
-        .iter()
-        .map(|value| value.as_str())
-        .collect::<Option<Vec<_>>>();
-    assert_eq!(forwarded, Some(vec!["WT_SESSION"]));
-    assert_eq!(
-        serde_json::from_slice::<Value>(
-            &fs::read(codex_home.join("hooks.json")).expect("upgraded hooks read")
-        )
-        .expect("upgraded hooks parse"),
-        serde_json::from_slice::<Value>(&hooks_before).expect("original hooks parse"),
-        "MCP environment reconciliation must preserve exact Hook declarations"
+    assert!(
+        upgraded.get("mcp_servers").is_none(),
+        "an exact historical MCP server is removed instead of upgraded in place"
     );
-    assert_eq!(
-        upgraded["hooks"]["state"].to_string(),
-        trusted_state_before,
-        "MCP environment reconciliation must preserve existing Hook trust state"
+    assert!(
+        upgraded
+            .get("hooks")
+            .and_then(Item::as_table_like)
+            .is_none_or(|hooks| !hooks.contains_key("state")),
+        "historical MCP trust does not become command-Hook trust"
     );
+    let migrated_hooks: Value = serde_json::from_slice(
+        &fs::read(codex_home.join("hooks.json")).expect("migrated hooks read"),
+    )
+    .expect("migrated hooks parse");
+    assert!(migrated_hooks["hooks"].as_object().is_some_and(|events| {
+        events.values().all(|groups| {
+            groups.as_array().is_some_and(|groups| {
+                groups
+                    .iter()
+                    .all(|group| group["hooks"][0]["type"] != "mcp_tool")
+            })
+        })
+    }));
     assert_eq!(
         integration.setup().expect("upgraded MCP setup is stable"),
         SetupOutcome::AlreadyInstalled
@@ -3020,6 +3436,27 @@ fn compact_and_subagent_lifecycle_are_classified_from_release_metadata() {
         };
         assert_eq!(context.agent_id(), Some("agent-child"));
         assert_eq!(context.agent_type(), Some("explorer"));
+    }
+}
+
+#[test]
+fn generic_subagent_tool_events_with_identity_are_ignored_before_root_presentation() {
+    let root = TestRoot::new("generic-subagent-tool-normalizer");
+    for event in ["PreToolUse", "PostToolUse"] {
+        let mut payload = hook_payload(event, "session-a", &root.path);
+        payload["agent_id"] = Value::String("agent-child".to_owned());
+        payload["agent_type"] = Value::String("thread".to_owned());
+        let normalized = CodexHookNormalizer
+            .normalize(
+                &serde_json::to_vec(&payload).expect("generic subagent payload serializes"),
+                UNIX_EPOCH,
+            )
+            .expect("generic subagent payload is valid");
+        let CodexNormalization::IgnoreSubagent(context) = normalized else {
+            panic!("expected {event} to be ignored before root presentation");
+        };
+        assert_eq!(context.agent_id(), Some("agent-child"));
+        assert_eq!(context.agent_type(), Some("thread"));
     }
 }
 

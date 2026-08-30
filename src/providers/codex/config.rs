@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicU8, Ordering};
+
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
@@ -42,6 +45,12 @@ use super::{
 const MANIFEST_SCHEMA: &str = "tabbeacon-codex-integration-v1";
 const MANIFEST_FILE: &str = "integration-v1.json";
 const LOCK_FILE: &str = "integration.lock";
+const MCP_MIGRATION_JOURNAL_SCHEMA: &str = "tabbeacon-codex-mcp-to-command-migration-v1";
+const MCP_MIGRATION_JOURNAL_FILE: &str = "mcp-to-command-migration-v1.json";
+const MCP_MIGRATION_RECOVERY_DIR: &str = "mcp-to-command-recovery-v1";
+
+#[cfg(test)]
+static MCP_MIGRATION_TEST_FAULT_AFTER: AtomicU8 = AtomicU8::new(0);
 const OWNED_DESCRIPTION: &str = "TabBeacon user-global lifecycle hooks";
 const RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
 // The MCP probe owns one fresh stdio server plus an immutable worker image,
@@ -155,10 +164,10 @@ pub struct CodexRepairReport {
     pub disposition: CodexRepairDisposition,
     /// Number of exact manifest-owned declarations proven absent.
     pub missing_declarations: usize,
-    /// Digest of the exact Hook target observed during this preflight.
+    /// Digest of the exact target observed during this preflight.
     ///
     /// An apply must present this value unchanged, so a preview cannot be
-    /// replayed after a concurrent edit to `hooks.json`.
+    /// replayed after a concurrent edit to an owned migration member.
     pub target_digest: String,
     /// Number of non-TabBeacon Hook groups preserved without mutation.
     pub third_party_groups_preserved: usize,
@@ -167,6 +176,14 @@ pub struct CodexRepairReport {
     pub postinstall_third_party_groups_preserved: usize,
     /// Repair never grants Codex Hook trust; the Owner must review `/hooks`.
     pub manual_hook_trust_review_required: bool,
+    /// Whether the preview or apply covers the one admitted legacy MCP upgrade.
+    ///
+    /// This additive field lets callers distinguish missing-group repair from a
+    /// transport migration without exposing configuration contents.
+    pub legacy_mcp_migration: bool,
+    /// Whether the exact manifest-owned MCP server is part of the approved
+    /// migration delta. It is always false for ordinary repair.
+    pub owned_mcp_server_removal_required: bool,
 }
 
 /// Result of an uninstall invocation.
@@ -409,6 +426,9 @@ pub enum CodexIntegrationError {
     UnsafeExecutablePath,
     /// A target path or ancestor is a symbolic link/reparse point.
     SymbolicLinkTarget,
+    /// An interrupted legacy MCP migration cannot be recovered without
+    /// overwriting state that is no longer exactly admitted.
+    MigrationRecoveryBlocked,
 }
 
 impl fmt::Display for CodexIntegrationError {
@@ -451,6 +471,9 @@ impl fmt::Display for CodexIntegrationError {
             Self::SymbolicLinkTarget => {
                 "a Codex integration target is a symbolic link or reparse point"
             }
+            Self::MigrationRecoveryBlocked => {
+                "an interrupted legacy MCP migration requires ownership-safe recovery"
+            }
         })
     }
 }
@@ -473,6 +496,7 @@ impl CodexIntegrationError {
             Self::ModifiedOwnedTitle | Self::TerminalTitleConflict => "TITLE_OWNERSHIP_BLOCKED",
             Self::SymbolicLinkTarget => "UNSAFE_TARGET_PATH_BLOCKED",
             Self::UnsafeExecutablePath => "UNSAFE_EXECUTABLE_PATH_BLOCKED",
+            Self::MigrationRecoveryBlocked => "MIGRATION_RECOVERY_BLOCKED",
             Self::StateRootUnavailable | Self::ConfigShape | Self::Io(_) => "REPAIR_BLOCKED",
         }
     }
@@ -611,6 +635,7 @@ impl CodexIntegration {
         // is repeated under the lock to prevent an executable-swap race.
         self.require_supported_profile(false)?;
         self.with_lock(|| {
+            self.recover_incomplete_mcp_migration()?;
             let profile = self.require_supported_profile(true)?;
             self.setup_locked(tabbeacon_owns_title, profile)
         })
@@ -638,10 +663,12 @@ impl CodexIntegration {
             // state root; repeat the probe under lock before writing.
             self.require_supported_profile(false)?;
             self.with_lock(|| {
+                self.recover_incomplete_mcp_migration()?;
                 let profile = self.require_supported_profile(true)?;
                 self.repair_locked(profile, true, expected_target_digest)
             })
         } else {
+            self.require_no_incomplete_mcp_migration()?;
             let profile = self.require_supported_profile(false)?;
             self.repair_locked(profile, false, expected_target_digest)
         }
@@ -654,7 +681,10 @@ impl CodexIntegration {
     /// Performs a full ownership preflight before mutation and refuses modified
     /// owned elements.
     pub fn uninstall(&self) -> Result<UninstallOutcome, CodexIntegrationError> {
-        self.with_lock(|| self.uninstall_locked())
+        self.with_lock(|| {
+            self.recover_incomplete_mcp_migration()?;
+            self.uninstall_locked()
+        })
     }
 
     /// Reconciles only the title ownership part of an already installed integration.
@@ -671,8 +701,8 @@ impl CodexIntegration {
         &self,
         tabbeacon_owns_title: bool,
     ) -> Result<TitleOwnershipOutcome, CodexIntegrationError> {
-        self.require_supported_profile(false)?;
         self.with_lock(|| {
+            self.recover_incomplete_mcp_migration()?;
             self.require_supported_profile(true)?;
             self.reconcile_title_ownership_locked(tabbeacon_owns_title)
         })
@@ -711,7 +741,7 @@ impl CodexIntegration {
             .is_some_and(Self::manifest_has_known_owned_declarations);
         let owned_hook_count = manifest.as_ref().map(|manifest| manifest.hooks.len());
         let title_owned = manifest.as_ref().map(|manifest| manifest.title_owned);
-        let hook_profile = profile_for_manifest(manifest.as_ref(), capability_profile);
+        let hook_profile = existing_profile_for_manifest(manifest.as_ref(), capability_profile);
         checks.push(if manifest.is_some() {
             pass(
                 "ownership.manifest",
@@ -833,7 +863,7 @@ impl CodexIntegration {
         });
         checks.push(match (&manifest, capability_profile) {
             (Some(manifest), Some(discovered_profile)) => {
-                match profile_for_manifest(Some(manifest), Some(discovered_profile)) {
+                match desired_profile_for_manifest(Some(manifest), Some(discovered_profile)) {
                     Some(profile) => match (
                         desired_hooks(&self.tabbeacon_executable, profile),
                         desired_mcp_server(&self.tabbeacon_executable, profile),
@@ -871,6 +901,28 @@ impl CodexIntegration {
             (None, Some(_)) => fail(
                 "hooks.currentness",
                 "CURRENTNESS_UNPROVEN: ownership manifest is missing or hooks are incompatible",
+            ),
+        });
+        checks.push(match (&manifest, capability_profile) {
+            (Some(manifest), Some(_)) if is_recognized_legacy_mcp_manifest(manifest) => warning(
+                "hooks.migration",
+                "LEGACY_MCP_HYBRID_MIGRATION_REQUIRED: exact owned MCP hooks can be previewed and migrated to the current command transport",
+            ),
+            (Some(manifest), Some(_)) if manifest.mcp_server.is_none() => pass(
+                "hooks.migration",
+                "CURRENT_COMMAND_TRANSPORT: no legacy TabBeacon MCP migration is required",
+            ),
+            (Some(_), Some(_)) => fail(
+                "hooks.migration",
+                "LEGACY_MCP_HYBRID_AMBIGUOUS: historical MCP state is not exact-owned and will not be mutated",
+            ),
+            (None, Some(_)) => fail(
+                "hooks.migration",
+                "MIGRATION_UNAVAILABLE: no exact owned TabBeacon integration is present",
+            ),
+            (_, None) => warning(
+                "hooks.migration",
+                "MIGRATION_MUTATION_BLOCKED: local capability discovery does not admit a command transport",
             ),
         });
         let trust_check = match (&manifest, &hooks, &config) {
@@ -1034,7 +1086,9 @@ impl CodexIntegration {
             .ok()
             .flatten()
             .as_ref()
-            .and_then(|manifest| profile_for_manifest(Some(manifest), Some(discovered_profile)));
+            .and_then(|manifest| {
+                existing_profile_for_manifest(Some(manifest), Some(discovered_profile))
+            });
         let Some(profile) = manifest_profile else {
             return vec![fail(
                 "hooks.runtime-probe",
@@ -1161,8 +1215,9 @@ impl CodexIntegration {
         let runtime_continuity = self.doctor().runtime_continuity();
         let capability_state = self.probe_codex_capabilities(false).state();
         let profile_is_supported = capability_state.is_supported();
-        let desired = profile_for_manifest(manifest.as_ref(), capability_state.supported_profile())
-            .and_then(|profile| desired_hooks(&self.tabbeacon_executable, profile).ok());
+        let desired =
+            desired_profile_for_manifest(manifest.as_ref(), capability_state.supported_profile())
+                .and_then(|profile| desired_hooks(&self.tabbeacon_executable, profile).ok());
         let Ok(events) = hooks_events(&hooks) else {
             return HookInventory::unavailable();
         };
@@ -1285,6 +1340,7 @@ impl CodexIntegration {
         HookInventory::available(entries)
     }
 
+    #[allow(clippy::too_many_lines)] // Ordered ownership checks and the legacy migration branch share one lock.
     fn setup_locked(
         &self,
         tabbeacon_owns_title: bool,
@@ -1295,7 +1351,7 @@ impl CodexIntegration {
         reject_symbolic_link(&self.config_path())?;
         if let Some(mut manifest) = self.load_manifest()? {
             self.validate_manifest_scope(&manifest)?;
-            let profile = profile_for_manifest(Some(&manifest), Some(profile))
+            let profile = desired_profile_for_manifest(Some(&manifest), Some(profile))
                 .ok_or(CodexIntegrationError::OwnershipManifest)?;
             let desired_hooks = desired_hooks(&self.tabbeacon_executable, profile)?;
             let desired_mcp_server = desired_mcp_server(&self.tabbeacon_executable, profile)?;
@@ -1305,6 +1361,26 @@ impl CodexIntegration {
                 .map_err(|_| CodexIntegrationError::ModifiedOwnedHook)?;
             Self::validate_title_ownership(&manifest, &config)?;
             Self::validate_mcp_server_ownership(&manifest, &config)?;
+            if manifest_declares_mcp_transport(&manifest)
+                && !is_recognized_legacy_mcp_manifest(&manifest)
+            {
+                // An owned MCP declaration may be removed only as part of the
+                // one exact historical transport migration. Never let an
+                // ambiguous, partial, or newer MCP shape fall through to
+                // ordinary command reconciliation merely because its server
+                // name is familiar or absent.
+                return Err(CodexIntegrationError::StaleOwnedHook);
+            }
+            if is_recognized_legacy_mcp_manifest(&manifest) {
+                // The manifest proves only an already-installed historical
+                // transport. Migrate that exact state transactionally to the
+                // capability-derived command profile; never let it select MCP
+                // as the desired current transport.
+                self.prepare_worker_runtime_image()?;
+                let plan = self.legacy_mcp_migration_plan(tabbeacon_owns_title, profile)?;
+                self.apply_legacy_mcp_migration(&plan)?;
+                return Ok(SetupOutcome::Upgraded);
+            }
             let mut config_changed =
                 Self::apply_title_ownership(&mut manifest, &mut config, tabbeacon_owns_title)?;
             config_changed |= Self::reconcile_mcp_server_ownership(
@@ -1422,6 +1498,427 @@ impl CodexIntegration {
         Ok(())
     }
 
+    /// Builds the exact owned replacement for one recognized legacy MCP
+    /// integration without mutating a target. This is shared by setup and the
+    /// preview-first repair path so both report the same bounded delta.
+    fn legacy_mcp_migration_plan(
+        &self,
+        tabbeacon_owns_title: bool,
+        profile: CodexHookProfile,
+    ) -> Result<McpMigrationPlan, CodexIntegrationError> {
+        if profile.uses_mcp_hook_transport() {
+            return Err(CodexIntegrationError::OwnershipManifest);
+        }
+        let hooks_before = read_required_safe_bytes(&self.hooks_path())?;
+        let config_before = read_required_safe_bytes(&self.config_path())?;
+        let manifest_before = read_required_safe_bytes(&self.manifest_path())?;
+        let mut manifest: IntegrationManifest = serde_json::from_slice(&manifest_before)
+            .map_err(|_| CodexIntegrationError::OwnershipManifest)?;
+        self.validate_manifest_scope(&manifest)?;
+        if !is_recognized_legacy_mcp_manifest(&manifest)
+            || !Self::manifest_has_known_owned_declarations(&manifest)
+        {
+            return Err(CodexIntegrationError::StaleOwnedHook);
+        }
+        let mut hooks = parse_existing_hooks_bytes(&hooks_before)?;
+        validate_known_hook_wire_shape(&hooks)?;
+        let mut config = parse_config_bytes(Some(&config_before))?;
+        let old_locations = locate_owned_hooks(&hooks, &manifest.hooks)
+            .map_err(|_| CodexIntegrationError::ModifiedOwnedHook)?;
+        Self::validate_title_ownership(&manifest, &config)?;
+        Self::validate_mcp_server_ownership(&manifest, &config)?;
+        let preserved = self.missing_repairable_owned_hooks(&hooks, &manifest)?;
+        if !preserved.missing.is_empty() {
+            return Err(CodexIntegrationError::ModifiedOwnedHook);
+        }
+
+        let desired = desired_hooks(&self.tabbeacon_executable, profile)?;
+        let desired_mcp_server = desired_mcp_server(&self.tabbeacon_executable, profile)?;
+        if desired_mcp_server.is_some() {
+            return Err(CodexIntegrationError::OwnershipManifest);
+        }
+        let _ = Self::apply_title_ownership(&mut manifest, &mut config, tabbeacon_owns_title)?;
+        let _ =
+            Self::reconcile_mcp_server_ownership(&mut manifest, &mut config, desired_mcp_server)?;
+        remap_hook_trust_state_for_migration(
+            &mut config,
+            &self.hooks_path(),
+            &hooks,
+            &old_locations,
+            &manifest.hooks,
+        )?;
+        remove_owned_hooks(&mut hooks, &manifest.hooks)?;
+        append_owned_hooks(&mut hooks, &desired)?;
+        manifest.hooks = desired;
+        manifest.mcp_server = None;
+        manifest.executable.clone_from(&self.tabbeacon_executable);
+
+        Ok(McpMigrationPlan {
+            manifest_after: serialize_manifest(&manifest)?,
+            hooks_after: serialize_hooks(&hooks)?,
+            config_after: config.to_string().into_bytes(),
+            hooks_before,
+            config_before,
+            manifest_before,
+            third_party_groups_preserved: preserved.third_party_groups,
+            postinstall_third_party_groups_preserved: preserved.postinstall_third_party_groups,
+        })
+    }
+
+    /// Applies the already-proven three-file migration under the integration
+    /// lock. Each member is protected by a private before-image and an owned
+    /// digest journal so an interrupted write is recovered before later setup
+    /// or repair touches the target again.
+    fn apply_legacy_mcp_migration(
+        &self,
+        plan: &McpMigrationPlan,
+    ) -> Result<(), CodexIntegrationError> {
+        let mut journal = self.begin_mcp_migration(plan)?;
+        #[cfg(test)]
+        if mcp_migration_test_fault_after(McpMigrationPhase::Prepared) {
+            return Err(CodexIntegrationError::Io(io::Error::other(
+                "test-only migration interruption",
+            )));
+        }
+        Self::write_mcp_migration_member(
+            &journal.members[0],
+            &plan.hooks_before,
+            &plan.hooks_after,
+        )?;
+        journal.phase = McpMigrationPhase::HooksWritten;
+        self.write_mcp_migration_journal(&journal)?;
+        #[cfg(test)]
+        if mcp_migration_test_fault_after(McpMigrationPhase::HooksWritten) {
+            return Err(CodexIntegrationError::Io(io::Error::other(
+                "test-only migration interruption",
+            )));
+        }
+
+        Self::write_mcp_migration_member(
+            &journal.members[1],
+            &plan.config_before,
+            &plan.config_after,
+        )?;
+        journal.phase = McpMigrationPhase::ConfigWritten;
+        self.write_mcp_migration_journal(&journal)?;
+        #[cfg(test)]
+        if mcp_migration_test_fault_after(McpMigrationPhase::ConfigWritten) {
+            return Err(CodexIntegrationError::Io(io::Error::other(
+                "test-only migration interruption",
+            )));
+        }
+
+        Self::write_mcp_migration_member(
+            &journal.members[2],
+            &plan.manifest_before,
+            &plan.manifest_after,
+        )?;
+        journal.phase = McpMigrationPhase::ManifestWritten;
+        self.write_mcp_migration_journal(&journal)?;
+        #[cfg(test)]
+        if mcp_migration_test_fault_after(McpMigrationPhase::ManifestWritten) {
+            return Err(CodexIntegrationError::Io(io::Error::other(
+                "test-only migration interruption",
+            )));
+        }
+        self.validate_completed_mcp_migration(&journal)?;
+        self.clear_mcp_migration_recovery(&journal)
+    }
+
+    fn begin_mcp_migration(
+        &self,
+        plan: &McpMigrationPlan,
+    ) -> Result<McpMigrationJournal, CodexIntegrationError> {
+        let journal_path = self.mcp_migration_journal_path();
+        let snapshot_root = self.mcp_migration_snapshot_root();
+        reject_symbolic_link(&journal_path)?;
+        reject_symbolic_link(&snapshot_root)?;
+        if journal_path.exists() || snapshot_root.exists() {
+            return Err(CodexIntegrationError::MigrationRecoveryBlocked);
+        }
+        fs::create_dir_all(&snapshot_root)?;
+        reject_symbolic_link(&snapshot_root)?;
+        let members = [
+            (
+                "hooks",
+                self.hooks_path(),
+                &plan.hooks_before,
+                &plan.hooks_after,
+            ),
+            (
+                "config",
+                self.config_path(),
+                &plan.config_before,
+                &plan.config_after,
+            ),
+            (
+                "manifest",
+                self.manifest_path(),
+                &plan.manifest_before,
+                &plan.manifest_after,
+            ),
+        ]
+        .into_iter()
+        .map(|(name, path, before, after)| {
+            let snapshot_path = snapshot_root.join(format!("{name}.before"));
+            atomic_write(&snapshot_path, before)?;
+            Ok(McpMigrationMember {
+                name: name.to_owned(),
+                path,
+                before_digest: sha256_digest(before),
+                after_digest: sha256_digest(after),
+                snapshot_path: Some(snapshot_path),
+            })
+        })
+        .collect::<Result<Vec<_>, io::Error>>()?;
+        let journal = McpMigrationJournal {
+            schema: MCP_MIGRATION_JOURNAL_SCHEMA.to_owned(),
+            phase: McpMigrationPhase::Prepared,
+            members,
+        };
+        self.write_mcp_migration_journal(&journal)?;
+        Ok(journal)
+    }
+
+    fn write_mcp_migration_member(
+        member: &McpMigrationMember,
+        before: &[u8],
+        after: &[u8],
+    ) -> Result<(), CodexIntegrationError> {
+        if member.before_digest != sha256_digest(before)
+            || member.after_digest != sha256_digest(after)
+            || read_required_safe_bytes(&member.path)? != before
+        {
+            return Err(CodexIntegrationError::ConcurrentTargetDrift);
+        }
+        write_if_unchanged(&member.path, before, after)
+    }
+
+    fn recover_incomplete_mcp_migration(&self) -> Result<(), CodexIntegrationError> {
+        let journal_path = self.mcp_migration_journal_path();
+        let snapshot_root = self.mcp_migration_snapshot_root();
+        reject_symbolic_link(&journal_path)?;
+        reject_symbolic_link(&snapshot_root)?;
+        let Some(bytes) = read_optional_bytes(&journal_path)? else {
+            if snapshot_root.exists() {
+                // A process can fail after private before-images are created
+                // but before the journal is durable.  There is no safe proof
+                // that those images belong to a transaction we may clean up.
+                return Err(CodexIntegrationError::MigrationRecoveryBlocked);
+            }
+            return Ok(());
+        };
+        let journal: McpMigrationJournal = serde_json::from_slice(&bytes)
+            .map_err(|_| CodexIntegrationError::MigrationRecoveryBlocked)?;
+        self.validate_mcp_migration_journal(&journal)?;
+        self.validate_mcp_migration_snapshots(&journal)?;
+        let digests = journal
+            .members
+            .iter()
+            .map(|member| read_required_safe_bytes(&member.path).map(|bytes| sha256_digest(&bytes)))
+            .collect::<Result<Vec<_>, _>>()?;
+        if journal.phase == McpMigrationPhase::ManifestWritten
+            && journal
+                .members
+                .iter()
+                .zip(&digests)
+                .all(|(member, digest)| digest == &member.after_digest)
+        {
+            self.validate_completed_mcp_migration(&journal)?;
+            return self.clear_mcp_migration_recovery(&journal);
+        }
+        if !journal
+            .members
+            .iter()
+            .zip(&digests)
+            .all(|(member, digest)| {
+                digest == &member.before_digest || digest == &member.after_digest
+            })
+        {
+            return Err(CodexIntegrationError::MigrationRecoveryBlocked);
+        }
+        for member in &journal.members {
+            let snapshot = member
+                .snapshot_path
+                .as_deref()
+                .ok_or(CodexIntegrationError::MigrationRecoveryBlocked)?;
+            let before = read_required_safe_bytes(snapshot)?;
+            let current = read_required_safe_bytes(&member.path)?;
+            if current != before {
+                write_if_unchanged(&member.path, &current, &before)?;
+            }
+        }
+        Self::validate_mcp_migration_member_digests(&journal, false)?;
+        self.clear_mcp_migration_recovery(&journal)
+    }
+
+    /// Refuses a read-only repair preview when an interrupted migration needs
+    /// recovery.  Preview intentionally does not recover because that would
+    /// mutate target files; apply, setup, uninstall, and title reconciliation
+    /// recover under the integration lock before continuing.
+    fn require_no_incomplete_mcp_migration(&self) -> Result<(), CodexIntegrationError> {
+        let journal_path = self.mcp_migration_journal_path();
+        let snapshot_root = self.mcp_migration_snapshot_root();
+        reject_symbolic_link(&journal_path)?;
+        reject_symbolic_link(&snapshot_root)?;
+        if journal_path.exists() || snapshot_root.exists() {
+            return Err(CodexIntegrationError::MigrationRecoveryBlocked);
+        }
+        Ok(())
+    }
+
+    fn validate_mcp_migration_journal(
+        &self,
+        journal: &McpMigrationJournal,
+    ) -> Result<(), CodexIntegrationError> {
+        if journal.schema != MCP_MIGRATION_JOURNAL_SCHEMA || journal.members.len() != 3 {
+            return Err(CodexIntegrationError::MigrationRecoveryBlocked);
+        }
+        let expected = [
+            ("hooks", self.hooks_path()),
+            ("config", self.config_path()),
+            ("manifest", self.manifest_path()),
+        ];
+        for (member, (name, path)) in journal.members.iter().zip(expected) {
+            if member.name != name
+                || member.path != path
+                || !is_sha256_digest(&member.before_digest)
+                || !is_sha256_digest(&member.after_digest)
+                || member.snapshot_path.as_deref()
+                    != Some(
+                        self.mcp_migration_snapshot_root()
+                            .join(format!("{name}.before"))
+                            .as_path(),
+                    )
+            {
+                return Err(CodexIntegrationError::MigrationRecoveryBlocked);
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_mcp_migration_snapshots(
+        &self,
+        journal: &McpMigrationJournal,
+    ) -> Result<(), CodexIntegrationError> {
+        for member in &journal.members {
+            let snapshot = member
+                .snapshot_path
+                .as_deref()
+                .ok_or(CodexIntegrationError::MigrationRecoveryBlocked)?;
+            reject_symbolic_link(snapshot)?;
+            let bytes = read_required_safe_bytes(snapshot)?;
+            if sha256_digest(&bytes) != member.before_digest {
+                return Err(CodexIntegrationError::MigrationRecoveryBlocked);
+            }
+        }
+        let manifest_snapshot = journal.members[2]
+            .snapshot_path
+            .as_deref()
+            .ok_or(CodexIntegrationError::MigrationRecoveryBlocked)?;
+        let manifest: IntegrationManifest =
+            serde_json::from_slice(&read_required_safe_bytes(manifest_snapshot)?)
+                .map_err(|_| CodexIntegrationError::MigrationRecoveryBlocked)?;
+        self.validate_manifest_scope(&manifest)
+            .map_err(|_| CodexIntegrationError::MigrationRecoveryBlocked)?;
+        if !is_recognized_legacy_mcp_manifest(&manifest)
+            || !Self::manifest_has_known_owned_declarations(&manifest)
+        {
+            return Err(CodexIntegrationError::MigrationRecoveryBlocked);
+        }
+        Ok(())
+    }
+
+    fn validate_completed_mcp_migration(
+        &self,
+        journal: &McpMigrationJournal,
+    ) -> Result<(), CodexIntegrationError> {
+        Self::validate_mcp_migration_member_digests(journal, true)?;
+        let manifest: IntegrationManifest =
+            serde_json::from_slice(&read_required_safe_bytes(&journal.members[2].path)?)
+                .map_err(|_| CodexIntegrationError::MigrationRecoveryBlocked)?;
+        self.validate_manifest_scope(&manifest)
+            .map_err(|_| CodexIntegrationError::MigrationRecoveryBlocked)?;
+        if manifest.mcp_server.is_some() || !Self::manifest_has_known_owned_declarations(&manifest)
+        {
+            return Err(CodexIntegrationError::MigrationRecoveryBlocked);
+        }
+        let hooks = read_hooks_document(&self.hooks_path())?;
+        locate_owned_hooks(&hooks, &manifest.hooks)
+            .map_err(|_| CodexIntegrationError::MigrationRecoveryBlocked)?;
+        let config = read_config_document(&self.config_path())?;
+        Self::validate_mcp_server_ownership(&manifest, &config)
+            .map_err(|_| CodexIntegrationError::MigrationRecoveryBlocked)
+    }
+
+    /// Verifies every transaction member against the image expected at the
+    /// current terminal phase before journal and snapshot cleanup. `after` is
+    /// true only for a fully written migration; recovery uses the exact saved
+    /// before-image instead.
+    fn validate_mcp_migration_member_digests(
+        journal: &McpMigrationJournal,
+        after: bool,
+    ) -> Result<(), CodexIntegrationError> {
+        for member in &journal.members {
+            let bytes = read_required_safe_bytes(&member.path)
+                .map_err(|_| CodexIntegrationError::MigrationRecoveryBlocked)?;
+            let expected = if after {
+                &member.after_digest
+            } else {
+                &member.before_digest
+            };
+            if sha256_digest(&bytes) != *expected {
+                return Err(CodexIntegrationError::MigrationRecoveryBlocked);
+            }
+        }
+        Ok(())
+    }
+
+    fn clear_mcp_migration_recovery(
+        &self,
+        journal: &McpMigrationJournal,
+    ) -> Result<(), CodexIntegrationError> {
+        for member in &journal.members {
+            if let Some(snapshot) = &member.snapshot_path
+                && snapshot.exists()
+            {
+                reject_symbolic_link(snapshot)?;
+                fs::remove_file(snapshot)?;
+            }
+        }
+        let snapshot_root = self.mcp_migration_snapshot_root();
+        if snapshot_root.exists() {
+            reject_symbolic_link(&snapshot_root)?;
+            fs::remove_dir(&snapshot_root)?;
+        }
+        let journal_path = self.mcp_migration_journal_path();
+        if journal_path.exists() {
+            reject_symbolic_link(&journal_path)?;
+            fs::remove_file(journal_path)?;
+        }
+        Ok(())
+    }
+
+    fn mcp_migration_journal_path(&self) -> PathBuf {
+        self.state_root.join(MCP_MIGRATION_JOURNAL_FILE)
+    }
+
+    fn mcp_migration_snapshot_root(&self) -> PathBuf {
+        self.state_root.join(MCP_MIGRATION_RECOVERY_DIR)
+    }
+
+    fn write_mcp_migration_journal(
+        &self,
+        journal: &McpMigrationJournal,
+    ) -> Result<(), CodexIntegrationError> {
+        let mut bytes = serde_json::to_vec_pretty(journal)
+            .map_err(|_| CodexIntegrationError::MigrationRecoveryBlocked)?;
+        bytes.push(b'\n');
+        atomic_write(&self.mcp_migration_journal_path(), &bytes)?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_lines)] // Preview-first repair and exact legacy migration use one ownership preflight.
     fn repair_locked(
         &self,
         profile: CodexHookProfile,
@@ -1433,10 +1930,55 @@ impl CodexIntegration {
             .load_manifest()?
             .ok_or(CodexIntegrationError::OwnershipManifest)?;
         self.validate_manifest_scope(&manifest)?;
-        let profile = profile_for_manifest(Some(&manifest), Some(profile))
+        let profile = desired_profile_for_manifest(Some(&manifest), Some(profile))
             .ok_or(CodexIntegrationError::OwnershipManifest)?;
         let desired = desired_hooks(&self.tabbeacon_executable, profile)?;
         let desired_mcp_server = desired_mcp_server(&self.tabbeacon_executable, profile)?;
+        if is_recognized_legacy_mcp_manifest(&manifest)
+            && Self::manifest_has_known_owned_declarations(&manifest)
+        {
+            if self.mcp_migration_journal_path().exists() {
+                return Err(CodexIntegrationError::MigrationRecoveryBlocked);
+            }
+            let plan = self.legacy_mcp_migration_plan(manifest.title_owned, profile)?;
+            let target_digest = mcp_migration_target_digest(&plan);
+            if apply {
+                let expected = expected_target_digest
+                    .ok_or(CodexIntegrationError::RepairPreviewDigestRequired)?;
+                if !is_sha256_digest(expected) {
+                    return Err(CodexIntegrationError::RepairPreviewDigestInvalid);
+                }
+                if expected != target_digest {
+                    return Err(CodexIntegrationError::ConcurrentTargetDrift);
+                }
+                self.prepare_worker_runtime_image()?;
+                self.apply_legacy_mcp_migration(&plan)?;
+                return Ok(CodexRepairReport {
+                    schema_version: 3,
+                    disposition: CodexRepairDisposition::RepairedTrustReviewRequired,
+                    missing_declarations: HOOK_EVENTS.len(),
+                    target_digest,
+                    third_party_groups_preserved: plan.third_party_groups_preserved,
+                    postinstall_third_party_groups_preserved: plan
+                        .postinstall_third_party_groups_preserved,
+                    manual_hook_trust_review_required: true,
+                    legacy_mcp_migration: true,
+                    owned_mcp_server_removal_required: true,
+                });
+            }
+            return Ok(CodexRepairReport {
+                schema_version: 3,
+                disposition: CodexRepairDisposition::ReadyToApply,
+                missing_declarations: HOOK_EVENTS.len(),
+                target_digest,
+                third_party_groups_preserved: plan.third_party_groups_preserved,
+                postinstall_third_party_groups_preserved: plan
+                    .postinstall_third_party_groups_preserved,
+                manual_hook_trust_review_required: true,
+                legacy_mcp_migration: true,
+                owned_mcp_server_removal_required: true,
+            });
+        }
         if manifest.hooks != desired
             || manifest.mcp_server != desired_mcp_server
             || !Self::manifest_has_known_owned_declarations(&manifest)
@@ -1482,6 +2024,8 @@ impl CodexIntegration {
                 third_party_groups_preserved: repairable.third_party_groups,
                 postinstall_third_party_groups_preserved: repairable.postinstall_third_party_groups,
                 manual_hook_trust_review_required: true,
+                legacy_mcp_migration: false,
+                owned_mcp_server_removal_required: false,
             });
         }
         if !apply {
@@ -1493,6 +2037,8 @@ impl CodexIntegration {
                 third_party_groups_preserved: repairable.third_party_groups,
                 postinstall_third_party_groups_preserved: repairable.postinstall_third_party_groups,
                 manual_hook_trust_review_required: true,
+                legacy_mcp_migration: false,
+                owned_mcp_server_removal_required: false,
             });
         }
 
@@ -1511,6 +2057,8 @@ impl CodexIntegration {
             third_party_groups_preserved: repairable.third_party_groups,
             postinstall_third_party_groups_preserved: repairable.postinstall_third_party_groups,
             manual_hook_trust_review_required: true,
+            legacy_mcp_migration: false,
+            owned_mcp_server_removal_required: false,
         })
     }
 
@@ -1921,10 +2469,7 @@ impl CodexIntegration {
     }
 
     fn write_manifest(&self, manifest: &IntegrationManifest) -> Result<(), CodexIntegrationError> {
-        let mut bytes = serde_json::to_vec_pretty(manifest)
-            .map_err(|_| CodexIntegrationError::OwnershipManifest)?;
-        bytes.push(b'\n');
-        atomic_write(&self.manifest_path(), &bytes)?;
+        atomic_write(&self.manifest_path(), &serialize_manifest(manifest)?)?;
         Ok(())
     }
 
@@ -2041,11 +2586,83 @@ struct IntegrationManifest {
     hooks: Vec<OwnedHook>,
 }
 
-/// Existing MCP-owned integrations retain their proven transport independently
-/// of fresh-install capability discovery. This avoids a discovery upgrade
-/// rewriting trusted owned declarations just because the current conservative
-/// default is command Hooks V1.
-fn profile_for_manifest(
+/// Private, short-lived recovery record for one exact legacy MCP migration.
+///
+/// It carries only member paths and digests. The pre-mutation bytes live in the
+/// adjacent owned recovery directory and are never emitted as diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct McpMigrationJournal {
+    schema: String,
+    phase: McpMigrationPhase,
+    members: Vec<McpMigrationMember>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum McpMigrationPhase {
+    Prepared,
+    HooksWritten,
+    ConfigWritten,
+    ManifestWritten,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct McpMigrationMember {
+    name: String,
+    path: PathBuf,
+    before_digest: String,
+    after_digest: String,
+    snapshot_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct McpMigrationPlan {
+    hooks_before: Vec<u8>,
+    hooks_after: Vec<u8>,
+    config_before: Vec<u8>,
+    config_after: Vec<u8>,
+    manifest_before: Vec<u8>,
+    manifest_after: Vec<u8>,
+    third_party_groups_preserved: usize,
+    postinstall_third_party_groups_preserved: usize,
+}
+
+fn mcp_migration_target_digest(plan: &McpMigrationPlan) -> String {
+    let mut digest = Sha256::new();
+    for (name, bytes) in [
+        ("hooks", plan.hooks_before.as_slice()),
+        ("config", plan.config_before.as_slice()),
+        ("manifest", plan.manifest_before.as_slice()),
+    ] {
+        digest.update(name.len().to_le_bytes());
+        digest.update(name.as_bytes());
+        digest.update(bytes.len().to_le_bytes());
+        digest.update(bytes);
+    }
+    format!("sha256:{:x}", digest.finalize())
+}
+
+#[cfg(test)]
+fn mcp_migration_test_fault_after(phase: McpMigrationPhase) -> bool {
+    let expected = match phase {
+        McpMigrationPhase::Prepared => 1,
+        McpMigrationPhase::HooksWritten => 2,
+        McpMigrationPhase::ConfigWritten => 3,
+        McpMigrationPhase::ManifestWritten => 4,
+    };
+    MCP_MIGRATION_TEST_FAULT_AFTER.load(Ordering::SeqCst) == expected
+}
+
+fn serialize_manifest(manifest: &IntegrationManifest) -> Result<Vec<u8>, CodexIntegrationError> {
+    let mut bytes = serde_json::to_vec_pretty(manifest)
+        .map_err(|_| CodexIntegrationError::OwnershipManifest)?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+/// Selects the currently installed transport for read-only runtime continuity
+/// inspection. It never authorizes new MCP declarations.
+fn existing_profile_for_manifest(
     manifest: Option<&IntegrationManifest>,
     discovered: Option<CodexHookProfile>,
 ) -> Option<CodexHookProfile> {
@@ -2053,6 +2670,16 @@ fn profile_for_manifest(
         Some(manifest) if manifest.mcp_server.is_some() => Some(CodexHookProfile::mcp_hybrid_v1()),
         _ => discovered,
     }
+}
+
+/// Selects the desired current transport. Historical ownership proves only that
+/// the legacy MCP shape may be recognized and migrated; it never changes the
+/// command-v1 profile selected by current capability evidence.
+fn desired_profile_for_manifest(
+    _manifest: Option<&IntegrationManifest>,
+    discovered: Option<CodexHookProfile>,
+) -> Option<CodexHookProfile> {
+    discovered
 }
 
 fn desired_hooks(
@@ -2152,6 +2779,30 @@ fn owned_mcp_hook_sets_for_manifest(
     let legacy = owned_mcp_tool_hooks(executable, profile)?;
     let hybrid = desired_hooks(executable, profile)?;
     Ok(vec![legacy, hybrid])
+}
+
+/// The only MCP states that may be removed are the exact ten-event historical
+/// declaration set and its exact SessionEnd-command successor, both paired with
+/// the manifest-owned stdio server. Similar-looking state is ambiguous.
+fn manifest_declares_mcp_transport(manifest: &IntegrationManifest) -> bool {
+    manifest.mcp_server.is_some()
+        || manifest.hooks.iter().any(|declaration| {
+            declaration
+                .group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .is_some_and(|handlers| {
+                    handlers.iter().any(|handler| {
+                        handler.get("type").and_then(Value::as_str) == Some("mcp_tool")
+                    })
+                })
+        })
+}
+
+fn is_recognized_legacy_mcp_manifest(manifest: &IntegrationManifest) -> bool {
+    manifest.mcp_server.is_some()
+        && owned_mcp_hook_sets_for_manifest(&manifest.executable)
+            .is_ok_and(|sets| sets.into_iter().any(|hooks| hooks == manifest.hooks))
 }
 
 /// Recognizes the one admitted migration from the first 0.149 transport to the
@@ -2430,8 +3081,14 @@ fn run_windows_hook_runtime_probe(command_line: &str) -> RuntimeProbeOutcome {
             Err(_) => break Some(false),
         }
     };
-    let marker_present = fs::read_to_string(&marker)
-        .is_ok_and(|contents| contents.starts_with("TABBEACON_HOOK_TIMING_V1 "));
+    // The isolated runtime probe accepts the established V1 marker as well as
+    // the content-free V2 receipt emitted by the current command Hook.  The
+    // marker's schema is the proof here; its timing values and Hook payload
+    // remain intentionally outside the diagnostic surface.
+    let marker_present = fs::read_to_string(&marker).is_ok_and(|contents| {
+        contents.starts_with("TABBEACON_HOOK_TIMING_V1 ")
+            || contents.starts_with("TABBEACON_HOOK_TIMING_V2 ")
+    });
     let _ = fs::remove_dir_all(&probe_root);
 
     match (write_succeeded, exited_successfully, marker_present) {
@@ -3800,6 +4457,117 @@ fn remove_owned_mcp_server(
     Ok(())
 }
 
+/// Revokes stale trust for exact legacy MCP declarations while preserving the
+/// exact state attached to third-party groups whose array positions shift when
+/// the owned declaration is removed. A command Hook has a different definition,
+/// so no legacy `TabBeacon` trust entry may transfer to it.
+fn remap_hook_trust_state_for_migration(
+    config: &mut DocumentMut,
+    hooks_path: &Path,
+    hook_document: &Value,
+    locations: &BTreeMap<String, usize>,
+    owned: &[OwnedHook],
+) -> Result<(), CodexIntegrationError> {
+    let events = hooks_events(hook_document)?;
+    let mut owned_locations = BTreeMap::new();
+    let mut group_counts = BTreeMap::new();
+    for declaration in owned {
+        let group_index = *locations
+            .get(&declaration.event)
+            .ok_or(CodexIntegrationError::ModifiedOwnedHook)?;
+        if owned_locations
+            .insert(declaration.event.as_str(), group_index)
+            .is_some()
+        {
+            return Err(CodexIntegrationError::ModifiedOwnedHook);
+        }
+        let group_count = events
+            .get(&declaration.event)
+            .and_then(Value::as_array)
+            .ok_or(CodexIntegrationError::ModifiedOwnedHook)?
+            .len();
+        if group_index >= group_count {
+            return Err(CodexIntegrationError::ModifiedOwnedHook);
+        }
+        group_counts.insert(declaration.event.as_str(), group_count);
+    }
+    let Some(hooks) = config.as_table_mut().get_mut("hooks") else {
+        return Ok(());
+    };
+    let hooks = hooks
+        .as_table_like_mut()
+        .ok_or(CodexIntegrationError::ConfigShape)?;
+    let Some(state) = hooks.get_mut("state") else {
+        return Ok(());
+    };
+    let state = state
+        .as_table_like_mut()
+        .ok_or(CodexIntegrationError::ConfigShape)?;
+
+    let entries = state
+        .iter()
+        .map(|(key, item)| (key.to_owned(), item.clone()))
+        .collect::<Vec<_>>();
+    let mut removals = BTreeSet::new();
+    let mut replacements = Vec::new();
+    for (key, item) in entries {
+        let Some((event, group_index, handler_index)) = owned_locations.keys().find_map(|event| {
+            parse_hook_trust_state_key(&key, hooks_path, event)
+                .map(|(group_index, handler_index)| (*event, group_index, handler_index))
+        }) else {
+            continue;
+        };
+        let owned_index = owned_locations[event];
+        let group_count = group_counts[event];
+        if group_index >= group_count {
+            // An out-of-range state key is not position-bound to any group
+            // this migration owns; preserve it exactly for Codex to diagnose.
+            continue;
+        }
+        if group_index == owned_index {
+            removals.insert(key);
+        } else if group_index > owned_index {
+            let replacement = format!(
+                "{}:{}:{}:{handler_index}",
+                hooks_path.display(),
+                event_key_label(event),
+                group_index - 1
+            );
+            removals.insert(key.clone());
+            replacements.push((key, replacement, item));
+        }
+    }
+    for (_, replacement, _) in &replacements {
+        if state.contains_key(replacement) && !removals.contains(replacement) {
+            return Err(CodexIntegrationError::ConfigShape);
+        }
+    }
+    for key in removals {
+        state.remove(&key);
+    }
+    for (original, replacement, item) in replacements {
+        state.remove(&original);
+        state.insert(&replacement, item);
+    }
+    if state.is_empty() {
+        hooks.remove("state");
+    }
+    if hooks.is_empty() {
+        config.as_table_mut().remove("hooks");
+    }
+    Ok(())
+}
+
+fn parse_hook_trust_state_key(key: &str, hooks_path: &Path, event: &str) -> Option<(usize, usize)> {
+    let prefix = format!("{}:{}:", hooks_path.display(), event_key_label(event));
+    let remainder = key.strip_prefix(&prefix)?;
+    let (group_index, handler_index) = remainder.split_once(':')?;
+    if handler_index.contains(':') {
+        return None;
+    }
+    Some((group_index.parse().ok()?, handler_index.parse().ok()?))
+}
+
 fn hook_trust_check(
     config: &DocumentMut,
     hooks_path: &Path,
@@ -4137,15 +4905,20 @@ fn fail(id: &'static str, summary: impl Into<String>) -> DoctorCheck {
 mod tests {
     use std::{
         fs,
+        sync::atomic::Ordering,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        CodexIntegrationError, DoctorStatus, OwnedHook, ProbeClaim, ensure_not_symbolic_link,
-        hybrid_runtime_probe_checks, normalized_hook_hash,
+        BackupRecord, CodexHookProfile, CodexIntegration, CodexIntegrationError, DoctorStatus,
+        IntegrationManifest, MCP_MIGRATION_TEST_FAULT_AFTER, ManifestPhase, McpMigrationPlan,
+        OwnedHook, ProbeClaim, UninstallOutcome, append_owned_hooks, desired_hooks,
+        desired_mcp_server, ensure_not_symbolic_link, hybrid_runtime_probe_checks,
+        mcp_transport_profile, normalized_hook_hash, serialize_hooks,
         windows_hook_command_for_default_comspec, write_if_unchanged,
     };
     use serde_json::json;
+    use toml_edit::DocumentMut;
 
     #[test]
     fn normalized_hash_matches_codex_0_147_0_hooks_list() {
@@ -4340,5 +5113,250 @@ mod tests {
                 Some(expected_session_end)
             );
         }
+    }
+
+    fn interrupted_legacy_mcp_migration_fixture()
+    -> (std::path::PathBuf, CodexIntegration, McpMigrationPlan) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("tabbeacon-mcp-migration-{nonce}"));
+        let codex_home = root.join("codex-home");
+        let state_root = root.join("state");
+        let executable = root.join(if cfg!(windows) {
+            "bin/tabbeacon.exe"
+        } else {
+            "bin/tabbeacon"
+        });
+        fs::create_dir_all(&codex_home).expect("Codex fixture home creates");
+        fs::create_dir_all(executable.parent().expect("fixture executable parent"))
+            .expect("fixture executable parent creates");
+        fs::write(&executable, b"fixture executable").expect("fixture executable writes");
+        let integration = CodexIntegration::new(&codex_home, &state_root, &executable);
+        let legacy_profile = mcp_transport_profile();
+        let legacy_hooks = desired_hooks(&executable, legacy_profile).expect("legacy hooks build");
+        let legacy_server = desired_mcp_server(&executable, legacy_profile)
+            .expect("legacy server builds")
+            .expect("legacy profile has MCP server");
+        let mut hooks = json!({"hooks": {}});
+        append_owned_hooks(&mut hooks, &legacy_hooks).expect("legacy hooks append");
+        fs::write(
+            codex_home.join("hooks.json"),
+            serialize_hooks(&hooks).expect("hooks serialize"),
+        )
+        .expect("legacy hooks write");
+        let mut config = "".parse::<DocumentMut>().expect("empty config parses");
+        super::disable_terminal_title(&mut config).expect("title disables");
+        super::install_owned_mcp_server(&mut config, &legacy_server).expect("MCP server installs");
+        fs::write(codex_home.join("config.toml"), config.to_string())
+            .expect("legacy config writes");
+        let manifest = IntegrationManifest {
+            schema: super::MANIFEST_SCHEMA.to_owned(),
+            phase: ManifestPhase::Active,
+            codex_home: codex_home.clone(),
+            hooks_path: codex_home.join("hooks.json"),
+            config_path: codex_home.join("config.toml"),
+            executable,
+            created_hooks_file: false,
+            hooks_backup: BackupRecord {
+                existed: false,
+                digest: None,
+                path: None,
+            },
+            config_backup: BackupRecord {
+                existed: false,
+                digest: None,
+                path: None,
+            },
+            title_owned: true,
+            prior_title: None,
+            mcp_server: Some(legacy_server),
+            hooks: legacy_hooks,
+        };
+        integration
+            .write_manifest(&manifest)
+            .expect("manifest writes");
+        let plan = integration
+            .legacy_mcp_migration_plan(true, CodexHookProfile::command_v1())
+            .expect("legacy migration plans");
+        (root, integration, plan)
+    }
+
+    #[test]
+    fn legacy_mcp_migration_recovers_each_interrupted_member_write() {
+        for (fault_after, expect_post_state) in [(1, false), (2, false), (3, false), (4, true)] {
+            let (root, integration, plan) = interrupted_legacy_mcp_migration_fixture();
+            let hooks_path = root.join("codex-home/hooks.json");
+            let config_path = root.join("codex-home/config.toml");
+            let manifest_path = root.join("state/integration-v1.json");
+            MCP_MIGRATION_TEST_FAULT_AFTER.store(fault_after, Ordering::SeqCst);
+            assert!(integration.apply_legacy_mcp_migration(&plan).is_err());
+            MCP_MIGRATION_TEST_FAULT_AFTER.store(0, Ordering::SeqCst);
+            integration
+                .recover_incomplete_mcp_migration()
+                .expect("exact interrupted migration recovers safely");
+            if expect_post_state {
+                assert_eq!(fs::read(&hooks_path).expect("hooks read"), plan.hooks_after);
+                assert_eq!(
+                    fs::read(&config_path).expect("config read"),
+                    plan.config_after
+                );
+                assert_eq!(
+                    fs::read(&manifest_path).expect("manifest read"),
+                    plan.manifest_after
+                );
+            } else {
+                assert_eq!(
+                    fs::read(&hooks_path).expect("hooks read"),
+                    plan.hooks_before
+                );
+                assert_eq!(
+                    fs::read(&config_path).expect("config read"),
+                    plan.config_before
+                );
+                assert_eq!(
+                    fs::read(&manifest_path).expect("manifest read"),
+                    plan.manifest_before
+                );
+            }
+            assert!(!integration.mcp_migration_journal_path().exists());
+            assert!(!integration.mcp_migration_snapshot_root().exists());
+            fs::remove_dir_all(root).expect("fixture cleanup");
+        }
+    }
+
+    #[test]
+    fn orphaned_mcp_migration_snapshots_block_recovery_without_target_mutation() {
+        let (root, integration, plan) = interrupted_legacy_mcp_migration_fixture();
+        let hooks_path = root.join("codex-home/hooks.json");
+        let config_path = root.join("codex-home/config.toml");
+        let manifest_path = root.join("state/integration-v1.json");
+        let hooks_before = fs::read(&hooks_path).expect("hooks snapshot reads");
+        let config_before = fs::read(&config_path).expect("config snapshot reads");
+        let manifest_before = fs::read(&manifest_path).expect("manifest snapshot reads");
+
+        let snapshot_root = integration.mcp_migration_snapshot_root();
+        fs::create_dir_all(&snapshot_root).expect("orphan snapshot root creates");
+        fs::write(snapshot_root.join("hooks.before"), &plan.hooks_before)
+            .expect("orphan snapshot writes");
+
+        assert!(matches!(
+            integration.recover_incomplete_mcp_migration(),
+            Err(CodexIntegrationError::MigrationRecoveryBlocked)
+        ));
+        assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
+        assert_eq!(
+            fs::read(&config_path).expect("config reread"),
+            config_before
+        );
+        assert_eq!(
+            fs::read(&manifest_path).expect("manifest reread"),
+            manifest_before
+        );
+        assert!(snapshot_root.exists(), "orphan evidence is preserved");
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn completed_mcp_migration_requires_all_exact_after_digests_before_cleanup() {
+        let (root, integration, plan) = interrupted_legacy_mcp_migration_fixture();
+        let journal = integration
+            .begin_mcp_migration(&plan)
+            .expect("migration journal begins");
+        fs::write(&journal.members[0].path, &plan.hooks_after).expect("hooks after writes");
+        fs::write(&journal.members[1].path, b"external-after-image-drift")
+            .expect("config drift writes");
+        fs::write(&journal.members[2].path, &plan.manifest_after).expect("manifest after writes");
+
+        assert!(matches!(
+            integration.validate_completed_mcp_migration(&journal),
+            Err(CodexIntegrationError::MigrationRecoveryBlocked)
+        ));
+        assert!(
+            integration.mcp_migration_journal_path().exists(),
+            "an unverified transaction remains available for explicit recovery"
+        );
+        assert!(
+            integration.mcp_migration_snapshot_root().exists(),
+            "the before-images remain available for explicit recovery"
+        );
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn rollback_mcp_migration_requires_all_exact_before_digests_before_cleanup() {
+        let (root, integration, plan) = interrupted_legacy_mcp_migration_fixture();
+        let journal = integration
+            .begin_mcp_migration(&plan)
+            .expect("migration journal begins");
+        fs::write(&journal.members[0].path, &plan.hooks_before).expect("hooks before writes");
+        fs::write(&journal.members[1].path, b"external-before-image-drift")
+            .expect("config drift writes");
+        fs::write(&journal.members[2].path, &plan.manifest_before).expect("manifest before writes");
+
+        assert!(matches!(
+            CodexIntegration::validate_mcp_migration_member_digests(&journal, false),
+            Err(CodexIntegrationError::MigrationRecoveryBlocked)
+        ));
+        assert!(
+            integration.mcp_migration_journal_path().exists(),
+            "an unverified rollback remains available for explicit recovery"
+        );
+        assert!(
+            integration.mcp_migration_snapshot_root().exists(),
+            "the before-images remain available for explicit recovery"
+        );
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn public_mutation_paths_recover_or_refuse_an_active_mcp_migration() {
+        let (preview_root, preview, preview_plan) = interrupted_legacy_mcp_migration_fixture();
+        preview
+            .begin_mcp_migration(&preview_plan)
+            .expect("preview transaction journal begins");
+        assert!(matches!(
+            preview.repair(false, None),
+            Err(CodexIntegrationError::MigrationRecoveryBlocked)
+        ));
+        assert!(preview.mcp_migration_journal_path().exists());
+        assert!(preview.mcp_migration_snapshot_root().exists());
+        fs::remove_dir_all(preview_root).expect("preview fixture cleanup");
+
+        let (uninstall_root, uninstall, uninstall_plan) =
+            interrupted_legacy_mcp_migration_fixture();
+        uninstall
+            .begin_mcp_migration(&uninstall_plan)
+            .expect("uninstall transaction journal begins");
+        assert_eq!(
+            uninstall.uninstall().expect("uninstall recovers first"),
+            UninstallOutcome::Removed
+        );
+        assert!(!uninstall.mcp_migration_journal_path().exists());
+        assert!(!uninstall.mcp_migration_snapshot_root().exists());
+        fs::remove_dir_all(uninstall_root).expect("uninstall fixture cleanup");
+
+        let (title_root, title, title_plan) = interrupted_legacy_mcp_migration_fixture();
+        title
+            .begin_mcp_migration(&title_plan)
+            .expect("title transaction journal begins");
+        let unavailable = CodexIntegration::new(
+            title_root.join("codex-home"),
+            title_root.join("state"),
+            title_root.join(if cfg!(windows) {
+                "bin/tabbeacon.exe"
+            } else {
+                "bin/tabbeacon"
+            }),
+        )
+        .with_codex_program(title_root.join("missing-codex-probe"));
+        assert!(matches!(
+            unavailable.reconcile_title_ownership(false),
+            Err(CodexIntegrationError::CapabilityMutationBlocked)
+        ));
+        assert!(!title.mcp_migration_journal_path().exists());
+        assert!(!title.mcp_migration_snapshot_root().exists());
+        fs::remove_dir_all(title_root).expect("title fixture cleanup");
     }
 }

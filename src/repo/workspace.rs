@@ -519,8 +519,21 @@ impl WorkspaceIdentityResolver {
     }
 
     fn workspace_facts(&self, cwd: &Path) -> Result<WorkspaceFacts, RepositoryIdentityError> {
-        match self.discovery.discover(cwd) {
+        match self.discovery.discover_without_root_commits(cwd) {
             Ok(discovered) => {
+                let canonical = canonicalize_repository(&discovered)?;
+                if canonical.identity.as_str().starts_with("remote:") {
+                    return Ok(WorkspaceFacts {
+                        identity_class: WorkspaceIdentityClass::GitRemote,
+                        identity: canonical.identity,
+                        display_name: canonical.display_name,
+                        workspace_root: discovered.worktree_root,
+                        git_common_dir: Some(discovered.git_common_dir),
+                        kind: WorkspaceKind::Git,
+                    });
+                }
+                let mut discovered = discovered;
+                discovered.root_commits = self.discovery.discover_root_commits(cwd)?;
                 let canonical = canonicalize_repository(&discovered)?;
                 Ok(WorkspaceFacts {
                     identity_class: if canonical.identity.as_str().starts_with("remote:") {
