@@ -156,6 +156,69 @@ function New-HookPayload {
     return ($payload | ConvertTo-Json -Compress)
 }
 
+function Initialize-G105QualificationState {
+    param([Parameter(Mandatory = $true)][string]$State)
+
+    [System.IO.Directory]::CreateDirectory($State) | Out-Null
+    $codexHome = Join-Path $State 'codex-home'
+    [System.IO.Directory]::CreateDirectory($codexHome) | Out-Null
+    $expectedImage = Join-Path $State (
+        'TabBeacon\repository-identity\runtime\worker-images\{0}\tabbeacon-worker.exe' -f
+            $binarySha256.ToLowerInvariant()
+    )
+    if (Test-Path -LiteralPath $expectedImage -PathType Leaf) {
+        $existingHash = (Get-FileHash -LiteralPath $expectedImage -Algorithm SHA256).Hash
+        if ($existingHash -ne $binarySha256) {
+            throw 'G105 qualification state contains a mismatched worker runtime image.'
+        }
+        return
+    }
+
+    # Real setup publishes the immutable worker image before the first Hook.
+    # Reproduce that contract in every isolated G105 state outside the timed
+    # one-second boundary. CODEX_HOME and LOCALAPPDATA remain run-owned; this
+    # never reads or mutates Owner Hook definitions or production state.
+    $info = [System.Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $resolvedBinary
+    $info.ArgumentList.Add('setup')
+    $info.ArgumentList.Add('codex')
+    $info.ArgumentList.Add('--plain')
+    $info.WorkingDirectory = $Workspace
+    $info.UseShellExecute = $false
+    $info.RedirectStandardInput = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.CreateNoWindow = $true
+    $info.EnvironmentVariables['LOCALAPPDATA'] = $State
+    $info.EnvironmentVariables['CODEX_HOME'] = $codexHome
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    if (-not $process.Start()) {
+        throw 'G105 isolated setup process did not start.'
+    }
+    $standardOutput = $process.StandardOutput.ReadToEndAsync()
+    $standardError = $process.StandardError.ReadToEndAsync()
+    $process.StandardInput.Close()
+    if (-not $process.WaitForExit(300000)) {
+        $null = Stop-OwnedHookProcessTree -Process $process
+        throw 'G105 isolated setup exceeded its five-minute infrastructure deadline.'
+    }
+    $process.WaitForExit()
+    $null = $standardOutput.GetAwaiter().GetResult()
+    $null = $standardError.GetAwaiter().GetResult()
+    if ($process.ExitCode -ne 0) {
+        throw 'G105 isolated setup did not complete successfully.'
+    }
+    if (-not (Test-Path -LiteralPath $expectedImage -PathType Leaf)) {
+        throw 'G105 isolated setup did not publish the expected worker runtime image.'
+    }
+    $publishedHash = (Get-FileHash -LiteralPath $expectedImage -Algorithm SHA256).Hash
+    if ($publishedHash -ne $binarySha256) {
+        throw 'G105 isolated setup published a worker runtime image with the wrong digest.'
+    }
+}
+
 function Start-ProductionHook {
     param(
         [Parameter(Mandatory = $true)][string]$State,
@@ -581,6 +644,7 @@ function Initialize-RootEventState {
         [Parameter(Mandatory = $true)][string]$Terminal
     )
 
+    Initialize-G105QualificationState -State $State
     $start = Invoke-ProductionHook -State $State -Event 'SessionStart' -Session $Session -TerminalToken $Terminal -Turn ''
     $prompt = Invoke-ProductionHook -State $State -Event 'UserPromptSubmit' -Session $Session -TerminalToken $Terminal -Turn $Turn
     if (-not $start.success -or $start.process_total_ms -eq $null -or -not $prompt.success -or $prompt.process_total_ms -eq $null) {

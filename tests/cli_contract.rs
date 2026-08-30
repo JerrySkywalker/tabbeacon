@@ -1609,3 +1609,27 @@ fn invalid_arguments_keep_usage_exit_code_and_interactive_commands_refuse_pipes(
     assert!(ui.contains("TABBEACON_UI=NON_INTERACTIVE"));
     assert!(!ui.contains('\u{1b}'));
 }
+
+#[test]
+fn g105_timing_uses_setup_prewarmed_exact_worker_images() {
+    let script = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("scripts")
+            .join("measure-codex-hook-runtime.ps1"),
+    )
+    .expect("G105 timing script reads");
+    for required in [
+        "function Initialize-G105QualificationState",
+        "$info.EnvironmentVariables['LOCALAPPDATA'] = $State",
+        "$info.EnvironmentVariables['CODEX_HOME'] = $codexHome",
+        "$info.ArgumentList.Add('setup')",
+        "$info.ArgumentList.Add('codex')",
+        "Initialize-G105QualificationState -State $State",
+        "$publishedHash -ne $binarySha256",
+    ] {
+        assert!(
+            script.contains(required),
+            "G105 timing must preserve the setup-prewarmed exact-image contract: {required}"
+        );
+    }
+}
