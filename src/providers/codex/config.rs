@@ -59,7 +59,14 @@ const RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_millis(900);
 // These are diagnostic phase bounds, not Hook-runtime budgets: the release
 // performance probe separately enforces the one-second declaration and p99
 // contract under representative warm and c8 load.
-const MCP_ACTIVITY_RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const MCP_ACTIVITY_RUNTIME_PROBE_TIMEOUT: Duration = if cfg!(debug_assertions) {
+    // A newly copied debug worker image can take minutes to enter on a loaded
+    // Windows host. This is a fixture watchdog; release diagnostics retain the
+    // bounded ten-second semantic window below.
+    Duration::from_mins(5)
+} else {
+    Duration::from_secs(10)
+};
 const MCP_TERMINATION_RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const SESSION_END_CLEANUP_RUNTIME_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_PROBE_EVENT: &str = "UserPromptSubmit";
@@ -3175,6 +3182,18 @@ fn run_windows_mcp_hook_runtime_probe(
     let Ok(probe_root) = create_runtime_probe_root() else {
         return RuntimeProbeOutcome::Unavailable;
     };
+    // Production setup prewarms this exact immutable image before a Hook can
+    // publish an activity lease. Reproduce that prerequisite outside the MCP
+    // diagnostic window so a large debug executable cannot masquerade as a
+    // transport or worker-start failure.
+    let worker_state_root = probe_root.join("TabBeacon").join("repository-identity");
+    if WorkerRuntimeStore::new(worker_state_root)
+        .publish(executable)
+        .is_err()
+    {
+        let _ = fs::remove_dir_all(&probe_root);
+        return RuntimeProbeOutcome::Unavailable;
+    }
     let activity_receipt = probe_root.join(ACTIVITY_WORKER_PROBE_RECEIPT_FILE);
     let activity_process = probe_root.join(ACTIVITY_WORKER_PROBE_PROCESS_FILE);
     let activity_started = probe_root.join(ACTIVITY_WORKER_PROBE_STARTED_FILE);

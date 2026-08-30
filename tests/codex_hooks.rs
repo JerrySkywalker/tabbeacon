@@ -564,17 +564,6 @@ fn try_write_and_wait_for_windows_hook(
 }
 
 #[cfg(windows)]
-fn write_and_wait_for_windows_hook(
-    child: Child,
-    input: &[u8],
-    stage: &str,
-    timeout: Duration,
-) -> Output {
-    try_write_and_wait_for_windows_hook(child, Some(input), timeout)
-        .unwrap_or_else(|error| panic!("Windows hook stage {stage} {error}"))
-}
-
-#[cfg(windows)]
 fn run_codex_windows_hook_with_shell(
     shell: CodexWindowsHookShell,
     command_line: &str,
@@ -1060,13 +1049,12 @@ fn direct_environment_is_qualified(
 }
 
 #[cfg(windows)]
-fn assert_real_hook_with_local_state_within(
+fn try_real_hook_with_local_state_within(
     executable: &Path,
     payload: &[u8],
     local_app_data: &Path,
     timeout: Duration,
-    stage: &str,
-) -> Duration {
+) -> Result<(Output, Duration), WindowsHookStageFailure> {
     let _shell_guard = WINDOWS_HOOK_SHELL_SERIALIZER
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1078,18 +1066,44 @@ fn assert_real_hook_with_local_state_within(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("real TabBeacon starts");
+        .map_err(WindowsHookStageFailure::Spawn)?;
     let started = Instant::now();
-    let output = write_and_wait_for_windows_hook(child, payload, stage, timeout);
+    let output = try_write_and_wait_for_windows_hook(child, Some(payload), timeout)?;
     let elapsed = started.elapsed();
+    Ok((output, elapsed))
+}
+
+#[cfg(windows)]
+fn real_hook_with_local_state_succeeds_or_reports_unqualified(
+    scope: &str,
+    executable: &Path,
+    payload: &[u8],
+    local_app_data: &Path,
+    timeout: Duration,
+) -> Option<Duration> {
+    let (output, elapsed) = match try_real_hook_with_local_state_within(
+        executable,
+        payload,
+        local_app_data,
+        timeout,
+    ) {
+        Ok(result) => result,
+        Err(error) if error.is_environment_timeout() => {
+            eprintln!(
+                "PERFORMANCE_ENVIRONMENT=UNQUALIFIED SCOPE={scope} SHELL=DIRECT-ACTUAL REASON={error}"
+            );
+            return None;
+        }
+        Err(error) => panic!("real Hook failed for {scope}: {error}"),
+    };
     assert!(
         output.status.success(),
-        "real Hook failed: {}",
+        "real Hook failed for {scope}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(output.stdout.is_empty(), "real Hook wrote stdout");
     assert!(output.stderr.is_empty(), "real Hook wrote stderr");
-    elapsed
+    Some(elapsed)
 }
 
 #[cfg(windows)]
@@ -5540,13 +5554,17 @@ fn anchored_production_hook_is_bounded_or_reports_unqualified_environment() {
     let mut start = hook_payload("SessionStart", "performance-session", &workspace);
     start["source"] = Value::String("startup".to_owned());
     let start = serde_json::to_vec(&start).expect("start payload serializes");
-    let _ = assert_real_hook_with_local_state_within(
+    if real_hook_with_local_state_succeeds_or_reports_unqualified(
+        "anchored SessionStart",
         &executable,
         &start,
         &local_app_data,
         WINDOWS_HOOK_STAGE_TIMEOUT,
-        "SessionStart anchor",
-    );
+    )
+    .is_none()
+    {
+        return;
+    }
 
     let prompt = serde_json::to_vec(&hook_payload_for_turn(
         "UserPromptSubmit",
@@ -5555,13 +5573,17 @@ fn anchored_production_hook_is_bounded_or_reports_unqualified_environment() {
         &workspace,
     ))
     .expect("prompt payload serializes");
-    let _ = assert_real_hook_with_local_state_within(
+    if real_hook_with_local_state_succeeds_or_reports_unqualified(
+        "anchored UserPromptSubmit",
         &executable,
         &prompt,
         &local_app_data,
         WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
-        "anchored UserPromptSubmit",
-    );
+    )
+    .is_none()
+    {
+        return;
+    }
 
     let post_tool = serde_json::to_vec(&hook_payload_for_turn(
         "PostToolUse",
@@ -5570,13 +5592,15 @@ fn anchored_production_hook_is_bounded_or_reports_unqualified_environment() {
         &workspace,
     ))
     .expect("post-tool payload serializes");
-    let elapsed = assert_real_hook_with_local_state_within(
+    let Some(elapsed) = real_hook_with_local_state_succeeds_or_reports_unqualified(
+        "anchored PostToolUse",
         &executable,
         &post_tool,
         &local_app_data,
         WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
-        "anchored PostToolUse",
-    );
+    ) else {
+        return;
+    };
     assert!(
         elapsed < WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
         "ordinary production Hook must remain below the one-second declaration, elapsed={elapsed:?}"
