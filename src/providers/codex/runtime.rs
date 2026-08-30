@@ -566,11 +566,12 @@ fn system_fast_path_outcome(normalized: &CodexNormalization) -> Option<HookDispa
     }
 }
 
-/// `Stop` renders the final result frame synchronously, but must not spend the
-/// same one-second Hook budget launching an optional persistent decoration
-/// worker. The activity reconciler retires any predecessor lease on this path.
-const fn allows_persistent_activity_worker(event: super::CodexHookEvent) -> bool {
-    !matches!(event, super::CodexHookEvent::Stop)
+/// Every admitted root lifecycle event may enter the bounded worker path.
+/// Presentation settings and the resolved action still decide whether a worker
+/// is needed. In particular, `Stop` resolves to static `ResultReady`, whose
+/// title owner must outlive the one-shot Hook process.
+const fn allows_persistent_activity_worker(_event: super::CodexHookEvent) -> bool {
+    true
 }
 
 fn open_owned_console() -> io::Result<Box<dyn Write>> {
@@ -846,14 +847,18 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::{activity::ActivityReconciliationTiming, repo::WorkspaceIdentityResolver};
+    use crate::{
+        activity::ActivityReconciliationTiming,
+        core::{Attention, Phase, SessionReconciler},
+        repo::WorkspaceIdentityResolver,
+    };
 
     use super::{
         CodexHookRuntime, HookDispatchOutcome, HookTimingCapture, HookTimingDestination,
         allows_persistent_activity_worker, record_activity_reconciliation_timing,
         system_fast_path_outcome, write_timing_line_in_directory, write_timing_line_once,
     };
-    use crate::providers::codex::CodexHookNormalizer;
+    use crate::providers::codex::{CodexHookNormalizer, CodexNormalization};
 
     fn test_root(label: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -969,10 +974,27 @@ mod tests {
     }
 
     #[test]
-    fn stop_defers_the_optional_persistent_activity_worker() {
-        assert!(!allows_persistent_activity_worker(
-            crate::providers::codex::CodexHookEvent::Stop
-        ));
+    fn root_stop_result_ready_requires_a_persistent_activity_worker() {
+        let raw = json!({
+            "hook_event_name": "Stop",
+            "session_id": "result-ready-session",
+            "turn_id": "result-ready-turn",
+            "cwd": "V:\\fixture"
+        });
+        let CodexNormalization::Evidence(normalized) = CodexHookNormalizer
+            .normalize(raw.to_string().as_bytes(), SystemTime::UNIX_EPOCH)
+            .expect("valid root Stop normalizes")
+        else {
+            panic!("valid root Stop must produce lifecycle evidence");
+        };
+        let snapshot = SessionReconciler::default().apply(normalized.evidence());
+
+        assert_eq!(snapshot.phase(), Phase::WaitingUser);
+        assert_eq!(snapshot.attention(), Attention::ResultReady);
+        assert!(
+            allows_persistent_activity_worker(normalized.context().event()),
+            "ResultReady needs a bounded post-Hook title owner"
+        );
         assert!(allows_persistent_activity_worker(
             crate::providers::codex::CodexHookEvent::PostToolUse
         ));
