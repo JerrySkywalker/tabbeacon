@@ -100,7 +100,8 @@ then atomically converts the task-root marker to `TRANSACTION=FINALIZED`.
 `RecoverPrepared` revalidates all expected lease identities and, for orphan
 reclaims, requires a fresh replacement writer proof if the original proof has
 expired. The original proof remains durable provenance; the final receipt records
-the fresh proof used to complete recovery. It either resumes the exact archive or
+the fresh proof used to complete recovery and, when they differ, carries the
+original prepared-proof path/digest plus `RECOVERY_PROOF_REFRESH=true`. It either resumes the exact archive or
 finalizes the already-verified archived bytes. If the only interrupted step was
 the task-marker finalization after a valid final external receipt, recovery
 validates that receipt and archive against the prepared operation, disposition,
@@ -135,4 +136,6 @@ prepared-transaction resume/finalization (including final receipt before marker)
 cross-task prepared-scope exclusion, final-receipt tamper rejection, receipt
 generation, fresh acquire after recovery, normal closure without an active
 holderless lease, explicit holder confirmation for normal settlement, and
-finally-path cleanup assertions for all active v1 fixtures and prepared markers.
+fresh-proof crash recovery, plus finally-path cleanup assertions for all active
+v1 fixtures and prepared markers through the canonical lifecycle tool. A child
+process deliberately fails immediately after acquire to prove that cleanup path.

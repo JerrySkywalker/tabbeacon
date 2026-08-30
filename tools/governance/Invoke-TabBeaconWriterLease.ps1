@@ -872,7 +872,9 @@ function Get-ReceiptText {
         [string]$FinalState,
         [string]$WriterCount,
         [string]$WriterProofPath = '',
-        [string]$WriterProofSha256 = ''
+        [string]$WriterProofSha256 = '',
+        [string]$PreparedWriterProofPath = '',
+        [string]$PreparedWriterProofSha256 = ''
     )
 
     $lines = @(
@@ -892,6 +894,14 @@ function Get-ReceiptText {
     if (-not [string]::IsNullOrWhiteSpace($WriterProofPath)) {
         $lines += "ACTIVE_WRITER_PROOF_PATH=$WriterProofPath"
         $lines += "ACTIVE_WRITER_PROOF_SHA256=$WriterProofSha256"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($PreparedWriterProofPath) -or -not [string]::IsNullOrWhiteSpace($PreparedWriterProofSha256)) {
+        if ([string]::IsNullOrWhiteSpace($PreparedWriterProofPath) -or [string]::IsNullOrWhiteSpace($PreparedWriterProofSha256)) {
+            throw 'WRITER_LEASE_RECOVERY_PROOF_PROVENANCE_INVALID'
+        }
+        $lines += "PREPARED_WRITER_PROOF_PATH=$PreparedWriterProofPath"
+        $lines += "PREPARED_WRITER_PROOF_SHA256=$PreparedWriterProofSha256"
+        $lines += 'RECOVERY_PROOF_REFRESH=true'
     }
     return ($lines -join [Environment]::NewLine) + [Environment]::NewLine
 }
@@ -960,7 +970,10 @@ function Get-FinalReceiptMetadata {
 
     $transaction = Get-TransactionFields -Path $Path
     $fields = $transaction.Fields
-    if ($fields['TRANSACTION'] -eq 'PREPARED' -or [string]::IsNullOrWhiteSpace($fields['DISPOSITION']) -or [string]::IsNullOrWhiteSpace($fields['OPERATION']) -or [string]::IsNullOrWhiteSpace($fields['ORIGINAL_LEASE_SHA256']) -or [string]::IsNullOrWhiteSpace($fields['ARCHIVED_LEASE_PATH']) -or [string]::IsNullOrWhiteSpace($fields['ARCHIVED_LEASE_SHA256']) -or [string]::IsNullOrWhiteSpace($fields['SCHEMA']) -or [string]::IsNullOrWhiteSpace($fields['GOAL']) -or [string]::IsNullOrWhiteSpace($fields['PHASE']) -or [string]::IsNullOrWhiteSpace($fields['FINAL_PHASE']) -or [string]::IsNullOrWhiteSpace($fields['ACTIVE_WRITER_COUNT']) -or $fields['LEASE_CONTENT_MODIFIED'] -ne 'false') {
+    $preparedProofPath = if ($null -eq $fields['PREPARED_WRITER_PROOF_PATH']) { '' } else { $fields['PREPARED_WRITER_PROOF_PATH'] }
+    $preparedProofSha256 = if ($null -eq $fields['PREPARED_WRITER_PROOF_SHA256']) { '' } else { $fields['PREPARED_WRITER_PROOF_SHA256'] }
+    $hasPreparedProofProvenance = -not [string]::IsNullOrWhiteSpace($preparedProofPath) -or -not [string]::IsNullOrWhiteSpace($preparedProofSha256)
+    if ($fields['TRANSACTION'] -eq 'PREPARED' -or [string]::IsNullOrWhiteSpace($fields['DISPOSITION']) -or [string]::IsNullOrWhiteSpace($fields['OPERATION']) -or [string]::IsNullOrWhiteSpace($fields['ORIGINAL_LEASE_SHA256']) -or [string]::IsNullOrWhiteSpace($fields['ARCHIVED_LEASE_PATH']) -or [string]::IsNullOrWhiteSpace($fields['ARCHIVED_LEASE_SHA256']) -or [string]::IsNullOrWhiteSpace($fields['SCHEMA']) -or [string]::IsNullOrWhiteSpace($fields['GOAL']) -or [string]::IsNullOrWhiteSpace($fields['PHASE']) -or [string]::IsNullOrWhiteSpace($fields['FINAL_PHASE']) -or [string]::IsNullOrWhiteSpace($fields['ACTIVE_WRITER_COUNT']) -or $fields['LEASE_CONTENT_MODIFIED'] -ne 'false' -or ($hasPreparedProofProvenance -and ([string]::IsNullOrWhiteSpace($preparedProofPath) -or [string]::IsNullOrWhiteSpace($preparedProofSha256) -or $fields['RECOVERY_PROOF_REFRESH'] -ne 'true')) -or (-not $hasPreparedProofProvenance -and $null -ne $fields['RECOVERY_PROOF_REFRESH'])) {
         throw 'WRITER_LEASE_FINAL_RECEIPT_INVALID'
     }
     return [pscustomobject]@{
@@ -977,6 +990,9 @@ function Get-FinalReceiptMetadata {
         WriterCount = $fields['ACTIVE_WRITER_COUNT']
         WriterProofPath = if ($null -eq $fields['ACTIVE_WRITER_PROOF_PATH']) { '' } else { $fields['ACTIVE_WRITER_PROOF_PATH'] }
         WriterProofSha256 = if ($null -eq $fields['ACTIVE_WRITER_PROOF_SHA256']) { '' } else { $fields['ACTIVE_WRITER_PROOF_SHA256'] }
+        PreparedWriterProofPath = $preparedProofPath
+        PreparedWriterProofSha256 = $preparedProofSha256
+        RecoveryProofRefreshed = $hasPreparedProofProvenance
     }
 }
 
@@ -1063,6 +1079,7 @@ function Invoke-ArchiveLease {
         $transactionPrepared = $true
     }
 
+    $preparedReceipt = $null
     if (Test-Path -LiteralPath $safeReceiptPath) {
         $preparedReceipt = Get-PreparedReceiptMetadata -Path $safeReceiptPath
         if ($preparedReceipt.OriginalLeaseSha256 -ne $Snapshot.Sha256 -or -not [string]::Equals((Get-FullPath -Path $preparedReceipt.ArchivePath), $safeArchivePath, [StringComparison]::OrdinalIgnoreCase) -or $preparedReceipt.Operation -ne $ArchiveOperation) {
@@ -1092,7 +1109,13 @@ function Invoke-ArchiveLease {
         throw 'WRITER_LEASE_ARCHIVE_INTEGRITY_FAILURE'
     }
 
-    $receipt = Get-ReceiptText -ReceiptDisposition $ReceiptDisposition -ReceiptOperation $ArchiveOperation -Snapshot $Snapshot -ArchivedPath $safeArchivePath -ArchivedSha256 $archived.Sha256 -FinalState $SettlementFinalPhase -WriterCount $WriterCount -WriterProofPath $WriterProofPath -WriterProofSha256 $WriterProofSha256
+    $preparedProofProvenancePath = ''
+    $preparedProofProvenanceSha256 = ''
+    if ($AllowRecoveryProofRefresh -and $null -ne $preparedReceipt -and -not $preparedReceipt.LegacyFormat -and ($preparedReceipt.WriterProofPath -ne $WriterProofPath -or $preparedReceipt.WriterProofSha256 -ne $WriterProofSha256)) {
+        $preparedProofProvenancePath = $preparedReceipt.WriterProofPath
+        $preparedProofProvenanceSha256 = $preparedReceipt.WriterProofSha256
+    }
+    $receipt = Get-ReceiptText -ReceiptDisposition $ReceiptDisposition -ReceiptOperation $ArchiveOperation -Snapshot $Snapshot -ArchivedPath $safeArchivePath -ArchivedSha256 $archived.Sha256 -FinalState $SettlementFinalPhase -WriterCount $WriterCount -WriterProofPath $WriterProofPath -WriterProofSha256 $WriterProofSha256 -PreparedWriterProofPath $preparedProofProvenancePath -PreparedWriterProofSha256 $preparedProofProvenanceSha256
     Write-ExistingUtf8File -Path $safeReceiptPath -Content $receipt
     $finalTransaction = @(
         'TRANSACTION=FINALIZED',
@@ -1383,7 +1406,9 @@ switch ($Operation) {
                 throw 'WRITER_LEASE_PREPARED_TRANSACTION_UNRECOVERABLE_NO_LEASE'
             }
             if ($receiptAlreadyFinal) {
-                if ($sourceExists -or -not $archiveExists -or $finalReceipt.Disposition -ne $receiptDisposition -or $finalReceipt.Operation -ne $expectedArchiveOperation -or $finalReceipt.OriginalLeaseSha256 -ne $ExpectedLeaseSha256.ToLowerInvariant() -or $finalReceipt.ArchivedLeaseSha256 -ne $ExpectedLeaseSha256.ToLowerInvariant() -or $finalReceipt.Schema -ne $ExpectedSchema -or $finalReceipt.Goal -ne $ExpectedGoal -or $finalReceipt.Phase -ne $ExpectedPhase -or $finalReceipt.FinalPhase -ne $settlementFinalPhase -or $finalReceipt.WriterCount -ne $writerCount -or $finalReceipt.WriterProofPath -ne $preparedReceipt.WriterProofPath -or $finalReceipt.WriterProofSha256 -ne $preparedReceipt.WriterProofSha256 -or -not [string]::Equals((Get-FullPath -Path $finalReceipt.ArchivedLeasePath), $safeArchivePath, [StringComparison]::OrdinalIgnoreCase)) {
+                $finalProofMatchesPrepared = $finalReceipt.WriterProofPath -eq $preparedReceipt.WriterProofPath -and $finalReceipt.WriterProofSha256 -eq $preparedReceipt.WriterProofSha256
+                $finalProofRefreshMatchesPrepared = $PreparedOperation -eq 'ReclaimOrphan' -and $finalReceipt.RecoveryProofRefreshed -and $finalReceipt.PreparedWriterProofPath -eq $preparedReceipt.WriterProofPath -and $finalReceipt.PreparedWriterProofSha256 -eq $preparedReceipt.WriterProofSha256 -and -not [string]::IsNullOrWhiteSpace($finalReceipt.WriterProofPath) -and -not [string]::IsNullOrWhiteSpace($finalReceipt.WriterProofSha256)
+                if ($sourceExists -or -not $archiveExists -or $finalReceipt.Disposition -ne $receiptDisposition -or $finalReceipt.Operation -ne $expectedArchiveOperation -or $finalReceipt.OriginalLeaseSha256 -ne $ExpectedLeaseSha256.ToLowerInvariant() -or $finalReceipt.ArchivedLeaseSha256 -ne $ExpectedLeaseSha256.ToLowerInvariant() -or $finalReceipt.Schema -ne $ExpectedSchema -or $finalReceipt.Goal -ne $ExpectedGoal -or $finalReceipt.Phase -ne $ExpectedPhase -or $finalReceipt.FinalPhase -ne $settlementFinalPhase -or $finalReceipt.WriterCount -ne $writerCount -or (-not ($finalProofMatchesPrepared -or $finalProofRefreshMatchesPrepared)) -or -not [string]::Equals((Get-FullPath -Path $finalReceipt.ArchivedLeasePath), $safeArchivePath, [StringComparison]::OrdinalIgnoreCase)) {
                     throw 'WRITER_LEASE_FINAL_RECEIPT_IDENTITY_MISMATCH'
                 }
                 $archivedSnapshot = Get-LeaseSnapshot -Path $safeArchivePath
@@ -1491,7 +1516,13 @@ switch ($Operation) {
                 Lease = $archivedSnapshot.Lease
                 SourceDescriptor = $null
             }
-            $receipt = Get-ReceiptText -ReceiptDisposition $receiptDisposition -ReceiptOperation $preparedReceipt.Operation -Snapshot $historicalSnapshot -ArchivedPath $safeArchivePath -ArchivedSha256 $archivedSnapshot.Sha256 -FinalState $settlementFinalPhase -WriterCount $writerCount -WriterProofPath $writerProofPath -WriterProofSha256 $writerProofSha256
+            $preparedProofProvenancePath = ''
+            $preparedProofProvenanceSha256 = ''
+            if ($PreparedOperation -eq 'ReclaimOrphan' -and -not $preparedReceipt.LegacyFormat -and ($preparedReceipt.WriterProofPath -ne $writerProofPath -or $preparedReceipt.WriterProofSha256 -ne $writerProofSha256)) {
+                $preparedProofProvenancePath = $preparedReceipt.WriterProofPath
+                $preparedProofProvenanceSha256 = $preparedReceipt.WriterProofSha256
+            }
+            $receipt = Get-ReceiptText -ReceiptDisposition $receiptDisposition -ReceiptOperation $preparedReceipt.Operation -Snapshot $historicalSnapshot -ArchivedPath $safeArchivePath -ArchivedSha256 $archivedSnapshot.Sha256 -FinalState $settlementFinalPhase -WriterCount $writerCount -WriterProofPath $writerProofPath -WriterProofSha256 $writerProofSha256 -PreparedWriterProofPath $preparedProofProvenancePath -PreparedWriterProofSha256 $preparedProofProvenanceSha256
             if (Test-Path -LiteralPath $safeReceiptPath -PathType Leaf) {
                 Write-ExistingUtf8File -Path $safeReceiptPath -Content $receipt
             } else {
