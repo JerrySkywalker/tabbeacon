@@ -22,6 +22,7 @@ param(
     [string]$ExpectedSourceHead,
     [string]$ExpectedWorktree,
     [string]$ExpectedBranch,
+    [string]$ExpectedHolder,
     [string]$ArchiveRoot,
     [string]$ArchivePath,
     [string]$ReceiptPath,
@@ -175,6 +176,22 @@ namespace TabBeacon.WriterLease {
                 IntPtr.Zero);
             if (handle.IsInvalid) {
                 throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateFile archive-directory open failed");
+            }
+            EnsureNotReparse(handle);
+            return handle;
+        }
+
+        public static SafeFileHandle OpenDirectoryGuard(string path) {
+            SafeFileHandle handle = CreateFile(
+                path,
+                GENERIC_READ,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                IntPtr.Zero);
+            if (handle.IsInvalid) {
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateFile archive-directory guard open failed");
             }
             EnsureNotReparse(handle);
             return handle;
@@ -391,6 +408,24 @@ function Test-HolderlessLease {
     return ($null -eq $holder) -or [string]::IsNullOrWhiteSpace([string]$holder)
 }
 
+function Assert-SettlementHolder {
+    param(
+        $Lease,
+        [string]$ConfirmedHolder
+    )
+
+    $actualHolder = [string](Get-LeaseProperty -Lease $Lease -Name 'holder')
+    if ([string]::IsNullOrWhiteSpace($actualHolder)) {
+        if (-not [string]::IsNullOrWhiteSpace($ConfirmedHolder)) {
+            throw 'WRITER_LEASE_SETTLE_HOLDER_MISMATCH'
+        }
+        return
+    }
+    if ($ConfirmedHolder -ne $actualHolder) {
+        throw 'WRITER_LEASE_SETTLE_HOLDER_CONFIRMATION_REQUIRED'
+    }
+}
+
 function Assert-LeaseIdentity {
     param(
         $Snapshot,
@@ -559,6 +594,28 @@ function Assert-NoActiveScopeConflict {
             throw "WRITER_LEASE_ACQUIRE_BLOCKED_SCOPE_CONFLICT=$existingPath"
         }
     }
+    foreach ($taskRoot in Get-ChildItem -LiteralPath $RegistryRoot -Directory -Force -ErrorAction Stop) {
+        if (($taskRoot.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "WRITER_LEASE_REGISTRY_ENTRY_UNSAFE_OR_INVALID=$($taskRoot.FullName)"
+        }
+        $transactionPath = Join-Path $taskRoot.FullName 'writer-lease.transaction.v1.txt'
+        if (-not (Test-Path -LiteralPath $transactionPath -PathType Leaf)) {
+            continue
+        }
+        $transaction = Get-TransactionFields -Path $transactionPath
+        if ($transaction.Fields['TRANSACTION'] -ne 'PREPARED') {
+            continue
+        }
+        $transactionRepository = [string]$transaction.Fields['REPOSITORY']
+        $transactionWorktree = [string]$transaction.Fields['WORKTREE']
+        $transactionBranch = [string]$transaction.Fields['BRANCH']
+        if ([string]::IsNullOrWhiteSpace($transactionRepository) -or [string]::IsNullOrWhiteSpace($transactionWorktree) -or [string]::IsNullOrWhiteSpace($transactionBranch)) {
+            throw "WRITER_LEASE_ACQUIRE_BLOCKED_UNCLASSIFIED_PREPARED_TRANSACTION=$transactionPath"
+        }
+        if ($transactionRepository -eq $RepositoryId -and ([string]::Equals((Get-FullPath -Path $transactionWorktree), $candidateWorktree, [StringComparison]::OrdinalIgnoreCase) -or $transactionBranch -eq $BranchName)) {
+            throw "WRITER_LEASE_ACQUIRE_BLOCKED_PREPARED_SCOPE_CONFLICT=$transactionPath"
+        }
+    }
 }
 
 function Write-NewUtf8File {
@@ -598,7 +655,7 @@ function Write-ExistingUtf8File {
     }
 }
 
-function Publish-NewLeaseAtomically {
+function Publish-NewUtf8FileAtomically {
     param([string]$Path, [string]$Content)
 
     $parent = Split-Path -Parent $Path
@@ -674,14 +731,19 @@ function Move-ExactLeaseByHandle {
 
     $handle = $null
     $destinationDirectoryHandle = $null
+    $destinationDirectoryGuard = $null
     try {
         $handle = [TabBeacon.WriterLease.Native]::OpenForExactMove($Snapshot.Path)
         $destinationDirectoryHandle = [TabBeacon.WriterLease.Native]::OpenSafeDirectory((Split-Path -Parent $DestinationPath))
+        $destinationDirectoryGuard = [TabBeacon.WriterLease.Native]::OpenDirectoryGuard((Split-Path -Parent $DestinationPath))
         if (-not [string]::Equals([TabBeacon.WriterLease.Native]::GetFinalPath($handle), $ExpectedSource.FinalPath, [StringComparison]::OrdinalIgnoreCase) -or [TabBeacon.WriterLease.Native]::GetFileIdentity($handle) -ne $ExpectedSource.Identity) {
             throw 'WRITER_LEASE_CONCURRENT_SOURCE_IDENTITY_DRIFT_BLOCKED'
         }
         if (-not [string]::Equals([TabBeacon.WriterLease.Native]::GetFinalPath($destinationDirectoryHandle), $ExpectedDestinationDirectory.FinalPath, [StringComparison]::OrdinalIgnoreCase) -or [TabBeacon.WriterLease.Native]::GetFileIdentity($destinationDirectoryHandle) -ne $ExpectedDestinationDirectory.Identity) {
             throw 'WRITER_LEASE_CONCURRENT_ARCHIVE_DIRECTORY_DRIFT_BLOCKED'
+        }
+        if (-not [string]::Equals([TabBeacon.WriterLease.Native]::GetFinalPath($destinationDirectoryGuard), $ExpectedDestinationDirectory.FinalPath, [StringComparison]::OrdinalIgnoreCase) -or [TabBeacon.WriterLease.Native]::GetFileIdentity($destinationDirectoryGuard) -ne $ExpectedDestinationDirectory.Identity) {
+            throw 'WRITER_LEASE_CONCURRENT_ARCHIVE_DIRECTORY_GUARD_DRIFT_BLOCKED'
         }
         $currentBytes = [TabBeacon.WriterLease.Native]::ReadExactBytes($handle)
         if ((Get-Sha256Hex -Bytes $currentBytes) -ne $Snapshot.Sha256) {
@@ -695,6 +757,9 @@ function Move-ExactLeaseByHandle {
         }
         if ($null -ne $destinationDirectoryHandle) {
             $destinationDirectoryHandle.Dispose()
+        }
+        if ($null -ne $destinationDirectoryGuard) {
+            $destinationDirectoryGuard.Dispose()
         }
     }
 }
@@ -890,6 +955,24 @@ function Get-PreparedReceiptMetadata {
     }
 }
 
+function Get-FinalReceiptMetadata {
+    param([string]$Path)
+
+    $transaction = Get-TransactionFields -Path $Path
+    $fields = $transaction.Fields
+    if ($fields['TRANSACTION'] -eq 'PREPARED' -or [string]::IsNullOrWhiteSpace($fields['OPERATION']) -or [string]::IsNullOrWhiteSpace($fields['ORIGINAL_LEASE_SHA256']) -or [string]::IsNullOrWhiteSpace($fields['ARCHIVED_LEASE_PATH']) -or [string]::IsNullOrWhiteSpace($fields['ARCHIVED_LEASE_SHA256']) -or [string]::IsNullOrWhiteSpace($fields['FINAL_PHASE'])) {
+        throw 'WRITER_LEASE_FINAL_RECEIPT_INVALID'
+    }
+    return [pscustomobject]@{
+        Path = $transaction.Path
+        Operation = $fields['OPERATION']
+        OriginalLeaseSha256 = $fields['ORIGINAL_LEASE_SHA256']
+        ArchivedLeasePath = $fields['ARCHIVED_LEASE_PATH']
+        ArchivedLeaseSha256 = $fields['ARCHIVED_LEASE_SHA256']
+        FinalPhase = $fields['FINAL_PHASE']
+    }
+}
+
 function Invoke-ArchiveLease {
     param(
         [string]$ArchiveOperation,
@@ -919,6 +1002,9 @@ function Invoke-ArchiveLease {
     if (Test-Path -LiteralPath $safeArchivePath) {
         throw 'WRITER_LEASE_ARCHIVE_COLLISION'
     }
+    if ((Test-Path -LiteralPath $safeReceiptPath -PathType Leaf) -and -not $UseExistingPreparedReceipt) {
+        throw 'WRITER_LEASE_RECEIPT_COLLISION'
+    }
 
     $prepared = @(
         'TRANSACTION=PREPARED',
@@ -926,6 +1012,9 @@ function Invoke-ArchiveLease {
         "ORIGINAL_LEASE_SHA256=$($Snapshot.Sha256)",
         "ARCHIVE_PATH=$safeArchivePath",
         "RECEIPT_PATH=$safeReceiptPath",
+        "REPOSITORY=$(Get-LeaseProperty -Lease $Snapshot.Lease -Name 'repository')",
+        "WORKTREE=$(Get-LeaseProperty -Lease $Snapshot.Lease -Name 'worktree')",
+        "BRANCH=$(Get-LeaseProperty -Lease $Snapshot.Lease -Name 'branch')",
         "DISPOSITION=$ReceiptDisposition",
         "FINAL_PHASE=$SettlementFinalPhase",
         "ACTIVE_WRITER_COUNT=$WriterCount"
@@ -960,17 +1049,14 @@ function Invoke-ArchiveLease {
         # A receipt from the immediately preceding implementation lacked the
         # task-root marker. Preserve it through RecoverPrepared, then leave the
         # deterministic FINALIZED marker used by all subsequent lifecycle runs.
-        Write-NewUtf8File -Path $transactionPath -Content ($prepared + [Environment]::NewLine)
+        Publish-NewUtf8FileAtomically -Path $transactionPath -Content ($prepared + [Environment]::NewLine)
         $transactionPrepared = $true
     } else {
-        Write-NewUtf8File -Path $transactionPath -Content ($prepared + [Environment]::NewLine)
+        Publish-NewUtf8FileAtomically -Path $transactionPath -Content ($prepared + [Environment]::NewLine)
         $transactionPrepared = $true
     }
 
     if (Test-Path -LiteralPath $safeReceiptPath) {
-        if (-not $UseExistingPreparedReceipt) {
-            throw 'WRITER_LEASE_RECEIPT_COLLISION'
-        }
         $preparedReceipt = Get-PreparedReceiptMetadata -Path $safeReceiptPath
         if ($preparedReceipt.OriginalLeaseSha256 -ne $Snapshot.Sha256 -or -not [string]::Equals((Get-FullPath -Path $preparedReceipt.ArchivePath), $safeArchivePath, [StringComparison]::OrdinalIgnoreCase) -or $preparedReceipt.Operation -ne $ArchiveOperation) {
             throw 'WRITER_LEASE_PREPARED_RECEIPT_IDENTITY_MISMATCH'
@@ -985,7 +1071,7 @@ function Invoke-ArchiveLease {
             throw 'WRITER_LEASE_PREPARED_RECEIPT_IDENTITY_MISMATCH'
         }
     } else {
-        Write-NewUtf8File -Path $safeReceiptPath -Content ($prepared + [Environment]::NewLine)
+        Publish-NewUtf8FileAtomically -Path $safeReceiptPath -Content ($prepared + [Environment]::NewLine)
     }
 
     $expectedArchiveDirectory = Get-ExactDirectoryDescriptor -Path (Split-Path -Parent $safeArchivePath)
@@ -1007,6 +1093,9 @@ function Invoke-ArchiveLease {
         "ORIGINAL_LEASE_SHA256=$($Snapshot.Sha256)",
         "ARCHIVE_PATH=$safeArchivePath",
         "RECEIPT_PATH=$safeReceiptPath",
+        "REPOSITORY=$(Get-LeaseProperty -Lease $Snapshot.Lease -Name 'repository')",
+        "WORKTREE=$(Get-LeaseProperty -Lease $Snapshot.Lease -Name 'worktree')",
+        "BRANCH=$(Get-LeaseProperty -Lease $Snapshot.Lease -Name 'branch')",
         "ARCHIVED_LEASE_SHA256=$($archived.Sha256)"
     ) -join [Environment]::NewLine
     Write-ExistingUtf8File -Path $transactionPath -Content ($finalTransaction + [Environment]::NewLine)
@@ -1106,7 +1195,7 @@ switch ($Operation) {
                 }
                 $json = ($lease | ConvertTo-Json -Depth 3) + [Environment]::NewLine
                 try {
-                    Publish-NewLeaseAtomically -Path $fullLeasePath -Content $json
+                    Publish-NewUtf8FileAtomically -Path $fullLeasePath -Content $json
                 } catch [IO.IOException] {
                     throw 'WRITER_LEASE_ACQUIRE_BLOCKED_ACTIVE_LEASE_EXISTS'
                 }
@@ -1144,6 +1233,7 @@ switch ($Operation) {
         try {
             $snapshot = Get-LeaseSnapshot -Path $LeasePath
             Assert-LeaseIdentity -Snapshot $snapshot -Sha256 $ExpectedLeaseSha256 -Schema $ExpectedSchema -GoalId $ExpectedGoal -State $ExpectedPhase -RepositoryId $ExpectedRepository -StartRemoteMain $ExpectedSourceHead -WorktreePath $ExpectedWorktree -BranchName $ExpectedBranch
+            Assert-SettlementHolder -Lease $snapshot.Lease -ConfirmedHolder $ExpectedHolder
             $archive = Invoke-ArchiveLease -ArchiveOperation 'settle' -Snapshot $snapshot -ArchiveRootPath $ArchiveRoot -ArchiveLeasePath $ArchivePath -SettlementReceiptPath $ReceiptPath -ReceiptDisposition $Disposition -SettlementFinalPhase $FinalPhase -WriterCount 'N/A'
             Write-MachineResult ([ordered]@{
                 operation = 'settle'
@@ -1230,6 +1320,8 @@ switch ($Operation) {
         try {
             $transactionPath = Get-LeaseTransactionPath -LeaseFilePath $LeasePath
             $transactionReceipt = $null
+            $receiptAlreadyFinal = $false
+            $finalReceipt = $null
             if (Test-Path -LiteralPath $transactionPath -PathType Leaf) {
                 $transactionReceipt = Get-PreparedReceiptMetadata -Path $transactionPath
                 if (-not [string]::Equals((Get-FullPath -Path $transactionReceipt.ReceiptPath), $safeReceiptPath, [StringComparison]::OrdinalIgnoreCase)) {
@@ -1237,9 +1329,18 @@ switch ($Operation) {
                 }
             }
             if (Test-Path -LiteralPath $safeReceiptPath -PathType Leaf) {
-                $preparedReceipt = Get-PreparedReceiptMetadata -Path $safeReceiptPath
-                if ($null -ne $transactionReceipt -and ($preparedReceipt.OriginalLeaseSha256 -ne $transactionReceipt.OriginalLeaseSha256 -or $preparedReceipt.Operation -ne $transactionReceipt.Operation -or -not [string]::Equals((Get-FullPath -Path $preparedReceipt.ArchivePath), (Get-FullPath -Path $transactionReceipt.ArchivePath), [StringComparison]::OrdinalIgnoreCase))) {
-                    throw 'WRITER_LEASE_TRANSACTION_MARKER_IDENTITY_MISMATCH'
+                $receiptFields = Get-TransactionFields -Path $safeReceiptPath
+                if ($receiptFields.Fields['TRANSACTION'] -eq 'PREPARED') {
+                    $preparedReceipt = Get-PreparedReceiptMetadata -Path $safeReceiptPath
+                    if ($null -ne $transactionReceipt -and ($preparedReceipt.OriginalLeaseSha256 -ne $transactionReceipt.OriginalLeaseSha256 -or $preparedReceipt.Operation -ne $transactionReceipt.Operation -or -not [string]::Equals((Get-FullPath -Path $preparedReceipt.ArchivePath), (Get-FullPath -Path $transactionReceipt.ArchivePath), [StringComparison]::OrdinalIgnoreCase))) {
+                        throw 'WRITER_LEASE_TRANSACTION_MARKER_IDENTITY_MISMATCH'
+                    }
+                } elseif ($null -ne $transactionReceipt) {
+                    $preparedReceipt = $transactionReceipt
+                    $finalReceipt = Get-FinalReceiptMetadata -Path $safeReceiptPath
+                    $receiptAlreadyFinal = $true
+                } else {
+                    throw 'WRITER_LEASE_FINAL_RECEIPT_WITHOUT_PREPARED_TRANSACTION'
                 }
             } elseif ($null -ne $transactionReceipt) {
                 $preparedReceipt = $transactionReceipt
@@ -1271,6 +1372,39 @@ switch ($Operation) {
             if (-not $sourceExists -and -not $archiveExists) {
                 throw 'WRITER_LEASE_PREPARED_TRANSACTION_UNRECOVERABLE_NO_LEASE'
             }
+            if ($receiptAlreadyFinal) {
+                if ($sourceExists -or -not $archiveExists -or $finalReceipt.Operation -ne $expectedArchiveOperation -or $finalReceipt.OriginalLeaseSha256 -ne $ExpectedLeaseSha256.ToLowerInvariant() -or $finalReceipt.ArchivedLeaseSha256 -ne $ExpectedLeaseSha256.ToLowerInvariant() -or -not [string]::Equals((Get-FullPath -Path $finalReceipt.ArchivedLeasePath), $safeArchivePath, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw 'WRITER_LEASE_FINAL_RECEIPT_IDENTITY_MISMATCH'
+                }
+                $archivedSnapshot = Get-LeaseSnapshot -Path $safeArchivePath
+                Assert-LeaseIdentity -Snapshot $archivedSnapshot -Sha256 $ExpectedLeaseSha256 -Schema $ExpectedSchema -GoalId $ExpectedGoal -State $ExpectedPhase -RepositoryId $ExpectedRepository -StartRemoteMain $ExpectedSourceHead -WorktreePath $ExpectedWorktree -BranchName $ExpectedBranch
+                if ($PreparedOperation -eq 'ReclaimOrphan') {
+                    if (-not (Test-HolderlessLease -Lease $archivedSnapshot.Lease)) {
+                        throw 'WRITER_LEASE_PREPARED_RECOVERY_NONEMPTY_HOLDER_BLOCKED'
+                    }
+                } else {
+                    Assert-SettlementHolder -Lease $archivedSnapshot.Lease -ConfirmedHolder $ExpectedHolder
+                }
+                $finalTransaction = @(
+                    'TRANSACTION=FINALIZED',
+                    "OPERATION=$($finalReceipt.Operation)",
+                    "ORIGINAL_LEASE_SHA256=$($archivedSnapshot.Sha256)",
+                    "ARCHIVE_PATH=$safeArchivePath",
+                    "RECEIPT_PATH=$safeReceiptPath",
+                    "ARCHIVED_LEASE_SHA256=$($archivedSnapshot.Sha256)"
+                ) -join [Environment]::NewLine
+                Write-ExistingUtf8File -Path $transactionPath -Content ($finalTransaction + [Environment]::NewLine)
+                Write-MachineResult ([ordered]@{
+                    operation = 'recover-prepared'
+                    recovery_state = 'finalized-existing-receipt'
+                    active_lease_exists = $false
+                    active_holderless_lease = $false
+                    archived_lease_path = $safeArchivePath
+                    archived_lease_sha256 = $archivedSnapshot.Sha256
+                    receipt_path = $safeReceiptPath
+                })
+                break
+            }
 
             if ($PreparedOperation -eq 'ReclaimOrphan') {
                 Assert-RequiredString -Name 'ActiveWriterProofPath' -Value $ActiveWriterProofPath
@@ -1282,8 +1416,12 @@ switch ($Operation) {
             if ($sourceExists) {
                 $snapshot = Get-LeaseSnapshot -Path $sourcePath
                 Assert-LeaseIdentity -Snapshot $snapshot -Sha256 $ExpectedLeaseSha256 -Schema $ExpectedSchema -GoalId $ExpectedGoal -State $ExpectedPhase -RepositoryId $ExpectedRepository -StartRemoteMain $ExpectedSourceHead -WorktreePath $ExpectedWorktree -BranchName $ExpectedBranch
-                if (-not (Test-HolderlessLease -Lease $snapshot.Lease)) {
-                    throw 'WRITER_LEASE_PREPARED_RECOVERY_NONEMPTY_HOLDER_BLOCKED'
+                if ($PreparedOperation -eq 'ReclaimOrphan') {
+                    if (-not (Test-HolderlessLease -Lease $snapshot.Lease)) {
+                        throw 'WRITER_LEASE_PREPARED_RECOVERY_NONEMPTY_HOLDER_BLOCKED'
+                    }
+                } else {
+                    Assert-SettlementHolder -Lease $snapshot.Lease -ConfirmedHolder $ExpectedHolder
                 }
                 if ($PreparedOperation -eq 'ReclaimOrphan') {
                     $writerProof = Assert-ActiveWriterProof -ProofPath $ActiveWriterProofPath -ExpectedProofSha256 $ExpectedActiveWriterProofSha256 -ExpectedLeasePath $snapshot.Path -ExpectedLeaseSha256 $snapshot.Sha256 -ExpectedWorktreePath $ExpectedWorktree -ExpectedBranchName $ExpectedBranch -ExpectedRepositoryId $ExpectedRepository
@@ -1323,8 +1461,12 @@ switch ($Operation) {
 
             $archivedSnapshot = Get-LeaseSnapshot -Path $safeArchivePath
             Assert-LeaseIdentity -Snapshot $archivedSnapshot -Sha256 $ExpectedLeaseSha256 -Schema $ExpectedSchema -GoalId $ExpectedGoal -State $ExpectedPhase -RepositoryId $ExpectedRepository -StartRemoteMain $ExpectedSourceHead -WorktreePath $ExpectedWorktree -BranchName $ExpectedBranch
-            if (-not (Test-HolderlessLease -Lease $archivedSnapshot.Lease)) {
-                throw 'WRITER_LEASE_PREPARED_RECOVERY_NONEMPTY_HOLDER_BLOCKED'
+            if ($PreparedOperation -eq 'ReclaimOrphan') {
+                if (-not (Test-HolderlessLease -Lease $archivedSnapshot.Lease)) {
+                    throw 'WRITER_LEASE_PREPARED_RECOVERY_NONEMPTY_HOLDER_BLOCKED'
+                }
+            } else {
+                Assert-SettlementHolder -Lease $archivedSnapshot.Lease -ConfirmedHolder $ExpectedHolder
             }
             if ($PreparedOperation -eq 'ReclaimOrphan') {
                 $writerProof = Assert-ActiveWriterProof -ProofPath $ActiveWriterProofPath -ExpectedProofSha256 $ExpectedActiveWriterProofSha256 -ExpectedLeasePath $sourcePath -ExpectedLeaseSha256 $ExpectedLeaseSha256 -ExpectedWorktreePath $ExpectedWorktree -ExpectedBranchName $ExpectedBranch -ExpectedRepositoryId $ExpectedRepository
@@ -1345,7 +1487,7 @@ switch ($Operation) {
             if (Test-Path -LiteralPath $safeReceiptPath -PathType Leaf) {
                 Write-ExistingUtf8File -Path $safeReceiptPath -Content $receipt
             } else {
-                Write-NewUtf8File -Path $safeReceiptPath -Content $receipt
+                Publish-NewUtf8FileAtomically -Path $safeReceiptPath -Content $receipt
             }
             if (Test-Path -LiteralPath $transactionPath -PathType Leaf) {
                 $finalTransaction = @(
