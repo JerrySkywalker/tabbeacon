@@ -97,19 +97,18 @@ binds the operation, original digest, archive path, final disposition, final
 phase, writer count, and any writer proof. It atomically replaces that receipt
 with the final receipt only after the exact opened source file has been renamed,
 then atomically converts the task-root marker to `TRANSACTION=FINALIZED`.
-`RecoverPrepared` revalidates all expected lease identities and, for orphan
-reclaims, requires a fresh replacement writer proof if the original proof has
-expired. The original proof remains durable provenance; the final receipt records
-the fresh proof used to complete recovery and, when they differ, carries the
-original prepared-proof path/digest plus `RECOVERY_PROOF_REFRESH=true`. Before
-the archive move, that fresh proof and provenance are atomically bound into the
-durable PREPARED marker and prepared receipt; final-marker recovery requires the
-final receipt to match that binding and the caller's fresh proof. It either resumes the exact archive or
-finalizes the already-verified archived bytes. If the only interrupted step was
-the task-marker finalization after a valid final external receipt, recovery
-validates that receipt and archive against the prepared operation, disposition,
-final phase, writer count, writer-proof binding, schema, Goal, and source phase,
-then finalizes the marker without rewriting either artifact. A legacy prepared record created
+`RecoverPrepared` revalidates all expected lease identities and, for an orphan
+reclaim whose source lease still exists, requires a fresh replacement writer
+proof if the bound proof has expired. It can rotate that proof again after a
+further interruption, always retaining the original prepared-proof path/digest
+as durable provenance with `RECOVERY_PROOF_REFRESH=true`. Before the archive
+move, the current fresh proof and that provenance are atomically bound into both
+the durable PREPARED marker and prepared receipt. Once the source lease is
+already archived, the matching marker-bound proof is historical transaction
+evidence: final-marker recovery validates the final receipt, archive, proof
+binding, provenance, schema, Goal, and source phase without requiring the old
+proof to remain temporally fresh. It either resumes the exact archive or
+finalizes the already-verified archived bytes. A legacy prepared record created
 by an earlier tool build requires explicit final phase and disposition; it is
 accepted only through `RecoverPrepared` and is immediately converted to the
 current final receipt. No state needs a manual JSON rewrite to recover.

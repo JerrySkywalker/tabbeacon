@@ -1088,28 +1088,26 @@ function Invoke-ArchiveLease {
 
     $refreshedPrepared = $prepared
     if ($AllowRecoveryProofRefresh -and $null -ne $transactionReceipt) {
-        if ($transactionReceipt.RecoveryProofRefreshed) {
+        if ($transactionReceipt.LegacyFormat -or [string]::IsNullOrWhiteSpace($transactionReceipt.WriterProofPath) -or [string]::IsNullOrWhiteSpace($transactionReceipt.WriterProofSha256) -or [string]::IsNullOrWhiteSpace($WriterProofPath) -or [string]::IsNullOrWhiteSpace($WriterProofSha256)) {
+            throw 'WRITER_LEASE_PREPARED_RECOVERY_PROOF_MISMATCH'
+        }
+        $originalPreparedProofPath = if ($transactionReceipt.RecoveryProofRefreshed) { $transactionReceipt.PreparedWriterProofPath } else { $transactionReceipt.WriterProofPath }
+        $originalPreparedProofSha256 = if ($transactionReceipt.RecoveryProofRefreshed) { $transactionReceipt.PreparedWriterProofSha256 } else { $transactionReceipt.WriterProofSha256 }
+        if ($transactionReceipt.RecoveryProofRefreshed -or $transactionReceipt.WriterProofPath -ne $WriterProofPath -or $transactionReceipt.WriterProofSha256 -ne $WriterProofSha256) {
+            $refreshedPrepared += [Environment]::NewLine + "PREPARED_WRITER_PROOF_PATH=$originalPreparedProofPath"
+            $refreshedPrepared += [Environment]::NewLine + "PREPARED_WRITER_PROOF_SHA256=$originalPreparedProofSha256"
+            $refreshedPrepared += [Environment]::NewLine + 'RECOVERY_PROOF_REFRESH=true'
             if ($transactionReceipt.WriterProofPath -ne $WriterProofPath -or $transactionReceipt.WriterProofSha256 -ne $WriterProofSha256) {
-                throw 'WRITER_LEASE_PREPARED_RECOVERY_PROOF_MISMATCH'
+                # The source lease remains present and the caller just supplied a
+                # new, verified zero-writer proof. Bind that proof before any
+                # archive move so an expired prior proof cannot deadlock recovery.
+                Write-ExistingUtf8File -Path $transactionPath -Content ($refreshedPrepared + [Environment]::NewLine)
+                $transactionReceipt = Get-PreparedReceiptMetadata -Path $transactionPath
             }
-            $refreshedPrepared += [Environment]::NewLine + "PREPARED_WRITER_PROOF_PATH=$($transactionReceipt.PreparedWriterProofPath)"
-            $refreshedPrepared += [Environment]::NewLine + "PREPARED_WRITER_PROOF_SHA256=$($transactionReceipt.PreparedWriterProofSha256)"
-            $refreshedPrepared += [Environment]::NewLine + 'RECOVERY_PROOF_REFRESH=true'
-        } elseif ($transactionReceipt.WriterProofPath -ne $WriterProofPath -or $transactionReceipt.WriterProofSha256 -ne $WriterProofSha256) {
-            if ($transactionReceipt.LegacyFormat -or [string]::IsNullOrWhiteSpace($transactionReceipt.WriterProofPath) -or [string]::IsNullOrWhiteSpace($transactionReceipt.WriterProofSha256) -or [string]::IsNullOrWhiteSpace($WriterProofPath) -or [string]::IsNullOrWhiteSpace($WriterProofSha256)) {
-                throw 'WRITER_LEASE_PREPARED_RECOVERY_PROOF_MISMATCH'
-            }
-            $refreshedPrepared += [Environment]::NewLine + "PREPARED_WRITER_PROOF_PATH=$($transactionReceipt.WriterProofPath)"
-            $refreshedPrepared += [Environment]::NewLine + "PREPARED_WRITER_PROOF_SHA256=$($transactionReceipt.WriterProofSha256)"
-            $refreshedPrepared += [Environment]::NewLine + 'RECOVERY_PROOF_REFRESH=true'
-            Write-ExistingUtf8File -Path $transactionPath -Content ($refreshedPrepared + [Environment]::NewLine)
-            $transactionReceipt = Get-PreparedReceiptMetadata -Path $transactionPath
         }
     }
 
     $preparedReceipt = $null
-    $externalProofMatchesCurrent = $false
-    $externalProofMatchesPrior = $false
     if (Test-Path -LiteralPath $safeReceiptPath) {
         $preparedReceipt = Get-PreparedReceiptMetadata -Path $safeReceiptPath
         if ($preparedReceipt.OriginalLeaseSha256 -ne $Snapshot.Sha256 -or -not [string]::Equals((Get-FullPath -Path $preparedReceipt.ArchivePath), $safeArchivePath, [StringComparison]::OrdinalIgnoreCase) -or $preparedReceipt.Operation -ne $ArchiveOperation) {
@@ -1122,12 +1120,16 @@ function Invoke-ArchiveLease {
         } elseif ($preparedReceipt.Disposition -ne $ReceiptDisposition -or $preparedReceipt.FinalPhase -ne $SettlementFinalPhase -or $preparedReceipt.WriterCount -ne $WriterCount) {
             throw 'WRITER_LEASE_PREPARED_RECEIPT_IDENTITY_MISMATCH'
         }
-        $externalProofMatchesCurrent = $preparedReceipt.WriterProofPath -eq $WriterProofPath -and $preparedReceipt.WriterProofSha256 -eq $WriterProofSha256
-        $externalProofMatchesPrior = $AllowRecoveryProofRefresh -and $null -ne $transactionReceipt -and $transactionReceipt.RecoveryProofRefreshed -and -not $preparedReceipt.RecoveryProofRefreshed -and $preparedReceipt.WriterProofPath -eq $transactionReceipt.PreparedWriterProofPath -and $preparedReceipt.WriterProofSha256 -eq $transactionReceipt.PreparedWriterProofSha256
-        if (-not $externalProofMatchesCurrent -and -not $externalProofMatchesPrior) {
-            throw 'WRITER_LEASE_PREPARED_RECEIPT_IDENTITY_MISMATCH'
-        }
-        if ($externalProofMatchesCurrent -and $null -ne $transactionReceipt -and $transactionReceipt.RecoveryProofRefreshed -and (-not $preparedReceipt.RecoveryProofRefreshed -or $preparedReceipt.PreparedWriterProofPath -ne $transactionReceipt.PreparedWriterProofPath -or $preparedReceipt.PreparedWriterProofSha256 -ne $transactionReceipt.PreparedWriterProofSha256)) {
+        if ($AllowRecoveryProofRefresh) {
+            if ($null -eq $transactionReceipt) {
+                throw 'WRITER_LEASE_PREPARED_RECOVERY_PROOF_MISMATCH'
+            }
+            # A previous crash can leave either durable PREPARED record on the
+            # prior proof. The source still exists and the new proof was checked
+            # above, so replace the receipt before the handle-bound archive move.
+            Write-ExistingUtf8File -Path $safeReceiptPath -Content ($refreshedPrepared + [Environment]::NewLine)
+            $preparedReceipt = Get-PreparedReceiptMetadata -Path $safeReceiptPath
+        } elseif ($preparedReceipt.WriterProofPath -ne $WriterProofPath -or $preparedReceipt.WriterProofSha256 -ne $WriterProofSha256) {
             throw 'WRITER_LEASE_PREPARED_RECEIPT_IDENTITY_MISMATCH'
         }
     } else {
@@ -1135,10 +1137,6 @@ function Invoke-ArchiveLease {
             throw 'WRITER_LEASE_PREPARED_RECOVERY_PROOF_MISMATCH'
         }
         Publish-NewUtf8FileAtomically -Path $safeReceiptPath -Content ($refreshedPrepared + [Environment]::NewLine)
-    }
-    if ($externalProofMatchesPrior) {
-        Write-ExistingUtf8File -Path $safeReceiptPath -Content ($refreshedPrepared + [Environment]::NewLine)
-        $preparedReceipt = Get-PreparedReceiptMetadata -Path $safeReceiptPath
     }
 
     $expectedArchiveDirectory = Get-ExactDirectoryDescriptor -Path (Split-Path -Parent $safeArchivePath)
@@ -1450,25 +1448,18 @@ switch ($Operation) {
             }
             if ($null -ne $transactionReceipt -and $transactionReceipt.RecoveryProofRefreshed -and -not $receiptAlreadyFinal) {
                 $externalMatchesRefreshedMarker = $preparedReceipt.WriterProofPath -eq $transactionReceipt.WriterProofPath -and $preparedReceipt.WriterProofSha256 -eq $transactionReceipt.WriterProofSha256 -and $preparedReceipt.RecoveryProofRefreshed -and $preparedReceipt.PreparedWriterProofPath -eq $transactionReceipt.PreparedWriterProofPath -and $preparedReceipt.PreparedWriterProofSha256 -eq $transactionReceipt.PreparedWriterProofSha256
-                $externalMatchesPriorMarker = -not $preparedReceipt.RecoveryProofRefreshed -and $preparedReceipt.WriterProofPath -eq $transactionReceipt.PreparedWriterProofPath -and $preparedReceipt.WriterProofSha256 -eq $transactionReceipt.PreparedWriterProofSha256
-                if (-not $externalMatchesRefreshedMarker -and -not ($sourceExists -and $externalMatchesPriorMarker)) {
+                if (-not $externalMatchesRefreshedMarker -and -not $sourceExists) {
                     throw 'WRITER_LEASE_PREPARED_RECOVERY_PROOF_MISMATCH'
                 }
             }
             if ($receiptAlreadyFinal) {
-                $finalizationProof = $null
-                if ($PreparedOperation -eq 'ReclaimOrphan') {
-                    Assert-RequiredString -Name 'ActiveWriterProofPath' -Value $ActiveWriterProofPath
-                    Assert-RequiredString -Name 'ExpectedActiveWriterProofSha256' -Value $ExpectedActiveWriterProofSha256
-                    $finalizationProof = Assert-ActiveWriterProof -ProofPath $ActiveWriterProofPath -ExpectedProofSha256 $ExpectedActiveWriterProofSha256 -ExpectedLeasePath $sourcePath -ExpectedLeaseSha256 $ExpectedLeaseSha256 -ExpectedWorktreePath $ExpectedWorktree -ExpectedBranchName $ExpectedBranch -ExpectedRepositoryId $ExpectedRepository
-                }
                 $finalProofMatchesPrepared = $finalReceipt.WriterProofPath -eq $preparedReceipt.WriterProofPath -and $finalReceipt.WriterProofSha256 -eq $preparedReceipt.WriterProofSha256
                 $finalProofProvenanceMatchesPrepared = if ($preparedReceipt.RecoveryProofRefreshed) {
                     $PreparedOperation -eq 'ReclaimOrphan' -and $finalReceipt.RecoveryProofRefreshed -and $finalReceipt.PreparedWriterProofPath -eq $preparedReceipt.PreparedWriterProofPath -and $finalReceipt.PreparedWriterProofSha256 -eq $preparedReceipt.PreparedWriterProofSha256
                 } else {
                     -not $finalReceipt.RecoveryProofRefreshed
                 }
-                if ($sourceExists -or -not $archiveExists -or $finalReceipt.Disposition -ne $receiptDisposition -or $finalReceipt.Operation -ne $expectedArchiveOperation -or $finalReceipt.OriginalLeaseSha256 -ne $ExpectedLeaseSha256.ToLowerInvariant() -or $finalReceipt.ArchivedLeaseSha256 -ne $ExpectedLeaseSha256.ToLowerInvariant() -or $finalReceipt.Schema -ne $ExpectedSchema -or $finalReceipt.Goal -ne $ExpectedGoal -or $finalReceipt.Phase -ne $ExpectedPhase -or $finalReceipt.FinalPhase -ne $settlementFinalPhase -or $finalReceipt.WriterCount -ne $writerCount -or -not $finalProofMatchesPrepared -or -not $finalProofProvenanceMatchesPrepared -or ($PreparedOperation -eq 'ReclaimOrphan' -and ($finalReceipt.WriterProofPath -ne $finalizationProof.Path -or $finalReceipt.WriterProofSha256 -ne $finalizationProof.Sha256)) -or -not [string]::Equals((Get-FullPath -Path $finalReceipt.ArchivedLeasePath), $safeArchivePath, [StringComparison]::OrdinalIgnoreCase)) {
+                if ($sourceExists -or -not $archiveExists -or $finalReceipt.Disposition -ne $receiptDisposition -or $finalReceipt.Operation -ne $expectedArchiveOperation -or $finalReceipt.OriginalLeaseSha256 -ne $ExpectedLeaseSha256.ToLowerInvariant() -or $finalReceipt.ArchivedLeaseSha256 -ne $ExpectedLeaseSha256.ToLowerInvariant() -or $finalReceipt.Schema -ne $ExpectedSchema -or $finalReceipt.Goal -ne $ExpectedGoal -or $finalReceipt.Phase -ne $ExpectedPhase -or $finalReceipt.FinalPhase -ne $settlementFinalPhase -or $finalReceipt.WriterCount -ne $writerCount -or -not $finalProofMatchesPrepared -or -not $finalProofProvenanceMatchesPrepared -or -not [string]::Equals((Get-FullPath -Path $finalReceipt.ArchivedLeasePath), $safeArchivePath, [StringComparison]::OrdinalIgnoreCase)) {
                     throw 'WRITER_LEASE_FINAL_RECEIPT_IDENTITY_MISMATCH'
                 }
                 $archivedSnapshot = Get-LeaseSnapshot -Path $safeArchivePath
@@ -1501,11 +1492,6 @@ switch ($Operation) {
                 break
             }
 
-            if ($PreparedOperation -eq 'ReclaimOrphan') {
-                Assert-RequiredString -Name 'ActiveWriterProofPath' -Value $ActiveWriterProofPath
-                Assert-RequiredString -Name 'ExpectedActiveWriterProofSha256' -Value $ExpectedActiveWriterProofSha256
-            }
-
             if ($sourceExists) {
                 $snapshot = Get-LeaseSnapshot -Path $sourcePath
                 Assert-LeaseIdentity -Snapshot $snapshot -Sha256 $ExpectedLeaseSha256 -Schema $ExpectedSchema -GoalId $ExpectedGoal -State $ExpectedPhase -RepositoryId $ExpectedRepository -StartRemoteMain $ExpectedSourceHead -WorktreePath $ExpectedWorktree -BranchName $ExpectedBranch
@@ -1517,6 +1503,8 @@ switch ($Operation) {
                     Assert-SettlementHolder -Lease $snapshot.Lease -ConfirmedHolder $ExpectedHolder
                 }
                 if ($PreparedOperation -eq 'ReclaimOrphan') {
+                    Assert-RequiredString -Name 'ActiveWriterProofPath' -Value $ActiveWriterProofPath
+                    Assert-RequiredString -Name 'ExpectedActiveWriterProofSha256' -Value $ExpectedActiveWriterProofSha256
                     $writerProof = Assert-ActiveWriterProof -ProofPath $ActiveWriterProofPath -ExpectedProofSha256 $ExpectedActiveWriterProofSha256 -ExpectedLeasePath $snapshot.Path -ExpectedLeaseSha256 $snapshot.Sha256 -ExpectedWorktreePath $ExpectedWorktree -ExpectedBranchName $ExpectedBranch -ExpectedRepositoryId $ExpectedRepository
                     $writerProofPath = $writerProof.Path
                     $writerProofSha256 = $writerProof.Sha256
@@ -1562,9 +1550,22 @@ switch ($Operation) {
                 Assert-SettlementHolder -Lease $archivedSnapshot.Lease -ConfirmedHolder $ExpectedHolder
             }
             if ($PreparedOperation -eq 'ReclaimOrphan') {
-                $writerProof = Assert-ActiveWriterProof -ProofPath $ActiveWriterProofPath -ExpectedProofSha256 $ExpectedActiveWriterProofSha256 -ExpectedLeasePath $sourcePath -ExpectedLeaseSha256 $ExpectedLeaseSha256 -ExpectedWorktreePath $ExpectedWorktree -ExpectedBranchName $ExpectedBranch -ExpectedRepositoryId $ExpectedRepository
-                $writerProofPath = $writerProof.Path
-                $writerProofSha256 = $writerProof.Sha256
+                if ($preparedReceipt.LegacyFormat) {
+                    Assert-RequiredString -Name 'ActiveWriterProofPath' -Value $ActiveWriterProofPath
+                    Assert-RequiredString -Name 'ExpectedActiveWriterProofSha256' -Value $ExpectedActiveWriterProofSha256
+                    $writerProof = Assert-ActiveWriterProof -ProofPath $ActiveWriterProofPath -ExpectedProofSha256 $ExpectedActiveWriterProofSha256 -ExpectedLeasePath $sourcePath -ExpectedLeaseSha256 $ExpectedLeaseSha256 -ExpectedWorktreePath $ExpectedWorktree -ExpectedBranchName $ExpectedBranch -ExpectedRepositoryId $ExpectedRepository
+                    $writerProofPath = $writerProof.Path
+                    $writerProofSha256 = $writerProof.Sha256
+                } else {
+                    if ([string]::IsNullOrWhiteSpace($preparedReceipt.WriterProofPath) -or [string]::IsNullOrWhiteSpace($preparedReceipt.WriterProofSha256)) {
+                        throw 'WRITER_LEASE_PREPARED_RECOVERY_PROOF_MISMATCH'
+                    }
+                    # The source lease is already archived. The proof bound into
+                    # PREPARED is historical transaction evidence, not a fresh
+                    # authorization to mutate a live lease.
+                    $writerProofPath = $preparedReceipt.WriterProofPath
+                    $writerProofSha256 = $preparedReceipt.WriterProofSha256
+                }
             } else {
                 $writerProofPath = ''
                 $writerProofSha256 = ''
@@ -1576,12 +1577,8 @@ switch ($Operation) {
                 Lease = $archivedSnapshot.Lease
                 SourceDescriptor = $null
             }
-            $preparedProofProvenancePath = ''
-            $preparedProofProvenanceSha256 = ''
-            if ($PreparedOperation -eq 'ReclaimOrphan' -and -not $preparedReceipt.LegacyFormat -and ($preparedReceipt.WriterProofPath -ne $writerProofPath -or $preparedReceipt.WriterProofSha256 -ne $writerProofSha256)) {
-                $preparedProofProvenancePath = $preparedReceipt.WriterProofPath
-                $preparedProofProvenanceSha256 = $preparedReceipt.WriterProofSha256
-            }
+            $preparedProofProvenancePath = if ($PreparedOperation -eq 'ReclaimOrphan' -and -not $preparedReceipt.LegacyFormat -and $preparedReceipt.RecoveryProofRefreshed) { $preparedReceipt.PreparedWriterProofPath } else { '' }
+            $preparedProofProvenanceSha256 = if ($PreparedOperation -eq 'ReclaimOrphan' -and -not $preparedReceipt.LegacyFormat -and $preparedReceipt.RecoveryProofRefreshed) { $preparedReceipt.PreparedWriterProofSha256 } else { '' }
             $receipt = Get-ReceiptText -ReceiptDisposition $receiptDisposition -ReceiptOperation $preparedReceipt.Operation -Snapshot $historicalSnapshot -ArchivedPath $safeArchivePath -ArchivedSha256 $archivedSnapshot.Sha256 -FinalState $settlementFinalPhase -WriterCount $writerCount -WriterProofPath $writerProofPath -WriterProofSha256 $writerProofSha256 -PreparedWriterProofPath $preparedProofProvenancePath -PreparedWriterProofSha256 $preparedProofProvenanceSha256
             if (Test-Path -LiteralPath $safeReceiptPath -PathType Leaf) {
                 Write-ExistingUtf8File -Path $safeReceiptPath -Content $receipt

@@ -182,10 +182,15 @@ function Get-ReclaimArguments {
 }
 
 function New-ActiveWriterProof {
-    param($Fixture, [string]$LeaseDigest)
+    param(
+        $Fixture,
+        [string]$LeaseDigest,
+        [string]$ProofFileName = 'active-writer-proof.txt',
+        [int]$AgeMinutes = 0
+    )
 
-    $proofPath = Join-Path $Fixture.Root 'active-writer-proof.txt'
-    $observedAt = [DateTimeOffset]::UtcNow
+    $proofPath = Join-Path $Fixture.Root $ProofFileName
+    $observedAt = [DateTimeOffset]::UtcNow.AddMinutes(-$AgeMinutes)
     $expiresAt = $observedAt.AddMinutes(2)
     $content = @(
         'PROOF_SCHEMA=tabbeacon-writer-active-proof.v1',
@@ -706,6 +711,111 @@ try {
     ))
     Assert-True -Condition ($refreshProofRecovered.recovery_state -eq 'finalized-existing-receipt') -Message 'fresh proof final receipt crash state did not recover'
     'WRITER_LEASE_TEST_REFRESHED_PROOF_FINAL_RECEIPT_RECOVERY=PASS'
+
+    # A second interruption can leave an expired bound proof before the archive
+    # move. A fresh C proof must replace it while retaining original A as
+    # provenance; otherwise PREPARED permanently blocks the scope.
+    $expiredRefreshFixture = New-FixtureLease -Name 'prepared-expired-refresh-rotation'
+    New-ArchiveRoot -Fixture $expiredRefreshFixture
+    $expiredRefreshDigest = Get-Digest -Path $expiredRefreshFixture.LeasePath
+    $expiredRefreshOriginalProof = New-ActiveWriterProof -Fixture $expiredRefreshFixture -LeaseDigest $expiredRefreshDigest -ProofFileName 'proof-a.txt'
+    $expiredRefreshBoundProof = New-ActiveWriterProof -Fixture $expiredRefreshFixture -LeaseDigest $expiredRefreshDigest -ProofFileName 'proof-b-expired.txt' -AgeMinutes 10
+    $expiredRefreshMarker = Join-Path $expiredRefreshFixture.Root 'writer-lease.transaction.v1.txt'
+    $expiredRefreshPrepared = @(
+        'TRANSACTION=PREPARED',
+        'OPERATION=reclaim-orphan',
+        ('ORIGINAL_LEASE_SHA256=' + $expiredRefreshDigest),
+        ('ARCHIVE_PATH=' + $expiredRefreshFixture.ArchivePath),
+        ('RECEIPT_PATH=' + $expiredRefreshFixture.ReceiptPath),
+        ('REPOSITORY=' + $expiredRefreshFixture.Repository),
+        ('WORKTREE=' + $expiredRefreshFixture.Worktree),
+        ('BRANCH=' + $expiredRefreshFixture.Branch),
+        'DISPOSITION=ORPHAN_RECLAIMED',
+        'FINAL_PHASE=RECLAIMED_ORPHAN',
+        'ACTIVE_WRITER_COUNT=0',
+        ('ACTIVE_WRITER_PROOF_PATH=' + $expiredRefreshBoundProof.Path),
+        ('ACTIVE_WRITER_PROOF_SHA256=' + $expiredRefreshBoundProof.Sha256),
+        ('PREPARED_WRITER_PROOF_PATH=' + $expiredRefreshOriginalProof.Path),
+        ('PREPARED_WRITER_PROOF_SHA256=' + $expiredRefreshOriginalProof.Sha256),
+        'RECOVERY_PROOF_REFRESH=true'
+    ) -join [Environment]::NewLine
+    [IO.File]::WriteAllText($expiredRefreshMarker, $expiredRefreshPrepared + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($expiredRefreshFixture.ReceiptPath, $expiredRefreshPrepared + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $expiredRefreshReplacementProof = New-ActiveWriterProof -Fixture $expiredRefreshFixture -LeaseDigest $expiredRefreshDigest -ProofFileName 'proof-c.txt'
+    $expiredRefreshIdentity = Get-IdentityArguments -Fixture $expiredRefreshFixture -Digest $expiredRefreshDigest
+    $expiredRefreshRecovered = Invoke-ToolJson -ToolArguments (@('-Operation', 'RecoverPrepared', '-PreparedOperation', 'ReclaimOrphan', '-LeasePath', $expiredRefreshFixture.LeasePath) + $expiredRefreshIdentity + @(
+        '-ExpectedHolderless',
+        '-ArchiveRoot', $expiredRefreshFixture.ArchiveRoot,
+        '-ArchivePath', $expiredRefreshFixture.ArchivePath,
+        '-ReceiptPath', $expiredRefreshFixture.ReceiptPath,
+        '-ActiveWriterProofPath', $expiredRefreshReplacementProof.Path,
+        '-ExpectedActiveWriterProofSha256', $expiredRefreshReplacementProof.Sha256
+    ))
+    Assert-True -Condition ($expiredRefreshRecovered.recovery_state -eq 'resumed-archive') -Message 'expired bound proof did not rotate before archive'
+    $expiredRefreshFinalReceipt = Get-Content -LiteralPath $expiredRefreshFixture.ReceiptPath -Raw
+    Assert-True -Condition ($expiredRefreshFinalReceipt.IndexOf(('ACTIVE_WRITER_PROOF_SHA256=' + $expiredRefreshReplacementProof.Sha256), [StringComparison]::Ordinal) -ge 0) -Message 'expired bound proof recovery did not bind replacement proof'
+    Assert-True -Condition ($expiredRefreshFinalReceipt.IndexOf(('PREPARED_WRITER_PROOF_SHA256=' + $expiredRefreshOriginalProof.Sha256), [StringComparison]::Ordinal) -ge 0) -Message 'expired bound proof recovery lost original provenance'
+    'WRITER_LEASE_TEST_EXPIRED_BOUND_PROOF_ROTATION=PASS'
+
+    # Once the archive and final receipt exist, their marker-bound proof is
+    # historical evidence. Marker-only finalization must not demand that it is
+    # still within the five-minute observation window.
+    $expiredFinalFixture = New-FixtureLease -Name 'prepared-expired-final-receipt'
+    New-ArchiveRoot -Fixture $expiredFinalFixture
+    $expiredFinalDigest = Get-Digest -Path $expiredFinalFixture.LeasePath
+    $expiredFinalOriginalProof = New-ActiveWriterProof -Fixture $expiredFinalFixture -LeaseDigest $expiredFinalDigest -ProofFileName 'proof-a.txt'
+    $expiredFinalBoundProof = New-ActiveWriterProof -Fixture $expiredFinalFixture -LeaseDigest $expiredFinalDigest -ProofFileName 'proof-b-expired.txt' -AgeMinutes 10
+    $expiredFinalMarker = Join-Path $expiredFinalFixture.Root 'writer-lease.transaction.v1.txt'
+    $expiredFinalPrepared = @(
+        'TRANSACTION=PREPARED',
+        'OPERATION=reclaim-orphan',
+        ('ORIGINAL_LEASE_SHA256=' + $expiredFinalDigest),
+        ('ARCHIVE_PATH=' + $expiredFinalFixture.ArchivePath),
+        ('RECEIPT_PATH=' + $expiredFinalFixture.ReceiptPath),
+        ('REPOSITORY=' + $expiredFinalFixture.Repository),
+        ('WORKTREE=' + $expiredFinalFixture.Worktree),
+        ('BRANCH=' + $expiredFinalFixture.Branch),
+        'DISPOSITION=ORPHAN_RECLAIMED',
+        'FINAL_PHASE=RECLAIMED_ORPHAN',
+        'ACTIVE_WRITER_COUNT=0',
+        ('ACTIVE_WRITER_PROOF_PATH=' + $expiredFinalBoundProof.Path),
+        ('ACTIVE_WRITER_PROOF_SHA256=' + $expiredFinalBoundProof.Sha256),
+        ('PREPARED_WRITER_PROOF_PATH=' + $expiredFinalOriginalProof.Path),
+        ('PREPARED_WRITER_PROOF_SHA256=' + $expiredFinalOriginalProof.Sha256),
+        'RECOVERY_PROOF_REFRESH=true'
+    ) -join [Environment]::NewLine
+    [IO.File]::WriteAllText($expiredFinalMarker, $expiredFinalPrepared + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $expiredFinalFixture.LeasePath -Destination $expiredFinalFixture.ArchivePath -ErrorAction Stop
+    $expiredFinalReceipt = @(
+        'DISPOSITION=ORPHAN_RECLAIMED',
+        'OPERATION=reclaim-orphan',
+        ('ORIGINAL_LEASE_PATH=' + $expiredFinalFixture.LeasePath),
+        ('ORIGINAL_LEASE_SHA256=' + $expiredFinalDigest),
+        ('ARCHIVED_LEASE_PATH=' + $expiredFinalFixture.ArchivePath),
+        ('ARCHIVED_LEASE_SHA256=' + $expiredFinalDigest),
+        ('SCHEMA=' + $expiredFinalFixture.Schema),
+        ('GOAL=' + $expiredFinalFixture.Goal),
+        ('PHASE=' + $expiredFinalFixture.Phase),
+        'FINAL_PHASE=RECLAIMED_ORPHAN',
+        'ACTIVE_WRITER_COUNT=0',
+        'LEASE_CONTENT_MODIFIED=false',
+        ('ACTIVE_WRITER_PROOF_PATH=' + $expiredFinalBoundProof.Path),
+        ('ACTIVE_WRITER_PROOF_SHA256=' + $expiredFinalBoundProof.Sha256),
+        ('PREPARED_WRITER_PROOF_PATH=' + $expiredFinalOriginalProof.Path),
+        ('PREPARED_WRITER_PROOF_SHA256=' + $expiredFinalOriginalProof.Sha256),
+        'RECOVERY_PROOF_REFRESH=true'
+    ) -join [Environment]::NewLine
+    [IO.File]::WriteAllText($expiredFinalFixture.ReceiptPath, $expiredFinalReceipt + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+    $expiredFinalIdentity = Get-IdentityArguments -Fixture $expiredFinalFixture -Digest $expiredFinalDigest
+    $expiredFinalRecovered = Invoke-ToolJson -ToolArguments (@('-Operation', 'RecoverPrepared', '-PreparedOperation', 'ReclaimOrphan', '-LeasePath', $expiredFinalFixture.LeasePath) + $expiredFinalIdentity + @(
+        '-ExpectedHolderless',
+        '-ArchiveRoot', $expiredFinalFixture.ArchiveRoot,
+        '-ArchivePath', $expiredFinalFixture.ArchivePath,
+        '-ReceiptPath', $expiredFinalFixture.ReceiptPath
+    ))
+    Assert-True -Condition ($expiredFinalRecovered.recovery_state -eq 'finalized-existing-receipt') -Message 'expired historical proof did not finalize marker-only recovery'
+    Assert-True -Condition ((Get-Content -LiteralPath $expiredFinalMarker -Raw).IndexOf('TRANSACTION=FINALIZED', [StringComparison]::Ordinal) -ge 0) -Message 'expired historical proof did not finalize marker'
+    'WRITER_LEASE_TEST_EXPIRED_FINAL_PROOF_MARKER_RECOVERY=PASS'
 
     # A final orphan receipt must carry precisely the proof binding recorded by
     # its prepared transaction; a substituted proof cannot finalize the marker.
