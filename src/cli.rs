@@ -165,6 +165,7 @@ pub enum Command {
         run_id: String,
         anchor_title: String,
         window_routing_id: String,
+        creator_process_id: u32,
     },
     /// Internal exact-owned temporary Windows Terminal cleanup helper.
     #[command(name = "__temporary-wt-cleanup-v1", hide = true)]
@@ -895,6 +896,7 @@ mod tests {
                 "TBWT-abc",
                 "TB-WT-ANCHOR-TBWT-abc",
                 "tabbeacon-TBWT-abc",
+                "4242",
             ])
             .is_ok()
         );

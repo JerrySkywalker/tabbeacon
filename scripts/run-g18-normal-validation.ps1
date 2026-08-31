@@ -283,7 +283,7 @@ Invoke-G18Hook 'SessionEnd'
     $temporaryWindowCreated = $true
     $receipt.TEMP_WINDOWS_CREATED = 1
     $registrationOutput = & $tabbeaconExecutable '__temporary-wt-register-v1' `
-        $runRoot $lifecycleRunId $anchorTitle $windowName 2>&1
+        $runRoot $lifecycleRunId $anchorTitle $windowName $PID 2>&1
     if ($LASTEXITCODE -ne 0) { Stop-Validation 'BLOCKED_TEMP_WT_REGISTRATION' }
     $ownershipPath = @($registrationOutput | ForEach-Object { $_.ToString().Trim() } |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) | Select-Object -Last 1

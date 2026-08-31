@@ -59,11 +59,11 @@ pub use uia::{
 };
 #[cfg(windows)]
 pub use wt_lifecycle::{
-    ExactOwnedWindowBackend, ExactWindowObservation, TemporaryWindowProductDisposition,
-    TemporaryWindowsTerminalCleanupReceipt, TemporaryWindowsTerminalOwnership,
-    cleanup_temporary_windows_terminal, close_unregistered_exact_anchor,
-    recover_stale_temporary_windows_terminals, register_temporary_windows_terminal,
-    register_temporary_windows_terminal_with_retry,
+    ExactOwnedWindowBackend, ExactOwnedWindowRecoveryBackend, ExactWindowObservation,
+    TemporaryWindowProductDisposition, TemporaryWindowsTerminalCleanupReceipt,
+    TemporaryWindowsTerminalOwnership, cleanup_temporary_windows_terminal,
+    close_unregistered_exact_anchor, recover_stale_temporary_windows_terminals,
+    register_temporary_windows_terminal, register_temporary_windows_terminal_with_retry,
 };
 
 #[cfg(not(windows))]

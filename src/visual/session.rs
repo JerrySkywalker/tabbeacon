@@ -249,6 +249,7 @@ impl TerminalTestSessionLauncher {
             &lifecycle_run_id,
             &anchor_title,
             &window_name,
+            std::process::id(),
             Duration::from_secs(5),
         ) {
             let _ = close_unregistered_exact_anchor(&WindowsUiaLocator, &anchor_title);

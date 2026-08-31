@@ -46,6 +46,21 @@ pub trait ExactOwnedWindowBackend {
     fn close_exact_anchor(&self, anchor_title: &str, expected_hwnd: isize) -> VisualResult<()>;
 }
 
+/// Additional process proof required before a later run may recover a window.
+pub trait ExactOwnedWindowRecoveryBackend: ExactOwnedWindowBackend {
+    /// Returns the start time for the currently live process at one PID.
+    ///
+    /// `None` is positive proof that no process currently owns the PID. Any
+    /// unavailable or ambiguous observation must return an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns a platform error when the PID or its process start time cannot
+    /// be observed unambiguously.
+    fn creator_process_started_unix_ms(&self, creator_process_id: u32)
+    -> VisualResult<Option<u64>>;
+}
+
 /// Immutable proof that one run owns one temporary Windows Terminal window.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TemporaryWindowsTerminalOwnership {
@@ -59,8 +74,11 @@ pub struct TemporaryWindowsTerminalOwnership {
     pub window_routing_id: String,
     /// Exact ancestor HWND admitted at registration.
     pub native_window_id: isize,
-    /// Creating helper process identifier.
+    /// Long-lived qualification supervisor process identifier.
     pub creator_process_id: u32,
+    /// Start time of the exact creator process instance, used to defeat PID reuse.
+    #[serde(default)]
+    pub creator_process_started_unix_ms: Option<u64>,
     /// UTC Unix milliseconds at admission.
     pub created_unix_ms: u64,
 }
@@ -115,14 +133,28 @@ pub struct TemporaryWindowsTerminalCleanupReceipt {
 /// Returns a classified identity, evidence, UIA, or filesystem error. No
 /// record is written unless the anchor and ancestor window cardinalities are
 /// both exactly one.
-pub fn register_temporary_windows_terminal<B: ExactOwnedWindowBackend>(
+pub fn register_temporary_windows_terminal<B: ExactOwnedWindowRecoveryBackend>(
     backend: &B,
     evidence_root: &Path,
     run_id: &str,
     anchor_title: &str,
     window_routing_id: &str,
+    creator_process_id: u32,
 ) -> VisualResult<PathBuf> {
     validate_registration(evidence_root, run_id, anchor_title, window_routing_id)?;
+    if creator_process_id == 0 {
+        return Err(VisualError::Platform(
+            "temporary Windows Terminal creator process ID must be nonzero".to_owned(),
+        ));
+    }
+    let creator_process_started_unix_ms = backend
+        .creator_process_started_unix_ms(creator_process_id)?
+        .ok_or_else(|| {
+            VisualError::Platform(
+                "temporary Windows Terminal creator process is not active at registration"
+                    .to_owned(),
+            )
+        })?;
     let observation = backend.observe_exact_anchor(anchor_title)?;
     if observation.anchor_tab_match_count != 1 || observation.target_window_match_count != 1 {
         return Err(VisualError::Platform(format!(
@@ -141,14 +173,22 @@ pub fn register_temporary_windows_terminal<B: ExactOwnedWindowBackend>(
         ));
     }
 
+    let created_unix_ms = unix_ms();
+    if creator_process_started_unix_ms > created_unix_ms {
+        return Err(VisualError::Platform(
+            "temporary Windows Terminal creator process time is newer than its ownership record"
+                .to_owned(),
+        ));
+    }
     let ownership = TemporaryWindowsTerminalOwnership {
         schema: OWNERSHIP_SCHEMA.to_owned(),
         run_id: run_id.to_owned(),
         anchor_title: anchor_title.to_owned(),
         window_routing_id: window_routing_id.to_owned(),
         native_window_id,
-        creator_process_id: std::process::id(),
-        created_unix_ms: unix_ms(),
+        creator_process_id,
+        creator_process_started_unix_ms: Some(creator_process_started_unix_ms),
+        created_unix_ms,
     };
     let path = evidence_root.join(format!("temporary-wt-{run_id}.ownership.json"));
     write_new_json(&path, &ownership)?;
@@ -162,12 +202,13 @@ pub fn register_temporary_windows_terminal<B: ExactOwnedWindowBackend>(
 ///
 /// Returns the final classified registration error after the deadline or an
 /// immediately non-retryable evidence/identity error.
-pub fn register_temporary_windows_terminal_with_retry<B: ExactOwnedWindowBackend>(
+pub fn register_temporary_windows_terminal_with_retry<B: ExactOwnedWindowRecoveryBackend>(
     backend: &B,
     evidence_root: &Path,
     run_id: &str,
     anchor_title: &str,
     window_routing_id: &str,
+    creator_process_id: u32,
     budget: Duration,
 ) -> VisualResult<PathBuf> {
     let deadline = Instant::now() + budget;
@@ -178,6 +219,7 @@ pub fn register_temporary_windows_terminal_with_retry<B: ExactOwnedWindowBackend
             run_id,
             anchor_title,
             window_routing_id,
+            creator_process_id,
         ) {
             Ok(path) => return Ok(path),
             Err(VisualError::Platform(_)) if Instant::now() < deadline => {
@@ -302,7 +344,7 @@ fn cleanup_temporary_windows_terminal_to_receipt<B: ExactOwnedWindowBackend>(
 ///
 /// Returns a classified evidence, filesystem, or ownership error. Recovery
 /// stops on the first ambiguous record rather than risking an Owner window.
-pub fn recover_stale_temporary_windows_terminals<B: ExactOwnedWindowBackend>(
+pub fn recover_stale_temporary_windows_terminals<B: ExactOwnedWindowRecoveryBackend>(
     backend: &B,
     registry_root: &Path,
 ) -> VisualResult<Vec<TemporaryWindowsTerminalCleanupReceipt>> {
@@ -321,13 +363,37 @@ pub fn recover_stale_temporary_windows_terminals<B: ExactOwnedWindowBackend>(
     let mut receipts = Vec::with_capacity(ownership_paths.len());
     for ownership_path in ownership_paths {
         let (ownership, ownership_sha256) = read_validated_ownership(&ownership_path)?;
+        let expected_creator_start = ownership.creator_process_started_unix_ms.ok_or_else(|| {
+            VisualError::Platform(
+                "stale exact-owned Windows Terminal recovery refused because creator process identity is unproven"
+                    .to_owned(),
+            )
+        })?;
+        if expected_creator_start > ownership.created_unix_ms {
+            return Err(VisualError::Platform(
+                "stale exact-owned Windows Terminal recovery refused invalid creator process time"
+                    .to_owned(),
+            ));
+        }
+        if backend.creator_process_started_unix_ms(ownership.creator_process_id)?
+            == Some(expected_creator_start)
+        {
+            return Err(VisualError::Platform(
+                "stale exact-owned Windows Terminal recovery refused because its creator process remains active"
+                    .to_owned(),
+            ));
+        }
+        let product_disposition = latest_cleanup_receipt(&ownership_path, &ownership_sha256)?
+            .map_or(TemporaryWindowProductDisposition::Exception, |receipt| {
+                receipt.product_disposition
+            });
         let receipt_path = next_cleanup_recovery_receipt_path(&ownership_path)?;
         let receipt = cleanup_temporary_windows_terminal_to_receipt(
             backend,
             &ownership,
             &ownership_sha256,
             &receipt_path,
-            TemporaryWindowProductDisposition::Exception,
+            product_disposition,
         )?;
         if receipt.temporary_wt_cleanup != "PASS" {
             return Err(VisualError::Platform(format!(
@@ -439,7 +505,11 @@ fn validate_registration(
 }
 
 fn validate_ownership(ownership: &TemporaryWindowsTerminalOwnership) -> VisualResult<()> {
-    if ownership.schema != OWNERSHIP_SCHEMA || ownership.native_window_id == 0 {
+    if ownership.schema != OWNERSHIP_SCHEMA
+        || ownership.native_window_id == 0
+        || ownership.creator_process_id == 0
+        || ownership.created_unix_ms == 0
+    {
         return Err(VisualError::Platform(
             "invalid temporary Windows Terminal ownership record".to_owned(),
         ));
@@ -657,9 +727,10 @@ mod tests {
     use std::{cell::Cell, fs, time::SystemTime};
 
     use super::{
-        ExactOwnedWindowBackend, ExactWindowObservation, TemporaryWindowProductDisposition,
-        cleanup_temporary_windows_terminal, close_unregistered_exact_anchor,
-        recover_stale_temporary_windows_terminals, register_temporary_windows_terminal,
+        ExactOwnedWindowBackend, ExactOwnedWindowRecoveryBackend, ExactWindowObservation,
+        TemporaryWindowProductDisposition, cleanup_temporary_windows_terminal,
+        close_unregistered_exact_anchor, recover_stale_temporary_windows_terminals,
+        register_temporary_windows_terminal,
     };
     use crate::visual::VisualResult;
 
@@ -693,6 +764,7 @@ mod tests {
         close_calls: Cell<u32>,
         close_fails: Cell<bool>,
         close_leaves_window: Cell<bool>,
+        creator_process_started_unix_ms: Cell<Option<u64>>,
     }
 
     impl FakeBackend {
@@ -704,6 +776,7 @@ mod tests {
                 close_calls: Cell::new(0),
                 close_fails: Cell::new(false),
                 close_leaves_window: Cell::new(false),
+                creator_process_started_unix_ms: Cell::new(Some(41)),
             }
         }
     }
@@ -741,6 +814,15 @@ mod tests {
         }
     }
 
+    impl ExactOwnedWindowRecoveryBackend for FakeBackend {
+        fn creator_process_started_unix_ms(
+            &self,
+            _creator_process_id: u32,
+        ) -> VisualResult<Option<u64>> {
+            Ok(self.creator_process_started_unix_ms.get())
+        }
+    }
+
     fn register(root: &TestRoot, backend: &FakeBackend) -> std::path::PathBuf {
         register_temporary_windows_terminal(
             backend,
@@ -748,6 +830,7 @@ mod tests {
             "TB-G105B-72-abc",
             "TB-WT-ANCHOR-TB-G105B-72-abc",
             "tabbeacon-TB-G105B-72-abc",
+            4242,
         )
         .expect("exact window registers")
     }
@@ -992,12 +1075,73 @@ mod tests {
         std::mem::forget(run);
 
         let recovery_backend = FakeBackend::exact();
+        recovery_backend.creator_process_started_unix_ms.set(None);
         let receipts = recover_stale_temporary_windows_terminals(&recovery_backend, &registry.0)
             .expect("stale exact-owned record recovers");
 
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].temporary_wt_cleanup, "PASS");
         assert_eq!(recovery_backend.close_calls.get(), 1);
+    }
+
+    #[test]
+    fn recovery_refuses_an_unfinished_record_while_its_creator_is_still_active() {
+        let registry = TestRoot::new();
+        let creating_backend = FakeBackend::exact();
+        let ownership = register(&registry, &creating_backend);
+        assert!(ownership.is_file());
+
+        let recovery_backend = FakeBackend::exact();
+        assert!(
+            recover_stale_temporary_windows_terminals(&recovery_backend, &registry.0).is_err(),
+            "an unfinished record is not stale while its exact creator process is active"
+        );
+        assert_eq!(recovery_backend.close_calls.get(), 0);
+    }
+
+    #[test]
+    fn recovery_treats_a_reused_pid_as_an_exited_creator_instance() {
+        let registry = TestRoot::new();
+        let creating_backend = FakeBackend::exact();
+        let ownership = register(&registry, &creating_backend);
+        assert!(ownership.is_file());
+
+        let recovery_backend = FakeBackend::exact();
+        recovery_backend
+            .creator_process_started_unix_ms
+            .set(Some(42));
+        let receipts = recover_stale_temporary_windows_terminals(&recovery_backend, &registry.0)
+            .expect("a newer process at the reused PID is not the recorded creator");
+
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(recovery_backend.close_calls.get(), 1);
+    }
+
+    #[test]
+    fn recovery_refuses_a_legacy_record_without_creator_instance_proof() {
+        let registry = TestRoot::new();
+        let creating_backend = FakeBackend::exact();
+        let ownership_path = register(&registry, &creating_backend);
+        let mut ownership: serde_json::Value =
+            serde_json::from_slice(&fs::read(&ownership_path).expect("ownership record reads"))
+                .expect("ownership record parses");
+        ownership
+            .as_object_mut()
+            .expect("ownership is an object")
+            .remove("creator_process_started_unix_ms");
+        fs::write(
+            &ownership_path,
+            serde_json::to_vec_pretty(&ownership).expect("legacy ownership serializes"),
+        )
+        .expect("legacy ownership fixture writes");
+
+        let recovery_backend = FakeBackend::exact();
+        recovery_backend.creator_process_started_unix_ms.set(None);
+        assert!(
+            recover_stale_temporary_windows_terminals(&recovery_backend, &registry.0).is_err(),
+            "recovery requires positive creator-instance evidence"
+        );
+        assert_eq!(recovery_backend.close_calls.get(), 0);
     }
 
     #[test]
@@ -1016,12 +1160,18 @@ mod tests {
         assert_eq!(failed.owned_temporary_wt_remaining, 1);
 
         let recovery_backend = FakeBackend::exact();
+        recovery_backend.creator_process_started_unix_ms.set(None);
         let receipts = recover_stale_temporary_windows_terminals(&recovery_backend, &registry.0)
             .expect("later run re-proves ownership and closes the stale exact HWND");
 
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].temporary_wt_cleanup, "PASS");
         assert_eq!(receipts[0].owned_temporary_wt_remaining, 0);
+        assert_eq!(
+            receipts[0].product_disposition,
+            TemporaryWindowProductDisposition::Fail,
+            "recovery preserves the original product result"
+        );
         assert_eq!(recovery_backend.close_calls.get(), 1);
         assert_eq!(
             cleanup_temporary_windows_terminal(

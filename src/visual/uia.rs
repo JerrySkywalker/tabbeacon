@@ -12,8 +12,11 @@ use uiautomation::{
     controls::WindowControl,
     types::{ControlType, Rect},
 };
-use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+use windows::Win32::{
+    Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, FILETIME, HANDLE, HWND},
+    System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+};
 
 // Windows Terminal can take longer than five seconds to retire a window that
 // owns multiple ConPTY tabs, even after WindowPattern.Close has been accepted.
@@ -22,8 +25,8 @@ use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 const EXACT_WINDOW_CLOSE_BUDGET: Duration = Duration::from_secs(30);
 
 use super::{
-    ExactOwnedWindowBackend, ExactWindowObservation, ScreenRect, UiaDump, VisualError,
-    VisualResult, WindowActivation, root_workspace_anchor_fixture_alias,
+    ExactOwnedWindowBackend, ExactOwnedWindowRecoveryBackend, ExactWindowObservation, ScreenRect,
+    UiaDump, VisualError, VisualResult, WindowActivation, root_workspace_anchor_fixture_alias,
 };
 use crate::title_authority::TitleProbeSample;
 
@@ -372,6 +375,76 @@ impl ExactOwnedWindowBackend for WindowsUiaLocator {
     }
 }
 
+impl ExactOwnedWindowRecoveryBackend for WindowsUiaLocator {
+    fn creator_process_started_unix_ms(
+        &self,
+        creator_process_id: u32,
+    ) -> VisualResult<Option<u64>> {
+        creator_process_started_unix_ms(creator_process_id)
+    }
+}
+
+struct ProcessHandle(HANDLE);
+
+impl Drop for ProcessHandle {
+    #[allow(unsafe_code)]
+    fn drop(&mut self) {
+        // SAFETY: this guard owns the successful `OpenProcess` result exactly once.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
+#[allow(unsafe_code)]
+fn creator_process_started_unix_ms(creator_process_id: u32) -> VisualResult<Option<u64>> {
+    // SAFETY: the access mask is query-only, handle inheritance is disabled,
+    // and the successful handle is closed by `ProcessHandle`.
+    let process = match unsafe {
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, creator_process_id)
+    } {
+        Ok(process) => ProcessHandle(process),
+        Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => {
+            return Ok(None);
+        }
+        Err(error) => {
+            return Err(VisualError::Platform(format!(
+                "temporary Windows Terminal creator process state is unproven: {error}"
+            )));
+        }
+    };
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    // SAFETY: all pointers refer to initialized writable `FILETIME` values and
+    // the process handle remains alive for the call.
+    unsafe {
+        GetProcessTimes(
+            process.0,
+            &raw mut creation,
+            &raw mut exit,
+            &raw mut kernel,
+            &raw mut user,
+        )
+    }
+    .map_err(|error| {
+        VisualError::Platform(format!(
+            "temporary Windows Terminal creator process time is unproven: {error}"
+        ))
+    })?;
+    let process_created_unix_ms = filetime_unix_ms(creation).ok_or_else(|| {
+        VisualError::Platform(
+            "temporary Windows Terminal creator process time predates the Unix epoch".to_owned(),
+        )
+    })?;
+    Ok(Some(process_created_unix_ms))
+}
+
+fn filetime_unix_ms(value: FILETIME) -> Option<u64> {
+    const WINDOWS_TO_UNIX_EPOCH_MILLIS: u64 = 11_644_473_600_000;
+    let ticks = (u64::from(value.dwHighDateTime) << 32) | u64::from(value.dwLowDateTime);
+    (ticks / 10_000).checked_sub(WINDOWS_TO_UNIX_EPOCH_MILLIS)
+}
+
 #[allow(unsafe_code)]
 fn native_window_exists(native_window_id: isize) -> bool {
     // UIA may retain a stale element immediately after WindowPattern.Close.
@@ -549,7 +622,9 @@ fn platform_error(error: impl std::fmt::Display) -> VisualError {
 
 #[cfg(test)]
 mod tests {
-    use super::title_is_run_correlated;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{creator_process_started_unix_ms, title_is_run_correlated};
     use crate::visual::root_workspace_anchor_fixture_alias;
 
     #[test]
@@ -559,5 +634,29 @@ mod tests {
 
         assert!(title_is_run_correlated(run_id, &format!("⠋ {alias}")));
         assert!(!title_is_run_correlated(run_id, "⠋ TB59-not-this-run"));
+    }
+
+    #[test]
+    fn creator_process_probe_binds_the_current_process_instance() {
+        let started = creator_process_started_unix_ms(std::process::id())
+            .expect("current process state is queryable")
+            .expect("current process is active");
+        let now = u64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("test clock follows Unix epoch")
+                .as_millis(),
+        )
+        .expect("current Unix milliseconds fit u64");
+
+        assert!(started <= now);
+    }
+
+    #[test]
+    fn creator_process_probe_distinguishes_an_absent_pid() {
+        assert_eq!(
+            creator_process_started_unix_ms(u32::MAX).expect("absent PID is positively observed"),
+            None
+        );
     }
 }

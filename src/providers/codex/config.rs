@@ -1629,6 +1629,8 @@ impl CodexIntegration {
             )));
         }
         self.validate_completed_mcp_migration(&journal)?;
+        journal.phase = McpMigrationPhase::CommitCleanupPending;
+        self.write_mcp_migration_journal(&journal)?;
         self.clear_mcp_migration_recovery(&journal)
     }
 
@@ -1718,6 +1720,20 @@ impl CodexIntegration {
         let journal: McpMigrationJournal = serde_json::from_slice(&bytes)
             .map_err(|_| CodexIntegrationError::MigrationRecoveryBlocked)?;
         self.validate_mcp_migration_journal(&journal)?;
+        match journal.phase {
+            McpMigrationPhase::CommitCleanupPending => {
+                self.validate_completed_mcp_migration(&journal)?;
+                return self.clear_mcp_migration_recovery(&journal);
+            }
+            McpMigrationPhase::RollbackCleanupPending => {
+                Self::validate_mcp_migration_member_digests(&journal, false)?;
+                return self.clear_mcp_migration_recovery(&journal);
+            }
+            McpMigrationPhase::Prepared
+            | McpMigrationPhase::HooksWritten
+            | McpMigrationPhase::ConfigWritten
+            | McpMigrationPhase::ManifestWritten => {}
+        }
         self.validate_mcp_migration_snapshots(&journal)?;
         let digests = journal
             .members
@@ -1732,7 +1748,10 @@ impl CodexIntegration {
                 .all(|(member, digest)| digest == &member.after_digest)
         {
             self.validate_completed_mcp_migration(&journal)?;
-            return self.clear_mcp_migration_recovery(&journal);
+            let mut terminal = journal;
+            terminal.phase = McpMigrationPhase::CommitCleanupPending;
+            self.write_mcp_migration_journal(&terminal)?;
+            return self.clear_mcp_migration_recovery(&terminal);
         }
         if !journal
             .members
@@ -1756,7 +1775,10 @@ impl CodexIntegration {
             }
         }
         Self::validate_mcp_migration_member_digests(&journal, false)?;
-        self.clear_mcp_migration_recovery(&journal)
+        let mut terminal = journal;
+        terminal.phase = McpMigrationPhase::RollbackCleanupPending;
+        self.write_mcp_migration_journal(&terminal)?;
+        self.clear_mcp_migration_recovery(&terminal)
     }
 
     /// Refuses a read-only repair preview when an interrupted migration needs
@@ -1885,6 +1907,12 @@ impl CodexIntegration {
         &self,
         journal: &McpMigrationJournal,
     ) -> Result<(), CodexIntegrationError> {
+        if !matches!(
+            journal.phase,
+            McpMigrationPhase::CommitCleanupPending | McpMigrationPhase::RollbackCleanupPending
+        ) {
+            return Err(CodexIntegrationError::MigrationRecoveryBlocked);
+        }
         for member in &journal.members {
             if let Some(snapshot) = &member.snapshot_path
                 && snapshot.exists()
@@ -2611,6 +2639,8 @@ enum McpMigrationPhase {
     HooksWritten,
     ConfigWritten,
     ManifestWritten,
+    CommitCleanupPending,
+    RollbackCleanupPending,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2656,6 +2686,9 @@ fn mcp_migration_test_fault_after(phase: McpMigrationPhase) -> bool {
         McpMigrationPhase::HooksWritten => 2,
         McpMigrationPhase::ConfigWritten => 3,
         McpMigrationPhase::ManifestWritten => 4,
+        McpMigrationPhase::CommitCleanupPending | McpMigrationPhase::RollbackCleanupPending => {
+            return false;
+        }
     };
     MCP_MIGRATION_TEST_FAULT_AFTER.load(Ordering::SeqCst) == expected
 }
@@ -5243,6 +5276,96 @@ mod tests {
             assert!(!integration.mcp_migration_snapshot_root().exists());
             fs::remove_dir_all(root).expect("fixture cleanup");
         }
+    }
+
+    #[test]
+    fn terminal_mcp_migration_cleanup_resumes_after_a_partial_snapshot_deletion() {
+        let (root, integration, plan) = interrupted_legacy_mcp_migration_fixture();
+        let journal = integration
+            .begin_mcp_migration(&plan)
+            .expect("migration journal begins");
+        for (member, after) in journal.members.iter().zip([
+            plan.hooks_after.as_slice(),
+            plan.config_after.as_slice(),
+            plan.manifest_after.as_slice(),
+        ]) {
+            fs::write(&member.path, after).expect("terminal after-image writes");
+        }
+
+        let mut terminal = serde_json::to_value(&journal).expect("journal serializes");
+        terminal["phase"] = serde_json::Value::String("commit_cleanup_pending".to_owned());
+        let mut terminal_bytes =
+            serde_json::to_vec_pretty(&terminal).expect("terminal journal serializes");
+        terminal_bytes.push(b'\n');
+        fs::write(integration.mcp_migration_journal_path(), terminal_bytes)
+            .expect("durable terminal cleanup phase writes");
+        fs::remove_file(
+            journal.members[0]
+                .snapshot_path
+                .as_deref()
+                .expect("hooks snapshot path"),
+        )
+        .expect("first cleanup deletion commits before interruption");
+
+        integration
+            .recover_incomplete_mcp_migration()
+            .expect("terminal cleanup resumes idempotently");
+        assert_eq!(
+            fs::read(&journal.members[0].path).expect("hooks after-image reads"),
+            plan.hooks_after
+        );
+        assert_eq!(
+            fs::read(&journal.members[1].path).expect("config after-image reads"),
+            plan.config_after
+        );
+        assert_eq!(
+            fs::read(&journal.members[2].path).expect("manifest after-image reads"),
+            plan.manifest_after
+        );
+        assert!(!integration.mcp_migration_journal_path().exists());
+        assert!(!integration.mcp_migration_snapshot_root().exists());
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn rollback_mcp_migration_cleanup_resumes_after_a_partial_snapshot_deletion() {
+        let (root, integration, plan) = interrupted_legacy_mcp_migration_fixture();
+        let journal = integration
+            .begin_mcp_migration(&plan)
+            .expect("migration journal begins");
+        let mut terminal = serde_json::to_value(&journal).expect("journal serializes");
+        terminal["phase"] = serde_json::Value::String("rollback_cleanup_pending".to_owned());
+        let mut terminal_bytes =
+            serde_json::to_vec_pretty(&terminal).expect("terminal journal serializes");
+        terminal_bytes.push(b'\n');
+        fs::write(integration.mcp_migration_journal_path(), terminal_bytes)
+            .expect("durable rollback cleanup phase writes");
+        fs::remove_file(
+            journal.members[1]
+                .snapshot_path
+                .as_deref()
+                .expect("config snapshot path"),
+        )
+        .expect("one rollback cleanup deletion commits before interruption");
+
+        integration
+            .recover_incomplete_mcp_migration()
+            .expect("rollback cleanup resumes idempotently");
+        assert_eq!(
+            fs::read(&journal.members[0].path).expect("hooks before-image reads"),
+            plan.hooks_before
+        );
+        assert_eq!(
+            fs::read(&journal.members[1].path).expect("config before-image reads"),
+            plan.config_before
+        );
+        assert_eq!(
+            fs::read(&journal.members[2].path).expect("manifest before-image reads"),
+            plan.manifest_before
+        );
+        assert!(!integration.mcp_migration_journal_path().exists());
+        assert!(!integration.mcp_migration_snapshot_root().exists());
+        fs::remove_dir_all(root).expect("fixture cleanup");
     }
 
     #[test]

@@ -218,7 +218,7 @@ $script:temporaryWindowCreated = $true
 $wtLauncherProcessId = $wtLauncher.Id
 $wtLauncher.Dispose()
 $registrationOutput = & $resolvedBinary '__temporary-wt-register-v1' `
-    $resolvedEvidence $lifecycleRunId $windowTitle $windowRoutingId 2>&1
+    $resolvedEvidence $lifecycleRunId $windowTitle $windowRoutingId $PID 2>&1
 if ($LASTEXITCODE -ne 0) {
     throw 'Exact-owned Windows Terminal registration failed'
 }

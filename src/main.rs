@@ -157,7 +157,14 @@ fn dispatch(cli: Cli) -> ExitCode {
             run_id,
             anchor_title,
             window_routing_id,
-        }) => temporary_wt_register(&evidence_root, &run_id, &anchor_title, &window_routing_id),
+            creator_process_id,
+        }) => temporary_wt_register(
+            &evidence_root,
+            &run_id,
+            &anchor_title,
+            &window_routing_id,
+            creator_process_id,
+        ),
         Some(Command::TemporaryWtCleanup {
             ownership_path,
             product_disposition,
@@ -268,6 +275,7 @@ fn temporary_wt_register(
     run_id: &str,
     anchor_title: &str,
     window_routing_id: &str,
+    creator_process_id: u32,
 ) -> ExitCode {
     let result = tabbeacon::visual::register_temporary_windows_terminal_with_retry(
         &tabbeacon::visual::WindowsUiaLocator,
@@ -275,6 +283,7 @@ fn temporary_wt_register(
         run_id,
         anchor_title,
         window_routing_id,
+        creator_process_id,
         Duration::from_secs(5),
     );
     match result {
