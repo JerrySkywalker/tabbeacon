@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 // owns multiple ConPTY tabs, even after WindowPattern.Close has been accepted.
 // Keep the wait bounded while allowing the exact admitted HWND to disappear
 // before classifying cleanup as failed.
-const EXACT_WINDOW_CLOSE_BUDGET: Duration = Duration::from_secs(15);
+const EXACT_WINDOW_CLOSE_BUDGET: Duration = Duration::from_secs(30);
 
 use super::{
     ExactOwnedWindowBackend, ExactWindowObservation, ScreenRect, UiaDump, VisualError,
