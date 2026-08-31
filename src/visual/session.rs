@@ -264,7 +264,11 @@ impl TerminalTestSessionLauncher {
         );
         let size = format!("{},{}", self.requested_size.0, self.requested_size.1);
         let anchor_hold_millis = target_hold_millis.saturating_add(15_000).max(30_000);
-        Command::new("wt.exe")
+        // `wt.exe` is a one-shot dispatcher. Observe its bounded dispatch
+        // result before attempting UIA registration: successful process
+        // creation alone does not prove that the named-window request was
+        // accepted by Windows Terminal.
+        let launch_status = Command::new("wt.exe")
             .args(["-w", &window_name, "--pos", &position, "--size", &size])
             .arg("new-tab")
             .args(["--title", &anchor_title, "--suppressApplicationTitle"])
@@ -281,12 +285,17 @@ impl TerminalTestSessionLauncher {
             .args(tab_options)
             .arg(executable)
             .args(arguments)
-            .spawn()
+            .status()
             .map_err(|error| {
                 VisualError::Platform(format!(
                     "could not launch owned Windows Terminal session: {error}"
                 ))
             })?;
+        if !launch_status.success() {
+            return Err(VisualError::Platform(
+                "Windows Terminal rejected the exact-owned fixture launch".to_owned(),
+            ));
+        }
         if let Err(error) = register_temporary_windows_terminal_with_retry(
             &WindowsUiaLocator,
             evidence_root,

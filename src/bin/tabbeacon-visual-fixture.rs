@@ -256,6 +256,11 @@ fn capture_promo_showcase(
     thread::sleep(Duration::from_millis(800));
 
     let ownership = read_promo_ownership(&session.ownership_path, session)?;
+    WindowsUiaLocator.verify_exact_anchor_window_tab_count(
+        &session.anchor_title,
+        ownership.native_window_id,
+        4,
+    )?;
     let capture_target = WindowsUiaLocator.activate_capture_target_for_exact_anchor(
         &session.anchor_title,
         ownership.native_window_id,
@@ -421,19 +426,28 @@ fn launch_showcase_sibling(
     run_id: &str,
     control_path: &Path,
 ) -> VisualResult<()> {
-    Command::new("wt.exe")
+    // Observe the named-window dispatch result before allowing a capture to
+    // proceed. A successful `spawn` only proves the launcher process exists;
+    // it does not prove the controlled sibling tab joined the registered
+    // exact-owned window.
+    let launch_status = Command::new("wt.exe")
         .args(["-w", window_name])
         .arg("new-tab")
         .arg("--useApplicationTitle")
         .arg(executable)
         .args(showcase_arguments(role, run_id, control_path))
-        .spawn()
-        .map(|_| ())
+        .status()
         .map_err(|error| {
             VisualError::Platform(format!(
                 "could not launch controlled promo Windows Terminal tab: {error}"
             ))
-        })
+        })?;
+    if !launch_status.success() {
+        return Err(VisualError::Platform(
+            "Windows Terminal rejected the controlled promo tab launch".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_promo_evidence_paths(

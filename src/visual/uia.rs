@@ -244,6 +244,57 @@ impl WindowsUiaLocator {
         OwnedWindowCaptureTarget::new(expected_hwnd, bounds)
     }
 
+    /// Verifies that the already-correlated exact-owned window contains the
+    /// expected number of tabs. The fixed anchor/HWND remains the sole
+    /// authority; this never uses mutable showcase tab titles as identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a platform error if the fixed anchor no longer resolves to the
+    /// registered HWND or the controlled tab fan-out is incomplete.
+    pub fn verify_exact_anchor_window_tab_count(
+        &self,
+        anchor_title: &str,
+        expected_hwnd: isize,
+        expected_tab_count: usize,
+    ) -> VisualResult<()> {
+        let (observation, window) = exact_anchor_window(anchor_title)?;
+        if observation.anchor_tab_match_count != 1
+            || observation.target_window_match_count != 1
+            || observation.native_window_id != Some(expected_hwnd)
+        {
+            return Err(VisualError::Platform(
+                "exact Windows Terminal showcase tab check refused an uncorrelated window"
+                    .to_owned(),
+            ));
+        }
+        let window = window.ok_or_else(|| {
+            VisualError::Platform(
+                "exact Windows Terminal showcase tab check lost the registered window".to_owned(),
+            )
+        })?;
+        let automation = UIAutomation::new().map_err(platform_error)?;
+        let tabs = match automation
+            .create_matcher()
+            .from_ref(&window)
+            .depth(12)
+            .control_type(ControlType::TabItem)
+            .timeout(0)
+            .find_all()
+        {
+            Ok(tabs) => tabs,
+            Err(error) if is_empty_match_error(&error.to_string()) => Vec::new(),
+            Err(error) => return Err(platform_error(error)),
+        };
+        if tabs.len() != expected_tab_count {
+            return Err(VisualError::Platform(format!(
+                "exact Windows Terminal showcase tab count is {}, expected {expected_tab_count}",
+                tabs.len()
+            )));
+        }
+        Ok(())
+    }
+
     /// Activates only the exact run-token/title-correlated fixture window.
     ///
     /// This is a harness-only visibility precondition, never product behavior.
