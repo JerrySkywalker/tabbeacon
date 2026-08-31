@@ -65,6 +65,20 @@ fn smoke_completion_is_durable_bounded_and_owner_correlated() {
         g18.contains("__temporary-wt-retry-cleanup-v1") && g18.contains("$ownershipPath $PID"),
         "the G18 cleanup retry must remain bound to the same long-lived qualification host"
     );
+    let g18_retry = g18
+        .find("__temporary-wt-retry-cleanup-v1")
+        .expect("the G18 exact-owner cleanup retry exists");
+    let g18_retry_tail = &g18[g18_retry..];
+    let refreshed_cleanup_exit = g18_retry_tail
+        .find("$cleanupExitCode = $LASTEXITCODE")
+        .expect("the G18 retry exit code replaces the failed primary cleanup exit code");
+    let cleanup_verdict = g18_retry_tail
+        .find("if ($cleanupExitCode -ne 0 -or $receipt.TEMP_WT_CLEANUP -ne 'PASS')")
+        .expect("the G18 cleanup verdict checks the effective cleanup result");
+    assert!(
+        refreshed_cleanup_exit < cleanup_verdict,
+        "a successful exact-owner retry must replace the failed primary cleanup exit code"
+    );
     assert!(
         script.contains("WaitForSingleObject")
             && script.contains("RESIDUAL_OWNED_PROCESS_OBSERVATION=")

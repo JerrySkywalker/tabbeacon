@@ -355,6 +355,7 @@ finally {
             if ($cleanupReceipt.temporary_wt_cleanup -ne 'PASS') {
                 $retryOutput = & $tabbeaconExecutable '__temporary-wt-retry-cleanup-v1' `
                     $ownershipPath $PID 2>&1
+                $cleanupExitCode = $LASTEXITCODE
                 $retryLine = @($retryOutput | ForEach-Object { $_.ToString() } |
                     Where-Object { $_.TrimStart().StartsWith('{') }) | Select-Object -Last 1
                 if ($null -eq $retryLine) { throw 'temporary_wt_cleanup_retry_receipt_missing' }
