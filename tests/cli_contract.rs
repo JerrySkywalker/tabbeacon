@@ -1634,6 +1634,9 @@ fn g105_timing_uses_setup_prewarmed_exact_worker_images() {
         "$info.ArgumentList.Add('codex')",
         "Initialize-G105QualificationState -State $State",
         "$publishedHash -ne $binarySha256",
+        "cwd = $resolvedEventWorkspace",
+        "$info.WorkingDirectory = $resolvedEventWorkspace",
+        "event_workspace_binding = if ($resolvedEventWorkspace -eq $resolvedWorkspace)",
         "schema = 'tabbeacon-g105-setup-boundary-v1'",
         "$cleanup = Invoke-ProductionHook -State $State -Event 'SessionEnd'",
     ] {

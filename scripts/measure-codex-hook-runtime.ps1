@@ -8,6 +8,11 @@ param(
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })]
     [string]$Workspace,
 
+    # Keep source admission bound to Workspace while allowing Hook payloads to
+    # use a separate disposable read-only workspace, as real qualification does.
+    [AllowEmptyString()]
+    [string]$EventWorkspace = '',
+
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^[0-9a-f]{40}$')]
     [string]$ExpectedHead,
@@ -51,7 +56,17 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$checkedOutHead = (git -C $Workspace rev-parse HEAD).Trim()
+$resolvedWorkspace = (Resolve-Path -LiteralPath $Workspace).Path
+$resolvedEventWorkspace = if ([string]::IsNullOrWhiteSpace($EventWorkspace)) {
+    $resolvedWorkspace
+}
+else {
+    (Resolve-Path -LiteralPath $EventWorkspace -ErrorAction Stop).Path
+}
+if (-not (Test-Path -LiteralPath $resolvedEventWorkspace -PathType Container)) {
+    throw 'EventWorkspace must be an existing directory.'
+}
+$checkedOutHead = (git -C $resolvedWorkspace rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $checkedOutHead -ne $ExpectedHead) {
     throw "Expected head $ExpectedHead does not match benchmark workspace head $checkedOutHead"
 }
@@ -141,7 +156,7 @@ function New-HookPayload {
     $payload = [ordered]@{
         hook_event_name = $Event
         session_id = $Session
-        cwd = $Workspace
+        cwd = $resolvedEventWorkspace
     }
     if ($Event -eq 'SessionStart') {
         $payload.source = 'startup'
@@ -183,7 +198,7 @@ function Initialize-G105QualificationState {
     $info.ArgumentList.Add('setup')
     $info.ArgumentList.Add('codex')
     $info.ArgumentList.Add('--plain')
-    $info.WorkingDirectory = $Workspace
+    $info.WorkingDirectory = $resolvedEventWorkspace
     $info.UseShellExecute = $false
     $info.RedirectStandardInput = $true
     $info.RedirectStandardOutput = $true
@@ -784,6 +799,7 @@ if ($MeasurementPlan -eq 'G105') {
         hook_declaration_mode = if ([string]::IsNullOrWhiteSpace($HookCommand)) { 'direct_binary' } else { 'direct_native_shell_neutral' }
         declaration_timeout_ms = 1000
         measurement_plan = 'G105'
+        event_workspace_binding = if ($resolvedEventWorkspace -eq $resolvedWorkspace) { 'source_workspace' } else { 'separate_disposable_workspace' }
         cold_samples_per_event = $ColdSamples
         warm_samples_per_event = $WarmSamples
         events = $events
