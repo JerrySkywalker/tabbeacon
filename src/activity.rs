@@ -2523,7 +2523,7 @@ fn worker_attribute_list(
 }
 
 #[cfg(windows)]
-fn append_quoted_windows_argument(
+fn append_windows_argument(
     command_line: &mut Vec<u16>,
     argument: &std::ffi::OsStr,
 ) -> io::Result<()> {
@@ -2533,6 +2533,14 @@ fn append_quoted_windows_argument(
             io::ErrorKind::InvalidInput,
             "activity process argument contains an embedded NUL",
         ));
+    }
+    if !argument.is_empty()
+        && !argument
+            .iter()
+            .any(|unit| matches!(*unit, 0x09 | 0x20 | 0x22))
+    {
+        command_line.extend(argument);
+        return Ok(());
     }
 
     command_line.push(u16::from(b'"'));
@@ -2601,10 +2609,10 @@ fn spawn_isolated_activity_process(
     application.push(0);
 
     let mut command_line = Vec::new();
-    append_quoted_windows_argument(&mut command_line, executable.as_os_str())?;
+    append_windows_argument(&mut command_line, executable.as_os_str())?;
     for argument in arguments {
         command_line.push(u16::from(b' '));
-        append_quoted_windows_argument(&mut command_line, std::ffi::OsStr::new(argument))?;
+        append_windows_argument(&mut command_line, std::ffi::OsStr::new(argument))?;
     }
     command_line.push(0);
 
@@ -3031,11 +3039,12 @@ mod tests {
         ActivityRender, CleanupObserverAction, LeaseTransition, PublishedWorkerStartup,
         SESSIONS_SCHEMA_VERSION, STATIC_ATTENTION_LEASE_TTL_MS, SessionWorkspaceObservability,
         TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation, WorkerProcessLiveness,
-        already_active_worker_render, cleanup_identity_recheck_due, cleanup_observer_action,
-        cleanup_observer_poll_ms, command_output_with_timeout, inspect_activity_leases_read_only,
-        inspect_sessions_read_only, next_animation_frame_deadline, normalized_windows_path,
-        persistent_worker_presentation, record_provider_session_observation,
-        start_published_worker, system_powershell_path, tasklist_output_reports_absence,
+        already_active_worker_render, append_windows_argument, cleanup_identity_recheck_due,
+        cleanup_observer_action, cleanup_observer_poll_ms, command_output_with_timeout,
+        inspect_activity_leases_read_only, inspect_sessions_read_only,
+        next_animation_frame_deadline, normalized_windows_path, persistent_worker_presentation,
+        record_provider_session_observation, start_published_worker, system_powershell_path,
+        tasklist_output_reports_absence,
     };
     use crate::{
         core::{Attention, Health, Phase},
@@ -3313,6 +3322,31 @@ mod tests {
         assert!(cleanup_identity_recheck_due(None, 1_000));
         assert!(!cleanup_identity_recheck_due(Some(1_000), 30_999));
         assert!(cleanup_identity_recheck_due(Some(1_000), 31_000));
+    }
+
+    #[test]
+    fn activity_process_command_line_keeps_identity_arguments_unquoted() {
+        let mut command_line = Vec::new();
+        append_windows_argument(
+            &mut command_line,
+            std::ffi::OsStr::new("__activity-worker-v1"),
+        )
+        .expect("safe worker argument encodes");
+        assert_eq!(
+            String::from_utf16(&command_line).expect("command line is UTF-16"),
+            "__activity-worker-v1"
+        );
+
+        command_line.clear();
+        append_windows_argument(
+            &mut command_line,
+            std::ffi::OsStr::new(r"C:\Program Files\TabBeacon\tabbeacon-worker.exe"),
+        )
+        .expect("spaced executable argument encodes");
+        assert_eq!(
+            String::from_utf16(&command_line).expect("command line is UTF-16"),
+            r#""C:\Program Files\TabBeacon\tabbeacon-worker.exe""#
+        );
     }
 
     #[test]
