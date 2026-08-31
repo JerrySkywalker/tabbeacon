@@ -4,12 +4,34 @@ All notable changes to TabBeacon will be documented here.
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-08-31
+
 ### Fixed
 
-- Migrated only exact owned historical Codex MCP Hook integrations to the
-  current command-Hook transport. The upgrade preserves unrelated Hooks, MCP
-  servers, and configuration, requires a fresh manual `/hooks` trust review,
-  and keeps subagent events out of root presentation state.
+- Prevented Codex child/subagent Hook activity from replacing root-session tab
+  state, while retaining synchronous fail-open command Hooks and their
+  one-second timeout.
+- Kept Stop-derived ResultReady presentation alive through its bounded static
+  activity-worker lease after the one-shot Stop Hook exits.
+- Moved active qualification and visual Windows Terminal windows onto
+  exact-owned RUN_ID, anchor TabItem, and HWND lifecycle cleanup without broad
+  process or window termination.
+
+### Changed
+
+- Migrated only exact-owned historical Codex MCP Hybrid integrations to the
+  current command-v1 Hook transport. The transaction preserves unrelated
+  Hooks, MCP servers, and configuration, and requires fresh manual `/hooks`
+  trust review when its managed Hook declarations change.
+- Removed avoidable Git subprocess work from conventional Codex Hook workspace
+  identity resolution, retaining conservative fallback for uncommon or
+  ambiguous repository layouts.
+
+### Maintained
+
+- Added no provider or presentation feature. Daily launch remains literal
+  `codex`; no wrapper, PATH shadow, PTY host, global daemon, trust bypass, or
+  production configuration mutation is introduced.
 
 ## [0.7.1] - 2026-08-28
 
