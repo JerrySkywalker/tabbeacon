@@ -49,6 +49,8 @@ fn smoke_completion_is_durable_bounded_and_owner_correlated() {
         script.contains("__temporary-wt-register-v1")
             && script.contains("$windowRoutingId $PID")
             && script.contains("__temporary-wt-cleanup-v1")
+            && script.contains("__temporary-wt-retry-cleanup-v1")
+            && script.contains("$script:temporaryWtOwnershipPath $PID")
             && script.contains("TEMP_WT_CLEANUP=")
             && script.contains("OWNER_WINDOWS_CLOSED=")
             && script.contains("BROAD_WINDOW_KILL_USED="),
@@ -58,6 +60,10 @@ fn smoke_completion_is_durable_bounded_and_owner_correlated() {
     assert!(
         g18.contains("$runRoot $lifecycleRunId $anchorTitle $windowName $PID"),
         "the G18 registration must bind ownership to its long-lived qualification host"
+    );
+    assert!(
+        g18.contains("__temporary-wt-retry-cleanup-v1") && g18.contains("$ownershipPath $PID"),
+        "the G18 cleanup retry must remain bound to the same long-lived qualification host"
     );
     assert!(
         script.contains("WaitForSingleObject")

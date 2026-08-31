@@ -12,7 +12,7 @@ use super::{
     FixtureReplay, TemporaryWindowProductDisposition, TemporaryWindowsTerminalCleanupReceipt,
     VisualError, VisualResult, WindowsUiaLocator, cleanup_temporary_windows_terminal,
     close_unregistered_exact_anchor, recover_stale_temporary_windows_terminals,
-    register_temporary_windows_terminal_with_retry,
+    register_temporary_windows_terminal_with_retry, retry_temporary_windows_terminal_cleanup,
 };
 
 /// A dedicated Windows Terminal test session positively correlated by run ID.
@@ -44,11 +44,20 @@ impl TerminalTestSession {
         &self,
         product_disposition: TemporaryWindowProductDisposition,
     ) -> VisualResult<TemporaryWindowsTerminalCleanupReceipt> {
-        cleanup_temporary_windows_terminal(
+        let receipt = cleanup_temporary_windows_terminal(
             &WindowsUiaLocator,
             &self.ownership_path,
             product_disposition,
-        )
+        )?;
+        if receipt.temporary_wt_cleanup == "PASS" {
+            Ok(receipt)
+        } else {
+            retry_temporary_windows_terminal_cleanup(
+                &WindowsUiaLocator,
+                &self.ownership_path,
+                std::process::id(),
+            )
+        }
     }
 }
 

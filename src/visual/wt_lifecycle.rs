@@ -253,6 +253,70 @@ pub fn cleanup_temporary_windows_terminal<B: ExactOwnedWindowBackend>(
     )
 }
 
+/// Retries a failed cleanup only for the exact process instance that created
+/// the immutable ownership record.
+///
+/// This is intentionally separate from stale recovery: an active creator may
+/// retry its own transient close failure, while a different run must continue
+/// to wait until that exact creator process instance has exited.
+///
+/// # Errors
+///
+/// Returns a classified evidence, process-identity, UIA, or filesystem error.
+/// The retry is refused unless the caller PID and process start time both
+/// match the immutable creator identity and the latest cleanup receipt is a
+/// failure with an exact-owned window still remaining.
+pub fn retry_temporary_windows_terminal_cleanup<B: ExactOwnedWindowRecoveryBackend>(
+    backend: &B,
+    ownership_path: &Path,
+    creator_process_id: u32,
+) -> VisualResult<TemporaryWindowsTerminalCleanupReceipt> {
+    let (ownership, ownership_sha256) = read_validated_ownership(ownership_path)?;
+    if creator_process_id == 0 || ownership.creator_process_id != creator_process_id {
+        return Err(VisualError::Platform(
+            "temporary Windows Terminal cleanup retry refused wrong creator process ID".to_owned(),
+        ));
+    }
+    let expected_creator_start = ownership.creator_process_started_unix_ms.ok_or_else(|| {
+        VisualError::Platform(
+            "temporary Windows Terminal cleanup retry refused unproven creator process identity"
+                .to_owned(),
+        )
+    })?;
+    if expected_creator_start > ownership.created_unix_ms {
+        return Err(VisualError::Platform(
+            "temporary Windows Terminal cleanup retry refused invalid creator process time"
+                .to_owned(),
+        ));
+    }
+    if backend.creator_process_started_unix_ms(creator_process_id)? != Some(expected_creator_start)
+    {
+        return Err(VisualError::Platform(
+            "temporary Windows Terminal cleanup retry refused changed creator process identity"
+                .to_owned(),
+        ));
+    }
+    let previous = latest_cleanup_receipt(ownership_path, &ownership_sha256)?.ok_or_else(|| {
+        VisualError::Platform(
+            "temporary Windows Terminal cleanup retry requires a prior failure receipt".to_owned(),
+        )
+    })?;
+    if previous.temporary_wt_cleanup != "FAIL" || previous.owned_temporary_wt_remaining == 0 {
+        return Err(VisualError::Platform(
+            "temporary Windows Terminal cleanup retry requires an unfinished prior failure"
+                .to_owned(),
+        ));
+    }
+    let receipt_path = next_cleanup_recovery_receipt_path(ownership_path)?;
+    cleanup_temporary_windows_terminal_to_receipt(
+        backend,
+        &ownership,
+        &ownership_sha256,
+        &receipt_path,
+        previous.product_disposition,
+    )
+}
+
 fn cleanup_temporary_windows_terminal_to_receipt<B: ExactOwnedWindowBackend>(
     backend: &B,
     ownership: &TemporaryWindowsTerminalOwnership,
@@ -730,7 +794,7 @@ mod tests {
         ExactOwnedWindowBackend, ExactOwnedWindowRecoveryBackend, ExactWindowObservation,
         TemporaryWindowProductDisposition, cleanup_temporary_windows_terminal,
         close_unregistered_exact_anchor, recover_stale_temporary_windows_terminals,
-        register_temporary_windows_terminal,
+        register_temporary_windows_terminal, retry_temporary_windows_terminal_cleanup,
     };
     use crate::visual::VisualResult;
 
@@ -1187,5 +1251,75 @@ mod tests {
                 .expect("successful recovery is terminal")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn exact_active_owner_retries_cleanup_and_preserves_product_failure() {
+        let registry = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let ownership = register(&registry, &backend);
+        backend.close_fails.set(true);
+        let failed = cleanup_temporary_windows_terminal(
+            &backend,
+            &ownership,
+            TemporaryWindowProductDisposition::Fail,
+        )
+        .expect("initial exact close failure records");
+        assert_eq!(failed.temporary_wt_cleanup, "FAIL");
+
+        backend.close_fails.set(false);
+        let retried = retry_temporary_windows_terminal_cleanup(&backend, &ownership, 4242)
+            .expect("the exact active creator retries its own cleanup");
+
+        assert_eq!(retried.temporary_wt_cleanup, "PASS");
+        assert_eq!(retried.owned_temporary_wt_remaining, 0);
+        assert_eq!(
+            retried.product_disposition,
+            TemporaryWindowProductDisposition::Fail
+        );
+        assert_eq!(backend.close_calls.get(), 2);
+    }
+
+    #[test]
+    fn active_owner_retry_refuses_the_wrong_creator_pid() {
+        let registry = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let ownership = register(&registry, &backend);
+        backend.close_fails.set(true);
+        cleanup_temporary_windows_terminal(
+            &backend,
+            &ownership,
+            TemporaryWindowProductDisposition::Pass,
+        )
+        .expect("initial exact close failure records");
+        backend.close_fails.set(false);
+
+        assert!(
+            retry_temporary_windows_terminal_cleanup(&backend, &ownership, 4243).is_err(),
+            "a different process cannot retry another run's cleanup"
+        );
+        assert_eq!(backend.close_calls.get(), 1);
+    }
+
+    #[test]
+    fn active_owner_retry_refuses_a_reused_creator_pid() {
+        let registry = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let ownership = register(&registry, &backend);
+        backend.close_fails.set(true);
+        cleanup_temporary_windows_terminal(
+            &backend,
+            &ownership,
+            TemporaryWindowProductDisposition::Pass,
+        )
+        .expect("initial exact close failure records");
+        backend.close_fails.set(false);
+        backend.creator_process_started_unix_ms.set(Some(42));
+
+        assert!(
+            retry_temporary_windows_terminal_cleanup(&backend, &ownership, 4242).is_err(),
+            "PID reuse cannot inherit exact ownership"
+        );
+        assert_eq!(backend.close_calls.get(), 1);
     }
 }

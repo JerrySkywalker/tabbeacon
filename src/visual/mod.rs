@@ -64,6 +64,7 @@ pub use wt_lifecycle::{
     TemporaryWindowsTerminalOwnership, cleanup_temporary_windows_terminal,
     close_unregistered_exact_anchor, recover_stale_temporary_windows_terminals,
     register_temporary_windows_terminal, register_temporary_windows_terminal_with_retry,
+    retry_temporary_windows_terminal_cleanup,
 };
 
 #[cfg(not(windows))]

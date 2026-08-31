@@ -124,6 +124,14 @@ function Invoke-ExactOwnedTemporaryWtCleanup {
             Where-Object { $_.TrimStart().StartsWith('{') }) | Select-Object -Last 1
         if ($null -eq $cleanupLine) { throw 'temporary_wt_cleanup_receipt_missing' }
         $script:temporaryWtCleanupReceipt = $cleanupLine | ConvertFrom-Json
+        if ($script:temporaryWtCleanupReceipt.temporary_wt_cleanup -ne 'PASS') {
+            $retryOutput = & $resolvedBinary '__temporary-wt-retry-cleanup-v1' `
+                $script:temporaryWtOwnershipPath $PID 2>&1
+            $retryLine = @($retryOutput | ForEach-Object { $_.ToString() } |
+                Where-Object { $_.TrimStart().StartsWith('{') }) | Select-Object -Last 1
+            if ($null -eq $retryLine) { throw 'temporary_wt_cleanup_retry_receipt_missing' }
+            $script:temporaryWtCleanupReceipt = $retryLine | ConvertFrom-Json
+        }
     }
     catch {
         $script:temporaryWtCleanupReceipt = [pscustomobject]@{

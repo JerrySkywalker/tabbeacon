@@ -352,6 +352,14 @@ finally {
                 Where-Object { $_.TrimStart().StartsWith('{') }) | Select-Object -Last 1
             if ($null -eq $cleanupLine) { throw 'temporary_wt_cleanup_receipt_missing' }
             $cleanupReceipt = $cleanupLine | ConvertFrom-Json
+            if ($cleanupReceipt.temporary_wt_cleanup -ne 'PASS') {
+                $retryOutput = & $tabbeaconExecutable '__temporary-wt-retry-cleanup-v1' `
+                    $ownershipPath $PID 2>&1
+                $retryLine = @($retryOutput | ForEach-Object { $_.ToString() } |
+                    Where-Object { $_.TrimStart().StartsWith('{') }) | Select-Object -Last 1
+                if ($null -eq $retryLine) { throw 'temporary_wt_cleanup_retry_receipt_missing' }
+                $cleanupReceipt = $retryLine | ConvertFrom-Json
+            }
             $receipt.TEMP_WT_CLEANUP = $cleanupReceipt.temporary_wt_cleanup
             $receipt.TEMP_WINDOWS_CREATED = $cleanupReceipt.temporary_windows_created
             $receipt.TEMP_WINDOWS_CLOSED = $cleanupReceipt.temporary_windows_closed

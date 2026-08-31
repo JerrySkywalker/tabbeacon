@@ -173,6 +173,12 @@ pub enum Command {
         ownership_path: PathBuf,
         product_disposition: String,
     },
+    /// Internal exact-active-owner temporary Windows Terminal cleanup retry.
+    #[command(name = "__temporary-wt-retry-cleanup-v1", hide = true)]
+    TemporaryWtRetryCleanup {
+        ownership_path: PathBuf,
+        creator_process_id: u32,
+    },
     /// Internal stale exact-owned temporary Windows Terminal recovery helper.
     #[command(name = "__temporary-wt-recover-v1", hide = true)]
     TemporaryWtRecover { registry_root: PathBuf },
@@ -912,10 +918,20 @@ mod tests {
             ])
             .is_ok()
         );
+        assert!(
+            Cli::try_parse_from([
+                "tabbeacon",
+                "__temporary-wt-retry-cleanup-v1",
+                "ownership.json",
+                "4242",
+            ])
+            .is_ok()
+        );
         let help = Cli::command().render_help().to_string();
         assert!(!help.contains("__activity-worker-v1"));
         assert!(!help.contains("__temporary-wt-register-v1"));
         assert!(!help.contains("__temporary-wt-cleanup-v1"));
+        assert!(!help.contains("__temporary-wt-retry-cleanup-v1"));
         assert!(!help.contains("__temporary-wt-recover-v1"));
     }
 }

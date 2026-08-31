@@ -169,6 +169,10 @@ fn dispatch(cli: Cli) -> ExitCode {
             ownership_path,
             product_disposition,
         }) => temporary_wt_cleanup(&ownership_path, &product_disposition),
+        Some(Command::TemporaryWtRetryCleanup {
+            ownership_path,
+            creator_process_id,
+        }) => temporary_wt_retry_cleanup(&ownership_path, creator_process_id),
         Some(Command::TemporaryWtRecover { registry_root }) => temporary_wt_recover(&registry_root),
         Some(Command::Setup {
             command: None,
@@ -308,6 +312,7 @@ fn temporary_wt_register(
     _run_id: &str,
     _anchor_title: &str,
     _window_routing_id: &str,
+    _creator_process_id: u32,
 ) -> ExitCode {
     ExitCode::FAILURE
 }
@@ -329,6 +334,34 @@ fn temporary_wt_cleanup(ownership_path: &std::path::Path, product_disposition: &
         &tabbeacon::visual::WindowsUiaLocator,
         ownership_path,
         disposition,
+    ) {
+        Ok(receipt) => match serde_json::to_string(&receipt) {
+            Ok(json) => {
+                println!("{json}");
+                if receipt.temporary_wt_cleanup == "PASS" {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+            Err(_) => ExitCode::FAILURE,
+        },
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(windows)]
+fn temporary_wt_retry_cleanup(
+    ownership_path: &std::path::Path,
+    creator_process_id: u32,
+) -> ExitCode {
+    match tabbeacon::visual::retry_temporary_windows_terminal_cleanup(
+        &tabbeacon::visual::WindowsUiaLocator,
+        ownership_path,
+        creator_process_id,
     ) {
         Ok(receipt) => match serde_json::to_string(&receipt) {
             Ok(json) => {
@@ -372,6 +405,14 @@ fn temporary_wt_recover(_registry_root: &std::path::Path) -> ExitCode {
 
 #[cfg(not(windows))]
 fn temporary_wt_cleanup(_ownership_path: &std::path::Path, _product_disposition: &str) -> ExitCode {
+    ExitCode::FAILURE
+}
+
+#[cfg(not(windows))]
+fn temporary_wt_retry_cleanup(
+    _ownership_path: &std::path::Path,
+    _creator_process_id: u32,
+) -> ExitCode {
     ExitCode::FAILURE
 }
 
