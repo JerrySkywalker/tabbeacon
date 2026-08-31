@@ -5,7 +5,7 @@ use std::{
     fs::OpenOptions,
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
-    process::{self, Command},
+    process::{self, Child, Command},
     thread,
     time::{Duration, Instant},
 };
@@ -102,6 +102,7 @@ const PROMO_FRAME_COUNT: u32 = 100;
 const PROMO_DURATION_MS: u64 = 10_000;
 const PROMO_FRAME_SETTLE: Duration = Duration::from_millis(150);
 const PROMO_CAPTURE_BUDGET: Duration = Duration::from_secs(85);
+const PROMO_WT_DISPATCH_OBSERVATION_BUDGET: Duration = Duration::from_secs(2);
 
 /// Content-minimal record of a successful deterministic showcase capture.
 /// It deliberately contains no terminal text, Owner identity, or filesystem
@@ -426,28 +427,43 @@ fn launch_showcase_sibling(
     run_id: &str,
     control_path: &Path,
 ) -> VisualResult<()> {
-    // Observe the named-window dispatch result before allowing a capture to
-    // proceed. A successful `spawn` only proves the launcher process exists;
-    // it does not prove the controlled sibling tab joined the registered
-    // exact-owned window.
-    let launch_status = Command::new("wt.exe")
+    // Observe an early named-window dispatcher failure without waiting for or
+    // terminating a launcher that remains alive while the real terminal is
+    // open. The later exact-anchor tab count proves the controlled fan-out.
+    let mut launcher = Command::new("wt.exe")
         .args(["-w", window_name])
         .arg("new-tab")
         .arg("--useApplicationTitle")
         .arg(executable)
         .args(showcase_arguments(role, run_id, control_path))
-        .status()
+        .spawn()
         .map_err(|error| {
             VisualError::Platform(format!(
                 "could not launch controlled promo Windows Terminal tab: {error}"
             ))
         })?;
-    if !launch_status.success() {
-        return Err(VisualError::Platform(
-            "Windows Terminal rejected the controlled promo tab launch".to_owned(),
-        ));
+    observe_promo_windows_terminal_dispatch(&mut launcher)
+}
+
+fn observe_promo_windows_terminal_dispatch(launcher: &mut Child) -> VisualResult<()> {
+    let deadline = Instant::now() + PROMO_WT_DISPATCH_OBSERVATION_BUDGET;
+    loop {
+        match launcher.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(_)) => {
+                return Err(VisualError::Platform(
+                    "Windows Terminal rejected the controlled promo tab launch".to_owned(),
+                ));
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                return Err(VisualError::Platform(format!(
+                    "could not observe the controlled promo Windows Terminal launcher: {error}"
+                )));
+            }
+        }
     }
-    Ok(())
 }
 
 fn validate_promo_evidence_paths(

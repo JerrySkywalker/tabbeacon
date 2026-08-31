@@ -2,8 +2,9 @@
 
 use std::{
     path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
+    process::{Child, Command},
+    thread,
+    time::{Duration, Instant},
 };
 
 use sha2::{Digest, Sha256};
@@ -77,6 +78,7 @@ const TITLE_ANIMATION_FIXTURE_HOLD_MILLIS: u64 = 60_000;
 // longer than that budget so a slow, exact-owned PrintWindow capture cannot
 // turn into a title/window-ownership race.
 const PROMO_SHOWCASE_HOLD_MILLIS: u64 = 95_000;
+const WT_DISPATCH_OBSERVATION_BUDGET: Duration = Duration::from_secs(2);
 
 impl Default for TerminalTestSessionLauncher {
     fn default() -> Self {
@@ -264,11 +266,11 @@ impl TerminalTestSessionLauncher {
         );
         let size = format!("{},{}", self.requested_size.0, self.requested_size.1);
         let anchor_hold_millis = target_hold_millis.saturating_add(15_000).max(30_000);
-        // `wt.exe` is a one-shot dispatcher. Observe its bounded dispatch
-        // result before attempting UIA registration: successful process
-        // creation alone does not prove that the named-window request was
-        // accepted by Windows Terminal.
-        let launch_status = Command::new("wt.exe")
+        // `wt.exe` may remain alive while a Windows Terminal window is open.
+        // Observe an early dispatcher failure when one is available, but do
+        // not wait for (or terminate) the launcher. Exact anchor registration
+        // remains the authority that proves the resulting terminal window.
+        let mut launcher = Command::new("wt.exe")
             .args(["-w", &window_name, "--pos", &position, "--size", &size])
             .arg("new-tab")
             .args(["--title", &anchor_title, "--suppressApplicationTitle"])
@@ -285,17 +287,13 @@ impl TerminalTestSessionLauncher {
             .args(tab_options)
             .arg(executable)
             .args(arguments)
-            .status()
+            .spawn()
             .map_err(|error| {
                 VisualError::Platform(format!(
                     "could not launch owned Windows Terminal session: {error}"
                 ))
             })?;
-        if !launch_status.success() {
-            return Err(VisualError::Platform(
-                "Windows Terminal rejected the exact-owned fixture launch".to_owned(),
-            ));
-        }
+        observe_windows_terminal_dispatch(&mut launcher, "exact-owned fixture")?;
         if let Err(error) = register_temporary_windows_terminal_with_retry(
             &WindowsUiaLocator,
             evidence_root,
@@ -316,6 +314,27 @@ impl TerminalTestSessionLauncher {
             anchor_title,
             ownership_path,
         })
+    }
+}
+
+fn observe_windows_terminal_dispatch(launcher: &mut Child, context: &str) -> VisualResult<()> {
+    let deadline = Instant::now() + WT_DISPATCH_OBSERVATION_BUDGET;
+    loop {
+        match launcher.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(_)) => {
+                return Err(VisualError::Platform(format!(
+                    "Windows Terminal rejected the {context} launch"
+                )));
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                return Err(VisualError::Platform(format!(
+                    "could not observe the Windows Terminal {context} launcher: {error}"
+                )));
+            }
+        }
     }
 }
 
