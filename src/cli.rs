@@ -158,6 +158,30 @@ pub enum Command {
         owner_sha256: String,
         expected_executable: String,
     },
+    /// Internal exact-owned temporary Windows Terminal registration helper.
+    #[command(name = "__temporary-wt-register-v1", hide = true)]
+    TemporaryWtRegister {
+        evidence_root: PathBuf,
+        run_id: String,
+        anchor_title: String,
+        window_routing_id: String,
+        creator_process_id: u32,
+    },
+    /// Internal exact-owned temporary Windows Terminal cleanup helper.
+    #[command(name = "__temporary-wt-cleanup-v1", hide = true)]
+    TemporaryWtCleanup {
+        ownership_path: PathBuf,
+        product_disposition: String,
+    },
+    /// Internal exact-active-owner temporary Windows Terminal cleanup retry.
+    #[command(name = "__temporary-wt-retry-cleanup-v1", hide = true)]
+    TemporaryWtRetryCleanup {
+        ownership_path: PathBuf,
+        creator_process_id: u32,
+    },
+    /// Internal stale exact-owned temporary Windows Terminal recovery helper.
+    #[command(name = "__temporary-wt-recover-v1", hide = true)]
+    TemporaryWtRecover { registry_root: PathBuf },
 }
 
 /// Setup command variants.
@@ -870,7 +894,44 @@ mod tests {
         assert!(
             Cli::try_parse_from(["tabbeacon", "__activity-worker-v1", "digest", "1", "2",]).is_ok()
         );
+        assert!(
+            Cli::try_parse_from([
+                "tabbeacon",
+                "__temporary-wt-register-v1",
+                "evidence",
+                "TBWT-abc",
+                "TB-WT-ANCHOR-TBWT-abc",
+                "tabbeacon-TBWT-abc",
+                "4242",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(["tabbeacon", "__temporary-wt-recover-v1", "evidence",]).is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "tabbeacon",
+                "__temporary-wt-cleanup-v1",
+                "ownership.json",
+                "FAIL",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "tabbeacon",
+                "__temporary-wt-retry-cleanup-v1",
+                "ownership.json",
+                "4242",
+            ])
+            .is_ok()
+        );
         let help = Cli::command().render_help().to_string();
         assert!(!help.contains("__activity-worker-v1"));
+        assert!(!help.contains("__temporary-wt-register-v1"));
+        assert!(!help.contains("__temporary-wt-cleanup-v1"));
+        assert!(!help.contains("__temporary-wt-retry-cleanup-v1"));
+        assert!(!help.contains("__temporary-wt-recover-v1"));
     }
 }

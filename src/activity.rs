@@ -57,6 +57,9 @@ pub const ACTIVITY_WORKER_PROBE_RECEIPT_FILE: &str = "activity-worker-probe.json
 /// Required basename for the non-content worker-start marker used when a
 /// probe must distinguish a spawn failure from a missing rendered frame.
 pub const ACTIVITY_WORKER_PROBE_STARTED_FILE: &str = "activity-worker-probe-started.json";
+/// Required basename for the content-minimal proof that the existing worker
+/// rendered a lease transition to static `ResultReady`.
+pub const ACTIVITY_WORKER_PROBE_RESULT_READY_FILE: &str = "activity-worker-probe-result-ready.json";
 /// Required basename for the non-content process-entry marker used by the
 /// isolated MCP activity probe.
 pub const ACTIVITY_WORKER_PROBE_PROCESS_FILE: &str = "activity-worker-probe-process.json";
@@ -161,6 +164,22 @@ impl ActivityWorkerProbeCapture {
         {
             self.published = true;
         }
+    }
+
+    fn record_result_ready_frame(&self) {
+        let path = self
+            .path
+            .with_file_name(ACTIVITY_WORKER_PROBE_RESULT_READY_FILE);
+        let Ok(file) = OpenOptions::new().write(true).create_new(true).open(path) else {
+            return;
+        };
+        let _ = serde_json::to_writer(
+            file,
+            &serde_json::json!({
+                "schema": "tabbeacon-activity-worker-probe-v1",
+                "result_ready_rendered": true,
+            }),
+        );
     }
 }
 
@@ -586,8 +605,8 @@ impl WorkerPresentation {
         }
     }
 
-    /// Creates a static result title that remains owned after a one-shot Hook
-    /// returns control to its shell host.
+    /// Creates a persistent static result title for lifecycle paths that admit
+    /// the optional worker after a one-shot Hook returns to its shell host.
     #[must_use]
     #[allow(dead_code)]
     fn result_ready(workspace_alias: &str, spinner: SpinnerPreset) -> Self {
@@ -724,6 +743,39 @@ impl WorkerPresentation {
             _ => LEASE_TTL_MS,
         }
     }
+
+    fn can_handoff_working_to_result_ready(&self, next: &Self) -> bool {
+        self.semantic_state == "working"
+            && next.semantic_state == "result-ready"
+            && self.workspace_alias == next.workspace_alias
+            && self.provider == next.provider
+            && self.provider_identity_visible == next.provider_identity_visible
+            && self.spinner_preset == next.spinner_preset
+    }
+}
+
+/// Returns a persistent worker presentation only for events that may spend
+/// the optional decoration budget. A Hook can still render the same static
+/// action without creating a worker.
+fn persistent_worker_presentation(
+    allow_persistent_worker: bool,
+    provider: &str,
+    workspace_alias: &str,
+    action: &PresentationAction,
+    settings: PresentationSettings,
+    workspace_observability: SessionWorkspaceObservability,
+) -> Option<WorkerPresentation> {
+    allow_persistent_worker
+        .then(|| {
+            WorkerPresentation::from_action(
+                provider,
+                workspace_alias,
+                action,
+                settings,
+                workspace_observability,
+            )
+        })
+        .flatten()
 }
 
 fn default_worker_provider() -> String {
@@ -753,6 +805,17 @@ pub(crate) enum ActivityRender {
     WithoutTitle,
     /// Ownership could not be proved, so decoration is suppressed fail-open.
     Suppress,
+}
+
+/// Content-free durations collected while a one-shot Hook reconciles activity
+/// ownership. These optional diagnostic facts never affect the lease, worker,
+/// or presentation decision.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ActivityReconciliationTiming {
+    pub(crate) lease_refresh: Option<u128>,
+    pub(crate) runtime_image_preparation: Option<u128>,
+    pub(crate) worker_launch: Option<u128>,
+    pub(crate) stop_cleanup: Option<u128>,
 }
 
 /// Bounded outcome of the asynchronous worker handoff after a lease is
@@ -853,7 +916,9 @@ impl ActivityCoordinator {
             action,
             settings,
             SessionWorkspaceObservability::default(),
+            true,
         )
+        .0
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -868,17 +933,19 @@ impl ActivityCoordinator {
         action: &PresentationAction,
         settings: PresentationSettings,
         workspace_observability: SessionWorkspaceObservability,
-    ) -> ActivityRender {
+        allow_persistent_worker: bool,
+    ) -> (ActivityRender, ActivityReconciliationTiming) {
+        let mut timing = ActivityReconciliationTiming::default();
         let ActivityExecution::System {
             executable,
             owner_sha256,
             terminal_binding_sha256,
         } = &self.execution
         else {
-            return ActivityRender::UncoordinatedFull;
+            return (ActivityRender::UncoordinatedFull, timing);
         };
         if !is_safe_worker_provider(provider) {
-            return ActivityRender::UncoordinatedFull;
+            return (ActivityRender::UncoordinatedFull, timing);
         }
         let key = WorkerKey::new(
             session_sha256,
@@ -886,7 +953,8 @@ impl ActivityCoordinator {
             generation,
             terminal_binding_sha256,
         );
-        let worker_presentation = WorkerPresentation::from_action(
+        let worker_presentation = persistent_worker_presentation(
+            allow_persistent_worker,
             provider,
             workspace_alias,
             action,
@@ -895,29 +963,39 @@ impl ActivityCoordinator {
         );
         let now = unix_ms();
         if let Some(presentation) = worker_presentation {
-            match self.store.refresh_runtime_backed_active_if_current(
+            let refresh_started = Instant::now();
+            let refresh = self.store.refresh_runtime_backed_active_if_current(
                 &key,
                 event_sequence,
                 owner_sha256,
                 &presentation,
                 now,
-            ) {
-                Ok(Some(LeaseTransition::Stale)) => return ActivityRender::Suppress,
+            );
+            timing.lease_refresh = Some(refresh_started.elapsed().as_millis());
+            match refresh {
+                Ok(Some(LeaseTransition::Stale)) => return (ActivityRender::Suppress, timing),
                 Ok(Some(LeaseTransition::AlreadyActive)) => {
-                    return already_active_worker_render();
+                    return (already_active_worker_render(), timing);
+                }
+                Ok(Some(LeaseTransition::UpdatedActive)) => {
+                    // The one-shot Hook emits the complete ResultReady frame.
+                    // The same working worker observes the in-place update on
+                    // its next bounded animation tick.
+                    return (ActivityRender::Full, timing);
                 }
                 Ok(None) => {}
                 Ok(Some(LeaseTransition::Published { .. } | LeaseTransition::Stopped { .. })) => {
                     unreachable!("existing runtime refresh only returns stale or active")
                 }
-                Err(_) => return ActivityRender::UncoordinatedFull,
+                Err(_) => return (ActivityRender::UncoordinatedFull, timing),
             }
             // A long-lived worker must never map the package-installed CLI.
             // Publishing is deliberately completed before its lease becomes
             // active, so an interrupted copy cannot authorize an ambiguous
             // process. A publication failure is decoration-only fail-open.
             let runtime_store = WorkerRuntimeStore::new(self.store.state_root());
-            let Ok((runtime_image, transition)) = self.store.publish_runtime_backed_active(
+            let runtime_image_started = Instant::now();
+            let published = self.store.publish_runtime_backed_active(
                 &runtime_store,
                 executable,
                 &key,
@@ -925,20 +1003,28 @@ impl ActivityCoordinator {
                 owner_sha256,
                 &presentation,
                 now,
-            ) else {
-                return ActivityRender::UncoordinatedFull;
+            );
+            timing.runtime_image_preparation = Some(runtime_image_started.elapsed().as_millis());
+            let Ok((runtime_image, transition)) = published else {
+                return (ActivityRender::UncoordinatedFull, timing);
             };
             match transition {
-                LeaseTransition::Stale => ActivityRender::Suppress,
-                LeaseTransition::AlreadyActive => already_active_worker_render(),
+                LeaseTransition::Stale => (ActivityRender::Suppress, timing),
+                LeaseTransition::AlreadyActive => (already_active_worker_render(), timing),
+                LeaseTransition::UpdatedActive => {
+                    unreachable!("publication cannot update an active worker in place")
+                }
                 LeaseTransition::Published { lease, .. } => {
                     // Publishing this lease atomically revokes the predecessor.
                     // It is safe to start the successor immediately because
                     // every worker validates the current lease before writing;
                     // waiting for the old worker's exit would consume most of
                     // the synchronous one-second Hook budget.
-                    match start_published_worker(|| spawn_worker(&runtime_image.executable, &lease))
-                    {
+                    let worker_launch_started = Instant::now();
+                    let startup =
+                        start_published_worker(|| spawn_worker(&runtime_image.executable, &lease));
+                    timing.worker_launch = Some(worker_launch_started.elapsed().as_millis());
+                    match startup {
                         PublishedWorkerStartup::Started => {
                             // Runtime-image collection is retention-only.  It
                             // re-enumerates state and hashes image files, so it
@@ -951,11 +1037,14 @@ impl ActivityCoordinator {
                             // opened the console or rendered its first frame.
                             // Keep this Hook's complete frame authoritative
                             // until a later event observes the active lease.
-                            PublishedWorkerStartup::Started.hook_render()
+                            (PublishedWorkerStartup::Started.hook_render(), timing)
                         }
                         PublishedWorkerStartup::WorkerSpawnFailed => {
                             let _ = self.store.deactivate_if_owned(&lease, unix_ms());
-                            PublishedWorkerStartup::WorkerSpawnFailed.hook_render()
+                            (
+                                PublishedWorkerStartup::WorkerSpawnFailed.hook_render(),
+                                timing,
+                            )
                         }
                     }
                 }
@@ -964,18 +1053,22 @@ impl ActivityCoordinator {
                 }
             }
         } else {
-            let Ok(transition) =
-                self.store
-                    .publish_stopped(&key, event_sequence, owner_sha256, now)
-            else {
-                return ActivityRender::UncoordinatedFull;
+            let stop_cleanup_started = Instant::now();
+            let stopped = self
+                .store
+                .publish_stopped(&key, event_sequence, owner_sha256, now);
+            timing.stop_cleanup = Some(stop_cleanup_started.elapsed().as_millis());
+            let Ok(transition) = stopped else {
+                return (ActivityRender::UncoordinatedFull, timing);
             };
             match transition {
-                LeaseTransition::Stale => ActivityRender::Suppress,
+                LeaseTransition::Stale => (ActivityRender::Suppress, timing),
                 // A stopped predecessor has already been atomically revoked.
                 // Do not spend the synchronous Hook budget observing its exit.
-                LeaseTransition::Stopped { .. } => ActivityRender::Full,
-                LeaseTransition::AlreadyActive | LeaseTransition::Published { .. } => {
+                LeaseTransition::Stopped { .. } => (ActivityRender::Full, timing),
+                LeaseTransition::AlreadyActive
+                | LeaseTransition::UpdatedActive
+                | LeaseTransition::Published { .. } => {
                     unreachable!("stop publication cannot return an active transition")
                 }
             }
@@ -1371,6 +1464,7 @@ fn cleanup_observer_action(
 enum LeaseTransition {
     Stale,
     AlreadyActive,
+    UpdatedActive,
     Published {
         lease: Box<WorkerLease>,
         predecessor: Option<WorkerOwnership>,
@@ -1491,15 +1585,25 @@ impl ActivityLeaseStore {
                 || current.generation != key.generation
                 || current.owner_sha256 != owner_sha256
                 || current.runtime_image_sha256.is_none()
-                || current.presentation.as_ref() != Some(presentation)
             {
                 return Ok(None);
             }
+            let transition =
+                if current.presentation.as_ref() == Some(presentation) {
+                    LeaseTransition::AlreadyActive
+                } else if current.presentation.as_ref().is_some_and(|current| {
+                    current.can_handoff_working_to_result_ready(presentation)
+                }) {
+                    current.presentation = Some(presentation.clone());
+                    LeaseTransition::UpdatedActive
+                } else {
+                    return Ok(None);
+                };
             current.event_sequence = current.event_sequence.max(event_sequence);
             current.updated_unix_ms = now;
             current.expires_unix_ms = expires_unix_ms;
             self.write(&current)?;
-            Ok(Some(LeaseTransition::AlreadyActive))
+            Ok(Some(transition))
         })
     }
 
@@ -1674,18 +1778,14 @@ impl ActivityLeaseStore {
         else {
             return;
         };
-        let Some(presentation) = initial.presentation.clone() else {
+        let Some(presentation) = initial.presentation.as_ref() else {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
             return;
         };
-        let Some(spinner) = presentation.spinner() else {
+        if presentation.spinner().is_none() || presentation.semantic_input().is_none() {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
             return;
-        };
-        let Some((phase, attention)) = presentation.semantic_input() else {
-            let _ = self.deactivate_if_owned(&initial, unix_ms());
-            return;
-        };
+        }
         let mut probe = ActivityWorkerProbeCapture::from_environment();
         let Ok(mut console) = open_owned_console(probe.is_some()) else {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
@@ -1702,46 +1802,53 @@ impl ActivityLeaseStore {
             let _ = self.deactivate_if_owned(&initial, unix_ms());
             return;
         }
-        let settings = PresentationSettings::new(
-            TitleMode::TabBeacon,
-            TabColorMode::Off,
-            ActivityMode::TitleSpinner,
-            spinner,
-            PresentationTheme::MutedDark,
-        );
-        let renderer = WindowsTerminalRenderer::with_settings(
-            WindowsTerminalCapabilities::new(false),
-            settings,
-        );
-        let action = presentation.presentation_action(phase, attention);
-        let state = match &action {
-            PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
-        };
         let mut frame_index = 0_usize;
         let mut next_frame_deadline = Instant::now();
-        let animated = presentation.semantic_state == "working";
-        loop {
-            let bytes = renderer.render_title_spinner_frame(state, frame_index);
+        while let Ok(Some((bytes, animated))) = self.with_lock(|| {
             // Keep lease validation and the terminal write in one critical section:
             // a newer event cannot supersede this worker between its authorization
             // check and the title write.
-            match self.with_lock(|| {
-                let Some(_) =
-                    self.load_worker_lease_locked(&ownership, terminal_binding_sha256, unix_ms())?
-                else {
-                    return Ok(None);
-                };
-                console.write_all(&bytes)?;
-                console.flush()?;
-                Ok(Some(()))
-            }) {
-                Ok(Some(())) => {}
-                Ok(None) | Err(_) => break,
-            }
+            let Some(lease) =
+                self.load_worker_lease_locked(&ownership, terminal_binding_sha256, unix_ms())?
+            else {
+                return Ok(None);
+            };
+            let Some(presentation) = lease.presentation.as_ref() else {
+                return Ok(None);
+            };
+            let Some(spinner) = presentation.spinner() else {
+                return Ok(None);
+            };
+            let Some((phase, attention)) = presentation.semantic_input() else {
+                return Ok(None);
+            };
+            let settings = PresentationSettings::new(
+                TitleMode::TabBeacon,
+                TabColorMode::Off,
+                ActivityMode::TitleSpinner,
+                spinner,
+                PresentationTheme::MutedDark,
+            );
+            let renderer = WindowsTerminalRenderer::with_settings(
+                WindowsTerminalCapabilities::new(false),
+                settings,
+            );
+            let action = presentation.presentation_action(phase, attention);
+            let state = match &action {
+                PresentationAction::Apply(state) | PresentationAction::Reset(state) => state,
+            };
+            let bytes = renderer.render_title_spinner_frame(state, frame_index);
+            console.write_all(&bytes)?;
+            console.flush()?;
+            Ok(Some((bytes, presentation.semantic_state == "working")))
+        }) {
             if let Some(probe) = probe.as_mut() {
                 // The recorder runs only after the real owned-console write
-                // and flush succeeded. It stores no rendered title content.
+                // and flush succeeded. It stores no title text.
                 probe.record_frame(&bytes);
+                if !animated {
+                    probe.record_result_ready_frame();
+                }
             }
             frame_index = frame_index.saturating_add(1);
             if animated {
@@ -2415,17 +2522,65 @@ fn worker_attribute_list(
     })
 }
 
-/// Starts a long-lived worker with an explicit standard-handle allowlist.
+#[cfg(windows)]
+fn append_windows_argument(
+    command_line: &mut Vec<u16>,
+    argument: &std::ffi::OsStr,
+) -> io::Result<()> {
+    let argument = argument.encode_wide().collect::<Vec<_>>();
+    if argument.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "activity process argument contains an embedded NUL",
+        ));
+    }
+    if !argument.is_empty()
+        && !argument
+            .iter()
+            .any(|unit| matches!(*unit, 0x09 | 0x20 | 0x22))
+    {
+        command_line.extend(argument);
+        return Ok(());
+    }
+
+    command_line.push(u16::from(b'"'));
+    let mut backslashes = 0_usize;
+    for unit in argument {
+        if unit == u16::from(b'\\') {
+            backslashes = backslashes.saturating_add(1);
+            continue;
+        }
+        if unit == u16::from(b'"') {
+            for _ in 0..backslashes.saturating_mul(2).saturating_add(1) {
+                command_line.push(u16::from(b'\\'));
+            }
+        } else {
+            for _ in 0..backslashes {
+                command_line.push(u16::from(b'\\'));
+            }
+        }
+        backslashes = 0;
+        command_line.push(unit);
+    }
+    for _ in 0..backslashes.saturating_mul(2) {
+        command_line.push(u16::from(b'\\'));
+    }
+    command_line.push(u16::from(b'"'));
+    Ok(())
+}
+
+/// Starts a detached activity helper with an explicit inherited-handle list.
 ///
-/// Rust's Windows `Command` implementation currently calls `CreateProcessW`
-/// with `bInheritHandles=TRUE`. `Stdio::null()` replaces the three standard
-/// handles, but it does not exclude other inheritable handles already present
-/// in the Hook process (notably the command runner's redirected pipe ends).
-/// A `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` preserves explicit NUL stdio without
-/// allowing those ambient handles to keep Codex's output pipes open.
+/// Both the renderer and its cleanup observer outlive the one-shot Hook. They
+/// must therefore inherit only their NUL-backed standard handles, never an
+/// ambient runner, Codex, or test-fixture pipe that happens to be inheritable.
 #[cfg(windows)]
 #[allow(unsafe_code)]
-fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
+fn spawn_isolated_activity_process(
+    executable: &Path,
+    arguments: &[String],
+    additional_creation_flags: u32,
+) -> io::Result<u32> {
     use std::mem;
 
     use windows::{
@@ -2433,7 +2588,7 @@ fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
             Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE},
             System::Threading::{
                 CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
-                PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+                PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
             },
         },
         core::{PCWSTR, PWSTR},
@@ -2448,20 +2603,17 @@ fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
     if application.contains(&0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "worker executable contains an embedded NUL",
+            "activity process executable contains an embedded NUL",
         ));
     }
     application.push(0);
+
     let mut command_line = Vec::new();
-    command_line.push(u16::from(b'"'));
-    command_line.extend(executable.as_os_str().encode_wide());
-    command_line.extend(
-        format!(
-            "\" __activity-worker-v1 {} {} {}",
-            lease.key_sha256, lease.generation, lease.revision
-        )
-        .encode_utf16(),
-    );
+    append_windows_argument(&mut command_line, executable.as_os_str())?;
+    for argument in arguments {
+        command_line.push(u16::from(b' '));
+        append_windows_argument(&mut command_line, std::ffi::OsStr::new(argument))?;
+    }
     command_line.push(0);
 
     let mut startup = STARTUPINFOEXW::default();
@@ -2479,7 +2631,9 @@ fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
             None,
             None,
             true,
-            CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+            CREATE_UNICODE_ENVIRONMENT
+                | EXTENDED_STARTUPINFO_PRESENT
+                | PROCESS_CREATION_FLAGS(additional_creation_flags),
             None,
             PCWSTR::null(),
             &raw const startup.StartupInfo,
@@ -2493,6 +2647,26 @@ fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
     Ok(process_id)
 }
 
+/// Starts a long-lived worker with an explicit standard-handle allowlist.
+///
+/// Rust's Windows `Command` implementation currently calls `CreateProcessW`
+/// with `bInheritHandles=TRUE`. `Stdio::null()` replaces the three standard
+/// handles, but it does not exclude other inheritable handles already present
+/// in the Hook process (notably the command runner's redirected pipe ends).
+/// A `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` preserves explicit NUL stdio without
+/// allowing those ambient handles to keep Codex's output pipes open.
+#[cfg(windows)]
+fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
+    let arguments = [
+        "__activity-worker-v1".to_owned(),
+        lease.key_sha256.clone(),
+        lease.generation.to_string(),
+        lease.revision.to_string(),
+    ];
+    spawn_isolated_activity_process(executable, &arguments, 0)
+}
+
+#[cfg(not(windows))]
 fn spawn_cleanup_observer(
     executable: &Path,
     lease: &WorkerLease,
@@ -2513,9 +2687,26 @@ fn spawn_cleanup_observer(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(windows)]
-    command.creation_flags(0x0000_0008 | 0x0000_0200);
     command.spawn().map(|_| ())
+}
+
+#[cfg(windows)]
+fn spawn_cleanup_observer(
+    executable: &Path,
+    lease: &WorkerLease,
+    worker_pid: u32,
+) -> io::Result<()> {
+    let expected_executable = normalized_executable_path(executable)?;
+    let arguments = [
+        "__activity-cleanup-observer-v1".to_owned(),
+        worker_pid.to_string(),
+        lease.key_sha256.clone(),
+        lease.generation.to_string(),
+        lease.revision.to_string(),
+        lease.owner_sha256.clone(),
+        expected_executable,
+    ];
+    spawn_isolated_activity_process(executable, &arguments, 0x0000_0008 | 0x0000_0200).map(|_| ())
 }
 
 fn worker_process_liveness(
@@ -2848,9 +3039,10 @@ mod tests {
         ActivityRender, CleanupObserverAction, LeaseTransition, PublishedWorkerStartup,
         SESSIONS_SCHEMA_VERSION, STATIC_ATTENTION_LEASE_TTL_MS, SessionWorkspaceObservability,
         TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation, WorkerProcessLiveness,
-        already_active_worker_render, cleanup_identity_recheck_due, cleanup_observer_action,
-        cleanup_observer_poll_ms, command_output_with_timeout, inspect_activity_leases_read_only,
-        inspect_sessions_read_only, next_animation_frame_deadline, normalized_windows_path,
+        already_active_worker_render, append_windows_argument, cleanup_identity_recheck_due,
+        cleanup_observer_action, cleanup_observer_poll_ms, command_output_with_timeout,
+        inspect_activity_leases_read_only, inspect_sessions_read_only,
+        next_animation_frame_deadline, normalized_windows_path, persistent_worker_presentation,
         record_provider_session_observation, start_published_worker, system_powershell_path,
         tasklist_output_reports_absence,
     };
@@ -3016,6 +3208,37 @@ mod tests {
     }
 
     #[test]
+    fn result_ready_can_render_without_starting_a_persistent_worker() {
+        let action = source_action(
+            Phase::WaitingUser,
+            Attention::ResultReady,
+            Some(ProviderVisualIdentity::codex()),
+        );
+        assert!(
+            persistent_worker_presentation(
+                true,
+                "codex",
+                "OWH",
+                &action,
+                worker_settings(),
+                SessionWorkspaceObservability::default(),
+            )
+            .is_some()
+        );
+        assert!(
+            persistent_worker_presentation(
+                false,
+                "codex",
+                "OWH",
+                &action,
+                worker_settings(),
+                SessionWorkspaceObservability::default(),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn worker_reconstruction_does_not_infer_identity_when_provider_badge_is_off() {
         let source = source_action(Phase::Working, Attention::None, None);
         let presentation = worker_from_source_action("codex", &source);
@@ -3099,6 +3322,31 @@ mod tests {
         assert!(cleanup_identity_recheck_due(None, 1_000));
         assert!(!cleanup_identity_recheck_due(Some(1_000), 30_999));
         assert!(cleanup_identity_recheck_due(Some(1_000), 31_000));
+    }
+
+    #[test]
+    fn activity_process_command_line_keeps_identity_arguments_unquoted() {
+        let mut command_line = Vec::new();
+        append_windows_argument(
+            &mut command_line,
+            std::ffi::OsStr::new("__activity-worker-v1"),
+        )
+        .expect("safe worker argument encodes");
+        assert_eq!(
+            String::from_utf16(&command_line).expect("command line is UTF-16"),
+            "__activity-worker-v1"
+        );
+
+        command_line.clear();
+        append_windows_argument(
+            &mut command_line,
+            std::ffi::OsStr::new(r"C:\Program Files\TabBeacon\tabbeacon-worker.exe"),
+        )
+        .expect("spaced executable argument encodes");
+        assert_eq!(
+            String::from_utf16(&command_line).expect("command line is UTF-16"),
+            r#""C:\Program Files\TabBeacon\tabbeacon-worker.exe""#
+        );
     }
 
     #[test]
@@ -3459,6 +3707,51 @@ mod tests {
             .expect("stopped lease reads")
             .expect("stopped lease exists");
         assert!(!stopped.active);
+    }
+
+    #[test]
+    fn result_ready_reuses_the_generation_matched_working_worker() {
+        let root = TestRoot::new("result-ready-worker-handoff");
+        let store = ActivityLeaseStore::new(&root.0);
+        let key = key(7, 'a', 'c');
+        let owner = digest('d');
+        let runtime_image = digest('e');
+        let working = presentation();
+        let result = WorkerPresentation::result_ready("OWH", SpinnerPreset::Braille);
+        let LeaseTransition::Published { lease: initial, .. } = store
+            .publish_active_with_runtime_image(
+                &key,
+                10,
+                &owner,
+                Some(&runtime_image),
+                &working,
+                1_000,
+            )
+            .expect("working worker publishes")
+        else {
+            panic!("working worker must publish");
+        };
+
+        let transition = store
+            .refresh_runtime_backed_active_if_current(&key, 11, &owner, &result, 1_100)
+            .expect("result handoff reconciles");
+        assert_eq!(
+            transition,
+            Some(LeaseTransition::UpdatedActive),
+            "ResultReady must reuse the exact current working worker rather than synchronously spawning a successor"
+        );
+        let updated = store
+            .load(key.digest())
+            .expect("updated lease reads")
+            .expect("updated lease exists");
+        assert_eq!(updated.revision, initial.revision);
+        assert_eq!(updated.presentation.as_ref(), Some(&result));
+        assert_eq!(
+            updated
+                .expires_unix_ms
+                .saturating_sub(updated.updated_unix_ms),
+            STATIC_ATTENTION_LEASE_TTL_MS
+        );
     }
 
     #[test]

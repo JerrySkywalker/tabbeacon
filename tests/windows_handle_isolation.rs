@@ -5,7 +5,10 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -14,7 +17,9 @@ use serde_json::{Value, json};
 use tabbeacon::activity::{
     ACTIVITY_OBSERVER_PROBE_PROCESS_FILE, ACTIVITY_WORKER_PROBE_PROCESS_FILE,
     ACTIVITY_WORKER_PROBE_RECEIPT_ENV, ACTIVITY_WORKER_PROBE_RECEIPT_FILE,
+    ACTIVITY_WORKER_PROBE_RESULT_READY_FILE, ACTIVITY_WORKER_PROBE_STARTED_FILE,
 };
+use tabbeacon::worker_runtime::WorkerRuntimeStore;
 use windows::Win32::{
     Foundation::{
         CloseHandle, ERROR_BROKEN_PIPE, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS,
@@ -27,8 +32,11 @@ use windows::core::HRESULT;
 
 // This is an OS-fixture watchdog, not the Codex Hook declaration. Keep it
 // long enough to observe handle/EOF correctness even on a saturated Windows
-// host where process scheduling itself can exceed the product timeout.
-const STAGE_TIMEOUT: Duration = Duration::from_mins(1);
+// host where first execution of a newly built debug worker image can spend
+// minutes in system process-start inspection. Release-mode Hook timing has a
+// separate one-second acceptance gate; this watchdog must not impersonate it.
+const STAGE_TIMEOUT: Duration = Duration::from_mins(5);
+static TEST_ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 struct TestRoot(PathBuf);
 
@@ -38,7 +46,9 @@ impl TestRoot {
             .duration_since(UNIX_EPOCH)
             .expect("clock after Unix epoch")
             .as_nanos();
-        let path = env::temp_dir().join(format!("tb-pipe-{}-{nonce}", std::process::id()));
+        let sequence = TEST_ROOT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path =
+            env::temp_dir().join(format!("tb-pipe-{}-{nonce}-{sequence}", std::process::id()));
         fs::create_dir(&path).expect("isolated test root is created");
         Self(path)
     }
@@ -231,7 +241,11 @@ fn run_hook(
 fn wait_for_file(path: &Path) {
     let deadline = Instant::now() + STAGE_TIMEOUT;
     while !path.is_file() {
-        assert!(Instant::now() < deadline, "missing probe receipt");
+        assert!(
+            Instant::now() < deadline,
+            "missing probe receipt: {}",
+            path.display()
+        );
         thread::sleep(Duration::from_millis(10));
     }
 }
@@ -269,6 +283,12 @@ fn hook_payload(event: &str, session: &str, turn: Option<&str>, cwd: &Path) -> V
     .expect("Hook payload serializes")
 }
 
+fn prewarm_worker_runtime(local_app_data: &Path, executable: &Path) {
+    WorkerRuntimeStore::new(local_app_data.join("TabBeacon").join("repository-identity"))
+        .publish(executable)
+        .expect("setup-prewarmed immutable worker image publishes");
+}
+
 #[test]
 fn worker_and_observer_exclude_ambient_handles_and_release_runner_streams() {
     let root = TestRoot::new();
@@ -299,6 +319,7 @@ fn worker_and_observer_exclude_ambient_handles_and_release_runner_streams() {
         ),
     )
     .expect("isolated settings are written");
+    prewarm_worker_runtime(&local_app_data, &executable);
     let terminal_session = "00000000-0000-0000-0000-000000000063";
     let probe_receipt = local_app_data.join(ACTIVITY_WORKER_PROBE_RECEIPT_FILE);
 
@@ -363,4 +384,125 @@ fn worker_and_observer_exclude_ambient_handles_and_release_runner_streams() {
         &probe_receipt,
         "SessionEnd",
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn root_stop_publishes_a_bounded_static_result_ready_worker() {
+    let root = TestRoot::new();
+    let executable = PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon"));
+    let workspace = root.child("w");
+    let local_app_data = root.child("l");
+    fs::create_dir_all(&workspace).expect("workspace is created");
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&workspace)
+            .status()
+            .is_ok_and(|status| status.success()),
+        "workspace Git fixture initializes"
+    );
+    let settings_root = local_app_data.join("TabBeacon");
+    fs::create_dir_all(&settings_root).expect("settings root is created");
+    fs::write(
+        settings_root.join("config.toml"),
+        concat!(
+            "[presentation]\n",
+            "title = \"tabbeacon\"\n",
+            "tab_color = \"off\"\n",
+            "activity = \"title-spinner\"\n",
+            "spinner = \"braille\"\n",
+            "theme = \"muted-dark\"\n",
+            "provider_badge = \"always\"\n",
+        ),
+    )
+    .expect("isolated settings are written");
+    prewarm_worker_runtime(&local_app_data, &executable);
+    let terminal_session = "00000000-0000-0000-0000-000000000072";
+    let probe_receipt = local_app_data.join(ACTIVITY_WORKER_PROBE_RECEIPT_FILE);
+
+    run_hook(
+        &executable,
+        &hook_payload("SessionStart", "result-session", None, &workspace),
+        &local_app_data,
+        terminal_session,
+        &probe_receipt,
+        "SessionStart",
+    );
+    run_hook(
+        &executable,
+        &hook_payload(
+            "UserPromptSubmit",
+            "result-session",
+            Some("result-turn"),
+            &workspace,
+        ),
+        &local_app_data,
+        terminal_session,
+        &probe_receipt,
+        "UserPromptSubmit",
+    );
+    wait_for_file(&local_app_data.join(ACTIVITY_WORKER_PROBE_PROCESS_FILE));
+    wait_for_file(&local_app_data.join(ACTIVITY_OBSERVER_PROBE_PROCESS_FILE));
+    wait_for_file(&local_app_data.join(ACTIVITY_WORKER_PROBE_STARTED_FILE));
+    for marker in [
+        ACTIVITY_WORKER_PROBE_PROCESS_FILE,
+        ACTIVITY_OBSERVER_PROBE_PROCESS_FILE,
+        ACTIVITY_WORKER_PROBE_STARTED_FILE,
+        ACTIVITY_WORKER_PROBE_RECEIPT_FILE,
+    ] {
+        let path = local_app_data.join(marker);
+        if path.exists() {
+            fs::remove_file(path).expect("owned working-worker marker removes");
+        }
+    }
+    run_hook(
+        &executable,
+        &hook_payload("Stop", "result-session", Some("result-turn"), &workspace),
+        &local_app_data,
+        terminal_session,
+        &probe_receipt,
+        "Stop",
+    );
+
+    wait_for_file(&local_app_data.join(ACTIVITY_WORKER_PROBE_RESULT_READY_FILE));
+    for marker in [
+        ACTIVITY_WORKER_PROBE_PROCESS_FILE,
+        ACTIVITY_OBSERVER_PROBE_PROCESS_FILE,
+        ACTIVITY_WORKER_PROBE_STARTED_FILE,
+    ] {
+        assert!(
+            !local_app_data.join(marker).exists(),
+            "ResultReady handoff must reuse the existing worker, marker={marker}"
+        );
+    }
+    let sessions = Command::new(&executable)
+        .args(["sessions", "--json"])
+        .env("LOCALAPPDATA", &local_app_data)
+        .output()
+        .expect("isolated sessions inspection starts");
+    assert!(sessions.status.success());
+    let sessions: Value = serde_json::from_slice(&sessions.stdout).expect("sessions JSON parses");
+    assert_eq!(sessions["active_sessions"], 1);
+    let rows = sessions["sessions"].as_array().expect("session rows");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["semantic_state"], "result-ready");
+
+    run_hook(
+        &executable,
+        &hook_payload("SessionEnd", "result-session", None, &workspace),
+        &local_app_data,
+        terminal_session,
+        &probe_receipt,
+        "SessionEnd",
+    );
+    let sessions = Command::new(executable)
+        .args(["sessions", "--json"])
+        .env("LOCALAPPDATA", &local_app_data)
+        .output()
+        .expect("post-cleanup sessions inspection starts");
+    assert!(sessions.status.success());
+    let sessions: Value =
+        serde_json::from_slice(&sessions.stdout).expect("post-cleanup sessions JSON parses");
+    assert_eq!(sessions["active_sessions"], 0);
 }

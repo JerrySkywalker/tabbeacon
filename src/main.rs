@@ -152,6 +152,28 @@ fn dispatch(cli: Cli) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Some(Command::TemporaryWtRegister {
+            evidence_root,
+            run_id,
+            anchor_title,
+            window_routing_id,
+            creator_process_id,
+        }) => temporary_wt_register(
+            &evidence_root,
+            &run_id,
+            &anchor_title,
+            &window_routing_id,
+            creator_process_id,
+        ),
+        Some(Command::TemporaryWtCleanup {
+            ownership_path,
+            product_disposition,
+        }) => temporary_wt_cleanup(&ownership_path, &product_disposition),
+        Some(Command::TemporaryWtRetryCleanup {
+            ownership_path,
+            creator_process_id,
+        }) => temporary_wt_retry_cleanup(&ownership_path, creator_process_id),
+        Some(Command::TemporaryWtRecover { registry_root }) => temporary_wt_recover(&registry_root),
         Some(Command::Setup {
             command: None,
             quick,
@@ -249,6 +271,149 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Preview(arguments)) => preview(arguments),
         Some(Command::Completions { shell }) => completions(shell),
     }
+}
+
+#[cfg(windows)]
+fn temporary_wt_register(
+    evidence_root: &std::path::Path,
+    run_id: &str,
+    anchor_title: &str,
+    window_routing_id: &str,
+    creator_process_id: u32,
+) -> ExitCode {
+    let result = tabbeacon::visual::register_temporary_windows_terminal_with_retry(
+        &tabbeacon::visual::WindowsUiaLocator,
+        evidence_root,
+        run_id,
+        anchor_title,
+        window_routing_id,
+        creator_process_id,
+        Duration::from_secs(5),
+    );
+    match result {
+        Ok(path) => {
+            println!("{}", path.display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            let _ = tabbeacon::visual::close_unregistered_exact_anchor(
+                &tabbeacon::visual::WindowsUiaLocator,
+                anchor_title,
+            );
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn temporary_wt_register(
+    _evidence_root: &std::path::Path,
+    _run_id: &str,
+    _anchor_title: &str,
+    _window_routing_id: &str,
+    _creator_process_id: u32,
+) -> ExitCode {
+    ExitCode::FAILURE
+}
+
+#[cfg(windows)]
+fn temporary_wt_cleanup(ownership_path: &std::path::Path, product_disposition: &str) -> ExitCode {
+    use tabbeacon::visual::TemporaryWindowProductDisposition as Disposition;
+
+    let disposition = match product_disposition.to_ascii_uppercase().as_str() {
+        "PASS" => Disposition::Pass,
+        "FAIL" => Disposition::Fail,
+        "BLOCKED" => Disposition::Blocked,
+        "TIMEOUT" => Disposition::Timeout,
+        "EXCEPTION" => Disposition::Exception,
+        "CANCELLED" => Disposition::Cancelled,
+        _ => return ExitCode::FAILURE,
+    };
+    match tabbeacon::visual::cleanup_temporary_windows_terminal(
+        &tabbeacon::visual::WindowsUiaLocator,
+        ownership_path,
+        disposition,
+    ) {
+        Ok(receipt) => match serde_json::to_string(&receipt) {
+            Ok(json) => {
+                println!("{json}");
+                if receipt.temporary_wt_cleanup == "PASS" {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+            Err(_) => ExitCode::FAILURE,
+        },
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(windows)]
+fn temporary_wt_retry_cleanup(
+    ownership_path: &std::path::Path,
+    creator_process_id: u32,
+) -> ExitCode {
+    match tabbeacon::visual::retry_temporary_windows_terminal_cleanup(
+        &tabbeacon::visual::WindowsUiaLocator,
+        ownership_path,
+        creator_process_id,
+    ) {
+        Ok(receipt) => match serde_json::to_string(&receipt) {
+            Ok(json) => {
+                println!("{json}");
+                if receipt.temporary_wt_cleanup == "PASS" {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::FAILURE
+                }
+            }
+            Err(_) => ExitCode::FAILURE,
+        },
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(windows)]
+fn temporary_wt_recover(registry_root: &std::path::Path) -> ExitCode {
+    match tabbeacon::visual::recover_stale_temporary_windows_terminals(
+        &tabbeacon::visual::WindowsUiaLocator,
+        registry_root,
+    ) {
+        Ok(receipts) => {
+            println!("STALE_EXACT_OWNED_WINDOWS_RECOVERED={}", receipts.len());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn temporary_wt_recover(_registry_root: &std::path::Path) -> ExitCode {
+    ExitCode::FAILURE
+}
+
+#[cfg(not(windows))]
+fn temporary_wt_cleanup(_ownership_path: &std::path::Path, _product_disposition: &str) -> ExitCode {
+    ExitCode::FAILURE
+}
+
+#[cfg(not(windows))]
+fn temporary_wt_retry_cleanup(
+    _ownership_path: &std::path::Path,
+    _creator_process_id: u32,
+) -> ExitCode {
+    ExitCode::FAILURE
 }
 
 fn config_command(
@@ -1048,6 +1213,7 @@ fn repair_codex(
     print_codex_repair_report(&report, output_mode)
 }
 
+#[allow(clippy::too_many_lines)] // Plain, JSON, and human output remain one compatible management contract.
 fn print_codex_repair_report(report: &CodexRepairReport, output_mode: OutputMode) -> ExitCode {
     if output_mode == OutputMode::Json {
         return match serde_json::to_string(&report) {
@@ -1072,6 +1238,11 @@ fn print_codex_repair_report(report: &CodexRepairReport, output_mode: OutputMode
         );
         println!("MISSING_DECLARATIONS={}", report.missing_declarations);
         println!("TARGET_DIGEST={}", report.target_digest);
+        println!("LEGACY_MCP_MIGRATION={}", report.legacy_mcp_migration);
+        println!(
+            "OWNED_TABBEACON_MCP_SERVER_REMOVAL_REQUIRED={}",
+            report.owned_mcp_server_removal_required
+        );
         println!(
             "THIRD_PARTY_GROUPS_PRESERVED={}",
             report.third_party_groups_preserved
@@ -1109,18 +1280,34 @@ fn print_codex_repair_report(report: &CodexRepairReport, output_mode: OutputMode
     let (tone, summary, next) = match report.disposition {
         CodexRepairDisposition::ReadyToApply => (
             HumanTone::Attention,
-            format!(
-                "Repair preview found {} exact missing TabBeacon Hook declarations and will preserve {} third-party Hook groups.",
-                report.missing_declarations, report.third_party_groups_preserved
-            ),
-            "Run `tabbeacon repair codex --apply --expected-target-digest <TARGET_DIGEST>` to restore only those declarations.",
+            if report.legacy_mcp_migration {
+                format!(
+                    "Migration preview found an exact legacy TabBeacon MCP integration. It will replace {} owned declarations, remove the exact owned MCP server, and preserve {} third-party Hook groups.",
+                    report.missing_declarations, report.third_party_groups_preserved
+                )
+            } else {
+                format!(
+                    "Repair preview found {} exact missing TabBeacon Hook declarations and will preserve {} third-party Hook groups.",
+                    report.missing_declarations, report.third_party_groups_preserved
+                )
+            },
+            if report.legacy_mcp_migration {
+                "Run `tabbeacon repair codex --apply --expected-target-digest <TARGET_DIGEST>` to migrate only that exact owned legacy transport, then review the command Hooks in `/hooks`."
+            } else {
+                "Run `tabbeacon repair codex --apply --expected-target-digest <TARGET_DIGEST>` to restore only those declarations."
+            },
         ),
         CodexRepairDisposition::RepairedTrustReviewRequired => (
             HumanTone::Success,
-            format!(
-                "Restored {} exact TabBeacon Hook declarations.",
-                report.missing_declarations
-            ),
+            if report.legacy_mcp_migration {
+                "Migrated the exact owned legacy TabBeacon MCP transport to command Hooks."
+                    .to_owned()
+            } else {
+                format!(
+                    "Restored {} exact TabBeacon Hook declarations.",
+                    report.missing_declarations
+                )
+            },
             "Launch `codex`, review the TabBeacon Hooks in `/hooks`, then run `tabbeacon doctor`.",
         ),
         CodexRepairDisposition::AlreadyExact => (

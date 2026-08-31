@@ -2,13 +2,13 @@ use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
-    time::{Instant, SystemTime},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use sha2::{Digest, Sha256};
 
 use crate::{
-    activity::{ActivityCoordinator, ActivityRender},
+    activity::{ActivityCoordinator, ActivityReconciliationTiming, ActivityRender},
     core::SessionReconciler,
     presentation::{
         PresentationPolicy, SemanticPresentationInput, TitleMarkBackend,
@@ -162,6 +162,15 @@ impl CodexHookRuntime {
         timing: &mut HookTimingCapture,
         session_end_probe: &mut Option<SessionEndProbeCapture>,
     ) -> HookDispatchOutcome {
+        let observed_at = SystemTime::now();
+        let normalized = match Self::normalize_with_timing(raw, observed_at, timing) {
+            Ok(normalized) => normalized,
+            Err(outcome) => return outcome,
+        };
+        if let Some(outcome) = system_fast_path_outcome(&normalized) {
+            return outcome;
+        }
+
         let started = Instant::now();
         let Ok(state_root) = StableAliasRegistry::default_state_root() else {
             return HookDispatchOutcome::DegradedStateRoot;
@@ -184,9 +193,9 @@ impl CodexHookRuntime {
             return HookDispatchOutcome::DegradedPresentationOutput;
         };
         timing.record("console_open", started);
-        runtime.dispatch_to_with_timing(
-            raw,
-            SystemTime::now(),
+        runtime.dispatch_normalized_with_timing(
+            normalized,
+            observed_at,
             &mut console,
             timing,
             session_end_probe,
@@ -220,16 +229,55 @@ impl CodexHookRuntime {
         timing: &mut HookTimingCapture,
         session_end_probe: &mut Option<SessionEndProbeCapture>,
     ) -> HookDispatchOutcome {
-        let observed_at_unix_seconds = observed_at
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs());
+        let normalized = match Self::normalize_with_timing(raw, observed_at, timing) {
+            Ok(normalized) => normalized,
+            Err(outcome) => return outcome,
+        };
+        self.dispatch_normalized_with_timing(
+            normalized,
+            observed_at,
+            sink,
+            timing,
+            session_end_probe,
+        )
+    }
+
+    fn normalize_with_timing(
+        raw: &[u8],
+        observed_at: SystemTime,
+        timing: &mut HookTimingCapture,
+    ) -> Result<CodexNormalization, HookDispatchOutcome> {
         let started = Instant::now();
         let Ok(normalized) = CodexHookNormalizer.normalize(raw, observed_at) else {
             timing.record("normalization", started);
-            return HookDispatchOutcome::DegradedInput;
+            return Err(HookDispatchOutcome::DegradedInput);
         };
         timing.record("normalization", started);
+        match &normalized {
+            CodexNormalization::Evidence(normalized) => {
+                timing.record_event(normalized.context().event());
+            }
+            CodexNormalization::PreserveCurrentState(context)
+            | CodexNormalization::IgnoreSubagent(context) => {
+                timing.record_event(context.event());
+            }
+            CodexNormalization::UnsupportedEvent => {}
+        }
+        Ok(normalized)
+    }
 
+    #[allow(clippy::too_many_lines)]
+    fn dispatch_normalized_with_timing(
+        &self,
+        normalized: CodexNormalization,
+        observed_at: SystemTime,
+        sink: &mut impl Write,
+        timing: &mut HookTimingCapture,
+        session_end_probe: &mut Option<SessionEndProbeCapture>,
+    ) -> HookDispatchOutcome {
+        let observed_at_unix_seconds = observed_at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_secs());
         let started = Instant::now();
         let (normalized, admitted) = match normalized {
             CodexNormalization::Evidence(normalized) => {
@@ -287,15 +335,17 @@ impl CodexHookRuntime {
         ) {
             Ok(selection) => selection,
             Err(AnchorSelectionError::Workspace) => {
+                timing.record("workspace_anchor", started);
                 return HookDispatchOutcome::DegradedWorkspaceIdentity;
             }
             Err(AnchorSelectionError::Anchor) => {
+                timing.record("workspace_anchor", started);
                 return HookDispatchOutcome::DegradedRootWorkspaceAnchor;
             }
         };
         timing.record("workspace_anchor", started);
 
-        let started = Instant::now();
+        let presentation_started = Instant::now();
         let mut reconciler = SessionReconciler::default();
         let snapshot = reconciler.apply(normalized.evidence());
         // Hook input contains no current local capability evidence. Provider
@@ -318,7 +368,10 @@ impl CodexHookRuntime {
                 state.workspace_alias().as_str()
             }
         };
-        let render = self.activity.reconcile_with_workspace_observability(
+        timing.record("presentation", presentation_started);
+
+        let activity_started = Instant::now();
+        let (render, activity_timing) = self.activity.reconcile_with_workspace_observability(
             admitted.session_sha256(),
             admitted.turn_sha256(),
             admitted.generation(),
@@ -328,7 +381,12 @@ impl CodexHookRuntime {
             &action,
             self.renderer.settings(),
             selection.workspace_observability(),
+            allows_persistent_activity_worker(normalized.context().event()),
         );
+        timing.record("activity_reconciliation", activity_started);
+        record_activity_reconciliation_timing(timing, activity_timing);
+
+        let presentation_render_started = Instant::now();
         let bytes = match render {
             ActivityRender::UncoordinatedFull | ActivityRender::Full => {
                 self.renderer.render(&action)
@@ -336,7 +394,7 @@ impl CodexHookRuntime {
             ActivityRender::WithoutTitle => self.renderer.render_without_title(&action),
             ActivityRender::Suppress => Vec::new(),
         };
-        timing.record("presentation_and_activity", started);
+        timing.record("presentation_render", presentation_render_started);
 
         let started = Instant::now();
         if self
@@ -492,6 +550,30 @@ enum AnchorSelectionError {
     Anchor,
 }
 
+/// Avoids platform initialization for Hook events that cannot mutate root state.
+///
+/// Subagent lifecycle events deliberately remain on the normal path so their
+/// bounded anchor accounting continues to run.
+fn system_fast_path_outcome(normalized: &CodexNormalization) -> Option<HookDispatchOutcome> {
+    match normalized {
+        CodexNormalization::IgnoreSubagent(context) if !context.event().is_subagent_lifecycle() => {
+            Some(HookDispatchOutcome::IgnoredSubagent)
+        }
+        CodexNormalization::UnsupportedEvent => Some(HookDispatchOutcome::IgnoredUnsupported),
+        CodexNormalization::Evidence(_)
+        | CodexNormalization::PreserveCurrentState(_)
+        | CodexNormalization::IgnoreSubagent(_) => None,
+    }
+}
+
+/// Every admitted root lifecycle event may enter the bounded worker path.
+/// Presentation settings and the resolved action still decide whether a worker
+/// is needed. In particular, `Stop` resolves to static `ResultReady`, whose
+/// title owner must outlive the one-shot Hook process.
+const fn allows_persistent_activity_worker(_event: super::CodexHookEvent) -> bool {
+    true
+}
+
 fn open_owned_console() -> io::Result<Box<dyn Write>> {
     #[cfg(windows)]
     if activity_worker_probe_enabled() {
@@ -530,7 +612,16 @@ struct HookTimingCapture {
     enabled: bool,
     started: Instant,
     phases: Vec<(&'static str, u128)>,
-    destination: Option<PathBuf>,
+    destination: Option<HookTimingDestination>,
+    event: Option<&'static str>,
+}
+
+/// The isolated timing harness can request one immutable receipt per Hook.
+/// Ordinary diagnostic use remains a single exact file, which preserves the
+/// existing no-overwrite contract.
+enum HookTimingDestination {
+    File(PathBuf),
+    Directory(PathBuf),
 }
 
 /// Opt-in content-free receipt for the independent command `SessionEnd` path.
@@ -581,7 +672,15 @@ impl HookTimingCapture {
     fn from_environment() -> Self {
         let destination = std::env::var_os("TABBEACON_HOOK_TIMING_FILE")
             .filter(|value| !value.is_empty())
-            .map(PathBuf::from);
+            .map(PathBuf::from)
+            .map(HookTimingDestination::File)
+            .or_else(|| {
+                std::env::var_os("TABBEACON_HOOK_TIMING_DIRECTORY")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .filter(|path| path.is_absolute() && path.is_dir())
+                    .map(HookTimingDestination::Directory)
+            });
         Self {
             enabled: destination.is_some()
                 || std::env::var_os("TABBEACON_HOOK_TIMING_CAPTURE")
@@ -589,6 +688,7 @@ impl HookTimingCapture {
             started: Instant::now(),
             phases: Vec::new(),
             destination,
+            event: None,
         }
     }
 
@@ -598,12 +698,27 @@ impl HookTimingCapture {
             started: Instant::now(),
             phases: Vec::new(),
             destination: None,
+            event: None,
         }
     }
 
     fn record(&mut self, phase: &'static str, started: Instant) {
         if self.enabled {
             self.phases.push((phase, started.elapsed().as_millis()));
+        }
+    }
+
+    fn record_elapsed_ms(&mut self, phase: &'static str, elapsed_ms: Option<u128>) {
+        if self.enabled
+            && let Some(elapsed_ms) = elapsed_ms
+        {
+            self.phases.push((phase, elapsed_ms));
+        }
+    }
+
+    fn record_event(&mut self, event: super::CodexHookEvent) {
+        if self.enabled {
+            self.event = Some(hook_event_name(event));
         }
     }
 
@@ -618,17 +733,39 @@ impl HookTimingCapture {
             .collect::<Vec<_>>()
             .join(",");
         let line = format!(
-            "TABBEACON_HOOK_TIMING_V1 total_ms={} outcome={} phases={phases}",
+            "TABBEACON_HOOK_TIMING_V2 event={} total_ms={} outcome={} phases={phases}",
+            self.event.unwrap_or("unrecognized"),
             self.started.elapsed().as_millis(),
             hook_dispatch_outcome_name(outcome)
         );
-        if let Some(destination) = &self.destination
-            && write_timing_line_once(destination, &line).is_ok()
-        {
-            return;
+        if let Some(destination) = &self.destination {
+            let written = match destination {
+                HookTimingDestination::File(destination) => {
+                    write_timing_line_once(destination, &line)
+                }
+                HookTimingDestination::Directory(directory) => {
+                    write_timing_line_in_directory(directory, &line)
+                }
+            };
+            if written.is_ok() {
+                return;
+            }
         }
         eprintln!("{line}");
     }
+}
+
+fn record_activity_reconciliation_timing(
+    timing: &mut HookTimingCapture,
+    activity_timing: ActivityReconciliationTiming,
+) {
+    timing.record_elapsed_ms("activity_lease_refresh", activity_timing.lease_refresh);
+    timing.record_elapsed_ms(
+        "runtime_image_preparation",
+        activity_timing.runtime_image_preparation,
+    );
+    timing.record_elapsed_ms("worker_launch", activity_timing.worker_launch);
+    timing.record_elapsed_ms("stop_cleanup", activity_timing.stop_cleanup);
 }
 
 /// Writes opt-in timing evidence only to a previously absent final path.
@@ -640,6 +777,30 @@ fn write_timing_line_once(destination: &std::path::Path, line: &str) -> io::Resu
         .create_new(true)
         .open(destination)?;
     file.write_all(line.as_bytes())
+}
+
+/// Writes one per-process, collision-safe receipt into an explicitly supplied
+/// existing directory.  The file name carries no Hook input or state: only a
+/// process id, an instant-derived nonce, and a bounded collision attempt.
+fn write_timing_line_in_directory(directory: &std::path::Path, line: &str) -> io::Result<()> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    for attempt in 0..8 {
+        let destination = directory.join(format!(
+            "tabbeacon-hook-timing-{}-{nonce}-{attempt}.txt",
+            std::process::id()
+        ));
+        match write_timing_line_once(&destination, line) {
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            result => return result,
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "timing receipt collision budget exhausted",
+    ))
 }
 
 const fn hook_dispatch_outcome_name(outcome: HookDispatchOutcome) -> &'static str {
@@ -659,6 +820,22 @@ const fn hook_dispatch_outcome_name(outcome: HookDispatchOutcome) -> &'static st
     }
 }
 
+const fn hook_event_name(event: super::CodexHookEvent) -> &'static str {
+    match event {
+        super::CodexHookEvent::SessionStart => "SessionStart",
+        super::CodexHookEvent::SessionEnd => "SessionEnd",
+        super::CodexHookEvent::UserPromptSubmit => "UserPromptSubmit",
+        super::CodexHookEvent::PreToolUse => "PreToolUse",
+        super::CodexHookEvent::PostToolUse => "PostToolUse",
+        super::CodexHookEvent::PermissionRequest => "PermissionRequest",
+        super::CodexHookEvent::Stop => "Stop",
+        super::CodexHookEvent::PreCompact => "PreCompact",
+        super::CodexHookEvent::PostCompact => "PostCompact",
+        super::CodexHookEvent::SubagentStart => "SubagentStart",
+        super::CodexHookEvent::SubagentStop => "SubagentStop",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -670,9 +847,18 @@ mod tests {
 
     use serde_json::json;
 
-    use crate::repo::WorkspaceIdentityResolver;
+    use crate::{
+        activity::ActivityReconciliationTiming,
+        core::{Attention, Phase, SessionReconciler},
+        repo::WorkspaceIdentityResolver,
+    };
 
-    use super::{CodexHookRuntime, HookDispatchOutcome, write_timing_line_once};
+    use super::{
+        CodexHookRuntime, HookDispatchOutcome, HookTimingCapture, HookTimingDestination,
+        allows_persistent_activity_worker, record_activity_reconciliation_timing,
+        system_fast_path_outcome, write_timing_line_in_directory, write_timing_line_once,
+    };
+    use crate::providers::codex::{CodexHookNormalizer, CodexNormalization};
 
     fn test_root(label: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -765,6 +951,56 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_subagent_tool_events_avoid_system_runtime_initialization() {
+        for event in ["PreToolUse", "PostToolUse"] {
+            let raw = json!({
+                "hook_event_name": event,
+                "session_id": "subagent-session",
+                "turn_id": "subagent-turn",
+                "agent_id": "thread-1",
+                "agent_type": "thread",
+                "cwd": "V:\\fixture"
+            });
+            let normalized = CodexHookNormalizer
+                .normalize(raw.to_string().as_bytes(), SystemTime::UNIX_EPOCH)
+                .expect("thread-attributed tool event normalizes");
+
+            assert_eq!(
+                system_fast_path_outcome(&normalized),
+                Some(HookDispatchOutcome::IgnoredSubagent),
+                "event={event}"
+            );
+        }
+    }
+
+    #[test]
+    fn root_stop_result_ready_requires_a_persistent_activity_worker() {
+        let raw = json!({
+            "hook_event_name": "Stop",
+            "session_id": "result-ready-session",
+            "turn_id": "result-ready-turn",
+            "cwd": "V:\\fixture"
+        });
+        let CodexNormalization::Evidence(normalized) = CodexHookNormalizer
+            .normalize(raw.to_string().as_bytes(), SystemTime::UNIX_EPOCH)
+            .expect("valid root Stop normalizes")
+        else {
+            panic!("valid root Stop must produce lifecycle evidence");
+        };
+        let snapshot = SessionReconciler::default().apply(normalized.evidence());
+
+        assert_eq!(snapshot.phase(), Phase::WaitingUser);
+        assert_eq!(snapshot.attention(), Attention::ResultReady);
+        assert!(
+            allows_persistent_activity_worker(normalized.context().event()),
+            "ResultReady needs a bounded post-Hook title owner"
+        );
+        assert!(allows_persistent_activity_worker(
+            crate::providers::codex::CodexHookEvent::PostToolUse
+        ));
+    }
+
+    #[test]
     fn timing_capture_refuses_to_overwrite_existing_evidence() {
         let root = test_root("timing-collision");
         let destination = root.join("timing.txt");
@@ -777,5 +1013,84 @@ mod tests {
             "sentinel"
         );
         fs::remove_dir_all(root).expect("owned test root removes");
+    }
+
+    #[test]
+    fn timing_directory_writes_distinct_content_free_receipts() {
+        let root = test_root("timing-directory");
+        write_timing_line_in_directory(&root, "first timing").expect("first timing receipt writes");
+        write_timing_line_in_directory(&root, "second timing")
+            .expect("second timing receipt writes");
+        let mut receipts = fs::read_dir(&root)
+            .expect("timing directory reads")
+            .map(|entry| entry.expect("timing entry reads").path())
+            .collect::<Vec<_>>();
+        receipts.sort();
+        assert_eq!(receipts.len(), 2);
+        assert!(receipts.iter().all(|receipt| {
+            receipt
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("tabbeacon-hook-timing-"))
+        }));
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|receipt| fs::read_to_string(receipt).expect("timing receipt rereads"))
+                .collect::<Vec<_>>(),
+            vec!["first timing", "second timing"]
+        );
+        fs::remove_dir_all(root).expect("owned test root removes");
+    }
+
+    #[test]
+    fn timing_capture_records_only_the_fixed_hook_event_name() {
+        let root = test_root("timing-event");
+        let capture = HookTimingCapture {
+            enabled: true,
+            started: std::time::Instant::now(),
+            phases: Vec::new(),
+            destination: Some(HookTimingDestination::Directory(root.clone())),
+            event: Some("PostToolUse"),
+        };
+        capture.emit(HookDispatchOutcome::IgnoredSubagent);
+        let receipt = fs::read_dir(&root)
+            .expect("timing directory reads")
+            .next()
+            .expect("one timing receipt exists")
+            .expect("timing receipt entry reads")
+            .path();
+        let line = fs::read_to_string(receipt).expect("timing receipt rereads");
+        assert!(line.starts_with("TABBEACON_HOOK_TIMING_V2 event=PostToolUse total_ms="));
+        assert!(line.contains("outcome=ignored_subagent"));
+        fs::remove_dir_all(root).expect("owned test root removes");
+    }
+
+    #[test]
+    fn activity_timing_records_only_fixed_content_free_phase_names() {
+        let mut capture = HookTimingCapture {
+            enabled: true,
+            started: std::time::Instant::now(),
+            phases: Vec::new(),
+            destination: None,
+            event: None,
+        };
+        record_activity_reconciliation_timing(
+            &mut capture,
+            ActivityReconciliationTiming {
+                lease_refresh: Some(1),
+                runtime_image_preparation: Some(2),
+                worker_launch: Some(3),
+                stop_cleanup: Some(4),
+            },
+        );
+        assert_eq!(
+            capture.phases,
+            vec![
+                ("activity_lease_refresh", 1),
+                ("runtime_image_preparation", 2),
+                ("worker_launch", 3),
+                ("stop_cleanup", 4),
+            ]
+        );
     }
 }

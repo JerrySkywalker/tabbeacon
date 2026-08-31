@@ -1,8 +1,19 @@
 //! Owned Windows Terminal fixture-session launch contract.
 
-use std::{path::Path, process::Command};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    time::Duration,
+};
 
-use super::{FixtureReplay, VisualError, VisualResult};
+use sha2::{Digest, Sha256};
+
+use super::{
+    FixtureReplay, TemporaryWindowProductDisposition, TemporaryWindowsTerminalCleanupReceipt,
+    VisualError, VisualResult, WindowsUiaLocator, cleanup_temporary_windows_terminal,
+    close_unregistered_exact_anchor, recover_stale_temporary_windows_terminals,
+    register_temporary_windows_terminal_with_retry, retry_temporary_windows_terminal_cleanup,
+};
 
 /// A dedicated Windows Terminal test session positively correlated by run ID.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +26,39 @@ pub struct TerminalTestSession {
     pub expected_title: String,
     /// Fixed requested terminal grid size, recorded even if Terminal rounds it.
     pub requested_size: (u16, u16),
+    /// Complete fixed anchor used as the only cleanup identity.
+    pub anchor_title: String,
+    /// Immutable exact run/anchor/routing/HWND ownership record.
+    pub ownership_path: PathBuf,
+}
+
+impl TerminalTestSession {
+    /// Closes only this exact-owned window and writes the separate cleanup
+    /// receipt without changing the caller's primary disposition.
+    ///
+    /// # Errors
+    ///
+    /// Returns a classified evidence, UIA, or filesystem error. Ambiguous
+    /// ownership is always an error and never triggers a close.
+    pub fn cleanup(
+        &self,
+        product_disposition: TemporaryWindowProductDisposition,
+    ) -> VisualResult<TemporaryWindowsTerminalCleanupReceipt> {
+        let receipt = cleanup_temporary_windows_terminal(
+            &WindowsUiaLocator,
+            &self.ownership_path,
+            product_disposition,
+        )?;
+        if receipt.temporary_wt_cleanup == "PASS" {
+            Ok(receipt)
+        } else {
+            retry_temporary_windows_terminal_cleanup(
+                &WindowsUiaLocator,
+                &self.ownership_path,
+                std::process::id(),
+            )
+        }
+    }
 }
 
 /// Launches a fixture child in an owned Windows Terminal window.
@@ -53,6 +97,7 @@ impl TerminalTestSessionLauncher {
         fixture_executable: &Path,
         replay: &FixtureReplay,
         run_id: &str,
+        evidence_root: &Path,
     ) -> VisualResult<TerminalTestSession> {
         let hold_millis = fixture_hold_millis(replay.case.expects_title_animation);
         let arguments = [
@@ -71,6 +116,8 @@ impl TerminalTestSessionLauncher {
             &replay.case.expected_title,
             &[],
             &arguments,
+            hold_millis,
+            evidence_root,
         )
     }
 
@@ -91,6 +138,7 @@ impl TerminalTestSessionLauncher {
         anchor_run_id: &str,
         anchor_title: &str,
         hold_millis: u64,
+        evidence_root: &Path,
     ) -> VisualResult<TerminalTestSession> {
         let arguments = [
             "__title-probe-fixture-v1".to_owned(),
@@ -104,6 +152,8 @@ impl TerminalTestSessionLauncher {
             anchor_title,
             &[],
             &arguments,
+            hold_millis,
+            evidence_root,
         )
     }
 
@@ -142,6 +192,7 @@ impl TerminalTestSessionLauncher {
             })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn launch_program(
         self,
         executable: &Path,
@@ -150,6 +201,8 @@ impl TerminalTestSessionLauncher {
         expected_title: &str,
         tab_options: &[String],
         arguments: &[String],
+        target_hold_millis: u64,
+        evidence_root: &Path,
     ) -> VisualResult<TerminalTestSession> {
         if !executable.is_file() {
             return Err(VisualError::Platform(format!(
@@ -161,14 +214,34 @@ impl TerminalTestSessionLauncher {
         // later fixtures into additional tabs; then Windows Terminal may retain
         // valid UIA elements for a hidden or expiring earlier tab. That makes a
         // pixel capture target ambiguous even when the title lookup succeeds.
-        let window_name = fixture_window_name(run_id, fixture_name);
+        recover_stale_temporary_windows_terminals(&WindowsUiaLocator, evidence_root)?;
+        let lifecycle_run_id = lifecycle_run_id(run_id, fixture_name);
+        let window_name = fixture_window_name(&lifecycle_run_id);
+        let anchor_title = format!("TB-WT-ANCHOR-{lifecycle_run_id}");
+        let ownership_path =
+            evidence_root.join(format!("temporary-wt-{lifecycle_run_id}.ownership.json"));
+        if ownership_path.exists() {
+            return Err(VisualError::EvidenceArtifactExists(ownership_path));
+        }
         let position = format!(
             "{},{}",
             self.requested_position.0, self.requested_position.1
         );
         let size = format!("{},{}", self.requested_size.0, self.requested_size.1);
+        let anchor_hold_millis = target_hold_millis.saturating_add(15_000).max(30_000);
         Command::new("wt.exe")
             .args(["-w", &window_name, "--pos", &position, "--size", &size])
+            .arg("new-tab")
+            .args(["--title", &anchor_title, "--suppressApplicationTitle"])
+            .args([
+                "powershell.exe",
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!("Start-Sleep -Milliseconds {anchor_hold_millis}"),
+            ])
+            .arg(";")
             .arg("new-tab")
             .args(tab_options)
             .arg(executable)
@@ -179,11 +252,25 @@ impl TerminalTestSessionLauncher {
                     "could not launch owned Windows Terminal session: {error}"
                 ))
             })?;
+        if let Err(error) = register_temporary_windows_terminal_with_retry(
+            &WindowsUiaLocator,
+            evidence_root,
+            &lifecycle_run_id,
+            &anchor_title,
+            &window_name,
+            std::process::id(),
+            Duration::from_secs(5),
+        ) {
+            let _ = close_unregistered_exact_anchor(&WindowsUiaLocator, &anchor_title);
+            return Err(error);
+        }
         Ok(TerminalTestSession {
             run_id: run_id.to_owned(),
             window_name,
             expected_title: expected_title.to_owned(),
             requested_size: self.requested_size,
+            anchor_title,
+            ownership_path,
         })
     }
 }
@@ -196,15 +283,20 @@ fn fixture_hold_millis(expects_title_animation: bool) -> u64 {
     }
 }
 
-fn fixture_window_name(run_id: &str, fixture_name: &str) -> String {
-    format!("tabbeacon-g03-{run_id}-{fixture_name}")
+fn lifecycle_run_id(run_id: &str, fixture_name: &str) -> String {
+    let digest = format!("{:x}", Sha256::digest(format!("{run_id}\0{fixture_name}")));
+    format!("TBWT-{}", &digest[..32])
+}
+
+fn fixture_window_name(lifecycle_run_id: &str) -> String {
+    format!("tabbeacon-{lifecycle_run_id}")
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         STATIC_FIXTURE_HOLD_MILLIS, TITLE_ANIMATION_FIXTURE_HOLD_MILLIS, fixture_hold_millis,
-        fixture_window_name,
+        fixture_window_name, lifecycle_run_id,
     };
 
     #[test]
@@ -219,12 +311,15 @@ mod tests {
     #[test]
     fn fixture_windows_are_isolated_within_one_visual_run() {
         assert_ne!(
-            fixture_window_name("GHA-123-1", "working"),
-            fixture_window_name("GHA-123-1", "result-ready")
+            lifecycle_run_id("GHA-123-1", "working"),
+            lifecycle_run_id("GHA-123-1", "result-ready")
         );
+        let lifecycle = lifecycle_run_id("GHA-123-1", "working");
         assert_eq!(
-            fixture_window_name("GHA-123-1", "working"),
-            "tabbeacon-g03-GHA-123-1-working"
+            fixture_window_name(&lifecycle),
+            format!("tabbeacon-{lifecycle}")
         );
+        assert!(lifecycle.starts_with("TBWT-"));
+        assert_eq!(lifecycle.len(), 37);
     }
 }

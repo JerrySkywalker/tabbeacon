@@ -46,6 +46,40 @@ fn smoke_completion_is_durable_bounded_and_owner_correlated() {
         "the child completion receipt must bind the owned run, candidate, and binary"
     );
     assert!(
+        script.contains("__temporary-wt-register-v1")
+            && script.contains("$windowRoutingId $PID")
+            && script.contains("__temporary-wt-cleanup-v1")
+            && script.contains("__temporary-wt-retry-cleanup-v1")
+            && script.contains("$script:temporaryWtOwnershipPath $PID")
+            && script.contains("TEMP_WT_CLEANUP=")
+            && script.contains("OWNER_WINDOWS_CLOSED=")
+            && script.contains("BROAD_WINDOW_KILL_USED="),
+        "the exact-owned temporary window must register and clean up on a separate receipt lane"
+    );
+    let g18 = repository_source("scripts/run-g18-normal-validation.ps1");
+    assert!(
+        g18.contains("$runRoot $lifecycleRunId $anchorTitle $windowName $PID"),
+        "the G18 registration must bind ownership to its long-lived qualification host"
+    );
+    assert!(
+        g18.contains("__temporary-wt-retry-cleanup-v1") && g18.contains("$ownershipPath $PID"),
+        "the G18 cleanup retry must remain bound to the same long-lived qualification host"
+    );
+    let g18_retry = g18
+        .find("__temporary-wt-retry-cleanup-v1")
+        .expect("the G18 exact-owner cleanup retry exists");
+    let g18_retry_tail = &g18[g18_retry..];
+    let refreshed_cleanup_exit = g18_retry_tail
+        .find("$cleanupExitCode = $LASTEXITCODE")
+        .expect("the G18 retry exit code replaces the failed primary cleanup exit code");
+    let cleanup_verdict = g18_retry_tail
+        .find("if ($cleanupExitCode -ne 0 -or $receipt.TEMP_WT_CLEANUP -ne 'PASS')")
+        .expect("the G18 cleanup verdict checks the effective cleanup result");
+    assert!(
+        refreshed_cleanup_exit < cleanup_verdict,
+        "a successful exact-owner retry must replace the failed primary cleanup exit code"
+    );
+    assert!(
         script.contains("WaitForSingleObject")
             && script.contains("RESIDUAL_OWNED_PROCESS_OBSERVATION=")
             && script.contains("if ($durableCompletionProven)"),

@@ -8,6 +8,11 @@ param(
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })]
     [string]$Workspace,
 
+    # Keep source admission bound to Workspace while allowing Hook payloads to
+    # use a separate disposable read-only workspace, as real qualification does.
+    [AllowEmptyString()]
+    [string]$EventWorkspace = '',
+
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^[0-9a-f]{40}$')]
     [string]$ExpectedHead,
@@ -38,12 +43,35 @@ param(
     [int]$WarmSamples = 100,
 
     [ValidateRange(10, 100)]
-    [int]$ConcurrencyRounds = 25
+    [int]$ConcurrencyRounds = 25,
+
+    [ValidateSet('Legacy', 'G105')]
+    [string]$MeasurementPlan = 'Legacy',
+
+    # Restricts an evidence-only G105 run to one named family while preserving
+    # the same cold/warm invocation and one-second budget.
+    [ValidateSet('', 'pre_tool_use_root', 'pre_tool_use_child', 'post_tool_use_root', 'post_tool_use_child', 'stop_root')]
+    [string]$OnlyG105Event = ''
 )
 
 $ErrorActionPreference = 'Stop'
+$ProductionHookDeadlineMs = 1000
+# Supporting setup/rearm Hooks are not target samples. Allow them to settle on
+# a loaded host, but retain their one-second overruns as explicit evidence.
+$SupportHookDeadlineMs = 5 * 60 * 1000
+$script:g105SupportSamples = [System.Collections.Generic.List[object]]::new()
 
-$checkedOutHead = (git -C $Workspace rev-parse HEAD).Trim()
+$resolvedWorkspace = (Resolve-Path -LiteralPath $Workspace).Path
+$resolvedEventWorkspace = if ([string]::IsNullOrWhiteSpace($EventWorkspace)) {
+    $resolvedWorkspace
+}
+else {
+    (Resolve-Path -LiteralPath $EventWorkspace -ErrorAction Stop).Path
+}
+if (-not (Test-Path -LiteralPath $resolvedEventWorkspace -PathType Container)) {
+    throw 'EventWorkspace must be an existing directory.'
+}
+$checkedOutHead = (git -C $resolvedWorkspace rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or $checkedOutHead -ne $ExpectedHead) {
     throw "Expected head $ExpectedHead does not match benchmark workspace head $checkedOutHead"
 }
@@ -102,7 +130,7 @@ function Parse-TimingLine {
 
     $match = [regex]::Match(
         $StandardError,
-        'TABBEACON_HOOK_TIMING_V1 total_ms=(?<total>\d+) outcome=(?<outcome>[a-z_]+) phases=(?<phases>[^\r\n]*)'
+        'TABBEACON_HOOK_TIMING_V(?:1|2)(?: event=[A-Za-z]+)? total_ms=(?<total>\d+) outcome=(?<outcome>[a-z_]+) phases=(?<phases>[^\r\n]*)'
     )
     if (-not $match.Success) {
         return $null
@@ -125,13 +153,15 @@ function New-HookPayload {
     param(
         [Parameter(Mandatory = $true)][string]$Event,
         [Parameter(Mandatory = $true)][string]$Session,
-        [AllowEmptyString()][string]$Turn
+        [AllowEmptyString()][string]$Turn,
+        [AllowEmptyString()][string]$AgentId = '',
+        [AllowEmptyString()][string]$AgentType = ''
     )
 
     $payload = [ordered]@{
         hook_event_name = $Event
         session_id = $Session
-        cwd = $Workspace
+        cwd = $resolvedEventWorkspace
     }
     if ($Event -eq 'SessionStart') {
         $payload.source = 'startup'
@@ -139,7 +169,74 @@ function New-HookPayload {
     elseif (-not [string]::IsNullOrEmpty($Turn)) {
         $payload.turn_id = $Turn
     }
+    if (-not [string]::IsNullOrEmpty($AgentId)) {
+        $payload.agent_id = $AgentId
+        $payload.agent_type = $AgentType
+    }
     return ($payload | ConvertTo-Json -Compress)
+}
+
+function Initialize-G105QualificationState {
+    param([Parameter(Mandatory = $true)][string]$State)
+
+    [System.IO.Directory]::CreateDirectory($State) | Out-Null
+    $codexHome = Join-Path $State 'codex-home'
+    [System.IO.Directory]::CreateDirectory($codexHome) | Out-Null
+    $expectedImage = Join-Path $State (
+        'TabBeacon\repository-identity\runtime\worker-images\{0}\tabbeacon-worker.exe' -f
+            $binarySha256.ToLowerInvariant()
+    )
+    if (Test-Path -LiteralPath $expectedImage -PathType Leaf) {
+        $existingHash = (Get-FileHash -LiteralPath $expectedImage -Algorithm SHA256).Hash
+        if ($existingHash -ne $binarySha256) {
+            throw 'G105 qualification state contains a mismatched worker runtime image.'
+        }
+        return
+    }
+
+    # Real setup publishes the immutable worker image before the first Hook.
+    # Reproduce that contract in every isolated G105 state outside the timed
+    # one-second boundary. CODEX_HOME and LOCALAPPDATA remain run-owned; this
+    # never reads or mutates Owner Hook definitions or production state.
+    $info = [System.Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $resolvedBinary
+    $info.ArgumentList.Add('setup')
+    $info.ArgumentList.Add('codex')
+    $info.ArgumentList.Add('--plain')
+    $info.WorkingDirectory = $resolvedEventWorkspace
+    $info.UseShellExecute = $false
+    $info.RedirectStandardInput = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.CreateNoWindow = $true
+    $info.EnvironmentVariables['LOCALAPPDATA'] = $State
+    $info.EnvironmentVariables['CODEX_HOME'] = $codexHome
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $info
+    if (-not $process.Start()) {
+        throw 'G105 isolated setup process did not start.'
+    }
+    $standardOutput = $process.StandardOutput.ReadToEndAsync()
+    $standardError = $process.StandardError.ReadToEndAsync()
+    $process.StandardInput.Close()
+    if (-not $process.WaitForExit(300000)) {
+        $null = Stop-OwnedHookProcessTree -Process $process
+        throw 'G105 isolated setup exceeded its five-minute infrastructure deadline.'
+    }
+    $process.WaitForExit()
+    $null = $standardOutput.GetAwaiter().GetResult()
+    $null = $standardError.GetAwaiter().GetResult()
+    if ($process.ExitCode -ne 0) {
+        throw 'G105 isolated setup did not complete successfully.'
+    }
+    if (-not (Test-Path -LiteralPath $expectedImage -PathType Leaf)) {
+        throw 'G105 isolated setup did not publish the expected worker runtime image.'
+    }
+    $publishedHash = (Get-FileHash -LiteralPath $expectedImage -Algorithm SHA256).Hash
+    if ($publishedHash -ne $binarySha256) {
+        throw 'G105 isolated setup published a worker runtime image with the wrong digest.'
+    }
 }
 
 function Start-ProductionHook {
@@ -148,7 +245,9 @@ function Start-ProductionHook {
         [Parameter(Mandatory = $true)][string]$Event,
         [Parameter(Mandatory = $true)][string]$Session,
         [Parameter(Mandatory = $true)][string]$TerminalToken,
-        [AllowEmptyString()][string]$Turn
+        [AllowEmptyString()][string]$Turn,
+        [AllowEmptyString()][string]$AgentId = '',
+        [AllowEmptyString()][string]$AgentType = ''
     )
 
     [System.IO.Directory]::CreateDirectory($State) | Out-Null
@@ -233,7 +332,7 @@ function Start-ProductionHook {
     }
     $standardOutput = $process.StandardOutput.ReadToEndAsync()
     $standardError = $process.StandardError.ReadToEndAsync()
-    $process.StandardInput.Write((New-HookPayload -Event $Event -Session $Session -Turn $Turn))
+    $process.StandardInput.Write((New-HookPayload -Event $Event -Session $Session -Turn $Turn -AgentId $AgentId -AgentType $AgentType))
     $process.StandardInput.Close()
     return [pscustomobject]@{
         process = $process
@@ -271,11 +370,12 @@ function Complete-HookStream {
     param(
         [Parameter(Mandatory = $true)]$Task,
         [Parameter(Mandatory = $true)]$Reader,
-        [Parameter(Mandatory = $true)]$Pending
+        [Parameter(Mandatory = $true)]$Pending,
+        [Parameter(Mandatory = $true)][int]$DeadlineMs
     )
 
     try {
-        $remainingMs = [Math]::Max(0, [int][Math]::Floor(1000 - $Pending.stopwatch.Elapsed.TotalMilliseconds))
+        $remainingMs = [Math]::Max(0, [int][Math]::Floor($DeadlineMs - $Pending.stopwatch.Elapsed.TotalMilliseconds))
         if ($remainingMs -gt 0 -and $Task.Wait($remainingMs)) {
             return [pscustomobject]@{ text = $Task.GetAwaiter().GetResult(); eof_timeout = $false }
         }
@@ -291,16 +391,29 @@ function Complete-HookStream {
 }
 
 function Complete-ProductionHook {
-    param([Parameter(Mandatory = $true)]$Pending)
+    param(
+        [Parameter(Mandatory = $true)]$Pending,
+        [int]$DeadlineMs = $ProductionHookDeadlineMs
+    )
 
-    $remainingMs = [Math]::Max(0, [int][Math]::Floor(1000 - $Pending.stopwatch.Elapsed.TotalMilliseconds))
+    $topLevelProcessExitMs = $null
+    $remainingMs = [Math]::Max(0, [int][Math]::Floor($DeadlineMs - $Pending.stopwatch.Elapsed.TotalMilliseconds))
     if (-not $Pending.process.HasExited -and ($remainingMs -le 0 -or -not $Pending.process.WaitForExit($remainingMs))) {
         $Pending.root_process_timeout = $true
         $null = Stop-OwnedHookProcessTree -Process $Pending.process
     }
-    $outerOutput = Complete-HookStream -Task $Pending.standard_output -Reader $Pending.standard_output_reader -Pending $Pending
-    $outerError = Complete-HookStream -Task $Pending.standard_error -Reader $Pending.standard_error_reader -Pending $Pending
+    if ($Pending.process.HasExited) {
+        $topLevelProcessExitMs = [Math]::Round($Pending.stopwatch.Elapsed.TotalMilliseconds, 3)
+    }
+    $outerOutput = Complete-HookStream -Task $Pending.standard_output -Reader $Pending.standard_output_reader -Pending $Pending -DeadlineMs $DeadlineMs
+    $outerError = Complete-HookStream -Task $Pending.standard_error -Reader $Pending.standard_error_reader -Pending $Pending -DeadlineMs $DeadlineMs
     $Pending.stream_eof_timeout = $Pending.stream_eof_timeout -or $outerOutput.eof_timeout -or $outerError.eof_timeout
+    $pipeEofCompletionMs = if (-not $Pending.stream_eof_timeout) {
+        [Math]::Round($Pending.stopwatch.Elapsed.TotalMilliseconds, 3)
+    }
+    else {
+        $null
+    }
     if ($Pending.stopwatch.IsRunning) { $Pending.stopwatch.Stop() }
     $standardError = ''
     for ($attempt = 1; $attempt -le 3; $attempt++) {
@@ -314,7 +427,7 @@ function Complete-ProductionHook {
     $exitCode = if ($Pending.process.HasExited) { $Pending.process.ExitCode } else { -1 }
     $success = -not $Pending.root_process_timeout -and -not $Pending.stream_eof_timeout -and
         $exitCode -eq 0 -and $null -ne $timing -and
-        $timing.outcome -eq 'applied' -and $outerOutput.text.Length -eq 0 -and
+        @('applied', 'ignored_subagent') -contains $timing.outcome -and $outerOutput.text.Length -eq 0 -and
         $outerError.text.Length -eq 0
     $phases = if ($null -eq $timing) {
         [ordered]@{}
@@ -336,10 +449,13 @@ function Complete-ProductionHook {
     return [pscustomobject]@{
         event = $Pending.event
         end_to_end_ms = [Math]::Round(
-            [Math]::Max($Pending.stopwatch.Elapsed.TotalMilliseconds, $(if ($Pending.root_process_timeout -or $Pending.stream_eof_timeout) { 1000 } else { 0 })),
+            [Math]::Max($Pending.stopwatch.Elapsed.TotalMilliseconds, $(if ($Pending.root_process_timeout -or $Pending.stream_eof_timeout) { $DeadlineMs } else { 0 })),
             3
         )
+        top_level_process_exit_ms = $topLevelProcessExitMs
+        pipe_eof_completion_ms = $pipeEofCompletionMs
         process_total_ms = if ($null -eq $timing) { $null } else { $timing.total_ms }
+        outcome = if ($null -eq $timing) { $null } else { $timing.outcome }
         phases = $phases
         success = $success
         exit_code = $exitCode
@@ -348,7 +464,46 @@ function Complete-ProductionHook {
         stderr_timing_present = $null -ne $timing
         root_process_timeout = $Pending.root_process_timeout
         stream_eof_timeout = $Pending.stream_eof_timeout
+        production_budget_exceeded = $Pending.stopwatch.Elapsed.TotalMilliseconds -ge $ProductionHookDeadlineMs
     }
+}
+
+function Write-G105FailureReceipt {
+    param(
+        [Parameter(Mandatory = $true)][string]$State,
+        [Parameter(Mandatory = $true)][string]$CaseId,
+        [Parameter(Mandatory = $true)][ValidateSet('cold', 'warm')][string]$SampleKind,
+        [Parameter(Mandatory = $true)][int]$SampleIndex,
+        [Parameter(Mandatory = $true)]$Sample
+    )
+
+    $path = Join-Path $State ("g105-failure-$CaseId-$SampleKind-$SampleIndex.json")
+    if (Test-Path -LiteralPath $path) {
+        throw "G105 failure receipt collision at $path"
+    }
+    $receipt = [ordered]@{
+        schema = 'tabbeacon-g105-hook-failure-v1'
+        expected_head = $ExpectedHead
+        case_id = $CaseId
+        sample_kind = $SampleKind
+        sample_index = $SampleIndex
+        event = $Sample.event
+        end_to_end_ms = $Sample.end_to_end_ms
+        top_level_process_exit_ms = $Sample.top_level_process_exit_ms
+        pipe_eof_completion_ms = $Sample.pipe_eof_completion_ms
+        process_total_ms = $Sample.process_total_ms
+        outcome = $Sample.outcome
+        root_process_timeout = $Sample.root_process_timeout
+        stream_eof_timeout = $Sample.stream_eof_timeout
+        exit_code = $Sample.exit_code
+        stderr_timing_present = $Sample.stderr_timing_present
+    }
+    [System.IO.File]::WriteAllText(
+        $path,
+        ($receipt | ConvertTo-Json -Depth 4 -Compress),
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    return $path
 }
 
 function Wait-ConcurrentProductionHooks {
@@ -402,16 +557,24 @@ function Invoke-ProductionHook {
         [Parameter(Mandatory = $true)][string]$Event,
         [Parameter(Mandatory = $true)][string]$Session,
         [Parameter(Mandatory = $true)][string]$TerminalToken,
-        [AllowEmptyString()][string]$Turn
+        [AllowEmptyString()][string]$Turn,
+        [AllowEmptyString()][string]$AgentId = '',
+        [AllowEmptyString()][string]$AgentType = '',
+        [int]$DeadlineMs = $ProductionHookDeadlineMs
     )
 
-    return Complete-ProductionHook -Pending (Start-ProductionHook -State $State -Event $Event -Session $Session -TerminalToken $TerminalToken -Turn $Turn)
+    return Complete-ProductionHook -Pending (Start-ProductionHook -State $State -Event $Event -Session $Session -TerminalToken $TerminalToken -Turn $Turn -AgentId $AgentId -AgentType $AgentType) -DeadlineMs $DeadlineMs
 }
 
 function Get-PhaseAttribution {
     param([Parameter(Mandatory = $true)][object[]]$Samples)
 
-    $phaseNames = @('shell_process_start_and_exit', 'state_root', 'runtime_initialization', 'console_open', 'normalization', 'generation_admission', 'workspace_anchor', 'presentation_and_activity', 'terminal_write')
+    $phaseNames = @(
+        'shell_process_start_and_exit', 'state_root', 'runtime_initialization', 'console_open',
+        'normalization', 'generation_admission', 'workspace_anchor', 'presentation',
+        'activity_reconciliation', 'activity_lease_refresh', 'runtime_image_preparation',
+        'worker_launch', 'stop_cleanup', 'presentation_render', 'terminal_write'
+    )
     $result = [ordered]@{}
     foreach ($phaseName in $phaseNames) {
         $values = [double[]]@($Samples | ForEach-Object {
@@ -430,7 +593,240 @@ function Get-PhaseAttribution {
     return $result
 }
 
+function Get-OptionalTimingStatistics {
+    param(
+        [Parameter(Mandatory = $true)][object[]]$Samples,
+        [Parameter(Mandatory = $true)][string]$Property
+    )
+
+    $values = [double[]]@($Samples | ForEach-Object {
+        $value = $_.PSObject.Properties[$Property].Value
+        if ($null -ne $value) { [double]$value }
+    })
+    if ($values.Count -eq 0) {
+        return $null
+    }
+    return [ordered]@{
+        samples = $values.Count
+        p50_ms = Get-Percentile -Values $values -Percentile 0.50
+        p95_ms = Get-Percentile -Values $values -Percentile 0.95
+        p99_ms = Get-Percentile -Values $values -Percentile 0.99
+        max_ms = [Math]::Round([double](($values | Measure-Object -Maximum).Maximum), 3)
+    }
+}
+
+function Get-EventTimingStatistics {
+    param([Parameter(Mandatory = $true)][object[]]$Samples)
+
+    return [ordered]@{
+        hook = Get-Statistics -Samples $Samples
+        top_level_process_exit_ms = Get-OptionalTimingStatistics -Samples $Samples -Property 'top_level_process_exit_ms'
+        pipe_eof_completion_ms = Get-OptionalTimingStatistics -Samples $Samples -Property 'pipe_eof_completion_ms'
+        phase_attribution = Get-PhaseAttribution -Samples $Samples
+    }
+}
+
+function Get-ActivityProbe {
+    param([Parameter(Mandatory = $true)][string]$State)
+
+    $workerPath = Join-Path $State 'activity-worker-probe-process.json'
+    $observerPath = Join-Path $State 'activity-observer-probe-process.json'
+    $workerStartedPath = Join-Path $State 'activity-worker-probe.json'
+    $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds(1000)
+    while ([DateTimeOffset]::UtcNow -lt $deadline) {
+        if ((Test-Path -LiteralPath $workerPath -PathType Leaf) -and
+            (Test-Path -LiteralPath $observerPath -PathType Leaf)) {
+            break
+        }
+        Start-Sleep -Milliseconds 10
+    }
+
+    $worker = if (Test-Path -LiteralPath $workerPath -PathType Leaf) {
+        Get-Content -LiteralPath $workerPath -Raw | ConvertFrom-Json
+    } else {
+        $null
+    }
+    $observer = if (Test-Path -LiteralPath $observerPath -PathType Leaf) {
+        Get-Content -LiteralPath $observerPath -Raw | ConvertFrom-Json
+    } else {
+        $null
+    }
+    return [ordered]@{
+        worker_process_entered = $null -ne $worker
+        observer_process_entered = $null -ne $observer
+        worker_render_started = Test-Path -LiteralPath $workerStartedPath -PathType Leaf
+        worker_stdout_handle_class = if ($null -ne $worker) { $worker.stdout_class } else { 'UNPROVEN' }
+        worker_stderr_handle_class = if ($null -ne $worker) { $worker.stderr_class } else { 'UNPROVEN' }
+        observer_stdout_handle_class = if ($null -ne $observer) { $observer.stdout_class } else { 'UNPROVEN' }
+        observer_stderr_handle_class = if ($null -ne $observer) { $observer.stderr_class } else { 'UNPROVEN' }
+    }
+}
+
+function Initialize-RootEventState {
+    param(
+        [Parameter(Mandatory = $true)][string]$State,
+        [Parameter(Mandatory = $true)][string]$Session,
+        [Parameter(Mandatory = $true)][string]$Turn,
+        [Parameter(Mandatory = $true)][string]$Terminal
+    )
+
+    Initialize-G105QualificationState -State $State
+    $start = Invoke-ProductionHook -State $State -Event 'SessionStart' -Session $Session -TerminalToken $Terminal -Turn '' -DeadlineMs $SupportHookDeadlineMs
+    $prompt = Invoke-ProductionHook -State $State -Event 'UserPromptSubmit' -Session $Session -TerminalToken $Terminal -Turn $Turn -DeadlineMs $SupportHookDeadlineMs
+    $script:g105SupportSamples.Add($start)
+    $script:g105SupportSamples.Add($prompt)
+    if (-not $start.success -or $start.process_total_ms -eq $null -or -not $prompt.success -or $prompt.process_total_ms -eq $null) {
+        $startReceipt = Write-G105FailureReceipt -State $State -CaseId 'setup-session-start' -SampleKind 'cold' -SampleIndex 0 -Sample $start
+        $promptReceipt = Write-G105FailureReceipt -State $State -CaseId 'setup-user-prompt-submit' -SampleKind 'cold' -SampleIndex 0 -Sample $prompt
+        $cleanup = Invoke-ProductionHook -State $State -Event 'SessionEnd' -Session $Session -TerminalToken $Terminal -Turn '' -DeadlineMs $SupportHookDeadlineMs
+        $setupReceiptPath = Join-Path $State 'g105-setup-boundary-v1.json'
+        $setupReceipt = [ordered]@{
+            schema = 'tabbeacon-g105-setup-boundary-v1'
+            expected_head = $ExpectedHead
+            session_start_failure_receipt = $startReceipt
+            user_prompt_submit_failure_receipt = $promptReceipt
+            cleanup_success = $cleanup.success
+            cleanup_root_process_timeout = $cleanup.root_process_timeout
+            cleanup_stream_eof_timeout = $cleanup.stream_eof_timeout
+        }
+        [System.IO.File]::WriteAllText(
+            $setupReceiptPath,
+            ($setupReceipt | ConvertTo-Json -Depth 4 -Compress),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        throw "Root-event setup did not complete inside the one-second production Hook budget. Receipt: $setupReceiptPath"
+    }
+}
+
+function Complete-RootEventState {
+    param(
+        [Parameter(Mandatory = $true)][string]$State,
+        [Parameter(Mandatory = $true)][string]$Session,
+        [Parameter(Mandatory = $true)][string]$Terminal
+    )
+
+    $null = Invoke-ProductionHook -State $State -Event 'SessionEnd' -Session $Session -TerminalToken $Terminal -Turn '' -DeadlineMs $SupportHookDeadlineMs
+}
+
+function Measure-G105EventCase {
+    param(
+        [Parameter(Mandatory = $true)][hashtable]$EventCase,
+        [Parameter(Mandatory = $true)][int]$Ordinal
+    )
+
+    $expectedOutcome = if ($EventCase.child) { 'ignored_subagent' } else { 'applied' }
+    $cold = @()
+    $coldProbe = @()
+    for ($index = 1; $index -le $ColdSamples; $index++) {
+        $state = Join-Path $StateRoot ("g105-{0}-cold-{1}" -f $EventCase.id, $index)
+        $session = "g105-$($EventCase.id)-cold-$index"
+        $turn = "g105-$($EventCase.id)-cold-turn-$index"
+        $terminal = "00000000-0000-0000-{0:D4}-{1:D12}" -f $Ordinal, $index
+        Initialize-RootEventState -State $state -Session $session -Turn $turn -Terminal $terminal
+        $sample = Invoke-ProductionHook -State $state -Event $EventCase.event -Session $session -TerminalToken $terminal -Turn $turn -AgentId $EventCase.agent_id -AgentType $EventCase.agent_type
+        if (-not $sample.success -or $sample.phases.Count -eq 0 -or $sample.process_total_ms -eq $null) {
+            $failureReceipt = Write-G105FailureReceipt -State $state -CaseId $EventCase.id -SampleKind 'cold' -SampleIndex $index -Sample $sample
+            Write-Error "G105_FAILURE_RECEIPT=$failureReceipt"
+            throw "Cold $($EventCase.id) sample $index did not complete inside the one-second production Hook budget."
+        }
+        if ($sample.outcome -ne $expectedOutcome) {
+            throw "Cold $($EventCase.id) sample $index produced $($sample.outcome) instead of $expectedOutcome."
+        }
+        $cold += $sample
+        $coldProbe += Get-ActivityProbe -State $state
+        Complete-RootEventState -State $state -Session $session -Terminal $terminal
+    }
+
+    $warmState = Join-Path $StateRoot ("g105-{0}-warm" -f $EventCase.id)
+    $warmSession = "g105-$($EventCase.id)-warm"
+    $warmTurn = "g105-$($EventCase.id)-warm-turn"
+    $warmTerminal = "00000000-0000-0000-{0:D4}-{1:D12}" -f $Ordinal, 9999
+    Initialize-RootEventState -State $warmState -Session $warmSession -Turn $warmTurn -Terminal $warmTerminal
+    $warm = @()
+    for ($index = 1; $index -le $WarmSamples; $index++) {
+        $sampleTurn = if ($EventCase.rearm_before_each_warm_sample) {
+            "$warmTurn-$index"
+        }
+        else {
+            $warmTurn
+        }
+        if ($EventCase.rearm_before_each_warm_sample) {
+            $rearm = Invoke-ProductionHook -State $warmState -Event 'UserPromptSubmit' -Session $warmSession -TerminalToken $warmTerminal -Turn $sampleTurn -DeadlineMs $SupportHookDeadlineMs
+            $script:g105SupportSamples.Add($rearm)
+            if (-not $rearm.success -or $rearm.outcome -ne 'applied') {
+                $failureReceipt = Write-G105FailureReceipt -State $warmState -CaseId "$($EventCase.id)-rearm" -SampleKind 'warm' -SampleIndex $index -Sample $rearm
+                Write-Error "G105_FAILURE_RECEIPT=$failureReceipt"
+                throw "Warm $($EventCase.id) sample $index could not re-arm the root turn."
+            }
+        }
+        $sample = Invoke-ProductionHook -State $warmState -Event $EventCase.event -Session $warmSession -TerminalToken $warmTerminal -Turn $sampleTurn -AgentId $EventCase.agent_id -AgentType $EventCase.agent_type
+        if (-not $sample.success -or $sample.phases.Count -eq 0 -or $sample.process_total_ms -eq $null) {
+            $failureReceipt = Write-G105FailureReceipt -State $warmState -CaseId $EventCase.id -SampleKind 'warm' -SampleIndex $index -Sample $sample
+            Write-Error "G105_FAILURE_RECEIPT=$failureReceipt"
+            throw "Warm $($EventCase.id) sample $index did not complete inside the one-second production Hook budget."
+        }
+        if ($sample.outcome -ne $expectedOutcome) {
+            throw "Warm $($EventCase.id) sample $index produced $($sample.outcome) instead of $expectedOutcome."
+        }
+        $warm += $sample
+    }
+    $warmProbe = Get-ActivityProbe -State $warmState
+    Complete-RootEventState -State $warmState -Session $warmSession -Terminal $warmTerminal
+
+    return [ordered]@{
+        event = $EventCase.event
+        expected_outcome = $expectedOutcome
+        cold = Get-EventTimingStatistics -Samples $cold
+        warm = Get-EventTimingStatistics -Samples $warm
+        activity_probe_cold = $coldProbe
+        activity_probe_warm = $warmProbe
+    }
+}
+
 [System.IO.Directory]::CreateDirectory($StateRoot) | Out-Null
+if ($MeasurementPlan -eq 'G105') {
+    $eventCases = @(
+        @{ id = 'pre_tool_use_root'; event = 'PreToolUse'; child = $false; agent_id = ''; agent_type = ''; rearm_before_each_warm_sample = $false },
+        @{ id = 'pre_tool_use_child'; event = 'PreToolUse'; child = $true; agent_id = 'g105-child'; agent_type = 'thread'; rearm_before_each_warm_sample = $false },
+        @{ id = 'post_tool_use_root'; event = 'PostToolUse'; child = $false; agent_id = ''; agent_type = ''; rearm_before_each_warm_sample = $false },
+        @{ id = 'post_tool_use_child'; event = 'PostToolUse'; child = $true; agent_id = 'g105-child'; agent_type = 'thread'; rearm_before_each_warm_sample = $false },
+        @{ id = 'stop_root'; event = 'Stop'; child = $false; agent_id = ''; agent_type = ''; rearm_before_each_warm_sample = $true }
+    )
+    if (-not [string]::IsNullOrWhiteSpace($OnlyG105Event)) {
+        $eventCases = @($eventCases | Where-Object { $_.id -eq $OnlyG105Event })
+    }
+    $events = [ordered]@{}
+    for ($index = 0; $index -lt $eventCases.Count; $index++) {
+        $case = $eventCases[$index]
+        $events[$case.id] = Measure-G105EventCase -EventCase $case -Ordinal ($index + 1)
+    }
+    $report = [ordered]@{
+        schema = 'tabbeacon-codex-hook-runtime-measurement-v2'
+        expected_head = $ExpectedHead
+        checked_out_head = $checkedOutHead
+        binary = [System.IO.Path]::GetFileName($Binary)
+        binary_sha256 = $binarySha256
+        hook_shell = $HookShell
+        hook_shell_basename = if ($HookShell -eq 'Pwsh7') { [System.IO.Path]::GetFileName($resolvedPwsh) } else { [System.IO.Path]::GetFileName($resolvedComspec) }
+        hook_shell_sha256 = if ($HookShell -eq 'Pwsh7') { $pwshSha256 } else { $comspecSha256 }
+        invocation = if ([string]::IsNullOrWhiteSpace($HookCommand)) { 'direct_binary' } else { "generated_command_windows_$HookShell" }
+        hook_declaration_mode = if ([string]::IsNullOrWhiteSpace($HookCommand)) { 'direct_binary' } else { 'direct_native_shell_neutral' }
+        declaration_timeout_ms = 1000
+        measurement_plan = 'G105'
+        event_workspace_binding = if ($resolvedEventWorkspace -eq $resolvedWorkspace) { 'source_workspace' } else { 'separate_disposable_workspace' }
+        support_hook_budget = Get-Statistics -Samples @($script:g105SupportSamples)
+        cold_samples_per_event = $ColdSamples
+        warm_samples_per_event = $WarmSamples
+        events = $events
+    }
+    $outputParent = Split-Path -Parent $OutputPath
+    if (-not [string]::IsNullOrWhiteSpace($outputParent)) {
+        [System.IO.Directory]::CreateDirectory($outputParent) | Out-Null
+    }
+    [System.IO.File]::WriteAllText($OutputPath, ($report | ConvertTo-Json -Depth 10), [System.Text.UTF8Encoding]::new($false))
+    $report | ConvertTo-Json -Depth 10
+    exit 0
+}
 $cold = @()
 for ($index = 1; $index -le $ColdSamples; $index++) {
     $state = Join-Path $StateRoot "cold-$index"

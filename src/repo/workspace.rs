@@ -519,8 +519,21 @@ impl WorkspaceIdentityResolver {
     }
 
     fn workspace_facts(&self, cwd: &Path) -> Result<WorkspaceFacts, RepositoryIdentityError> {
-        match self.discovery.discover(cwd) {
+        match self.discovery.discover_without_root_commits_for_hook(cwd) {
             Ok(discovered) => {
+                let canonical = canonicalize_repository(&discovered)?;
+                if canonical.identity.as_str().starts_with("remote:") {
+                    return Ok(WorkspaceFacts {
+                        identity_class: WorkspaceIdentityClass::GitRemote,
+                        identity: canonical.identity,
+                        display_name: canonical.display_name,
+                        workspace_root: discovered.worktree_root,
+                        git_common_dir: Some(discovered.git_common_dir),
+                        kind: WorkspaceKind::Git,
+                    });
+                }
+                let mut discovered = discovered;
+                discovered.root_commits = self.discovery.discover_root_commits(cwd)?;
                 let canonical = canonicalize_repository(&discovered)?;
                 Ok(WorkspaceFacts {
                     identity_class: if canonical.identity.as_str().starts_with("remote:") {
@@ -757,7 +770,44 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::WorkspaceIdentityResolver;
+    use super::{WorkspaceIdentityResolver, WorkspaceKind};
+
+    #[test]
+    fn remote_git_workspace_resolves_without_launching_git_when_local_metadata_is_complete() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock follows Unix epoch")
+            .as_nanos();
+        let root = env::temp_dir().join(format!(
+            "tabbeacon-fast-remote-workspace-{}-{nonce}",
+            std::process::id()
+        ));
+        let git_root = root.join("git-root");
+        let nested = git_root.join("nested");
+        fs::create_dir_all(git_root.join(".git")).expect("Git directory creates");
+        fs::create_dir_all(&nested).expect("nested directory creates");
+        fs::write(
+            git_root.join(".git").join("config"),
+            "[remote \"origin\"]\n\turl = https://example.invalid/acme/fixture.git\n",
+        )
+        .expect("local Git config writes");
+
+        let resolved = WorkspaceIdentityResolver::with_git_executable(
+            root.join("state"),
+            root.join("missing-git-executable"),
+        )
+        .resolve(&nested)
+        .expect("complete local metadata resolves without a Git process");
+
+        assert_eq!(resolved.kind, WorkspaceKind::Git);
+        assert_eq!(
+            resolved.identity.as_str(),
+            "remote:example.invalid/acme/fixture"
+        );
+        assert_eq!(resolved.workspace_root, git_root);
+
+        fs::remove_dir_all(root).expect("owned test root removes");
+    }
 
     #[test]
     fn fast_workspace_location_uses_nearest_git_marker_without_discovery() {

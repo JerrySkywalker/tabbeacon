@@ -18,7 +18,10 @@ fn terminal_runner_uses_a_bounded_durable_completion_contract() {
         "RESIDUAL_OWNED_PROCESS_OBSERVATION",
         "WaitForSingleObject",
         "VISUAL_OPERATION_DISPOSITION=$visualDisposition",
-        "WINDOWS_TERMINAL_TUI_SMOKE=$visualDisposition",
+        "WINDOWS_TERMINAL_TUI_SMOKE=$overallDisposition",
+        "TEMP_WT_CLEANUP=$($script:temporaryWtCleanupReceipt.temporary_wt_cleanup)",
+        "OWNER_WINDOWS_CLOSED=$($script:temporaryWtCleanupReceipt.owner_windows_closed)",
+        "BROAD_WINDOW_KILL_USED=$($script:temporaryWtCleanupReceipt.broad_window_kill_used.ToString().ToLowerInvariant())",
     ] {
         assert!(
             RUNNER.contains(required),

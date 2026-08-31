@@ -82,7 +82,9 @@ New-Item -ItemType Directory -Path $EvidenceDirectory -Force | Out-Null
 $resolvedEvidence = (Resolve-Path -LiteralPath $EvidenceDirectory).Path
 $token = [Guid]::NewGuid().ToString('N')
 $completionToken = [Guid]::NewGuid().ToString('N')
-$windowTitle = "TabBeacon-G61-$token"
+$lifecycleRunId = "TBWT-$token"
+$windowRoutingId = "tabbeacon-$lifecycleRunId"
+$windowTitle = "TB-WT-ANCHOR-$lifecycleRunId"
 $sentinelPath = Join-Path $resolvedEvidence "sentinel-$token.txt"
 $fixtureResultPath = Join-Path $resolvedEvidence "fixture-$token.txt"
 $completionReceiptPath = Join-Path $resolvedEvidence "completion-$token.txt"
@@ -94,6 +96,66 @@ foreach ($path in @($sentinelPath, $fixtureResultPath, $completionReceiptPath, $
 }
 
 $binarySha256 = (Get-FileHash -LiteralPath $resolvedBinary -Algorithm SHA256).Hash
+$script:temporaryWtOwnershipPath = $null
+$script:temporaryWindowCreated = $false
+$script:temporaryWtCleanupReceipt = $null
+$script:temporaryWtProductDisposition = 'EXCEPTION'
+
+function Invoke-ExactOwnedTemporaryWtCleanup {
+    if ($null -ne $script:temporaryWtCleanupReceipt) { return }
+    if ($null -eq $script:temporaryWtOwnershipPath) {
+        if ($script:temporaryWindowCreated) {
+            $script:temporaryWtCleanupReceipt = [pscustomobject]@{
+                temporary_wt_cleanup = 'FAIL'
+                temporary_windows_created = 1
+                temporary_windows_closed = 0
+                owned_temporary_wt_remaining = 1
+                owner_windows_closed = 0
+                broad_window_kill_used = $false
+                detail = 'IMMUTABLE_OWNERSHIP_RECORD_MISSING'
+            }
+        }
+        return
+    }
+    try {
+        $cleanupOutput = & $resolvedBinary '__temporary-wt-cleanup-v1' `
+            $script:temporaryWtOwnershipPath $script:temporaryWtProductDisposition 2>&1
+        $cleanupLine = @($cleanupOutput | ForEach-Object { $_.ToString() } |
+            Where-Object { $_.TrimStart().StartsWith('{') }) | Select-Object -Last 1
+        if ($null -eq $cleanupLine) { throw 'temporary_wt_cleanup_receipt_missing' }
+        $script:temporaryWtCleanupReceipt = $cleanupLine | ConvertFrom-Json
+        if ($script:temporaryWtCleanupReceipt.temporary_wt_cleanup -ne 'PASS') {
+            $retryOutput = & $resolvedBinary '__temporary-wt-retry-cleanup-v1' `
+                $script:temporaryWtOwnershipPath $PID 2>&1
+            $retryLine = @($retryOutput | ForEach-Object { $_.ToString() } |
+                Where-Object { $_.TrimStart().StartsWith('{') }) | Select-Object -Last 1
+            if ($null -eq $retryLine) { throw 'temporary_wt_cleanup_retry_receipt_missing' }
+            $script:temporaryWtCleanupReceipt = $retryLine | ConvertFrom-Json
+        }
+    }
+    catch {
+        $script:temporaryWtCleanupReceipt = [pscustomobject]@{
+            temporary_wt_cleanup = 'FAIL'
+            temporary_windows_created = 1
+            temporary_windows_closed = 0
+            owned_temporary_wt_remaining = 1
+            owner_windows_closed = 0
+            broad_window_kill_used = $false
+            detail = 'TEMPORARY_WT_CLEANUP_UNPROVEN'
+        }
+    }
+}
+
+trap {
+    $script:temporaryWtProductDisposition = 'EXCEPTION'
+    Invoke-ExactOwnedTemporaryWtCleanup
+    throw
+}
+
+& $resolvedBinary '__temporary-wt-recover-v1' $resolvedEvidence | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    throw 'Stale exact-owned Windows Terminal recovery refused'
+}
 
 Add-Type -TypeDefinition @'
 using System;
@@ -137,7 +199,7 @@ public static class TabBeaconSmokeProcessObservation {
 '@
 
 $arguments = @(
-    '-w', 'new',
+    '-w', $windowRoutingId,
     'new-tab',
     '--title', $windowTitle,
     '--suppressApplicationTitle',
@@ -160,8 +222,21 @@ $arguments = @(
 # Windows title discovery, CIM, or PowerShell process queries.
 $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
 $wtLauncher = Start-Process -FilePath $wtCommand.Source -ArgumentList $arguments -PassThru
+$script:temporaryWindowCreated = $true
 $wtLauncherProcessId = $wtLauncher.Id
 $wtLauncher.Dispose()
+$registrationOutput = & $resolvedBinary '__temporary-wt-register-v1' `
+    $resolvedEvidence $lifecycleRunId $windowTitle $windowRoutingId $PID 2>&1
+if ($LASTEXITCODE -ne 0) {
+    throw 'Exact-owned Windows Terminal registration failed'
+}
+$script:temporaryWtOwnershipPath = @($registrationOutput |
+    ForEach-Object { $_.ToString().Trim() } |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) | Select-Object -Last 1
+if ([string]::IsNullOrWhiteSpace($script:temporaryWtOwnershipPath) -or
+    -not (Test-Path -LiteralPath $script:temporaryWtOwnershipPath -PathType Leaf)) {
+    throw 'Exact-owned Windows Terminal ownership receipt was not created'
+}
 
 $completionReceiptObserved = $false
 $completionReceiptInvalid = $false
@@ -299,6 +374,23 @@ elseif ($completionReceiptInvalid) {
 else {
     'FIXTURE_OR_EVIDENCE_FAILURE'
 }
+$script:temporaryWtProductDisposition = if ($passed) {
+    'PASS'
+}
+elseif ($watchdogExpired) {
+    'TIMEOUT'
+}
+else {
+    'FAIL'
+}
+Invoke-ExactOwnedTemporaryWtCleanup
+$temporaryWtCleanupPassed = $null -ne $script:temporaryWtCleanupReceipt -and
+    $script:temporaryWtCleanupReceipt.temporary_wt_cleanup -eq 'PASS'
+$overallPassed = $passed -and $temporaryWtCleanupPassed
+$overallDisposition = if ($overallPassed) { 'PASS' } else { 'FAIL' }
+if ($passed -and -not $temporaryWtCleanupPassed) {
+    $failureClass = 'TEMPORARY_WT_CLEANUP_FAILURE'
+}
 
 $receipt = @(
     "RUN_ID=$RunId"
@@ -334,8 +426,14 @@ $receipt = @(
     "TUI_INTERFACE_STAGED_APPLY=$($interfaceApplyStaged.ToString().ToLowerInvariant())"
     "VISUAL_OPERATION_DISPOSITION=$visualDisposition"
     "VISUAL_FAILURE_CLASS=$failureClass"
-    "WINDOWS_TERMINAL_TUI_SMOKE=$visualDisposition"
-    "WINDOWS_TERMINAL_SMOKE=$visualDisposition"
+    "WINDOWS_TERMINAL_TUI_SMOKE=$overallDisposition"
+    "WINDOWS_TERMINAL_SMOKE=$overallDisposition"
+    "TEMP_WT_CLEANUP=$($script:temporaryWtCleanupReceipt.temporary_wt_cleanup)"
+    "TEMP_WINDOWS_CREATED=$($script:temporaryWtCleanupReceipt.temporary_windows_created)"
+    "TEMP_WINDOWS_CLOSED=$($script:temporaryWtCleanupReceipt.temporary_windows_closed)"
+    "OWNED_TEMP_WT_REMAINING=$($script:temporaryWtCleanupReceipt.owned_temporary_wt_remaining)"
+    "OWNER_WINDOWS_CLOSED=$($script:temporaryWtCleanupReceipt.owner_windows_closed)"
+    "BROAD_WINDOW_KILL_USED=$($script:temporaryWtCleanupReceipt.broad_window_kill_used.ToString().ToLowerInvariant())"
     "TUI_EXIT_RESTORES_TERMINAL=$($passed.ToString().ToLowerInvariant())"
     "SHELL_USABLE_AFTER_TUI=$($shellUsable.ToString().ToLowerInvariant())"
     'OWNER_MUTATIONS=none'
@@ -343,6 +441,6 @@ $receipt = @(
 Write-AtomicLines -Path $receiptPath -Lines $receipt
 
 $receipt | ForEach-Object { Write-Output $_ }
-if (-not $passed) {
+if (-not $overallPassed) {
     exit 1
 }
