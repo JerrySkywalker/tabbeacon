@@ -55,6 +55,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$ProductionHookDeadlineMs = 1000
+# Supporting setup/rearm Hooks are not target samples. Allow them to settle on
+# a loaded host, but retain their one-second overruns as explicit evidence.
+$SupportHookDeadlineMs = 5 * 60 * 1000
+$script:g105SupportSamples = [System.Collections.Generic.List[object]]::new()
 
 $resolvedWorkspace = (Resolve-Path -LiteralPath $Workspace).Path
 $resolvedEventWorkspace = if ([string]::IsNullOrWhiteSpace($EventWorkspace)) {
@@ -365,11 +370,12 @@ function Complete-HookStream {
     param(
         [Parameter(Mandatory = $true)]$Task,
         [Parameter(Mandatory = $true)]$Reader,
-        [Parameter(Mandatory = $true)]$Pending
+        [Parameter(Mandatory = $true)]$Pending,
+        [Parameter(Mandatory = $true)][int]$DeadlineMs
     )
 
     try {
-        $remainingMs = [Math]::Max(0, [int][Math]::Floor(1000 - $Pending.stopwatch.Elapsed.TotalMilliseconds))
+        $remainingMs = [Math]::Max(0, [int][Math]::Floor($DeadlineMs - $Pending.stopwatch.Elapsed.TotalMilliseconds))
         if ($remainingMs -gt 0 -and $Task.Wait($remainingMs)) {
             return [pscustomobject]@{ text = $Task.GetAwaiter().GetResult(); eof_timeout = $false }
         }
@@ -385,10 +391,13 @@ function Complete-HookStream {
 }
 
 function Complete-ProductionHook {
-    param([Parameter(Mandatory = $true)]$Pending)
+    param(
+        [Parameter(Mandatory = $true)]$Pending,
+        [int]$DeadlineMs = $ProductionHookDeadlineMs
+    )
 
     $topLevelProcessExitMs = $null
-    $remainingMs = [Math]::Max(0, [int][Math]::Floor(1000 - $Pending.stopwatch.Elapsed.TotalMilliseconds))
+    $remainingMs = [Math]::Max(0, [int][Math]::Floor($DeadlineMs - $Pending.stopwatch.Elapsed.TotalMilliseconds))
     if (-not $Pending.process.HasExited -and ($remainingMs -le 0 -or -not $Pending.process.WaitForExit($remainingMs))) {
         $Pending.root_process_timeout = $true
         $null = Stop-OwnedHookProcessTree -Process $Pending.process
@@ -396,8 +405,8 @@ function Complete-ProductionHook {
     if ($Pending.process.HasExited) {
         $topLevelProcessExitMs = [Math]::Round($Pending.stopwatch.Elapsed.TotalMilliseconds, 3)
     }
-    $outerOutput = Complete-HookStream -Task $Pending.standard_output -Reader $Pending.standard_output_reader -Pending $Pending
-    $outerError = Complete-HookStream -Task $Pending.standard_error -Reader $Pending.standard_error_reader -Pending $Pending
+    $outerOutput = Complete-HookStream -Task $Pending.standard_output -Reader $Pending.standard_output_reader -Pending $Pending -DeadlineMs $DeadlineMs
+    $outerError = Complete-HookStream -Task $Pending.standard_error -Reader $Pending.standard_error_reader -Pending $Pending -DeadlineMs $DeadlineMs
     $Pending.stream_eof_timeout = $Pending.stream_eof_timeout -or $outerOutput.eof_timeout -or $outerError.eof_timeout
     $pipeEofCompletionMs = if (-not $Pending.stream_eof_timeout) {
         [Math]::Round($Pending.stopwatch.Elapsed.TotalMilliseconds, 3)
@@ -440,7 +449,7 @@ function Complete-ProductionHook {
     return [pscustomobject]@{
         event = $Pending.event
         end_to_end_ms = [Math]::Round(
-            [Math]::Max($Pending.stopwatch.Elapsed.TotalMilliseconds, $(if ($Pending.root_process_timeout -or $Pending.stream_eof_timeout) { 1000 } else { 0 })),
+            [Math]::Max($Pending.stopwatch.Elapsed.TotalMilliseconds, $(if ($Pending.root_process_timeout -or $Pending.stream_eof_timeout) { $DeadlineMs } else { 0 })),
             3
         )
         top_level_process_exit_ms = $topLevelProcessExitMs
@@ -455,6 +464,7 @@ function Complete-ProductionHook {
         stderr_timing_present = $null -ne $timing
         root_process_timeout = $Pending.root_process_timeout
         stream_eof_timeout = $Pending.stream_eof_timeout
+        production_budget_exceeded = $Pending.stopwatch.Elapsed.TotalMilliseconds -ge $ProductionHookDeadlineMs
     }
 }
 
@@ -549,10 +559,11 @@ function Invoke-ProductionHook {
         [Parameter(Mandatory = $true)][string]$TerminalToken,
         [AllowEmptyString()][string]$Turn,
         [AllowEmptyString()][string]$AgentId = '',
-        [AllowEmptyString()][string]$AgentType = ''
+        [AllowEmptyString()][string]$AgentType = '',
+        [int]$DeadlineMs = $ProductionHookDeadlineMs
     )
 
-    return Complete-ProductionHook -Pending (Start-ProductionHook -State $State -Event $Event -Session $Session -TerminalToken $TerminalToken -Turn $Turn -AgentId $AgentId -AgentType $AgentType)
+    return Complete-ProductionHook -Pending (Start-ProductionHook -State $State -Event $Event -Session $Session -TerminalToken $TerminalToken -Turn $Turn -AgentId $AgentId -AgentType $AgentType) -DeadlineMs $DeadlineMs
 }
 
 function Get-PhaseAttribution {
@@ -660,12 +671,14 @@ function Initialize-RootEventState {
     )
 
     Initialize-G105QualificationState -State $State
-    $start = Invoke-ProductionHook -State $State -Event 'SessionStart' -Session $Session -TerminalToken $Terminal -Turn ''
-    $prompt = Invoke-ProductionHook -State $State -Event 'UserPromptSubmit' -Session $Session -TerminalToken $Terminal -Turn $Turn
+    $start = Invoke-ProductionHook -State $State -Event 'SessionStart' -Session $Session -TerminalToken $Terminal -Turn '' -DeadlineMs $SupportHookDeadlineMs
+    $prompt = Invoke-ProductionHook -State $State -Event 'UserPromptSubmit' -Session $Session -TerminalToken $Terminal -Turn $Turn -DeadlineMs $SupportHookDeadlineMs
+    $script:g105SupportSamples.Add($start)
+    $script:g105SupportSamples.Add($prompt)
     if (-not $start.success -or $start.process_total_ms -eq $null -or -not $prompt.success -or $prompt.process_total_ms -eq $null) {
         $startReceipt = Write-G105FailureReceipt -State $State -CaseId 'setup-session-start' -SampleKind 'cold' -SampleIndex 0 -Sample $start
         $promptReceipt = Write-G105FailureReceipt -State $State -CaseId 'setup-user-prompt-submit' -SampleKind 'cold' -SampleIndex 0 -Sample $prompt
-        $cleanup = Invoke-ProductionHook -State $State -Event 'SessionEnd' -Session $Session -TerminalToken $Terminal -Turn ''
+        $cleanup = Invoke-ProductionHook -State $State -Event 'SessionEnd' -Session $Session -TerminalToken $Terminal -Turn '' -DeadlineMs $SupportHookDeadlineMs
         $setupReceiptPath = Join-Path $State 'g105-setup-boundary-v1.json'
         $setupReceipt = [ordered]@{
             schema = 'tabbeacon-g105-setup-boundary-v1'
@@ -692,7 +705,7 @@ function Complete-RootEventState {
         [Parameter(Mandatory = $true)][string]$Terminal
     )
 
-    $null = Invoke-ProductionHook -State $State -Event 'SessionEnd' -Session $Session -TerminalToken $Terminal -Turn ''
+    $null = Invoke-ProductionHook -State $State -Event 'SessionEnd' -Session $Session -TerminalToken $Terminal -Turn '' -DeadlineMs $SupportHookDeadlineMs
 }
 
 function Measure-G105EventCase {
@@ -738,7 +751,8 @@ function Measure-G105EventCase {
             $warmTurn
         }
         if ($EventCase.rearm_before_each_warm_sample) {
-            $rearm = Invoke-ProductionHook -State $warmState -Event 'UserPromptSubmit' -Session $warmSession -TerminalToken $warmTerminal -Turn $sampleTurn
+            $rearm = Invoke-ProductionHook -State $warmState -Event 'UserPromptSubmit' -Session $warmSession -TerminalToken $warmTerminal -Turn $sampleTurn -DeadlineMs $SupportHookDeadlineMs
+            $script:g105SupportSamples.Add($rearm)
             if (-not $rearm.success -or $rearm.outcome -ne 'applied') {
                 $failureReceipt = Write-G105FailureReceipt -State $warmState -CaseId "$($EventCase.id)-rearm" -SampleKind 'warm' -SampleIndex $index -Sample $rearm
                 Write-Error "G105_FAILURE_RECEIPT=$failureReceipt"
@@ -800,6 +814,7 @@ if ($MeasurementPlan -eq 'G105') {
         declaration_timeout_ms = 1000
         measurement_plan = 'G105'
         event_workspace_binding = if ($resolvedEventWorkspace -eq $resolvedWorkspace) { 'source_workspace' } else { 'separate_disposable_workspace' }
+        support_hook_budget = Get-Statistics -Samples @($script:g105SupportSamples)
         cold_samples_per_event = $ColdSamples
         warm_samples_per_event = $WarmSamples
         events = $events

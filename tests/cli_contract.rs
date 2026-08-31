@@ -1637,6 +1637,8 @@ fn g105_timing_uses_setup_prewarmed_exact_worker_images() {
         "cwd = $resolvedEventWorkspace",
         "$info.WorkingDirectory = $resolvedEventWorkspace",
         "event_workspace_binding = if ($resolvedEventWorkspace -eq $resolvedWorkspace)",
+        "$SupportHookDeadlineMs = 5 * 60 * 1000",
+        "support_hook_budget = Get-Statistics -Samples @($script:g105SupportSamples)",
         "schema = 'tabbeacon-g105-setup-boundary-v1'",
         "$cleanup = Invoke-ProductionHook -State $State -Event 'SessionEnd'",
     ] {
