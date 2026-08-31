@@ -25,8 +25,9 @@ use windows::Win32::{
 const EXACT_WINDOW_CLOSE_BUDGET: Duration = Duration::from_secs(30);
 
 use super::{
-    ExactOwnedWindowBackend, ExactOwnedWindowRecoveryBackend, ExactWindowObservation, ScreenRect,
-    UiaDump, VisualError, VisualResult, WindowActivation, root_workspace_anchor_fixture_alias,
+    ExactOwnedWindowBackend, ExactOwnedWindowRecoveryBackend, ExactWindowObservation,
+    OwnedWindowCaptureTarget, ScreenRect, UiaDump, VisualError, VisualResult, WindowActivation,
+    root_workspace_anchor_fixture_alias,
 };
 use crate::title_authority::TitleProbeSample;
 
@@ -187,6 +188,60 @@ impl WindowsUiaLocator {
         let automation = UIAutomation::new().ok()?;
         let root = automation.get_root_element().ok()?;
         screen_rect(root.get_bounding_rectangle().ok()?)
+    }
+
+    /// Activates and returns a capture target for one already-registered
+    /// temporary Windows Terminal window.
+    ///
+    /// The fixed anchor is the sole identity authority: it must resolve to one
+    /// `TabItem`, one ancestor window, and the exact HWND stored by the
+    /// lifecycle record. Dynamic demo-tab titles are never used to find or
+    /// close a window.
+    ///
+    /// # Errors
+    ///
+    /// Returns a platform error when exact correlation, foreground activation,
+    /// or usable window geometry cannot be established.
+    pub fn activate_capture_target_for_exact_anchor(
+        &self,
+        anchor_title: &str,
+        expected_hwnd: isize,
+    ) -> VisualResult<OwnedWindowCaptureTarget> {
+        let (observation, window) = exact_anchor_window(anchor_title)?;
+        if observation.anchor_tab_match_count != 1
+            || observation.target_window_match_count != 1
+            || observation.native_window_id != Some(expected_hwnd)
+        {
+            return Err(VisualError::Platform(format!(
+                "exact Windows Terminal capture refused: anchor_matches={} window_matches={} hwnd_match={}",
+                observation.anchor_tab_match_count,
+                observation.target_window_match_count,
+                observation.native_window_id == Some(expected_hwnd)
+            )));
+        }
+        let window = window.ok_or_else(|| {
+            VisualError::Platform(
+                "exact Windows Terminal capture refused because the ancestor window vanished"
+                    .to_owned(),
+            )
+        })?;
+        let control = WindowControl::try_from(window.clone()).map_err(platform_error)?;
+        let set_foreground = control.set_foregrand().map_err(platform_error)?;
+        window.set_focus().map_err(platform_error)?;
+        if !set_foreground {
+            return Err(VisualError::Platform(
+                "Windows did not accept foreground activation for the exact owned fixture window"
+                    .to_owned(),
+            ));
+        }
+        let bounds = screen_rect(window.get_bounding_rectangle().map_err(platform_error)?)
+            .filter(|bounds| bounds.width > 0 && bounds.height > 0)
+            .ok_or_else(|| {
+                VisualError::Platform(
+                    "exact owned fixture window did not expose capturable bounds".to_owned(),
+                )
+            })?;
+        OwnedWindowCaptureTarget::new(expected_hwnd, bounds)
     }
 
     /// Activates only the exact run-token/title-correlated fixture window.
@@ -460,13 +515,17 @@ fn exact_anchor_window(
         return Err(VisualError::InvalidIdentifier(anchor_title.to_owned()));
     }
     let automation = UIAutomation::new().map_err(platform_error)?;
-    let tabs = automation
+    let tabs = match automation
         .create_matcher()
         .name(anchor_title)
         .control_type(ControlType::TabItem)
         .timeout(0)
         .find_all()
-        .map_err(platform_error)?;
+    {
+        Ok(tabs) => tabs,
+        Err(error) if is_empty_match_error(&error.to_string()) => Vec::new(),
+        Err(error) => return Err(platform_error(error)),
+    };
     let anchor_tab_match_count = u32::try_from(tabs.len()).map_err(|_| {
         VisualError::Platform("UIA anchor count does not fit the receipt contract".to_owned())
     })?;
@@ -620,11 +679,23 @@ fn platform_error(error: impl std::fmt::Display) -> VisualError {
     ))
 }
 
+/// `uiautomation` reports an empty `find_all` as an error on some Windows
+/// builds. For an exact owned-anchor lookup, that is a zero-cardinality fact,
+/// not an infrastructure failure; callers can then retry or refuse cleanup
+/// without broadening the selector.
+fn is_empty_match_error(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("can not find element")
+        || detail.contains("cannot find element")
+        || detail.contains("element not found")
+        || detail.contains("0x80070490")
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{creator_process_started_unix_ms, title_is_run_correlated};
+    use super::{creator_process_started_unix_ms, is_empty_match_error, title_is_run_correlated};
     use crate::visual::root_workspace_anchor_fixture_alias;
 
     #[test]
@@ -658,5 +729,12 @@ mod tests {
             creator_process_started_unix_ms(u32::MAX).expect("absent PID is positively observed"),
             None
         );
+    }
+
+    #[test]
+    fn empty_uia_find_all_is_classified_as_zero_cardinality() {
+        assert!(is_empty_match_error("can not find element"));
+        assert!(is_empty_match_error("HRESULT 0x80070490"));
+        assert!(!is_empty_match_error("access denied"));
     }
 }

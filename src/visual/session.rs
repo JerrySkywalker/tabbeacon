@@ -73,6 +73,10 @@ const STATIC_FIXTURE_HOLD_MILLIS: u64 = 10_000;
 // nominal polling cadence. A title-animated fixture therefore reserves enough
 // time for activation, actual UIA observation, and owned-window capture.
 const TITLE_ANIMATION_FIXTURE_HOLD_MILLIS: u64 = 60_000;
+// The parent capture loop has an 85-second budget. Keep the anchor alive
+// longer than that budget so a slow, exact-owned PrintWindow capture cannot
+// turn into a title/window-ownership race.
+const PROMO_SHOWCASE_HOLD_MILLIS: u64 = 95_000;
 
 impl Default for TerminalTestSessionLauncher {
     fn default() -> Self {
@@ -117,6 +121,7 @@ impl TerminalTestSessionLauncher {
             &[],
             &arguments,
             hold_millis,
+            Duration::from_secs(5),
             evidence_root,
         )
     }
@@ -153,6 +158,35 @@ impl TerminalTestSessionLauncher {
             &[],
             &arguments,
             hold_millis,
+            Duration::from_secs(5),
+            evidence_root,
+        )
+    }
+
+    /// Launches a bounded, production-rendered promotional showcase in one
+    /// exact-owned Windows Terminal window. Its static anchor remains the only
+    /// cleanup identity while sibling showcase tabs may change title.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualError::Platform`] when Windows Terminal cannot launch
+    /// the fixture or the exact anchor cannot be durably registered.
+    pub fn launch_promo_showcase(
+        &self,
+        fixture_executable: &Path,
+        run_id: &str,
+        showcase_arguments: &[String],
+        evidence_root: &Path,
+    ) -> VisualResult<TerminalTestSession> {
+        self.launch_program(
+            fixture_executable,
+            run_id,
+            "promo-showcase",
+            "promo",
+            &["--useApplicationTitle".to_owned()],
+            showcase_arguments,
+            PROMO_SHOWCASE_HOLD_MILLIS,
+            Duration::from_secs(12),
             evidence_root,
         )
     }
@@ -202,6 +236,7 @@ impl TerminalTestSessionLauncher {
         tab_options: &[String],
         arguments: &[String],
         target_hold_millis: u64,
+        registration_budget: Duration,
         evidence_root: &Path,
     ) -> VisualResult<TerminalTestSession> {
         if !executable.is_file() {
@@ -259,7 +294,7 @@ impl TerminalTestSessionLauncher {
             &anchor_title,
             &window_name,
             std::process::id(),
-            Duration::from_secs(5),
+            registration_budget,
         ) {
             let _ = close_unregistered_exact_anchor(&WindowsUiaLocator, &anchor_title);
             return Err(error);

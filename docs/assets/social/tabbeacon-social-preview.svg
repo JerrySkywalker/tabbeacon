@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">TabBeacon: live status for Codex and more in Windows Terminal</title>
+  <desc id="desc">A TabBeacon-owned Codex-led social preview with three bounded synthetic terminal tab states and no launcher requirement.</desc>
+  <defs fill-rule="evenodd">
+    <path id="A" d="M1 0h3v1H1zM0 1h1v6H0zM4 1h1v6H4zM1 3h3v1H1z"/>
+    <path id="B" d="M0 0h3v1H0zM0 3h3v1H0zM0 6h3v1H0zM0 0h1v7H0zM3 1h1v2H3zM3 4h1v2H3z"/>
+    <path id="C" d="M1 0h4v1H1zM0 1h1v5H0zM1 6h4v1H1zM4 1h1v1H4zM4 5h1v1H4z"/>
+    <path id="D" d="M0 0h3v1H0zM0 6h3v1H0zM0 0h1v7H0zM3 1h1v5H3zM4 2h1v3H4z"/>
+    <path id="E" d="M0 0h5v1H0zM0 3h4v1H0zM0 6h5v1H0zM0 0h1v7H0z"/>
+    <path id="G" d="M1 0h4v1H1zM0 1h1v5H0zM1 6h4v1H1zM4 1h1v1H4zM2 3h3v4H4V4H2z"/>
+    <path id="I" d="M0 0h5v1H0zM2 1h1v5H2zM0 6h5v1H0z"/>
+    <path id="K" d="M0 0h1v7H0zM4 0h1L2 3l3 4H4L1 3z"/>
+    <path id="M" d="M0 0h1v7H0zM4 0h1v7H4zM1 0h1l1 3 1-3h1v2L3 5H2L1 2z"/>
+    <path id="N" d="M0 0h1v7H0zM4 0h1v7H4zM1 0h1l2 5v2H3L1 2z"/>
+    <path id="O" d="M1 0h3v1H1zM0 1h1v5H0zM4 1h1v5H4zM1 6h3v1H1z"/>
+    <path id="P" d="M0 0h4v1H0zM0 0h1v7H0zM4 1h1v3H4zM1 3h3v1H1z"/>
+    <path id="R" d="M0 0h4v1H0zM0 0h1v7H0zM4 1h1v3H4zM1 3h3v1H1zM2 4h1l2 3H4z"/>
+    <path id="S" d="M1 0h4v1H1zM0 1h1v2H0zM1 3h3v1H1zM4 4h1v2H4zM0 6h4v1H0z"/>
+    <path id="T" d="M0 0h5v1H0zM2 1h1v6H2z"/>
+    <path id="U" d="M0 0h1v6H0zM4 0h1v6H4zM1 6h3v1H1z"/>
+    <path id="W" d="M0 0h1v6H0zM4 0h1v6H4zM1 5h1v2H1zM3 5h1v2H3zM2 6h1v1H2z"/>
+    <path id="X" d="M0 0h1l1 2 1-2h1L3 3l2 4H4L2 4 1 7H0l2-4z"/>
+    <path id="Y" d="M0 0h1v2H0zM4 0h1v2H4zM1 2h1v1H1zM3 2h1v1H3zM2 3h1v4H2z"/>
+  </defs>
+  <rect width="1280" height="640" fill="#071426"/>
+  <path d="M0 500C230 418 426 587 664 498s330-3 616-76v218H0Z" fill="#0D2745"/>
+  <path d="M0 548c221-92 417 50 651-42s364 1 629-94" fill="none" stroke="#20345A" stroke-width="3" opacity=".9"/>
+  <g transform="translate(100 92) scale(.86)">
+    <path fill="#14213D" d="M40 58c0-11 9-20 20-20h61l17 18h58c11 0 20 9 20 20v105c0 11-9 20-20 20H60c-11 0-20-9-20-20V58Z"/>
+    <path fill="#20345A" d="M40 82h176v24H40z"/>
+    <path fill="#39D9F2" d="M65 108h69v16H65z"/>
+    <path fill="#80C7FF" d="m65 147 27 18-27 18z"/>
+    <circle cx="167" cy="139" r="15" fill="#39D9F2"/>
+    <circle cx="167" cy="139" r="5" fill="#14213D"/>
+    <path fill="none" stroke="#39D9F2" stroke-linecap="round" stroke-width="10" d="M195 111a40 40 0 0 1 0 56"/>
+    <path fill="none" stroke="#80C7FF" stroke-linecap="round" stroke-width="8" d="M211 94a65 65 0 0 1 0 90"/>
+  </g>
+  <g aria-label="TABBEACON" fill="#80C7FF" transform="translate(332 136) scale(6)">
+    <use href="#T" x="0"/><use href="#A" x="6"/><use href="#B" x="12"/><use href="#B" x="18"/><use href="#E" x="24"/><use href="#A" x="30"/><use href="#C" x="36"/><use href="#O" x="42"/><use href="#N" x="48"/>
+  </g>
+  <g aria-label="CODEX" fill="#F5FAFF" transform="translate(100 235) scale(11)">
+    <use href="#C" x="0"/><use href="#O" x="6"/><use href="#D" x="12"/><use href="#E" x="18"/><use href="#X" x="24"/>
+  </g>
+  <g aria-label="AND MORE" fill="#F5FAFF" transform="translate(100 332) scale(11)">
+    <use href="#A" x="0"/><use href="#N" x="6"/><use href="#D" x="12"/><use href="#M" x="24"/><use href="#O" x="30"/><use href="#R" x="36"/><use href="#E" x="42"/>
+  </g>
+  <g transform="translate(100 475)">
+    <rect width="1032" height="96" rx="18" fill="#102946" stroke="#2A5279" stroke-width="2"/>
+    <rect x="20" y="18" width="300" height="60" rx="12" fill="#173A5C"/>
+    <circle cx="54" cy="48" r="10" fill="#39D9F2"/>
+    <g aria-label="API" fill="#EAF6FF" transform="translate(78 29) scale(4)"><use href="#A" x="0"/><use href="#P" x="6"/><use href="#I" x="12"/></g>
+    <rect x="366" y="18" width="300" height="60" rx="12" fill="#173A5C"/>
+    <circle cx="400" cy="48" r="10" fill="#69D19B"/>
+    <path d="m414 48 6 6 12-14" fill="none" stroke="#69D19B" stroke-linecap="round" stroke-linejoin="round" stroke-width="5"/>
+    <g aria-label="WEB" fill="#EAF6FF" transform="translate(442 29) scale(4)"><use href="#W" x="0"/><use href="#E" x="6"/><use href="#B" x="12"/></g>
+    <rect x="712" y="18" width="300" height="60" rx="12" fill="#173A5C"/>
+    <circle cx="746" cy="48" r="10" fill="#F2C96D"/>
+    <path d="M762 40c7 0 10 3 10 8 0 7-7 7-7 13m0 7h.1" fill="none" stroke="#F2C96D" stroke-linecap="round" stroke-width="4"/>
+    <g aria-label="DOCS" fill="#EAF6FF" transform="translate(786 29) scale(4)"><use href="#D" x="0"/><use href="#O" x="6"/><use href="#C" x="12"/><use href="#S" x="18"/></g>
+  </g>
+</svg>
