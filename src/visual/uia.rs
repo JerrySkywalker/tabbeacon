@@ -15,6 +15,12 @@ use uiautomation::{
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
 
+// Windows Terminal can take longer than five seconds to retire a window that
+// owns multiple ConPTY tabs, even after WindowPattern.Close has been accepted.
+// Keep the wait bounded while allowing the exact admitted HWND to disappear
+// before classifying cleanup as failed.
+const EXACT_WINDOW_CLOSE_BUDGET: Duration = Duration::from_secs(15);
+
 use super::{
     ExactOwnedWindowBackend, ExactWindowObservation, ScreenRect, UiaDump, VisualError,
     VisualResult, WindowActivation, root_workspace_anchor_fixture_alias,
@@ -349,7 +355,7 @@ impl ExactOwnedWindowBackend for WindowsUiaLocator {
         let control = WindowControl::try_from(window).map_err(platform_error)?;
         let close_result = control.close();
 
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + EXACT_WINDOW_CLOSE_BUDGET;
         while native_window_exists(expected_hwnd) {
             if Instant::now() >= deadline {
                 let detail = close_result.as_ref().err().map_or_else(
