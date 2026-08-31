@@ -71,8 +71,9 @@ They are not partially supported and are not enabled by this release train.
 
 ## Quick Start
 
-Current public release: **v0.7.1**. Active feature development is paused for
-an extended dogfood period after this maintenance closeout.
+Current public release: **v0.7.2**. Active feature development remains paused
+after this hotfix closeout; the frozen v0.7.3 promotion train requires a new
+explicit Owner admission.
 
 Install the public CLI, then run the guided setup:
 

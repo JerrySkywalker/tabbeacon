@@ -31,17 +31,29 @@ TAG=v0.6.1
 
 ## Current production baseline
 
-CURRENT_PUBLIC_RELEASE=v0.7.1
-CURRENT_PUBLIC_TARGET=v0.7.1
-ACTIVE_FEATURE_DEVELOPMENT=PAUSED_EXCEPT_TB_V072_HOTFIX
+CURRENT_PUBLIC_RELEASE=v0.7.2
+CURRENT_PUBLIC_TARGET=v0.7.2
+ACTIVE_FEATURE_DEVELOPMENT=PAUSED
+PROMOTION_TARGET_RELEASE=v0.7.3
+PROMO_PR=100
+PROMO_PR_STATE=FROZEN_DRAFT
 
-The v0.7.1 maintenance closeout is publicly distributed. Active feature
-development remains paused for the Owner's extended dogfood period except the
-explicitly admitted `TB-V072-FULL-SUBAGENT-HOOK-HOTFIX-TO-PUBLIC-RELEASE-001`
-sequence (G103-G106). `ROADMAP_V072.md` and `DEVELOPMENT_PAUSE.md` are the
-authoritative current-scope documents for that narrow exception. Historical
-production evidence remains below; it is retained as the record for each release
-line and does not supersede the current public baseline.
+The v0.7.2 Codex subagent Hook stability hotfix is publicly distributed. Its
+accepted release source, immutable tag, registry package, and Windows asset are:
+
+```text
+RELEASE_SHA=1ee71720c27633a12f808903fb22b03cb367e79a
+TAG=v0.7.2
+CRATES_IO_VERSION=0.7.2
+GITHUB_RELEASE=v0.7.2
+WINDOWS_ZIP_SHA256=c4cb600a00754953dc8f328789e2fea8277adbdc10ad68bacee5beb261753c0a
+```
+
+Active feature development is paused for Owner dogfood. PR #100 remains a
+frozen draft for the v0.7.3 promotion target; this closeout does not resume or
+merge it. `ROADMAP_V072.md` remains the historical hotfix execution record, and
+`DEVELOPMENT_PAUSE.md` is the authoritative current-scope boundary. Historical
+production evidence remains below and does not supersede this public baseline.
 
 ## Historical v0.4 production baseline
 
