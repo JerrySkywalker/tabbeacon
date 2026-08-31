@@ -327,10 +327,8 @@ fn cleanup_temporary_windows_terminal_to_receipt<B: ExactOwnedWindowBackend>(
     if receipt_path.exists() {
         let receipt: TemporaryWindowsTerminalCleanupReceipt =
             serde_json::from_slice(&fs::read(receipt_path)?)?;
-        if receipt.schema != CLEANUP_SCHEMA
-            || receipt.ownership_sha256 != ownership_sha256
-            || receipt.product_disposition != product_disposition
-        {
+        validate_cleanup_receipt(&receipt, ownership_sha256)?;
+        if receipt.product_disposition != product_disposition {
             return Err(VisualError::Platform(
                 "existing temporary Windows Terminal cleanup receipt does not match ownership"
                     .to_owned(),
@@ -792,9 +790,10 @@ mod tests {
 
     use super::{
         ExactOwnedWindowBackend, ExactOwnedWindowRecoveryBackend, ExactWindowObservation,
-        TemporaryWindowProductDisposition, cleanup_temporary_windows_terminal,
-        close_unregistered_exact_anchor, recover_stale_temporary_windows_terminals,
-        register_temporary_windows_terminal, retry_temporary_windows_terminal_cleanup,
+        TemporaryWindowProductDisposition, cleanup_receipt_path,
+        cleanup_temporary_windows_terminal, close_unregistered_exact_anchor,
+        recover_stale_temporary_windows_terminals, register_temporary_windows_terminal,
+        retry_temporary_windows_terminal_cleanup,
     };
     use crate::visual::VisualResult;
 
@@ -972,6 +971,68 @@ mod tests {
 
         assert_eq!(first, second);
         assert_eq!(backend.close_calls.get(), 1);
+    }
+
+    #[test]
+    fn repeated_cleanup_rejects_every_invalid_existing_receipt_invariant() {
+        for invalid_case in [
+            "schema",
+            "ownership_sha256",
+            "product_disposition",
+            "temporary_windows_created",
+            "temporary_windows_closed",
+            "owner_windows_closed",
+            "broad_window_kill_used",
+            "pass_with_remaining_window",
+            "fail_without_remaining_window",
+            "unknown_cleanup_status",
+        ] {
+            let root = TestRoot::new();
+            let backend = FakeBackend::exact();
+            let ownership = register(&root, &backend);
+            let mut receipt = cleanup_temporary_windows_terminal(
+                &backend,
+                &ownership,
+                TemporaryWindowProductDisposition::Pass,
+            )
+            .expect("first cleanup records");
+            match invalid_case {
+                "schema" => receipt.schema = "wrong-schema".to_owned(),
+                "ownership_sha256" => receipt.ownership_sha256 = "0".repeat(64),
+                "product_disposition" => {
+                    receipt.product_disposition = TemporaryWindowProductDisposition::Fail;
+                }
+                "temporary_windows_created" => receipt.temporary_windows_created = 2,
+                "temporary_windows_closed" => receipt.temporary_windows_closed = 2,
+                "owner_windows_closed" => receipt.owner_windows_closed = 1,
+                "broad_window_kill_used" => receipt.broad_window_kill_used = true,
+                "pass_with_remaining_window" => receipt.owned_temporary_wt_remaining = 1,
+                "fail_without_remaining_window" => receipt.temporary_wt_cleanup = "FAIL".to_owned(),
+                "unknown_cleanup_status" => receipt.temporary_wt_cleanup = "UNKNOWN".to_owned(),
+                _ => unreachable!("all invalid receipt cases are explicit"),
+            }
+            let receipt_path = cleanup_receipt_path(&ownership).expect("receipt path resolves");
+            fs::write(
+                receipt_path,
+                serde_json::to_vec_pretty(&receipt).expect("tampered receipt serializes"),
+            )
+            .expect("tampered receipt writes");
+
+            assert!(
+                cleanup_temporary_windows_terminal(
+                    &backend,
+                    &ownership,
+                    TemporaryWindowProductDisposition::Pass,
+                )
+                .is_err(),
+                "invalid existing cleanup receipt must be rejected: {invalid_case}"
+            );
+            assert_eq!(
+                backend.close_calls.get(),
+                1,
+                "receipt validation must not repeat or widen cleanup: {invalid_case}"
+            );
+        }
     }
 
     #[test]
