@@ -2522,17 +2522,57 @@ fn worker_attribute_list(
     })
 }
 
-/// Starts a long-lived worker with an explicit standard-handle allowlist.
+#[cfg(windows)]
+fn append_quoted_windows_argument(
+    command_line: &mut Vec<u16>,
+    argument: &std::ffi::OsStr,
+) -> io::Result<()> {
+    let argument = argument.encode_wide().collect::<Vec<_>>();
+    if argument.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "activity process argument contains an embedded NUL",
+        ));
+    }
+
+    command_line.push(u16::from(b'"'));
+    let mut backslashes = 0_usize;
+    for unit in argument {
+        if unit == u16::from(b'\\') {
+            backslashes = backslashes.saturating_add(1);
+            continue;
+        }
+        if unit == u16::from(b'"') {
+            for _ in 0..backslashes.saturating_mul(2).saturating_add(1) {
+                command_line.push(u16::from(b'\\'));
+            }
+        } else {
+            for _ in 0..backslashes {
+                command_line.push(u16::from(b'\\'));
+            }
+        }
+        backslashes = 0;
+        command_line.push(unit);
+    }
+    for _ in 0..backslashes.saturating_mul(2) {
+        command_line.push(u16::from(b'\\'));
+    }
+    command_line.push(u16::from(b'"'));
+    Ok(())
+}
+
+/// Starts a detached activity helper with an explicit inherited-handle list.
 ///
-/// Rust's Windows `Command` implementation currently calls `CreateProcessW`
-/// with `bInheritHandles=TRUE`. `Stdio::null()` replaces the three standard
-/// handles, but it does not exclude other inheritable handles already present
-/// in the Hook process (notably the command runner's redirected pipe ends).
-/// A `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` preserves explicit NUL stdio without
-/// allowing those ambient handles to keep Codex's output pipes open.
+/// Both the renderer and its cleanup observer outlive the one-shot Hook. They
+/// must therefore inherit only their NUL-backed standard handles, never an
+/// ambient runner, Codex, or test-fixture pipe that happens to be inheritable.
 #[cfg(windows)]
 #[allow(unsafe_code)]
-fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
+fn spawn_isolated_activity_process(
+    executable: &Path,
+    arguments: &[String],
+    additional_creation_flags: u32,
+) -> io::Result<u32> {
     use std::mem;
 
     use windows::{
@@ -2540,7 +2580,7 @@ fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
             Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE},
             System::Threading::{
                 CREATE_UNICODE_ENVIRONMENT, CreateProcessW, EXTENDED_STARTUPINFO_PRESENT,
-                PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+                PROCESS_CREATION_FLAGS, PROCESS_INFORMATION, STARTF_USESTDHANDLES, STARTUPINFOEXW,
             },
         },
         core::{PCWSTR, PWSTR},
@@ -2555,20 +2595,17 @@ fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
     if application.contains(&0) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "worker executable contains an embedded NUL",
+            "activity process executable contains an embedded NUL",
         ));
     }
     application.push(0);
+
     let mut command_line = Vec::new();
-    command_line.push(u16::from(b'"'));
-    command_line.extend(executable.as_os_str().encode_wide());
-    command_line.extend(
-        format!(
-            "\" __activity-worker-v1 {} {} {}",
-            lease.key_sha256, lease.generation, lease.revision
-        )
-        .encode_utf16(),
-    );
+    append_quoted_windows_argument(&mut command_line, executable.as_os_str())?;
+    for argument in arguments {
+        command_line.push(u16::from(b' '));
+        append_quoted_windows_argument(&mut command_line, std::ffi::OsStr::new(argument))?;
+    }
     command_line.push(0);
 
     let mut startup = STARTUPINFOEXW::default();
@@ -2586,7 +2623,9 @@ fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
             None,
             None,
             true,
-            CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+            CREATE_UNICODE_ENVIRONMENT
+                | EXTENDED_STARTUPINFO_PRESENT
+                | PROCESS_CREATION_FLAGS(additional_creation_flags),
             None,
             PCWSTR::null(),
             &raw const startup.StartupInfo,
@@ -2600,6 +2639,26 @@ fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
     Ok(process_id)
 }
 
+/// Starts a long-lived worker with an explicit standard-handle allowlist.
+///
+/// Rust's Windows `Command` implementation currently calls `CreateProcessW`
+/// with `bInheritHandles=TRUE`. `Stdio::null()` replaces the three standard
+/// handles, but it does not exclude other inheritable handles already present
+/// in the Hook process (notably the command runner's redirected pipe ends).
+/// A `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` preserves explicit NUL stdio without
+/// allowing those ambient handles to keep Codex's output pipes open.
+#[cfg(windows)]
+fn spawn_worker(executable: &Path, lease: &WorkerLease) -> io::Result<u32> {
+    let arguments = [
+        "__activity-worker-v1".to_owned(),
+        lease.key_sha256.clone(),
+        lease.generation.to_string(),
+        lease.revision.to_string(),
+    ];
+    spawn_isolated_activity_process(executable, &arguments, 0)
+}
+
+#[cfg(not(windows))]
 fn spawn_cleanup_observer(
     executable: &Path,
     lease: &WorkerLease,
@@ -2620,9 +2679,26 @@ fn spawn_cleanup_observer(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(windows)]
-    command.creation_flags(0x0000_0008 | 0x0000_0200);
     command.spawn().map(|_| ())
+}
+
+#[cfg(windows)]
+fn spawn_cleanup_observer(
+    executable: &Path,
+    lease: &WorkerLease,
+    worker_pid: u32,
+) -> io::Result<()> {
+    let expected_executable = normalized_executable_path(executable)?;
+    let arguments = [
+        "__activity-cleanup-observer-v1".to_owned(),
+        worker_pid.to_string(),
+        lease.key_sha256.clone(),
+        lease.generation.to_string(),
+        lease.revision.to_string(),
+        lease.owner_sha256.clone(),
+        expected_executable,
+    ];
+    spawn_isolated_activity_process(executable, &arguments, 0x0000_0008 | 0x0000_0200).map(|_| ())
 }
 
 fn worker_process_liveness(
