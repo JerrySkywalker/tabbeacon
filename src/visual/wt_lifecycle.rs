@@ -15,6 +15,7 @@ use super::{VisualError, VisualResult};
 
 const OWNERSHIP_SCHEMA: &str = "tabbeacon-temporary-wt-ownership-v1";
 const CLEANUP_SCHEMA: &str = "tabbeacon-temporary-wt-cleanup-v1";
+const MAX_CLEANUP_RECOVERY_ATTEMPTS: u8 = 32;
 
 /// Fresh UIA correlation for one fixed, run-owned anchor tab.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,15 +200,27 @@ pub fn cleanup_temporary_windows_terminal<B: ExactOwnedWindowBackend>(
     ownership_path: &Path,
     product_disposition: TemporaryWindowProductDisposition,
 ) -> VisualResult<TemporaryWindowsTerminalCleanupReceipt> {
-    let ownership_bytes = fs::read(ownership_path)?;
-    let ownership: TemporaryWindowsTerminalOwnership = serde_json::from_slice(&ownership_bytes)?;
-    validate_ownership(&ownership)?;
-    let ownership_sha256 = hex_sha256(&ownership_bytes);
+    let (ownership, ownership_sha256) = read_validated_ownership(ownership_path)?;
     let receipt_path = cleanup_receipt_path(ownership_path)?;
+    cleanup_temporary_windows_terminal_to_receipt(
+        backend,
+        &ownership,
+        &ownership_sha256,
+        &receipt_path,
+        product_disposition,
+    )
+}
 
+fn cleanup_temporary_windows_terminal_to_receipt<B: ExactOwnedWindowBackend>(
+    backend: &B,
+    ownership: &TemporaryWindowsTerminalOwnership,
+    ownership_sha256: &str,
+    receipt_path: &Path,
+    product_disposition: TemporaryWindowProductDisposition,
+) -> VisualResult<TemporaryWindowsTerminalCleanupReceipt> {
     if receipt_path.exists() {
         let receipt: TemporaryWindowsTerminalCleanupReceipt =
-            serde_json::from_slice(&fs::read(&receipt_path)?)?;
+            serde_json::from_slice(&fs::read(receipt_path)?)?;
         if receipt.schema != CLEANUP_SCHEMA
             || receipt.ownership_sha256 != ownership_sha256
             || receipt.product_disposition != product_disposition
@@ -222,9 +235,9 @@ pub fn cleanup_temporary_windows_terminal<B: ExactOwnedWindowBackend>(
 
     let Ok(initial) = backend.observe_exact_anchor(&ownership.anchor_title) else {
         return write_cleanup_receipt(
-            &receipt_path,
+            receipt_path,
             cleanup_failure(
-                ownership_sha256,
+                ownership_sha256.to_owned(),
                 product_disposition,
                 1,
                 "INITIAL_OBSERVATION_FAILED",
@@ -237,21 +250,21 @@ pub fn cleanup_temporary_windows_terminal<B: ExactOwnedWindowBackend>(
         && initial.native_window_id.is_none()
     {
         cleanup_success(
-            ownership_sha256,
+            ownership_sha256.to_owned(),
             product_disposition,
             0,
             "EXACT_OWNED_WINDOW_ALREADY_ABSENT",
         )
     } else if initial.anchor_tab_match_count != 1 || initial.target_window_match_count != 1 {
         cleanup_failure(
-            ownership_sha256,
+            ownership_sha256.to_owned(),
             product_disposition,
             initial.anchor_tab_match_count.max(1),
             "AMBIGUOUS_EXACT_OWNERSHIP_REFUSED",
         )
     } else if initial.native_window_id != Some(ownership.native_window_id) {
         cleanup_failure(
-            ownership_sha256,
+            ownership_sha256.to_owned(),
             product_disposition,
             initial.anchor_tab_match_count,
             "HWND_MISMATCH_REFUSED",
@@ -261,7 +274,7 @@ pub fn cleanup_temporary_windows_terminal<B: ExactOwnedWindowBackend>(
         .is_err()
     {
         cleanup_failure(
-            ownership_sha256,
+            ownership_sha256.to_owned(),
             product_disposition,
             1,
             "EXACT_CLOSE_FAILED",
@@ -271,14 +284,14 @@ pub fn cleanup_temporary_windows_terminal<B: ExactOwnedWindowBackend>(
         // HWND disappeared. A second UIA tree query can retain a stale element
         // after WindowPattern.Close and is therefore not the close authority.
         cleanup_success(
-            ownership_sha256,
+            ownership_sha256.to_owned(),
             product_disposition,
             1,
             "EXACT_OWNED_WINDOW_CLOSED",
         )
     };
 
-    write_cleanup_receipt(&receipt_path, receipt)
+    write_cleanup_receipt(receipt_path, receipt)
 }
 
 /// Recovers unfinished records below one admitted qualification registry.
@@ -307,9 +320,13 @@ pub fn recover_stale_temporary_windows_terminals<B: ExactOwnedWindowBackend>(
     ownership_paths.sort();
     let mut receipts = Vec::with_capacity(ownership_paths.len());
     for ownership_path in ownership_paths {
-        let receipt = cleanup_temporary_windows_terminal(
+        let (ownership, ownership_sha256) = read_validated_ownership(&ownership_path)?;
+        let receipt_path = next_cleanup_recovery_receipt_path(&ownership_path)?;
+        let receipt = cleanup_temporary_windows_terminal_to_receipt(
             backend,
-            &ownership_path,
+            &ownership,
+            &ownership_sha256,
+            &receipt_path,
             TemporaryWindowProductDisposition::Exception,
         )?;
         if receipt.temporary_wt_cleanup != "PASS" {
@@ -381,8 +398,11 @@ fn collect_unfinished_ownership_records(
         if !filename.starts_with("temporary-wt-") || !filename.ends_with(".ownership.json") {
             continue;
         }
-        let receipt_path = cleanup_receipt_path(&path)?;
-        if !receipt_path.exists() {
+        let (_, ownership_sha256) = read_validated_ownership(&path)?;
+        let latest = latest_cleanup_receipt(&path, &ownership_sha256)?;
+        if latest.as_ref().is_none_or(|receipt| {
+            receipt.temporary_wt_cleanup != "PASS" || receipt.owned_temporary_wt_remaining != 0
+        }) {
             paths.push(path);
         }
     }
@@ -459,6 +479,13 @@ fn is_safe_token(value: &str, max_len: usize) -> bool {
 }
 
 fn cleanup_receipt_path(ownership_path: &Path) -> VisualResult<PathBuf> {
+    cleanup_receipt_path_for_attempt(ownership_path, None)
+}
+
+fn cleanup_receipt_path_for_attempt(
+    ownership_path: &Path,
+    recovery_attempt: Option<u8>,
+) -> VisualResult<PathBuf> {
     let filename = ownership_path
         .file_name()
         .and_then(|value| value.to_str())
@@ -466,7 +493,80 @@ fn cleanup_receipt_path(ownership_path: &Path) -> VisualResult<PathBuf> {
     let stem = filename
         .strip_suffix(".ownership.json")
         .ok_or_else(|| VisualError::InvalidIdentifier(filename.to_owned()))?;
-    Ok(ownership_path.with_file_name(format!("{stem}.cleanup.json")))
+    let filename = recovery_attempt.map_or_else(
+        || format!("{stem}.cleanup.json"),
+        |attempt| format!("{stem}.recovery-{attempt:02}.cleanup.json"),
+    );
+    Ok(ownership_path.with_file_name(filename))
+}
+
+fn read_validated_ownership(
+    ownership_path: &Path,
+) -> VisualResult<(TemporaryWindowsTerminalOwnership, String)> {
+    let ownership_bytes = fs::read(ownership_path)?;
+    let ownership: TemporaryWindowsTerminalOwnership = serde_json::from_slice(&ownership_bytes)?;
+    validate_ownership(&ownership)?;
+    Ok((ownership, hex_sha256(&ownership_bytes)))
+}
+
+fn latest_cleanup_receipt(
+    ownership_path: &Path,
+    ownership_sha256: &str,
+) -> VisualResult<Option<TemporaryWindowsTerminalCleanupReceipt>> {
+    let mut latest = None;
+    for recovery_attempt in
+        std::iter::once(None).chain((1..=MAX_CLEANUP_RECOVERY_ATTEMPTS).map(Some))
+    {
+        let path = cleanup_receipt_path_for_attempt(ownership_path, recovery_attempt)?;
+        if !path.exists() {
+            break;
+        }
+        let receipt: TemporaryWindowsTerminalCleanupReceipt =
+            serde_json::from_slice(&fs::read(path)?)?;
+        validate_cleanup_receipt(&receipt, ownership_sha256)?;
+        latest = Some(receipt);
+    }
+    Ok(latest)
+}
+
+fn next_cleanup_recovery_receipt_path(ownership_path: &Path) -> VisualResult<PathBuf> {
+    let primary = cleanup_receipt_path(ownership_path)?;
+    if !primary.exists() {
+        return Ok(primary);
+    }
+    for attempt in 1..=MAX_CLEANUP_RECOVERY_ATTEMPTS {
+        let candidate = cleanup_receipt_path_for_attempt(ownership_path, Some(attempt))?;
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(VisualError::Platform(
+        "temporary Windows Terminal cleanup recovery attempt budget exhausted".to_owned(),
+    ))
+}
+
+fn validate_cleanup_receipt(
+    receipt: &TemporaryWindowsTerminalCleanupReceipt,
+    ownership_sha256: &str,
+) -> VisualResult<()> {
+    let status_is_valid = match receipt.temporary_wt_cleanup.as_str() {
+        "PASS" => receipt.owned_temporary_wt_remaining == 0,
+        "FAIL" => receipt.owned_temporary_wt_remaining > 0,
+        _ => false,
+    };
+    if receipt.schema != CLEANUP_SCHEMA
+        || receipt.ownership_sha256 != ownership_sha256
+        || receipt.temporary_windows_created != 1
+        || receipt.temporary_windows_closed > 1
+        || receipt.owner_windows_closed != 0
+        || receipt.broad_window_kill_used
+        || !status_is_valid
+    {
+        return Err(VisualError::Platform(
+            "invalid temporary Windows Terminal cleanup receipt".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn cleanup_success(
@@ -898,5 +998,44 @@ mod tests {
         assert_eq!(receipts.len(), 1);
         assert_eq!(receipts[0].temporary_wt_cleanup, "PASS");
         assert_eq!(recovery_backend.close_calls.get(), 1);
+    }
+
+    #[test]
+    fn next_run_retries_exact_owned_window_after_an_immutable_cleanup_failure() {
+        let registry = TestRoot::new();
+        let creating_backend = FakeBackend::exact();
+        let ownership = register(&registry, &creating_backend);
+        creating_backend.close_fails.set(true);
+        let failed = cleanup_temporary_windows_terminal(
+            &creating_backend,
+            &ownership,
+            TemporaryWindowProductDisposition::Fail,
+        )
+        .expect("initial exact close failure records");
+        assert_eq!(failed.temporary_wt_cleanup, "FAIL");
+        assert_eq!(failed.owned_temporary_wt_remaining, 1);
+
+        let recovery_backend = FakeBackend::exact();
+        let receipts = recover_stale_temporary_windows_terminals(&recovery_backend, &registry.0)
+            .expect("later run re-proves ownership and closes the stale exact HWND");
+
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].temporary_wt_cleanup, "PASS");
+        assert_eq!(receipts[0].owned_temporary_wt_remaining, 0);
+        assert_eq!(recovery_backend.close_calls.get(), 1);
+        assert_eq!(
+            cleanup_temporary_windows_terminal(
+                &creating_backend,
+                &ownership,
+                TemporaryWindowProductDisposition::Fail,
+            )
+            .expect("original failure receipt remains immutable"),
+            failed
+        );
+        assert!(
+            recover_stale_temporary_windows_terminals(&recovery_backend, &registry.0)
+                .expect("successful recovery is terminal")
+                .is_empty()
+        );
     }
 }
