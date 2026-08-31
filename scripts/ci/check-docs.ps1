@@ -198,33 +198,45 @@ $currentFacingPaths = @(
 )
 foreach ($path in $currentFacingPaths) {
     $content = Get-Content -LiteralPath $path -Raw
-    Assert-Docs ($content -notmatch '(?i)(current|latest|supported)\s+(public\s+|published\s+)?release[^\n]{0,80}v?0\.(2|6\.0|6\.1)') "$path contains a stale current release marker"
+    Assert-Docs ($content -notmatch '(?i)(current|latest|supported)\s+(public\s+|published\s+)?release[^\n]{0,80}v?0\.(2|6\.0|6\.1|7\.1)') "$path contains a stale current release marker"
     Assert-Docs ($content -notmatch '(?i)TabBeacon\s+0\.6\.0\s+(supports|is|includes)') "$path contains stale v0.6.0 current-product wording"
 }
 
 $currentReleaseProofs = @(
-    @{ Path = 'README.md'; Pattern = 'Current public release:\s+\*\*v0\.7\.1\*\*' },
-    @{ Path = 'README.zh-CN.md'; Pattern = '\u5f53\u524d\u516c\u5f00\u7248\u672c\uff1a\*\*v0\.7\.1\*\*' },
-    @{ Path = 'SECURITY.md'; Pattern = 'current published release is \*\*v0\.7\.1\*\*' },
-    @{ Path = 'docs/README.md'; Pattern = 'Current public release:\s+\*\*v0\.7\.1\*\*' },
-    @{ Path = 'docs/getting-started.md'; Pattern = 'current public release is \*\*v0\.7\.1\*\*' },
-    @{ Path = 'docs/development/release-process.md'; Pattern = 'current public release is \*\*v0\.7\.1\*\*' },
-    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.7\.1' },
-    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.7\.1' }
+    @{ Path = 'README.md'; Pattern = 'Current public release:\s+\*\*v0\.7\.2\*\*' },
+    @{ Path = 'README.zh-CN.md'; Pattern = '\u5f53\u524d\u516c\u5f00\u7248\u672c\uff1a\*\*v0\.7\.2\*\*' },
+    @{ Path = 'SECURITY.md'; Pattern = 'current published release is \*\*v0\.7\.2\*\*' },
+    @{ Path = 'docs/README.md'; Pattern = 'Current public release:\s+\*\*v0\.7\.2\*\*' },
+    @{ Path = 'docs/getting-started.md'; Pattern = 'current public release is \*\*v0\.7\.2\*\*' },
+    @{ Path = 'docs/development/release-process.md'; Pattern = 'current public release is \*\*v0\.7\.2\*\*' },
+    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.7\.2' },
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.7\.2' }
 )
 foreach ($proof in $currentReleaseProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw -Encoding UTF8
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not declare v0.7.1 as the current public release"
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not declare v0.7.2 as the current public release"
 }
 
 $releaseTargetProofs = @(
-    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_TARGET=v0\.7\.1' },
-    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'CURRENT_PUBLIC_TARGET=v0\.7\.1' },
-    @{ Path = 'docs/v0.7.1-release-notes.md'; Pattern = '# TabBeacon v0\.7\.1' }
+    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_TARGET=v0\.7\.2' },
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'CURRENT_PUBLIC_TARGET=v0\.7\.2' },
+    @{ Path = 'docs/v0.7.2-release-notes.md'; Pattern = '# TabBeacon v0\.7\.2' }
 )
 foreach ($proof in $releaseTargetProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not identify the v0.7.1 release record"
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not identify the v0.7.2 release record"
+}
+
+$pauseStateProofs = @(
+    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'ACTIVE_FEATURE_DEVELOPMENT=PAUSED' },
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'ACTIVE_FEATURE_DEVELOPMENT=PAUSED' },
+    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'PROMOTION_TARGET_RELEASE=v0\.7\.3' },
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'PROMO_PR_STATE=FROZEN_DRAFT' },
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'PR100_MERGE_ALLOWED=false' }
+)
+foreach ($proof in $pauseStateProofs) {
+    $content = Get-Content -LiteralPath $proof.Path -Raw
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not preserve the post-v0.7.2 development pause"
 }
 
 Write-Host 'README_BADGE_COUNT=2'
