@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    env, fs,
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -21,6 +22,7 @@ const REMOTE_ARGS: &[&str] = &[
     "^remote\\..*\\.url$",
 ];
 const ROOT_COMMIT_ARGS: &[&str] = &["rev-list", "--max-parents=0", "--all"];
+const MAX_GIT_CONTROL_FILE_BYTES: u64 = 1024 * 1024;
 
 /// One locally configured Git remote URL.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -148,6 +150,29 @@ impl RepositoryDiscovery {
         })
     }
 
+    /// Discovers ordinary worktree layout and local remote URLs without
+    /// launching Git when the repository uses complete, direct metadata.
+    ///
+    /// Codex command Hooks have a strict one-second lifecycle. On Windows,
+    /// launching `git.exe` twice for layout and remote configuration can
+    /// consume that entire budget before presentation begins. A conventional
+    /// `.git` directory or gitfile plus a direct local config is already the
+    /// same offline authority those commands read, so use it in-process. Rare
+    /// config/include layouts fall back to the established Git implementation.
+    pub(super) fn discover_without_root_commits_for_hook(
+        &self,
+        cwd: impl AsRef<Path>,
+    ) -> Result<DiscoveredRepository, RepositoryIdentityError> {
+        let cwd = cwd.as_ref();
+        match discover_process_free(cwd) {
+            ProcessFreeDiscovery::Repository(discovered) => Ok(discovered),
+            ProcessFreeDiscovery::NotRepository => {
+                Err(RepositoryIdentityError::NotRepository(cwd.to_path_buf()))
+            }
+            ProcessFreeDiscovery::RequiresGit => self.discover_without_root_commits(cwd),
+        }
+    }
+
     /// Reads the local root-history fallback only when no usable remote
     /// identity was established.
     ///
@@ -205,6 +230,336 @@ impl RepositoryDiscovery {
             })
         }
     }
+}
+
+enum ProcessFreeDiscovery {
+    Repository(DiscoveredRepository),
+    NotRepository,
+    RequiresGit,
+}
+
+struct ProcessFreeLayout {
+    worktree_root: PathBuf,
+    git_dir: PathBuf,
+    git_common_dir: PathBuf,
+}
+
+fn discover_process_free(cwd: &Path) -> ProcessFreeDiscovery {
+    let Some(layout) = process_free_layout(cwd) else {
+        return ProcessFreeDiscovery::NotRepository;
+    };
+    let Ok(layout) = layout else {
+        return ProcessFreeDiscovery::RequiresGit;
+    };
+    let Ok(remotes) = process_free_remotes(&layout) else {
+        return ProcessFreeDiscovery::RequiresGit;
+    };
+    ProcessFreeDiscovery::Repository(DiscoveredRepository {
+        worktree_root: layout.worktree_root,
+        git_dir: layout.git_dir,
+        git_common_dir: layout.git_common_dir,
+        remotes,
+        root_commits: Vec::new(),
+    })
+}
+
+fn process_free_layout(cwd: &Path) -> Option<Result<ProcessFreeLayout, ()>> {
+    let mut candidate = if cwd.is_absolute() {
+        cwd.to_path_buf()
+    } else {
+        let Ok(current) = env::current_dir() else {
+            return Some(Err(()));
+        };
+        current.join(cwd)
+    };
+    if !candidate.is_dir() {
+        return Some(Err(()));
+    }
+
+    loop {
+        let marker = candidate.join(".git");
+        match fs::symlink_metadata(&marker) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Some(Err(()));
+                }
+                let git_dir = if metadata.is_dir() {
+                    marker
+                } else if metadata.is_file() {
+                    let Ok(contents) = read_bounded_utf8(&marker) else {
+                        return Some(Err(()));
+                    };
+                    let mut lines = contents
+                        .lines()
+                        .map(str::trim)
+                        .filter(|line| !line.is_empty());
+                    let Some(git_dir_value) = lines
+                        .next()
+                        .and_then(|line| strip_ascii_prefix(line, "gitdir:").map(str::trim))
+                        .filter(|value| !value.is_empty())
+                    else {
+                        return Some(Err(()));
+                    };
+                    if lines.next().is_some() {
+                        return Some(Err(()));
+                    }
+                    let path = PathBuf::from(git_dir_value);
+                    if path.is_absolute() {
+                        path
+                    } else {
+                        candidate.join(path)
+                    }
+                } else {
+                    return Some(Err(()));
+                };
+                let Ok(git_dir) = fs::canonicalize(git_dir) else {
+                    return Some(Err(()));
+                };
+                if !git_dir.is_dir() {
+                    return Some(Err(()));
+                }
+                let git_common_dir = match read_optional_bounded_utf8(&git_dir.join("commondir")) {
+                    Ok(Some(value)) => {
+                        let value = value.trim();
+                        if value.is_empty() || value.lines().count() != 1 {
+                            return Some(Err(()));
+                        }
+                        let path = PathBuf::from(value);
+                        let path = if path.is_absolute() {
+                            path
+                        } else {
+                            git_dir.join(path)
+                        };
+                        let Ok(path) = fs::canonicalize(path) else {
+                            return Some(Err(()));
+                        };
+                        path
+                    }
+                    Ok(None) => git_dir.clone(),
+                    Err(()) => return Some(Err(())),
+                };
+                if !git_common_dir.is_dir() {
+                    return Some(Err(()));
+                }
+                return Some(Ok(ProcessFreeLayout {
+                    worktree_root: candidate,
+                    git_dir,
+                    git_common_dir,
+                }));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Some(Err(())),
+        }
+        if !candidate.pop() {
+            return None;
+        }
+    }
+}
+
+fn process_free_remotes(layout: &ProcessFreeLayout) -> Result<Vec<RepositoryRemote>, ()> {
+    let Some(config) = read_optional_bounded_utf8(&layout.git_common_dir.join("config"))? else {
+        return Ok(Vec::new());
+    };
+    parse_process_free_remotes(&config)
+}
+
+fn read_bounded_utf8(path: &Path) -> Result<String, ()> {
+    let metadata = fs::metadata(path).map_err(|_| ())?;
+    if !metadata.is_file() || metadata.len() > MAX_GIT_CONTROL_FILE_BYTES {
+        return Err(());
+    }
+    fs::read_to_string(path).map_err(|_| ())
+}
+
+fn read_optional_bounded_utf8(path: &Path) -> Result<Option<String>, ()> {
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            if !metadata.is_file() || metadata.len() > MAX_GIT_CONTROL_FILE_BYTES {
+                return Err(());
+            }
+            fs::read_to_string(path).map(Some).map_err(|_| ())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+fn parse_process_free_remotes(config: &str) -> Result<Vec<RepositoryRemote>, ()> {
+    let mut section = String::new();
+    let mut subsection = None::<String>;
+    let mut remotes = Vec::new();
+    for raw_line in config.trim_start_matches('\u{feff}').lines() {
+        if raw_line.trim_end().ends_with('\\') {
+            return Err(());
+        }
+        let line = strip_git_config_comment(raw_line)?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') {
+            let (next_section, next_subsection) = parse_git_config_section(line)?;
+            if next_section.eq_ignore_ascii_case("include")
+                || next_section.eq_ignore_ascii_case("includeif")
+            {
+                return Err(());
+            }
+            section = next_section;
+            subsection = next_subsection;
+            continue;
+        }
+
+        let (name, value) = parse_git_config_assignment(line)?;
+        if section.eq_ignore_ascii_case("include")
+            || section.eq_ignore_ascii_case("includeif")
+            || (section.is_empty() && name.eq_ignore_ascii_case("include.path"))
+        {
+            return Err(());
+        }
+        if section.eq_ignore_ascii_case("extensions")
+            && name.eq_ignore_ascii_case("worktreeconfig")
+            && git_config_truthy(&value)
+        {
+            return Err(());
+        }
+        if section.eq_ignore_ascii_case("remote") && name.eq_ignore_ascii_case("url") {
+            let remote_name = subsection
+                .as_ref()
+                .filter(|name| !name.is_empty())
+                .ok_or(())?;
+            if !value.trim().is_empty() {
+                remotes.push(RepositoryRemote {
+                    name: remote_name.clone(),
+                    url: value.trim().to_owned(),
+                });
+            }
+        }
+    }
+    remotes.sort_unstable();
+    remotes.dedup();
+    Ok(remotes)
+}
+
+fn strip_git_config_comment(line: &str) -> Result<String, ()> {
+    let mut result = String::with_capacity(line.len());
+    let mut quoted = false;
+    let mut escaped = false;
+    for character in line.chars() {
+        if escaped {
+            result.push('\\');
+            result.push(character);
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if character == '"' {
+            quoted = !quoted;
+            result.push(character);
+            continue;
+        }
+        if !quoted && matches!(character, '#' | ';') {
+            if result.trim().is_empty()
+                || result.chars().next_back().is_some_and(char::is_whitespace)
+            {
+                break;
+            }
+            // Ambiguous comment placement is uncommon and not worth
+            // interpreting differently from Git on the Hook fast path.
+            return Err(());
+        }
+        result.push(character);
+    }
+    if quoted || escaped {
+        return Err(());
+    }
+    Ok(result)
+}
+
+fn parse_git_config_section(line: &str) -> Result<(String, Option<String>), ()> {
+    let body = line
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .map(str::trim)
+        .ok_or(())?;
+    if body.is_empty() {
+        return Err(());
+    }
+    if let Some((section, subsection)) = body.split_once(char::is_whitespace) {
+        let subsection = subsection.trim();
+        if !subsection.starts_with('"') || !subsection.ends_with('"') {
+            return Err(());
+        }
+        let subsection = parse_git_config_value(subsection)?;
+        return Ok((section.to_owned(), Some(subsection)));
+    }
+    if let Some((section, subsection)) = body.split_once('.')
+        && section.eq_ignore_ascii_case("remote")
+    {
+        return Ok((section.to_owned(), Some(subsection.to_owned())));
+    }
+    Ok((body.to_owned(), None))
+}
+
+fn parse_git_config_assignment(line: &str) -> Result<(String, String), ()> {
+    let (name, value) = if let Some((name, value)) = line.split_once('=') {
+        (name.trim(), value.trim())
+    } else if let Some(index) = line.find(char::is_whitespace) {
+        (line[..index].trim(), line[index..].trim())
+    } else {
+        (line.trim(), "true")
+    };
+    if name.is_empty() {
+        return Err(());
+    }
+    Ok((name.to_owned(), parse_git_config_value(value)?))
+}
+
+fn parse_git_config_value(value: &str) -> Result<String, ()> {
+    let mut result = String::with_capacity(value.len());
+    let mut quoted = false;
+    let mut escaped = false;
+    for character in value.chars() {
+        if escaped {
+            result.push(match character {
+                'n' => '\n',
+                't' => '\t',
+                'b' => '\u{0008}',
+                '\\' => '\\',
+                '"' => '"',
+                _ => return Err(()),
+            });
+            escaped = false;
+            continue;
+        }
+        if character == '\\' {
+            escaped = true;
+        } else if character == '"' {
+            quoted = !quoted;
+        } else {
+            result.push(character);
+        }
+    }
+    if quoted || escaped {
+        return Err(());
+    }
+    Ok(result.trim().to_owned())
+}
+
+fn git_config_truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "yes" | "on" | "1"
+    )
+}
+
+fn strip_ascii_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &value[prefix.len()..])
 }
 
 fn required_absolute_path(
@@ -286,7 +641,10 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{LAYOUT_ARGS, REMOTE_ARGS, ROOT_COMMIT_ARGS, RepositoryDiscovery, parse_remotes};
+    use super::{
+        LAYOUT_ARGS, ProcessFreeDiscovery, REMOTE_ARGS, ROOT_COMMIT_ARGS, RepositoryDiscovery,
+        discover_process_free, parse_process_free_remotes, parse_remotes,
+    };
 
     fn test_root(label: &str) -> std::path::PathBuf {
         let nonce = SystemTime::now()
@@ -332,6 +690,76 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].name(), "origin");
         assert_eq!(parsed[1].name(), "zeta");
+    }
+
+    #[test]
+    fn process_free_remote_config_is_sorted_deduplicated_and_unquoted() {
+        let parsed = parse_process_free_remotes(
+            "[remote \"zeta\"]\n\turl = \"ssh://host/z/repo.git\"\n\
+             [remote \"origin\"]\n\turl = https://host/o/repo.git # primary\n\
+             \turl = https://host/o/repo.git\n",
+        )
+        .expect("direct local config is supported");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name(), "origin");
+        assert_eq!(parsed[0].url(), "https://host/o/repo.git");
+        assert_eq!(parsed[1].name(), "zeta");
+        assert_eq!(parsed[1].url(), "ssh://host/z/repo.git");
+    }
+
+    #[test]
+    fn process_free_remote_config_defers_indirection_and_ambiguous_comments_to_git() {
+        for config in [
+            "[include]\n\tpath = ../shared.config\n",
+            "[includeIf \"gitdir:~/work/\"]\n\tpath = ../shared.config\n",
+            "[extensions]\n\tworktreeConfig = true\n",
+            "[remote \"origin\"]\n\turl = ssh://host/repo;variant\n",
+        ] {
+            assert!(
+                parse_process_free_remotes(config).is_err(),
+                "unsupported local config must use Git: {config}"
+            );
+        }
+    }
+
+    #[test]
+    fn process_free_discovery_supports_linked_worktree_gitfiles() {
+        let root = test_root("linked-worktree");
+        let worktree = root.join("worktree");
+        let nested = worktree.join("nested");
+        let git_dir = root.join("admin");
+        let common_dir = root.join("common");
+        fs::create_dir_all(&nested).expect("linked worktree creates");
+        fs::create_dir_all(&git_dir).expect("linked Git directory creates");
+        fs::create_dir_all(&common_dir).expect("common Git directory creates");
+        fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .expect("gitfile writes");
+        fs::write(git_dir.join("commondir"), "../common\n").expect("commondir writes");
+        fs::write(
+            common_dir.join("config"),
+            "[remote \"origin\"]\n\turl = https://example.invalid/acme/linked.git\n",
+        )
+        .expect("common config writes");
+
+        let ProcessFreeDiscovery::Repository(discovered) = discover_process_free(&nested) else {
+            panic!("complete linked-worktree metadata resolves without Git");
+        };
+        assert_eq!(discovered.worktree_root, worktree);
+        assert_eq!(
+            discovered.git_dir,
+            fs::canonicalize(git_dir).expect("Git directory canonicalizes")
+        );
+        assert_eq!(
+            discovered.git_common_dir,
+            fs::canonicalize(common_dir).expect("common directory canonicalizes")
+        );
+        assert_eq!(discovered.remotes.len(), 1);
+        assert_eq!(discovered.remotes[0].name(), "origin");
+
+        fs::remove_dir_all(root).expect("owned test root removes");
     }
 
     #[test]
