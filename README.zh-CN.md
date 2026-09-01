@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="docs/assets/brand/tabbeacon-logo.svg" width="420" alt="TabBeacon" />
+  <img src="https://raw.githubusercontent.com/JerrySkywalker/tabbeacon/9215500cb3b0a9ef183c9c096a4bdde1b749da5b/docs/assets/brand/tabbeacon-logo.svg" width="420" alt="TabBeacon" />
 </p>
 
-<p align="center"><strong>为编码智能体标签页提供实时身份与状态，同时不改变你的启动方式。</strong></p>
+<p align="center"><strong>为 Windows Terminal 中的 Codex（以及更多编码智能体）标签页提供实时身份与状态，同时不改变你的启动方式。</strong></p>
 
-<p align="center">简体中文 | <a href="README.md">English</a></p>
+<p align="center">简体中文 | <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/README.md">English</a></p>
 
 <!-- tabbeacon:hero-badges:start -->
 <p align="center">
@@ -13,9 +13,29 @@
 </p>
 <!-- tabbeacon:hero-badges:end -->
 
-<p align="center"><a href="https://github.com/JerrySkywalker/tabbeacon/releases">发布版本</a> · <a href="https://crates.io/crates/tabbeacon">crates.io</a> · <a href="docs/README.md">文档</a> · <a href="LICENSE">MIT 许可证</a></p>
+<p align="center"><a href="https://github.com/JerrySkywalker/tabbeacon/releases">发布版本</a> · <a href="https://crates.io/crates/tabbeacon">crates.io</a> · <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/README.md">文档</a> · <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/LICENSE">MIT 许可证</a></p>
 
-<!-- tabbeacon:critical-invariants install=cargo-install-tabbeacon-locked setup=tabbeacon-setup codex=codex agy=agy providers=codex-agy claude=deferred opencode=deferred trust=manual fail-open=true privacy=content-minimal -->
+<!-- tabbeacon:critical-invariants install=cargo-install-tabbeacon setup=tabbeacon-setup codex=codex agy=agy providers=codex-agy claude=deferred opencode=deferred trust=manual fail-open=true privacy=content-minimal -->
+
+<p align="center">
+  <a href="https://github.com/JerrySkywalker/tabbeacon/blob/9215500cb3b0a9ef183c9c096a4bdde1b749da5b/docs/assets/demo/tabbeacon-demo.gif"><img src="https://raw.githubusercontent.com/JerrySkywalker/tabbeacon/9215500cb3b0a9ef183c9c096a4bdde1b749da5b/docs/assets/demo/tabbeacon-demo.gif" width="960" alt="TabBeacon 在真实 Windows Terminal 窗口中展示 API、WEB 和 DOCS 工作区状态" /></a>
+</p>
+
+<p align="center"><sub>由 TabBeacon 确定性展示夹具驱动的真实 Windows Terminal 渲染；不包含实时 Codex 或 Agy 模型对话。</sub></p>
+
+## 支持的编码智能体
+
+| 编码智能体 | 状态 | 日常命令 | 兼容性策略 |
+| --- | --- | --- | --- |
+| Codex CLI | 生产支持 | `codex` | 基于能力；版本字符串仅用于诊断。 |
+| Agy CLI | 生产支持 | `agy` | 精确准入配置：Agy 1.1.19。 |
+
+### 延后集成
+
+- Claude Code — Deferred
+- OpenCode — Deferred
+
+它们不是部分支持，也不会在此发布列车中启用。
 
 ## 为什么选择 TabBeacon？
 
@@ -36,7 +56,7 @@ PTY 主机、终端替代品或后台守护进程。
 ? OWH     问题
 ```
 
-![由 TabBeacon 确定性展示夹具驱动的真实 Windows Terminal 渲染效果。](docs/assets/screenshots/tabbeacon-overview.png)
+![由 TabBeacon 确定性展示夹具驱动的真实 Windows Terminal 渲染效果。](https://raw.githubusercontent.com/JerrySkywalker/tabbeacon/9215500cb3b0a9ef183c9c096a4bdde1b749da5b/docs/assets/screenshots/tabbeacon-overview.png)
 
 > [!NOTE]
 > 由 TabBeacon 确定性展示夹具驱动的真实 Windows Terminal 渲染效果；这不是实时
@@ -53,29 +73,15 @@ PTY 主机、终端替代品或后台守护进程。
   工具内容。
 - 保留无关提供商设置的、所有权安全的配置变更。
 
-## 支持的编码智能体
-
-| 编码智能体 | 状态 | 日常命令 | 兼容性策略 |
-| --- | --- | --- | --- |
-| Codex CLI | 生产支持 | `codex` | 基于能力；版本字符串仅用于诊断。 |
-| Agy CLI | 生产支持 | `agy` | 精确准入配置：Agy 1.1.19。 |
-
-### 延后集成
-
-- Claude Code — Deferred
-- OpenCode — Deferred
-
-它们不是部分支持，也不会在此发布列车中启用。
-
 ## 快速开始
 
-当前公开版本：**v0.7.2**。此热修复收尾后，功能开发仍处于暂停状态；已冻结的
-v0.7.3 推广列车必须获得新的明确 Owner 准入后才能继续。
+当前公开版本：**v0.7.2**。已准入的 v0.7.3 推广工作正在进行分发准备；公开发布
+仍是必须另行获得 Owner 授权的边界。
 
 安装公开 CLI，然后运行引导式设置：
 
 ```powershell
-cargo install tabbeacon --locked
+cargo install tabbeacon
 tabbeacon setup
 ```
 
@@ -90,6 +96,13 @@ codex
 ```powershell
 tabbeacon setup agy
 agy
+```
+
+精确发布验证与普通用户路径保持分离。v0.7.3 公开发布后，发布验证可以同时固定版本
+与锁文件：
+
+```powershell
+cargo install tabbeacon --version 0.7.3 --locked
 ```
 
 > [!TIP]
@@ -139,25 +152,26 @@ tabbeacon ui
 ```
 
 偏好设置与提供商集成状态、Hook 信任和运行时/会话证据彼此独立。当前所有权边界请
-参阅 [Codex Hooks 指南](docs/codex-hooks.md) 和 [Agy 设置指南](docs/agy-setup.md)。
+参阅 [Codex Hooks 指南](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/codex-hooks.md)
+和 [Agy 设置指南](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/agy-setup.md)。
 
 ## 文档
 
-- [文档入口](docs/README.md)
-- [技术概览](docs/architecture.md)
-- [架构](docs/architecture.md)
-- [Codex Hooks](docs/codex-hooks.md)
-- [Agy 设置](docs/agy-setup.md)
-- [Codex 兼容性](docs/CODEX_COMPATIBILITY_V3.md)
-- [终端视觉后端](docs/TERMINAL_VISUAL_BACKENDS.md)
-- [原生标签图标结论](docs/research/WT_NATIVE_ICON_DISPOSITION.md)
+- [文档入口](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/README.md)
+- [技术概览](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/architecture.md)
+- [架构](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/architecture.md)
+- [Codex Hooks](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/codex-hooks.md)
+- [Agy 设置](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/agy-setup.md)
+- [Codex 兼容性](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/CODEX_COMPATIBILITY_V3.md)
+- [终端视觉后端](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/TERMINAL_VISUAL_BACKENDS.md)
+- [原生标签图标结论](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/research/WT_NATIVE_ICON_DISPOSITION.md)
 
 ## 贡献
 
-欢迎贡献。请从 [CONTRIBUTING.md](CONTRIBUTING.md) 开始，使用聚焦分支，并让精确
+欢迎贡献。请从 [CONTRIBUTING.md](https://github.com/JerrySkywalker/tabbeacon/blob/main/CONTRIBUTING.md) 开始，使用聚焦分支，并让精确
 HEAD CI 验证候选提交。提供商配置、进程定位或终端仪器化等高风险变更还有额外的
 治理和安全边界。
 
 ## 许可证
 
-TabBeacon 采用 [MIT 许可证](LICENSE)。
+TabBeacon 采用 [MIT 许可证](https://github.com/JerrySkywalker/tabbeacon/blob/main/LICENSE)。

@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="docs/assets/brand/tabbeacon-logo.svg" width="420" alt="TabBeacon" />
+  <img src="https://raw.githubusercontent.com/JerrySkywalker/tabbeacon/9215500cb3b0a9ef183c9c096a4bdde1b749da5b/docs/assets/brand/tabbeacon-logo.svg" width="420" alt="TabBeacon" />
 </p>
 
-<p align="center"><strong>Live identity and status for coding-agent tabs, without changing how you launch them.</strong></p>
+<p align="center"><strong>Live identity and status for Codex—and more—across Windows Terminal tabs, without changing how you launch them.</strong></p>
 
-<p align="center">English | <a href="README.zh-CN.md">简体中文</a></p>
+<p align="center">English | <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/README.zh-CN.md">简体中文</a></p>
 
 <!-- tabbeacon:hero-badges:start -->
 <p align="center">
@@ -13,9 +13,29 @@
 </p>
 <!-- tabbeacon:hero-badges:end -->
 
-<p align="center"><a href="https://github.com/JerrySkywalker/tabbeacon/releases">Releases</a> · <a href="https://crates.io/crates/tabbeacon">crates.io</a> · <a href="docs/README.md">Documentation</a> · <a href="LICENSE">MIT License</a></p>
+<p align="center"><a href="https://github.com/JerrySkywalker/tabbeacon/releases">Releases</a> · <a href="https://crates.io/crates/tabbeacon">crates.io</a> · <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/README.md">Documentation</a> · <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/LICENSE">MIT License</a></p>
 
-<!-- tabbeacon:critical-invariants install=cargo-install-tabbeacon-locked setup=tabbeacon-setup codex=codex agy=agy providers=codex-agy claude=deferred opencode=deferred trust=manual fail-open=true privacy=content-minimal -->
+<!-- tabbeacon:critical-invariants install=cargo-install-tabbeacon setup=tabbeacon-setup codex=codex agy=agy providers=codex-agy claude=deferred opencode=deferred trust=manual fail-open=true privacy=content-minimal -->
+
+<p align="center">
+  <a href="https://github.com/JerrySkywalker/tabbeacon/blob/9215500cb3b0a9ef183c9c096a4bdde1b749da5b/docs/assets/demo/tabbeacon-demo.gif"><img src="https://raw.githubusercontent.com/JerrySkywalker/tabbeacon/9215500cb3b0a9ef183c9c096a4bdde1b749da5b/docs/assets/demo/tabbeacon-demo.gif" width="960" alt="TabBeacon showing API, WEB, and DOCS workspace status in a real Windows Terminal window" /></a>
+</p>
+
+<p align="center"><sub>Real Windows Terminal rendering from TabBeacon's deterministic presentation fixture; no live Codex or Agy model conversation.</sub></p>
+
+## Supported Coding Agents
+
+| Coding Agent | Status | Daily command | Compatibility policy |
+| --- | --- | --- | --- |
+| Codex CLI | Production | `codex` | Capability-based; a version string is diagnostic only. |
+| Agy CLI | Production | `agy` | Exact admitted profile: Agy 1.1.19. |
+
+### Deferred integrations
+
+- Claude Code — Deferred
+- OpenCode — Deferred
+
+They are not partially supported and are not enabled by this release train.
 
 ## Why TabBeacon?
 
@@ -37,7 +57,7 @@ The production visual backend is title-first and intentionally compact:
 ? OWH     question
 ```
 
-![Real Windows Terminal rendering using TabBeacon's deterministic presentation fixture.](docs/assets/screenshots/tabbeacon-overview.png)
+![Real Windows Terminal rendering using TabBeacon's deterministic presentation fixture.](https://raw.githubusercontent.com/JerrySkywalker/tabbeacon/9215500cb3b0a9ef183c9c096a4bdde1b749da5b/docs/assets/screenshots/tabbeacon-overview.png)
 
 > [!NOTE]
 > Real Windows Terminal rendering using TabBeacon's deterministic presentation
@@ -55,30 +75,16 @@ The production visual backend is title-first and intentionally compact:
   session projections without persisting prompt, assistant, or tool content.
 - Ownership-safe configuration changes that preserve unrelated provider settings.
 
-## Supported Coding Agents
-
-| Coding Agent | Status | Daily command | Compatibility policy |
-| --- | --- | --- | --- |
-| Codex CLI | Production | `codex` | Capability-based; a version string is diagnostic only. |
-| Agy CLI | Production | `agy` | Exact admitted profile: Agy 1.1.19. |
-
-### Deferred integrations
-
-- Claude Code — Deferred
-- OpenCode — Deferred
-
-They are not partially supported and are not enabled by this release train.
-
 ## Quick Start
 
-Current public release: **v0.7.2**. Active feature development remains paused
-after this hotfix closeout; the frozen v0.7.3 promotion train requires a new
-explicit Owner admission.
+Current public release: **v0.7.2**. The admitted v0.7.3 promotion is in its
+distribution-preparation train; public publishing remains a separate
+Owner-authorized boundary.
 
 Install the public CLI, then run the guided setup:
 
 ```powershell
-cargo install tabbeacon --locked
+cargo install tabbeacon
 tabbeacon setup
 ```
 
@@ -95,6 +101,13 @@ the daily command literal:
 ```powershell
 tabbeacon setup agy
 agy
+```
+
+Exact release verification remains separate from the normal user path. After
+v0.7.3 is published, release verification may pin both the version and lockfile:
+
+```powershell
+cargo install tabbeacon --version 0.7.3 --locked
 ```
 
 > [!TIP]
@@ -152,27 +165,28 @@ tabbeacon ui
 ```
 
 Preferences are distinct from provider integration state, Hook trust, and
-runtime/session evidence. See the [Codex Hooks guide](docs/codex-hooks.md) and
-[Agy setup guide](docs/agy-setup.md) for current ownership boundaries.
+runtime/session evidence. See the [Codex Hooks guide](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/codex-hooks.md)
+and [Agy setup guide](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/agy-setup.md)
+for current ownership boundaries.
 
 ## Documentation
 
-- [Documentation portal](docs/README.md)
-- [Technical overview](docs/architecture.md)
-- [Architecture](docs/architecture.md)
-- [Codex Hooks](docs/codex-hooks.md)
-- [Agy setup](docs/agy-setup.md)
-- [Codex compatibility](docs/CODEX_COMPATIBILITY_V3.md)
-- [Terminal visual backends](docs/TERMINAL_VISUAL_BACKENDS.md)
-- [Native tab-icon disposition](docs/research/WT_NATIVE_ICON_DISPOSITION.md)
+- [Documentation portal](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/README.md)
+- [Technical overview](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/architecture.md)
+- [Architecture](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/architecture.md)
+- [Codex Hooks](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/codex-hooks.md)
+- [Agy setup](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/agy-setup.md)
+- [Codex compatibility](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/CODEX_COMPATIBILITY_V3.md)
+- [Terminal visual backends](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/TERMINAL_VISUAL_BACKENDS.md)
+- [Native tab-icon disposition](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/research/WT_NATIVE_ICON_DISPOSITION.md)
 
 ## Contributing
 
-Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md); use a
+Contributions are welcome. Start with [CONTRIBUTING.md](https://github.com/JerrySkywalker/tabbeacon/blob/main/CONTRIBUTING.md); use a
 focused branch and let exact-head CI validate the candidate. High-risk changes
 to provider configuration, process targeting, or terminal instrumentation have
 additional governance and safety boundaries.
 
 ## License
 
-TabBeacon is licensed under the [MIT License](LICENSE).
+TabBeacon is licensed under the [MIT License](https://github.com/JerrySkywalker/tabbeacon/blob/main/LICENSE).

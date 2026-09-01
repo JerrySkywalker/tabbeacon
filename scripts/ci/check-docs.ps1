@@ -76,8 +76,10 @@ foreach ($path in $requiredFiles) {
 
 $englishReadme = Get-RequiredContent 'README.md'
 $chineseReadme = Get-RequiredContent 'README.zh-CN.md'
-Assert-Docs ($englishReadme -match 'href="README\.zh-CN\.md"') 'README.md must link to README.zh-CN.md'
-Assert-Docs ($chineseReadme -match 'href="README\.md"') 'README.zh-CN.md must link to README.md'
+$repositoryUrl = 'https://github.com/JerrySkywalker/tabbeacon'
+$stableMediaRevision = '9215500cb3b0a9ef183c9c096a4bdde1b749da5b'
+Assert-Docs ($englishReadme.Contains(('href="{0}/blob/main/README.zh-CN.md"' -f $repositoryUrl))) 'README.md must use a crates.io-safe absolute link to README.zh-CN.md'
+Assert-Docs ($chineseReadme.Contains(('href="{0}/blob/main/README.md"' -f $repositoryUrl))) 'README.zh-CN.md must use a crates.io-safe absolute link to README.md'
 
 $badgeBlockPattern = '(?s)<!-- tabbeacon:hero-badges:start -->(?<badges>.*?)<!-- tabbeacon:hero-badges:end -->'
 foreach ($readme in @(@{ Name = 'README.md'; Content = $englishReadme }, @{ Name = 'README.zh-CN.md'; Content = $chineseReadme })) {
@@ -91,9 +93,16 @@ foreach ($readme in @(@{ Name = 'README.md'; Content = $englishReadme }, @{ Name
     Assert-Docs ($badges -notmatch '(?i)codex|agy|claude|opencode') "$($readme.Name) has a prohibited agent badge"
 }
 
-$invariantMarker = '<!-- tabbeacon:critical-invariants install=cargo-install-tabbeacon-locked setup=tabbeacon-setup codex=codex agy=agy providers=codex-agy claude=deferred opencode=deferred trust=manual fail-open=true privacy=content-minimal -->'
+$invariantMarker = '<!-- tabbeacon:critical-invariants install=cargo-install-tabbeacon setup=tabbeacon-setup codex=codex agy=agy providers=codex-agy claude=deferred opencode=deferred trust=manual fail-open=true privacy=content-minimal -->'
 Assert-Docs ($englishReadme.Contains($invariantMarker)) 'README.md is missing the critical EN/ZH invariant marker'
 Assert-Docs ($chineseReadme.Contains($invariantMarker)) 'README.zh-CN.md is missing the critical EN/ZH invariant marker'
+
+foreach ($readme in @(@{ Name = 'README.md'; Content = $englishReadme }, @{ Name = 'README.zh-CN.md'; Content = $chineseReadme })) {
+    Assert-Docs ($readme.Content -match '(?m)^cargo install tabbeacon$') "$($readme.Name) is missing the normal unpinned install command"
+    Assert-Docs ($readme.Content -notmatch '(?m)^cargo install tabbeacon --locked$') "$($readme.Name) still requires --locked in the normal install path"
+    Assert-Docs ($readme.Content.Contains("raw.githubusercontent.com/JerrySkywalker/tabbeacon/$stableMediaRevision/docs/assets/demo/tabbeacon-demo.gif")) "$($readme.Name) is missing the crates.io-safe immutable demo URL"
+    Assert-Docs ($readme.Content.Contains("$repositoryUrl/blob/$stableMediaRevision/docs/assets/demo/tabbeacon-demo.gif")) "$($readme.Name) is missing the immutable demo target link"
+}
 
 $brandAssets = @(
     'docs/assets/brand/tabbeacon-mark.svg',
