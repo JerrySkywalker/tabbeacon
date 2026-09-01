@@ -296,10 +296,6 @@ fn temporary_wt_register(
             ExitCode::SUCCESS
         }
         Err(error) => {
-            let _ = tabbeacon::visual::close_unregistered_exact_anchor(
-                &tabbeacon::visual::WindowsUiaLocator,
-                anchor_title,
-            );
             eprintln!("{error}");
             ExitCode::FAILURE
         }

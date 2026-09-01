@@ -2,17 +2,20 @@
 
 use std::{
     path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
+    process::{Child, Command},
+    thread,
+    time::{Duration, Instant},
 };
 
 use sha2::{Digest, Sha256};
 
 use super::{
-    FixtureReplay, TemporaryWindowProductDisposition, TemporaryWindowsTerminalCleanupReceipt,
-    VisualError, VisualResult, WindowsUiaLocator, cleanup_temporary_windows_terminal,
-    close_unregistered_exact_anchor, recover_stale_temporary_windows_terminals,
-    register_temporary_windows_terminal_with_retry, retry_temporary_windows_terminal_cleanup,
+    FixtureReplay, TemporaryWindowProductDisposition, TemporaryWindowsTerminalAcquisition,
+    TemporaryWindowsTerminalCleanupReceipt, TemporaryWindowsTerminalPreparedRun, VisualError,
+    VisualResult, WindowsUiaLocator, cleanup_temporary_windows_terminal,
+    complete_temporary_windows_terminal_acquisition, finalize_temporary_windows_terminal_lifecycle,
+    prepare_temporary_windows_terminal_lifecycle, recover_stale_temporary_windows_terminals,
+    retry_temporary_windows_terminal_cleanup,
 };
 
 /// A dedicated Windows Terminal test session positively correlated by run ID.
@@ -30,6 +33,7 @@ pub struct TerminalTestSession {
     pub anchor_title: String,
     /// Immutable exact run/anchor/routing/HWND ownership record.
     pub ownership_path: PathBuf,
+    prepared_lifecycle: TemporaryWindowsTerminalPreparedRun,
 }
 
 impl TerminalTestSession {
@@ -59,6 +63,31 @@ impl TerminalTestSession {
             )
         }
     }
+
+    /// Runs one bounded qualification body and deterministically accounts for
+    /// exact-owned cleanup before returning either result.
+    ///
+    /// # Errors
+    ///
+    /// Returns the primary body error with the separate cleanup disposition, or
+    /// a cleanup error when the body would otherwise pass.
+    pub fn run_with_cleanup<T>(
+        &self,
+        body: impl FnOnce() -> VisualResult<T>,
+        classify_error: impl FnOnce(&VisualError) -> TemporaryWindowProductDisposition,
+    ) -> VisualResult<(T, TemporaryWindowsTerminalCleanupReceipt)> {
+        let body_result = body();
+        let product_disposition = body_result
+            .as_ref()
+            .map_or_else(classify_error, |_| TemporaryWindowProductDisposition::Pass);
+        finalize_temporary_windows_terminal_lifecycle(
+            &WindowsUiaLocator,
+            &self.prepared_lifecycle,
+            &self.ownership_path,
+            body_result,
+            product_disposition,
+        )
+    }
 }
 
 /// Launches a fixture child in an owned Windows Terminal window.
@@ -73,6 +102,11 @@ const STATIC_FIXTURE_HOLD_MILLIS: u64 = 10_000;
 // nominal polling cadence. A title-animated fixture therefore reserves enough
 // time for activation, actual UIA observation, and owned-window capture.
 const TITLE_ANIMATION_FIXTURE_HOLD_MILLIS: u64 = 60_000;
+// The parent capture loop has an 85-second budget. Keep the anchor alive
+// longer than that budget so a slow, exact-owned PrintWindow capture cannot
+// turn into a title/window-ownership race.
+const PROMO_SHOWCASE_HOLD_MILLIS: u64 = 95_000;
+const WT_DISPATCH_OBSERVATION_BUDGET: Duration = Duration::from_secs(2);
 
 impl Default for TerminalTestSessionLauncher {
     fn default() -> Self {
@@ -117,6 +151,7 @@ impl TerminalTestSessionLauncher {
             &[],
             &arguments,
             hold_millis,
+            Duration::from_secs(5),
             evidence_root,
         )
     }
@@ -153,6 +188,35 @@ impl TerminalTestSessionLauncher {
             &[],
             &arguments,
             hold_millis,
+            Duration::from_secs(5),
+            evidence_root,
+        )
+    }
+
+    /// Launches a bounded, production-rendered promotional showcase in one
+    /// exact-owned Windows Terminal window. Its static anchor remains the only
+    /// cleanup identity while sibling showcase tabs may change title.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VisualError::Platform`] when Windows Terminal cannot launch
+    /// the fixture or the exact anchor cannot be durably registered.
+    pub fn launch_promo_showcase(
+        &self,
+        fixture_executable: &Path,
+        run_id: &str,
+        showcase_arguments: &[String],
+        evidence_root: &Path,
+    ) -> VisualResult<TerminalTestSession> {
+        self.launch_program(
+            fixture_executable,
+            run_id,
+            "promo-showcase",
+            "promo",
+            &["--useApplicationTitle".to_owned()],
+            showcase_arguments,
+            PROMO_SHOWCASE_HOLD_MILLIS,
+            Duration::from_secs(12),
             evidence_root,
         )
     }
@@ -202,6 +266,7 @@ impl TerminalTestSessionLauncher {
         tab_options: &[String],
         arguments: &[String],
         target_hold_millis: u64,
+        registration_budget: Duration,
         evidence_root: &Path,
     ) -> VisualResult<TerminalTestSession> {
         if !executable.is_file() {
@@ -223,13 +288,25 @@ impl TerminalTestSessionLauncher {
         if ownership_path.exists() {
             return Err(VisualError::EvidenceArtifactExists(ownership_path));
         }
+        let prepared_lifecycle = prepare_temporary_windows_terminal_lifecycle(
+            &WindowsUiaLocator,
+            evidence_root,
+            &lifecycle_run_id,
+            &anchor_title,
+            &window_name,
+            std::process::id(),
+        )?;
         let position = format!(
             "{},{}",
             self.requested_position.0, self.requested_position.1
         );
         let size = format!("{},{}", self.requested_size.0, self.requested_size.1);
         let anchor_hold_millis = target_hold_millis.saturating_add(15_000).max(30_000);
-        Command::new("wt.exe")
+        // `wt.exe` may remain alive while a Windows Terminal window is open.
+        // Observe an early dispatcher failure when one is available, but do
+        // not wait for (or terminate) the launcher. Exact anchor registration
+        // remains the authority that proves the resulting terminal window.
+        let launch_result = Command::new("wt.exe")
             .args(["-w", &window_name, "--pos", &position, "--size", &size])
             .arg("new-tab")
             .args(["--title", &anchor_title, "--suppressApplicationTitle"])
@@ -251,19 +328,29 @@ impl TerminalTestSessionLauncher {
                 VisualError::Platform(format!(
                     "could not launch owned Windows Terminal session: {error}"
                 ))
-            })?;
-        if let Err(error) = register_temporary_windows_terminal_with_retry(
+            })
+            .and_then(|mut launcher| {
+                observe_windows_terminal_dispatch(&mut launcher, "exact-owned fixture")
+            });
+        let launch_error = launch_result.err().map(|error| error.to_string());
+        let acquisition = complete_temporary_windows_terminal_acquisition(
             &WindowsUiaLocator,
-            evidence_root,
-            &lifecycle_run_id,
-            &anchor_title,
-            &window_name,
-            std::process::id(),
-            Duration::from_secs(5),
-        ) {
-            let _ = close_unregistered_exact_anchor(&WindowsUiaLocator, &anchor_title);
-            return Err(error);
-        }
+            &prepared_lifecycle,
+            registration_budget,
+            launch_error.as_deref(),
+        )?;
+        let ownership_path = match acquisition {
+            TemporaryWindowsTerminalAcquisition::Registered { ownership_path } => ownership_path,
+            TemporaryWindowsTerminalAcquisition::Failed(receipt) => {
+                return Err(VisualError::Platform(format!(
+                    "Windows Terminal acquisition failed: PRIMARY_DISPOSITION={:?} CLEANUP_DISPOSITION={:?} REGISTRATION_DETAIL={} CLEANUP_DETAIL={}",
+                    receipt.primary_disposition,
+                    receipt.cleanup_disposition,
+                    receipt.registration_detail,
+                    receipt.cleanup_detail
+                )));
+            }
+        };
         Ok(TerminalTestSession {
             run_id: run_id.to_owned(),
             window_name,
@@ -271,7 +358,29 @@ impl TerminalTestSessionLauncher {
             requested_size: self.requested_size,
             anchor_title,
             ownership_path,
+            prepared_lifecycle,
         })
+    }
+}
+
+fn observe_windows_terminal_dispatch(launcher: &mut Child, context: &str) -> VisualResult<()> {
+    let deadline = Instant::now() + WT_DISPATCH_OBSERVATION_BUDGET;
+    loop {
+        match launcher.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(_)) => {
+                return Err(VisualError::Platform(format!(
+                    "Windows Terminal rejected the {context} launch"
+                )));
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                return Err(VisualError::Platform(format!(
+                    "could not observe the Windows Terminal {context} launcher: {error}"
+                )));
+            }
+        }
     }
 }
 
