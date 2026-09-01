@@ -31,29 +31,34 @@ TAG=v0.6.1
 
 ## Current production baseline
 
-CURRENT_PUBLIC_RELEASE=v0.7.2
-CURRENT_PUBLIC_TARGET=v0.7.2
+CURRENT_PUBLIC_RELEASE=v0.7.3
+CURRENT_PUBLIC_TARGET=v0.7.3
+V073_IMPLEMENTATION=COMPLETE
 ACTIVE_FEATURE_DEVELOPMENT=PAUSED
-PROMOTION_TARGET_RELEASE=v0.7.3
-PROMO_PR=100
-PROMO_PR_STATE=FROZEN_DRAFT
+V08_OPTIONS_STATUS=NON_AUTHORITATIVE
+ROADMAP_V08_CREATED=false
+NEXT_RECOMMENDED_GOAL=LONG_TERM_DOGFOOD_NO_ACTIVE_DEVELOPMENT
 
-The v0.7.2 Codex subagent Hook stability hotfix is publicly distributed. Its
-accepted release source, immutable tag, registry package, and Windows asset are:
+The v0.7.3 discoverability and distribution maintenance release is publicly
+distributed. Its accepted release source, immutable tag, registry package, and
+Windows asset are:
 
 ```text
-RELEASE_SHA=1ee71720c27633a12f808903fb22b03cb367e79a
-TAG=v0.7.2
-CRATES_IO_VERSION=0.7.2
-GITHUB_RELEASE=v0.7.2
-WINDOWS_ZIP_SHA256=c4cb600a00754953dc8f328789e2fea8277adbdc10ad68bacee5beb261753c0a
+RELEASE_SHA=1485b4dc0fe634a21634adc9ec539deb76beaad2
+TAG=v0.7.3
+CRATES_IO_VERSION=0.7.3
+GITHUB_RELEASE=v0.7.3
+WINDOWS_ZIP_SHA256=9d78a49319c3e8680479d47bbbf8fd5e459b008300029164b768b896609be14c
+PR100_SUPERSEDED=true
+PR100_MERGED=false
 ```
 
-Active feature development is paused for Owner dogfood. PR #100 remains a
-frozen draft for the v0.7.3 promotion target; this closeout does not resume or
-merge it. `ROADMAP_V072.md` remains the historical hotfix execution record, and
-`DEVELOPMENT_PAUSE.md` is the authoritative current-scope boundary. Historical
-production evidence remains below and does not supersede this public baseline.
+Active feature development is paused for long-term dogfood: four weeks minimum
+and six to eight weeks preferred. PR #100 is closed without merge after exact
+supersession by the accepted v0.7.3 Train A. `ROADMAP_V073.md` remains the
+release execution record, and `DEVELOPMENT_PAUSE.md` is the authoritative
+current-scope boundary. Historical production evidence remains below and does
+not supersede this public baseline.
 
 ## Historical v0.4 production baseline
 

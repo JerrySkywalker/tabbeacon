@@ -77,9 +77,8 @@ The production visual backend is title-first and intentionally compact:
 
 ## Quick Start
 
-Current public release: **v0.7.2**. The admitted v0.7.3 release candidate is in
-pre-publication validation; public publishing remains a separate
-Owner-authorized boundary.
+Current public release: **v0.7.3**. Active feature development is paused for a
+long-term dogfood period, and no authoritative v0.8 roadmap has been created.
 
 Install the public CLI, run the guided setup, then launch Codex as usual:
 
@@ -99,8 +98,8 @@ tabbeacon setup agy
 agy
 ```
 
-Exact release verification remains separate from the normal user path. After
-v0.7.3 is published, release verification may pin both the version and lockfile:
+Exact release verification remains separate from the normal user path. To
+verify the published v0.7.3 crate, pin both the version and lockfile:
 
 ```powershell
 cargo install tabbeacon --version 0.7.3 --locked
