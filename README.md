@@ -81,19 +81,15 @@ Current public release: **v0.7.2**. The admitted v0.7.3 promotion is in its
 distribution-preparation train; public publishing remains a separate
 Owner-authorized boundary.
 
-Install the public CLI, then run the guided setup:
+Install the public CLI, run the guided setup, then launch Codex as usual:
 
 ```powershell
 cargo install tabbeacon
 tabbeacon setup
+codex
 ```
 
 Review provider Hook trust manually when the supported setup flow asks for it.
-Then launch your coding agent as usual:
-
-```powershell
-codex
-```
 
 For the admitted Agy profile, configure its user-global title callback and keep
 the daily command literal:

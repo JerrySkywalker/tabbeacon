@@ -98,8 +98,10 @@ Assert-Docs ($englishReadme.Contains($invariantMarker)) 'README.md is missing th
 Assert-Docs ($chineseReadme.Contains($invariantMarker)) 'README.zh-CN.md is missing the critical EN/ZH invariant marker'
 
 foreach ($readme in @(@{ Name = 'README.md'; Content = $englishReadme }, @{ Name = 'README.zh-CN.md'; Content = $chineseReadme })) {
+    $normalizedReadme = $readme.Content -replace "`r`n", "`n"
     Assert-Docs ($readme.Content -match '(?m)^cargo install tabbeacon$') "$($readme.Name) is missing the normal unpinned install command"
     Assert-Docs ($readme.Content -notmatch '(?m)^cargo install tabbeacon --locked$') "$($readme.Name) still requires --locked in the normal install path"
+    Assert-Docs ($normalizedReadme.Contains("cargo install tabbeacon`ntabbeacon setup`ncodex")) "$($readme.Name) is missing the canonical install/setup/codex Quick Start sequence"
     Assert-Docs ($readme.Content.Contains("raw.githubusercontent.com/JerrySkywalker/tabbeacon/$stableMediaRevision/docs/assets/demo/tabbeacon-demo.gif")) "$($readme.Name) is missing the crates.io-safe immutable demo URL"
     Assert-Docs ($readme.Content.Contains("$repositoryUrl/blob/$stableMediaRevision/docs/assets/demo/tabbeacon-demo.gif")) "$($readme.Name) is missing the immutable demo target link"
 }
