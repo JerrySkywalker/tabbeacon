@@ -420,14 +420,7 @@ pub fn finalize_temporary_windows_terminal_lifecycle<B: ExactOwnedWindowRecovery
     primary_result: VisualResult<T>,
     product_disposition: TemporaryWindowProductDisposition,
 ) -> VisualResult<(T, TemporaryWindowsTerminalCleanupReceipt)> {
-    if validate_prepared_run(prepared).is_err() {
-        let receipt = ownership_refusal_receipt(prepared, false, "PREPARED_RECORD_INVALID");
-        write_lifecycle_receipt(prepared, &receipt)?;
-        return Err(VisualError::Platform(
-            "PRIMARY_DISPOSITION=BLOCKED CLEANUP_DISPOSITION=AMBIGUOUS: prepared run record missing or invalid"
-                .to_owned(),
-        ));
-    }
+    let prepared_record_valid = validate_prepared_run(prepared).is_ok();
     let primary_disposition = normalize_primary_disposition(product_disposition);
     let (ownership, _) = match read_validated_ownership(ownership_path) {
         Ok(ownership) => ownership,
@@ -459,17 +452,45 @@ pub fn finalize_temporary_windows_terminal_lifecycle<B: ExactOwnedWindowRecovery
         ));
     }
 
-    let cleanup =
-        match cleanup_temporary_windows_terminal(backend, ownership_path, product_disposition) {
-            Ok(receipt) if receipt.temporary_wt_cleanup != "PASS" => {
-                retry_temporary_windows_terminal_cleanup(
-                    backend,
-                    ownership_path,
-                    prepared.creator_process_id,
-                )
+    if !prepared_record_valid {
+        let cleanup = cleanup_registered_temporary_windows_terminal(
+            backend,
+            ownership_path,
+            prepared.creator_process_id,
+            TemporaryWindowProductDisposition::Blocked,
+        );
+        let mut lifecycle = lifecycle_receipt_from_final_cleanup(
+            prepared,
+            TemporaryWindowProductDisposition::Blocked,
+            Some("PREPARED_RECORD_INVALID_AFTER_EXACT_OWNERSHIP".to_owned()),
+            cleanup.as_ref(),
+        );
+        "EXACT_OWNERSHIP_CROSS_BOUND_PREPARED_RECORD_INVALID"
+            .clone_into(&mut lifecycle.registration_detail);
+        write_lifecycle_receipt(prepared, &lifecycle)?;
+        return match cleanup {
+            Ok(cleanup) if cleanup.temporary_wt_cleanup == "PASS" => {
+                Err(VisualError::Platform(
+                    "PRIMARY_DISPOSITION=BLOCKED CLEANUP_DISPOSITION=PASS: prepared run record missing or invalid after exact ownership; exact-owned cleanup completed"
+                        .to_owned(),
+                ))
             }
-            result => result,
+            Ok(cleanup) => Err(VisualError::Platform(format!(
+                "PRIMARY_DISPOSITION=BLOCKED CLEANUP_DISPOSITION=FAIL: prepared run record missing or invalid after exact ownership; {}",
+                cleanup.detail
+            ))),
+            Err(cleanup_error) => Err(VisualError::Platform(format!(
+                "PRIMARY_DISPOSITION=BLOCKED CLEANUP_DISPOSITION=FAIL: prepared run record missing or invalid after exact ownership; {cleanup_error}"
+            ))),
         };
+    }
+
+    let cleanup = cleanup_registered_temporary_windows_terminal(
+        backend,
+        ownership_path,
+        prepared.creator_process_id,
+        product_disposition,
+    );
     let lifecycle = lifecycle_receipt_from_final_cleanup(
         prepared,
         primary_disposition,
@@ -501,6 +522,20 @@ pub fn finalize_temporary_windows_terminal_lifecycle<B: ExactOwnedWindowRecovery
             "PRIMARY_DISPOSITION={} CLEANUP_DISPOSITION=FAIL: {primary_error}; {cleanup_error}",
             primary_disposition_name(primary_disposition)
         ))),
+    }
+}
+
+fn cleanup_registered_temporary_windows_terminal<B: ExactOwnedWindowRecoveryBackend>(
+    backend: &B,
+    ownership_path: &Path,
+    creator_process_id: u32,
+    product_disposition: TemporaryWindowProductDisposition,
+) -> VisualResult<TemporaryWindowsTerminalCleanupReceipt> {
+    match cleanup_temporary_windows_terminal(backend, ownership_path, product_disposition) {
+        Ok(receipt) if receipt.temporary_wt_cleanup != "PASS" => {
+            retry_temporary_windows_terminal_cleanup(backend, ownership_path, creator_process_id)
+        }
+        result => result,
     }
 }
 
@@ -2459,7 +2494,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_prepared_record_after_registration_is_durably_refused() {
+    fn missing_prepared_record_after_registration_still_closes_cross_bound_ownership() {
         let root = TestRoot::new();
         let backend = FakeBackend::exact();
         let prepared = prepare_temporary_windows_terminal_lifecycle(
@@ -2496,8 +2531,8 @@ mod tests {
             .to_string();
 
         assert!(detail.contains("PRIMARY_DISPOSITION=BLOCKED"));
-        assert!(detail.contains("CLEANUP_DISPOSITION=AMBIGUOUS"));
-        assert_eq!(backend.close_calls.get(), 0);
+        assert!(detail.contains("CLEANUP_DISPOSITION=PASS"));
+        assert_eq!(backend.close_calls.get(), 1);
         let lifecycle: super::TemporaryWindowsTerminalLifecycleReceipt = serde_json::from_slice(
             &fs::read(
                 root.0
@@ -2508,8 +2543,79 @@ mod tests {
         .expect("lifecycle receipt JSON");
         assert_eq!(
             lifecycle.cleanup_disposition,
-            TemporaryWindowCleanupDisposition::Ambiguous
+            TemporaryWindowCleanupDisposition::Pass
         );
-        assert!(lifecycle.ambiguous_window_left_untouched);
+        assert_eq!(
+            lifecycle.primary_disposition,
+            TemporaryWindowProductDisposition::Blocked
+        );
+        assert_eq!(lifecycle.temporary_windows_closed, Some(1));
+        assert_eq!(lifecycle.owned_temporary_wt_remaining, Some(0));
+        assert!(!lifecycle.ambiguous_window_left_untouched);
+        assert_eq!(
+            lifecycle.registration_detail,
+            "EXACT_OWNERSHIP_CROSS_BOUND_PREPARED_RECORD_INVALID"
+        );
+    }
+
+    #[test]
+    fn missing_prepared_record_retains_blocked_primary_and_failed_cleanup() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let prepared = prepare_temporary_windows_terminal_lifecycle(
+            &backend,
+            &root.0,
+            "TBWT-finalize-prepared-missing-cleanup-fail",
+            "TB-WT-ANCHOR-TBWT-finalize-prepared-missing-cleanup-fail",
+            "tabbeacon-TBWT-finalize-prepared-missing-cleanup-fail",
+            4242,
+        )
+        .expect("durable PREPARED record");
+        let TemporaryWindowsTerminalAcquisition::Registered { ownership_path } =
+            complete_temporary_windows_terminal_acquisition(
+                &backend,
+                &prepared,
+                std::time::Duration::ZERO,
+                None,
+            )
+            .expect("exact ownership acquisition")
+        else {
+            panic!("exact anchor must register");
+        };
+        fs::remove_file(&prepared.path).expect("owned prepared record removes");
+        backend.close_fails.set(true);
+
+        let result = finalize_temporary_windows_terminal_lifecycle(
+            &backend,
+            &prepared,
+            &ownership_path,
+            Ok(()),
+            TemporaryWindowProductDisposition::Pass,
+        );
+        let detail = result
+            .expect_err("cleanup failure must remain separate from blocked primary")
+            .to_string();
+
+        assert!(detail.contains("PRIMARY_DISPOSITION=BLOCKED"));
+        assert!(detail.contains("CLEANUP_DISPOSITION=FAIL"));
+        assert_eq!(backend.close_calls.get(), 2);
+        let lifecycle: super::TemporaryWindowsTerminalLifecycleReceipt =
+            serde_json::from_slice(
+                &fs::read(root.0.join(
+                    "temporary-wt-TBWT-finalize-prepared-missing-cleanup-fail.lifecycle.json",
+                ))
+                .expect("lifecycle receipt bytes"),
+            )
+            .expect("lifecycle receipt JSON");
+        assert_eq!(
+            lifecycle.primary_disposition,
+            TemporaryWindowProductDisposition::Blocked
+        );
+        assert_eq!(
+            lifecycle.cleanup_disposition,
+            TemporaryWindowCleanupDisposition::Fail
+        );
+        assert_eq!(lifecycle.owned_temporary_wt_remaining, Some(1));
+        assert!(!lifecycle.ambiguous_window_left_untouched);
     }
 }
