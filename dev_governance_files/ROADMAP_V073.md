@@ -2,22 +2,22 @@
 
 ## Status
 
-**OWNER RE-ADMITTED / IMPLEMENTATION MAY BEGIN AFTER THIS PLANNING PR IS ACCEPTED.**
+**COMPLETE / PUBLICLY RELEASED / LONG-TERM DOGFOOD.**
 
-The v0.7.2 Codex subagent stability hotfix is publicly closed out. The Owner now
-re-admits the previously frozen Discoverability & Automated Demo train against
-the post-v0.7.2 production baseline.
+The v0.7.3 Discoverability, Demo & Distribution Polish train is publicly closed
+out. Runtime/provider behavior remained unchanged, and the repository has
+entered long-term dogfood with no active feature development.
 
 ```text
 ADMISSION_BASE_MAIN=63a76bceb6f1710b87aa687bef1f56abf3bf3268
-CURRENT_PUBLIC_RELEASE=v0.7.2
-TARGET_PUBLIC_RELEASE=v0.7.3
-V073_IMPLEMENTATION=ADMITTED_AFTER_PLANNING_PR_MERGE
-ACTIVE_SCOPE=DISCOVERY_DEMO_DISTRIBUTION_POLISH
-PROMO_PR=100
-PROMO_PR_STATE=FROZEN_DRAFT_TO_RECONCILE
+RELEASE_SHA=1485b4dc0fe634a21634adc9ec539deb76beaad2
+CURRENT_PUBLIC_RELEASE=v0.7.3
+CURRENT_PUBLIC_TARGET=v0.7.3
+V073_IMPLEMENTATION=COMPLETE
+ACTIVE_FEATURE_DEVELOPMENT=PAUSED
+V08_OPTIONS_STATUS=NON_AUTHORITATIVE
 ROADMAP_V08_CREATED=false
-PUBLIC_RELEASE_MUTATION=false_until_G102_authorized
+NEXT_RECOMMENDED_GOAL=LONG_TERM_DOGFOOD_NO_ACTIVE_DEVELOPMENT
 ```
 
 This is intentionally the last bounded product-maintenance train before an
@@ -110,35 +110,23 @@ Goal is accepted.
 
 ## Reconciliation gate for PR #100
 
-PR #100 is preserved as historical Train-A evidence, but its frozen branch is
-based on pre-hotfix history and is not mergeable source truth by itself.
+PR #100 is preserved as historical Train-A evidence. Its desired G99/G100 scope
+was represented and strengthened by the accepted v0.7.3 Train A in PR #108, so
+PR #100 was closed without merge.
 
 ```text
 PR100_REMOTE_HEAD_AT_READMISSION=4731a3ffbca643a4e3d3afcd3b61f1d849eaa434
 PR100_MERGED=false
-PR100_DRAFT=true
-PR100_DIRECT_MERGE_ALLOWED=false_until_reconciled
-LOCAL_RECOVERY_CONTEXT=31c076d4458a4c0606e494c1dea452946a92fb15_if_still_present
+PR100_STATE=CLOSED_SUPERSEDED
+PR100_SUPERSEDED=true
+PR100_SUPERSEDED_BY_PR=108
+PR108_MERGE_SHA=9215500cb3b0a9ef183c9c096a4bdde1b749da5b
 ```
 
-The first Implementer must:
-
-1. fetch exact current `main`;
-2. inspect the remote PR #100 diff and any still-present local recovery commit;
-3. preserve scope-clean G99/G100 work;
-4. reuse the post-v0.7.2 exact-owned Windows Terminal lifecycle rather than the
-   old top-level `Window.Name` assumption;
-5. avoid force-pushing merely to preserve a historical PR number; and
-6. either safely reconcile PR #100 or preserve it as evidence and create a clean
-   successor Train-A PR from current main.
-
-Preferred decision rule:
-
-```text
-IF clean merge/current-main integration preserves scope and history
-THEN continue PR100
-ELSE preserve PR100 and create successor Train-A PR
-```
+The successor retained the social-preview and generator intent, replaced the
+old v0.7.2 discovery note with the accepted v0.7.3 research, and added the
+stricter exact-owned Windows Terminal lifecycle plus verified demo assets. The
+old branch remains available only through Git history.
 
 ## G99 — GitHub Discovery Surface
 
@@ -389,13 +377,17 @@ CONSERVATIVE_TOTAL=18..20 h
 
 ## Long-term dogfood end state
 
-After verified public v0.7.3 closeout:
+Verified public v0.7.3 closeout established:
 
 ```text
 CURRENT_PUBLIC_RELEASE=v0.7.3
 CURRENT_PUBLIC_TARGET=v0.7.3
+V073_IMPLEMENTATION=COMPLETE
 ACTIVE_FEATURE_DEVELOPMENT=PAUSED
+NO_ACTIVE_FEATURE_DEVELOPMENT=true
+V08_OPTIONS_STATUS=NON_AUTHORITATIVE
 ROADMAP_V08_CREATED=false
+DOGFOOD_MODE=LONG_TERM_DOGFOOD_NO_ACTIVE_DEVELOPMENT
 NEXT_RECOMMENDED_GOAL=LONG_TERM_DOGFOOD_NO_ACTIVE_DEVELOPMENT
 ```
 
