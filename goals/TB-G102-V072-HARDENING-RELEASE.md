@@ -1,17 +1,19 @@
-# TB-G102 — v0.7.2 Hardening & Public Release
+# TB-G102 — v0.7.3 Hardening & Public Release
 
 ## Purpose
 
-Close the v0.7.2 maintenance train as a truthful public release after G99–G101
+Close the v0.7.3 maintenance train as a truthful public release after G99–G101
 have been accepted. This release must preserve production runtime/provider
 behavior while publishing the discoverability, deterministic demo, and Cargo
 presentation improvements.
 
 ## Preconditions
 
-This roadmap document does not itself authorize G102 implementation. A fresh
-explicit Owner admission is required before any G102 repository write, version
-bump, publication, tag, or release mutation.
+The active v0.7.3 execution Goal authorizes reversible G102 release-candidate
+preparation, including the version candidate, release documentation, package
+and Windows artifact gates, and a draft PR. It does not authorize merging this
+release PR or performing any crates.io, tag, GitHub Release, or public-asset
+mutation. Those actions require a separate explicit Owner authorization.
 
 Required:
 
@@ -19,13 +21,14 @@ Required:
 G99=ACCEPTED
 G100=ACCEPTED
 G101=ACCEPTED
-CURRENT_PUBLIC_RELEASE=v0.7.1
-TARGET_PUBLIC_RELEASE=v0.7.2
+CURRENT_PUBLIC_RELEASE=v0.7.2
+TARGET_PUBLIC_RELEASE=v0.7.3
+PUBLIC_RELEASE_AUTHORIZATION=false
 RUNTIME_BEHAVIOR_CHANGED=false
 PROVIDER_BEHAVIOR_CHANGED=false
 ```
 
-Start from exact fresh remote `main`, verify no overlapping v0.7.2 release
+Start from exact fresh remote `main`, verify no overlapping v0.7.3 release
 writer, and use one focused release branch/worktree.
 
 ## A. Version/release metadata
@@ -33,10 +36,10 @@ writer, and use one focused release branch/worktree.
 Only in G102 bump:
 
 ```text
-0.7.1 -> 0.7.2
+0.7.2 -> 0.7.3
 ```
 
-Update Cargo metadata, lockfile if required, changelog, v0.7.2 release notes,
+Update Cargo metadata, lockfile if required, changelog, v0.7.3 release notes,
 and current release/upgrade truth according to existing repository convention.
 Do not rewrite historical release evidence.
 
@@ -107,7 +110,7 @@ Audit the exact `.crate` archive.
 Required:
 
 ```text
-PACKAGE_VERSION=0.7.2
+PACKAGE_VERSION=0.7.3
 PROMO_GIF_IN_CRATE=false
 SOCIAL_PREVIEW_IN_CRATE=false
 PROMO_BUILD_EVIDENCE_IN_CRATE=false
@@ -126,10 +129,10 @@ Required:
 ```text
 WINDOWS_ZIP=PASS
 SHA256_SIDECAR=PASS
-BINARY_VERSION=tabbeacon 0.7.2
+BINARY_VERSION=tabbeacon 0.7.3
 ```
 
-This artifact remains a release artifact; v0.7.2 does not create a new Windows
+This artifact remains a release artifact; v0.7.3 does not create a new Windows
 installer or package-manager install path.
 
 ## F. Pre-publication consumers
@@ -137,12 +140,12 @@ installer or package-manager install path.
 Use disposable clean roots and current release procedure to prove candidate
 install/upgrade behavior without mutating Owner production configuration.
 
-At minimum prove the v0.7.1 -> v0.7.2 upgrade path and basic CLI smoke while
+At minimum prove the v0.7.2 -> v0.7.3 upgrade path and basic CLI smoke while
 preserving unrelated provider config/hooks.
 
 ## G. Release PR
 
-Open one focused PR to `main` containing only the v0.7.2 release transaction and
+Open one focused PR to `main` containing only the v0.7.3 release transaction and
 settled G99–G101 work if not already merged separately.
 
 Before merge require exact-head hosted CI, docs/package/media checks, and focused
@@ -153,7 +156,7 @@ Merge only the exact accepted head and record the admitted `RELEASE_SHA`.
 ## H. Public release authorization
 
 The public mutation boundary remains explicit. If the active Owner instruction
-that launches G102 authorizes publication of v0.7.2, proceed after all gates
+that launches G102 authorizes publication of v0.7.3, proceed after all gates
 pass. Otherwise stop at `WAITING_FOR_OWNER_RELEASE_AUTHORIZATION`.
 
 Do not infer public-release authority merely from this planning document.
@@ -162,9 +165,9 @@ Do not infer public-release authority merely from this planning document.
 
 After explicit authorization and post-merge exact-main verification:
 
-1. publish crates.io `tabbeacon 0.7.2`;
-2. create/push immutable tag `v0.7.2` at `RELEASE_SHA`;
-3. create GitHub Release `v0.7.2`;
+1. publish crates.io `tabbeacon 0.7.3`;
+2. create/push immutable tag `v0.7.3` at `RELEASE_SHA`;
+3. create GitHub Release `v0.7.3`;
 4. upload verified Windows x64 ZIP + SHA-256 sidecar;
 5. verify public metadata/assets.
 
@@ -184,20 +187,20 @@ Required:
 
 ```text
 DEFAULT_CRATES_IO_INSTALL=PASS
-DEFAULT_INSTALL_RESOLVES_CURRENT=0.7.2
+DEFAULT_INSTALL_RESOLVES_CURRENT=0.7.3
 ```
 
 ### Exact release path
 
 ```powershell
-cargo install tabbeacon --version 0.7.2 --locked
+cargo install tabbeacon --version 0.7.3 --locked
 ```
 
 Required:
 
 ```text
 EXACT_CRATES_IO_INSTALL=PASS
-EXACT_CONSUMER_VERSION=0.7.2
+EXACT_CONSUMER_VERSION=0.7.3
 ```
 
 No `--git`, `--path`, local worktree binary, or pre-populated target may stand
@@ -206,7 +209,7 @@ in for either public consumer.
 ## K. GitHub asset consumer
 
 From a fresh disposable root, download the public Windows asset + sidecar,
-verify SHA-256, extract, launch, and prove `tabbeacon 0.7.2`.
+verify SHA-256, extract, launch, and prove `tabbeacon 0.7.3`.
 
 Required:
 
@@ -220,8 +223,8 @@ WINDOWS_ASSET_HASH=PASS
 Only after all public surfaces pass, reconcile current-facing truth to:
 
 ```text
-CURRENT_PUBLIC_RELEASE=v0.7.2
-CURRENT_PUBLIC_TARGET=v0.7.2
+CURRENT_PUBLIC_RELEASE=v0.7.3
+CURRENT_PUBLIC_TARGET=v0.7.3
 ```
 
 If a metadata-only closeout PR is required, create/validate/merge it separately
@@ -242,7 +245,7 @@ feature trains.
 ## Owner production boundary
 
 Do not mutate the Owner's installed TabBeacon/Codex/Agy configuration or Hook
-trust merely because v0.7.2 is released.
+trust merely because v0.7.3 is released.
 
 ```text
 PRODUCTION_CODEX_CONFIGURATION_MUTATED=false
@@ -264,15 +267,15 @@ RELEASE_BOUNDARY=true
 ## Final public acceptance
 
 ```text
-CRATES_IO_VERSION=0.7.2
-TAG=v0.7.2
+CRATES_IO_VERSION=0.7.3
+TAG=v0.7.3
 TAG_SHA=RELEASE_SHA
-GITHUB_RELEASE=v0.7.2
+GITHUB_RELEASE=v0.7.3
 GITHUB_RELEASE_TARGET=RELEASE_SHA
 DEFAULT_CRATES_IO_INSTALL=PASS
 EXACT_CRATES_IO_INSTALL=PASS
 GITHUB_ASSET_FRESH_CONSUMER=PASS
 PUBLIC_VERSION_CONSISTENT=true
-CURRENT_PUBLIC_RELEASE=v0.7.2
+CURRENT_PUBLIC_RELEASE=v0.7.3
 ACTIVE_FEATURE_DEVELOPMENT=PAUSED
 ```

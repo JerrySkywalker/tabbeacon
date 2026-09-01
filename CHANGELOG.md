@@ -4,6 +4,36 @@ All notable changes to TabBeacon will be documented here.
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-09-01
+
+### Added
+
+- Added a privacy-safe deterministic promotional demo captured from one
+  exact-owned real Windows Terminal window using TabBeacon's production
+  renderer and synthetic `API`, `WEB`, and `DOCS` workspaces.
+- Added validated social-preview SVG/PNG assets and refreshed public repository
+  discovery metadata around the Codex-led "Codex and more" position.
+
+### Changed
+
+- Moved the exact Codex/Agy support truth and real demo higher in the English
+  and Simplified Chinese READMEs, using immutable media links that render from
+  crates.io.
+- Simplified the normal install path to `cargo install tabbeacon`, followed by
+  `tabbeacon setup` and the unchanged daily `codex` command. Version-pinned
+  `--locked` installation remains a release-verification path only.
+- Tightened the package allowlist so promo media, social-preview assets,
+  evidence, and FFmpeg remain outside the crate while all packaged test source
+  dependencies remain complete.
+
+### Maintained
+
+- Changed no runtime or provider behavior. Codex remains capability-based,
+  Agy remains the exact admitted 1.1.19 profile, and Claude Code/OpenCode remain
+  deferred. Daily commands remain literal `codex` and `agy`; no wrapper, PATH
+  shadow, PTY host, global daemon, trust bypass, or production configuration
+  mutation is introduced.
+
 ## [0.7.2] - 2026-08-31
 
 ### Fixed
