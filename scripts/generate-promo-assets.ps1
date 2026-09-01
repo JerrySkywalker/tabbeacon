@@ -190,7 +190,7 @@ if ($Mode -eq 'Capture') {
 Assert-NormalExistingPath $EvidenceRoot | Out-Null
 $fixtureProof = Read-FixtureReceipt $fixtureReceipt $ExpectedHead $frames
 Assert-PrivacyReview $PrivacyReviewReceipt $ExpectedHead $fixtureProof $frames
-if (Test-Path -LiteralPath $gif -PathType Leaf -or Test-Path -LiteralPath $poster -PathType Leaf) {
+if ((Test-Path -LiteralPath $gif -PathType Leaf) -or (Test-Path -LiteralPath $poster -PathType Leaf)) {
     throw 'Refusing to overwrite a committed promo asset; use a fresh source transaction instead.'
 }
 foreach ($path in @($palette, $temporaryGif, $temporaryPoster, $mediaReceipt)) {
