@@ -22,11 +22,11 @@ use tabbeacon::{
     repo::WorkspaceIdentityResolver,
     settings::PresentationSettings,
     visual::{
-        CaptureBackend, FixtureDriver, LiveVisualRunRequest, PrintWindowCaptureBackend,
-        ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME, TemporaryWindowProductDisposition,
-        TemporaryWindowsTerminalOwnership, TerminalTestSession, TerminalTestSessionLauncher,
-        VisualDisposition, VisualError, VisualResult, WindowsUiaLocator,
-        root_workspace_anchor_fixture_alias,
+        CaptureBackend, ExactOwnedWindowBackend, FixtureDriver, LiveVisualRunRequest,
+        PrintWindowCaptureBackend, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME,
+        TemporaryWindowProductDisposition, TemporaryWindowsTerminalOwnership, TerminalTestSession,
+        TerminalTestSessionLauncher, VisualDisposition, VisualError, VisualResult,
+        WindowsUiaLocator, root_workspace_anchor_fixture_alias,
         runner::{authorize_live_worker, run_live, run_live_in_worker},
     },
 };
@@ -45,10 +45,12 @@ fn run(arguments: &[String]) -> VisualResult<()> {
         "emit" => emit(arguments),
         "run" => run_live_harness(arguments),
         "run-worker" => run_live_worker(arguments),
+        "preflight" => run_exact_wt_preflight(arguments),
         "promo" => run_promo_showcase(arguments),
         "showcase" => emit_showcase(arguments),
         _ => Err(VisualError::Platform(
-            "expected `emit`, `run`, `promo`, or `showcase` visual fixture subcommand".to_owned(),
+            "expected `emit`, `run`, `preflight`, `promo`, or `showcase` visual fixture subcommand"
+                .to_owned(),
         )),
     }
 }
@@ -137,6 +139,132 @@ struct PromoCapture {
     frame_height: u32,
 }
 
+/// Content-minimal proof that the exact promo acquisition and finally-cleanup
+/// path controls one real Windows Terminal window before a full capture begins.
+#[derive(Debug, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+struct ExactWtPreflightReceipt {
+    source_sha: String,
+    windows_terminal_version: String,
+    primary_disposition: &'static str,
+    cleanup_disposition: String,
+    exact_anchor_tabitem_match_count: u32,
+    ancestor_window_match_count: u32,
+    exact_hwnd_resolved: bool,
+    immutable_ownership_record_created: bool,
+    exact_owned_minimal_observation: bool,
+    temporary_windows_created: u32,
+    temporary_windows_closed: u32,
+    owned_temporary_wt_remaining: u32,
+    owner_windows_closed: u32,
+    broad_windows_terminal_kill: bool,
+}
+
+/// Exercises the same launch, exact registration, and finally cleanup used by
+/// the promo pipeline, but performs only one content-free ownership observation.
+fn run_exact_wt_preflight(arguments: &[String]) -> VisualResult<()> {
+    let expected_head = argument_value(arguments, "--expected-head")?;
+    let run_id = argument_value(arguments, "--run-id")?;
+    let evidence_root = PathBuf::from(argument_value(arguments, "--evidence-root")?);
+    let receipt_path = PathBuf::from(argument_value(arguments, "--receipt")?);
+    if !is_exact_sha(&expected_head) || checked_out_head()? != expected_head {
+        return Err(VisualError::Platform(
+            "exact WT preflight requires EXPECTED_HEAD == CHECKED_OUT_HEAD".to_owned(),
+        ));
+    }
+    if !is_safe_run_id(&run_id) {
+        return Err(VisualError::InvalidIdentifier(run_id));
+    }
+    validate_exact_wt_preflight_paths(&run_id, &evidence_root, &receipt_path)?;
+    let control_path = evidence_root.join("preflight-control.txt");
+    write_new_text(&control_path, "WAITING\n")?;
+    let fixture_executable = env::current_exe().map_err(VisualError::Io)?;
+    let initial_arguments = showcase_arguments("api", &run_id, &control_path);
+    let session = TerminalTestSessionLauncher::default().launch_promo_showcase(
+        &fixture_executable,
+        &run_id,
+        &initial_arguments,
+        &evidence_root,
+    )?;
+    let ownership_record_created = session.ownership_path.is_file();
+    let (observation, cleanup) = session.run_with_cleanup(
+        || {
+            let ownership = read_promo_ownership(&session.ownership_path, &session)?;
+            let observation = WindowsUiaLocator.observe_exact_anchor(&session.anchor_title)?;
+            if observation.anchor_tab_match_count != 1
+                || observation.target_window_match_count != 1
+                || observation.native_window_id != Some(ownership.native_window_id)
+            {
+                return Err(VisualError::Platform(
+                    "exact WT preflight ownership observation became ambiguous".to_owned(),
+                ));
+            }
+            WindowsUiaLocator.verify_exact_anchor_window_tab_count(
+                &session.anchor_title,
+                ownership.native_window_id,
+                2,
+            )?;
+            write_promo_control(&control_path, "DONE")?;
+            Ok(observation)
+        },
+        |_| TemporaryWindowProductDisposition::Fail,
+    )?;
+    let cleanup_gate_passed = cleanup.temporary_wt_cleanup == "PASS"
+        && cleanup.temporary_windows_created == 1
+        && cleanup.temporary_windows_closed == 1
+        && cleanup.owned_temporary_wt_remaining == 0
+        && cleanup.owner_windows_closed == 0
+        && !cleanup.broad_window_kill_used;
+    let receipt = ExactWtPreflightReceipt {
+        source_sha: expected_head,
+        windows_terminal_version: command_value("wt.exe", &["--version"]),
+        primary_disposition: if cleanup_gate_passed { "PASS" } else { "FAIL" },
+        cleanup_disposition: cleanup.temporary_wt_cleanup.clone(),
+        exact_anchor_tabitem_match_count: observation.anchor_tab_match_count,
+        ancestor_window_match_count: observation.target_window_match_count,
+        exact_hwnd_resolved: observation.native_window_id.is_some_and(|hwnd| hwnd != 0),
+        immutable_ownership_record_created: ownership_record_created,
+        exact_owned_minimal_observation: true,
+        temporary_windows_created: cleanup.temporary_windows_created,
+        temporary_windows_closed: cleanup.temporary_windows_closed,
+        owned_temporary_wt_remaining: cleanup.owned_temporary_wt_remaining,
+        owner_windows_closed: cleanup.owner_windows_closed,
+        broad_windows_terminal_kill: cleanup.broad_window_kill_used,
+    };
+    write_new_json(&receipt_path, &receipt)?;
+    println!(
+        "{}",
+        serde_json::to_string(&receipt).map_err(VisualError::Json)?
+    );
+    if cleanup_gate_passed {
+        Ok(())
+    } else {
+        Err(VisualError::Platform(
+            "exact WT preflight cleanup did not satisfy the one-created one-closed hard gate"
+                .to_owned(),
+        ))
+    }
+}
+
+fn validate_exact_wt_preflight_paths(
+    run_id: &str,
+    evidence_root: &Path,
+    receipt_path: &Path,
+) -> VisualResult<()> {
+    let expected_root = PathBuf::from(r"V:\build\tabbeacon").join(run_id);
+    if !evidence_root.is_dir()
+        || fs::canonicalize(evidence_root)? != fs::canonicalize(&expected_root)?
+        || receipt_path != evidence_root.join("controlled-preflight-receipt.json")
+        || receipt_path.exists()
+    {
+        return Err(VisualError::Platform(
+            "exact WT preflight paths must be fresh and stay inside the exact owned evidence root"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Generates raw frames through a real stock Windows Terminal window. The
 /// static anchor is registered before any dynamic `API`/`WEB`/`DOCS` tabs are
 /// launched, so neither a changing title nor a top-level `Window.Name` is
@@ -175,38 +303,27 @@ fn run_promo_showcase(arguments: &[String]) -> VisualResult<()> {
         &evidence_root,
     )?;
 
-    let body_result = capture_promo_showcase(
-        &fixture_executable,
-        &session,
-        &run_id,
-        &control_path,
-        &frames_directory,
-    );
-    let product_disposition = match &body_result {
-        Ok(_) => TemporaryWindowProductDisposition::Pass,
-        Err(error)
+    let (capture, cleanup) = session.run_with_cleanup(
+        || {
+            capture_promo_showcase(
+                &fixture_executable,
+                &session,
+                &run_id,
+                &control_path,
+                &frames_directory,
+            )
+        },
+        |error| {
             if error
                 .to_string()
-                .contains("promo capture exceeded its bounded") =>
-        {
-            TemporaryWindowProductDisposition::Timeout
-        }
-        Err(_) => TemporaryWindowProductDisposition::Fail,
-    };
-    let cleanup = session.cleanup(product_disposition)?;
-    if cleanup.temporary_wt_cleanup != "PASS"
-        || cleanup.temporary_windows_created != 1
-        || cleanup.temporary_windows_closed != 1
-        || cleanup.owned_temporary_wt_remaining != 0
-        || cleanup.owner_windows_closed != 0
-        || cleanup.broad_window_kill_used
-    {
-        return Err(VisualError::Platform(
-            "promo exact-owned temporary Windows Terminal cleanup did not satisfy the hard gate"
-                .to_owned(),
-        ));
-    }
-    let capture = body_result?;
+                .contains("promo capture exceeded its bounded")
+            {
+                TemporaryWindowProductDisposition::Timeout
+            } else {
+                TemporaryWindowProductDisposition::Fail
+            }
+        },
+    )?;
     let receipt = PromoShowcaseReceipt {
         source_sha: expected_head,
         windows_terminal_version: command_value("wt.exe", &["--version"]),

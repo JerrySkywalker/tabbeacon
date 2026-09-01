@@ -10,10 +10,12 @@ use std::{
 use sha2::{Digest, Sha256};
 
 use super::{
-    FixtureReplay, TemporaryWindowProductDisposition, TemporaryWindowsTerminalCleanupReceipt,
-    VisualError, VisualResult, WindowsUiaLocator, cleanup_temporary_windows_terminal,
-    close_unregistered_exact_anchor, recover_stale_temporary_windows_terminals,
-    register_temporary_windows_terminal_with_retry, retry_temporary_windows_terminal_cleanup,
+    FixtureReplay, TemporaryWindowProductDisposition, TemporaryWindowsTerminalAcquisition,
+    TemporaryWindowsTerminalCleanupReceipt, TemporaryWindowsTerminalPreparedRun, VisualError,
+    VisualResult, WindowsUiaLocator, cleanup_temporary_windows_terminal,
+    complete_temporary_windows_terminal_acquisition, finalize_temporary_windows_terminal_lifecycle,
+    prepare_temporary_windows_terminal_lifecycle, recover_stale_temporary_windows_terminals,
+    retry_temporary_windows_terminal_cleanup,
 };
 
 /// A dedicated Windows Terminal test session positively correlated by run ID.
@@ -31,6 +33,7 @@ pub struct TerminalTestSession {
     pub anchor_title: String,
     /// Immutable exact run/anchor/routing/HWND ownership record.
     pub ownership_path: PathBuf,
+    prepared_lifecycle: TemporaryWindowsTerminalPreparedRun,
 }
 
 impl TerminalTestSession {
@@ -59,6 +62,31 @@ impl TerminalTestSession {
                 std::process::id(),
             )
         }
+    }
+
+    /// Runs one bounded qualification body and deterministically accounts for
+    /// exact-owned cleanup before returning either result.
+    ///
+    /// # Errors
+    ///
+    /// Returns the primary body error with the separate cleanup disposition, or
+    /// a cleanup error when the body would otherwise pass.
+    pub fn run_with_cleanup<T>(
+        &self,
+        body: impl FnOnce() -> VisualResult<T>,
+        classify_error: impl FnOnce(&VisualError) -> TemporaryWindowProductDisposition,
+    ) -> VisualResult<(T, TemporaryWindowsTerminalCleanupReceipt)> {
+        let body_result = body();
+        let product_disposition = body_result
+            .as_ref()
+            .map_or_else(classify_error, |_| TemporaryWindowProductDisposition::Pass);
+        finalize_temporary_windows_terminal_lifecycle(
+            &WindowsUiaLocator,
+            &self.prepared_lifecycle,
+            &self.ownership_path,
+            body_result,
+            product_disposition,
+        )
     }
 }
 
@@ -260,6 +288,14 @@ impl TerminalTestSessionLauncher {
         if ownership_path.exists() {
             return Err(VisualError::EvidenceArtifactExists(ownership_path));
         }
+        let prepared_lifecycle = prepare_temporary_windows_terminal_lifecycle(
+            &WindowsUiaLocator,
+            evidence_root,
+            &lifecycle_run_id,
+            &anchor_title,
+            &window_name,
+            std::process::id(),
+        )?;
         let position = format!(
             "{},{}",
             self.requested_position.0, self.requested_position.1
@@ -270,7 +306,7 @@ impl TerminalTestSessionLauncher {
         // Observe an early dispatcher failure when one is available, but do
         // not wait for (or terminate) the launcher. Exact anchor registration
         // remains the authority that proves the resulting terminal window.
-        let mut launcher = Command::new("wt.exe")
+        let launch_result = Command::new("wt.exe")
             .args(["-w", &window_name, "--pos", &position, "--size", &size])
             .arg("new-tab")
             .args(["--title", &anchor_title, "--suppressApplicationTitle"])
@@ -292,20 +328,29 @@ impl TerminalTestSessionLauncher {
                 VisualError::Platform(format!(
                     "could not launch owned Windows Terminal session: {error}"
                 ))
-            })?;
-        observe_windows_terminal_dispatch(&mut launcher, "exact-owned fixture")?;
-        if let Err(error) = register_temporary_windows_terminal_with_retry(
+            })
+            .and_then(|mut launcher| {
+                observe_windows_terminal_dispatch(&mut launcher, "exact-owned fixture")
+            });
+        let launch_error = launch_result.err().map(|error| error.to_string());
+        let acquisition = complete_temporary_windows_terminal_acquisition(
             &WindowsUiaLocator,
-            evidence_root,
-            &lifecycle_run_id,
-            &anchor_title,
-            &window_name,
-            std::process::id(),
+            &prepared_lifecycle,
             registration_budget,
-        ) {
-            let _ = close_unregistered_exact_anchor(&WindowsUiaLocator, &anchor_title);
-            return Err(error);
-        }
+            launch_error.as_deref(),
+        )?;
+        let ownership_path = match acquisition {
+            TemporaryWindowsTerminalAcquisition::Registered { ownership_path } => ownership_path,
+            TemporaryWindowsTerminalAcquisition::Failed(receipt) => {
+                return Err(VisualError::Platform(format!(
+                    "Windows Terminal acquisition failed: PRIMARY_DISPOSITION={:?} CLEANUP_DISPOSITION={:?} REGISTRATION_DETAIL={} CLEANUP_DETAIL={}",
+                    receipt.primary_disposition,
+                    receipt.cleanup_disposition,
+                    receipt.registration_detail,
+                    receipt.cleanup_detail
+                )));
+            }
+        };
         Ok(TerminalTestSession {
             run_id: run_id.to_owned(),
             window_name,
@@ -313,6 +358,7 @@ impl TerminalTestSessionLauncher {
             requested_size: self.requested_size,
             anchor_title,
             ownership_path,
+            prepared_lifecycle,
         })
     }
 }

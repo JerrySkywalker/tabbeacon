@@ -15,6 +15,8 @@ use super::{VisualError, VisualResult};
 
 const OWNERSHIP_SCHEMA: &str = "tabbeacon-temporary-wt-ownership-v1";
 const CLEANUP_SCHEMA: &str = "tabbeacon-temporary-wt-cleanup-v1";
+const PREPARED_SCHEMA: &str = "tabbeacon-temporary-wt-prepared-v1";
+const LIFECYCLE_SCHEMA: &str = "tabbeacon-temporary-wt-lifecycle-v1";
 const MAX_CLEANUP_RECOVERY_ATTEMPTS: u8 = 32;
 
 /// Fresh UIA correlation for one fixed, run-owned anchor tab.
@@ -124,6 +126,694 @@ pub struct TemporaryWindowsTerminalCleanupReceipt {
     pub broad_window_kill_used: bool,
     /// Content-minimal cleanup classification.
     pub detail: String,
+}
+
+/// Explicit qualification-only Windows Terminal lifecycle states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TemporaryWindowsTerminalLifecycleState {
+    /// Safe run identity was validated and durably recorded before launch.
+    Prepared,
+    /// The exact `wt.exe` launch was attempted.
+    LaunchAttempted,
+    /// Exactly one fixed anchor and ancestor HWND were observed.
+    AnchorDiscovered,
+    /// The immutable creator-bound ownership record was created.
+    ExactOwnershipRegistered,
+    /// Capture or another bounded qualification body was active.
+    CaptureActive,
+    /// Exact-owned cleanup accounting began.
+    CleanupStarted,
+    /// Cleanup accounting reached a typed terminal result.
+    CleanupComplete,
+}
+
+/// Typed cleanup result retained independently from the primary disposition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum TemporaryWindowCleanupDisposition {
+    /// Exact-owned cleanup completed safely.
+    Pass,
+    /// Exact ownership was registered but the exact close did not complete.
+    Fail,
+    /// Pre-ownership recovery could not prove one exact creator-bound window.
+    Ambiguous,
+    /// No exact fixed anchor was present, so no window was targeted.
+    NotOwned,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct TemporaryWindowsTerminalPreparedRecord {
+    schema: String,
+    run_id: String,
+    anchor_title_sha256: String,
+    window_routing_id_sha256: String,
+    creator_process_id: u32,
+    creator_process_started_unix_ms: u64,
+    prepared_unix_ms: u64,
+    state: TemporaryWindowsTerminalLifecycleState,
+}
+
+/// Validated in-memory handle for one immutable pre-launch run record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemporaryWindowsTerminalPreparedRun {
+    path: PathBuf,
+    evidence_root: PathBuf,
+    run_id: String,
+    anchor_title: String,
+    window_routing_id: String,
+    creator_process_id: u32,
+    creator_process_started_unix_ms: u64,
+}
+
+/// Content-minimal terminal receipt for acquisition or full lifecycle failure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)] // Explicit safety facts mirror the durable receipt contract.
+pub struct TemporaryWindowsTerminalLifecycleReceipt {
+    /// Stable schema identifier.
+    pub schema: String,
+    /// Unique qualification-run nonce.
+    pub run_id: String,
+    /// Primary qualification result, normalized to PASS, FAIL, or BLOCKED.
+    pub primary_disposition: TemporaryWindowProductDisposition,
+    /// Cleanup result, retained independently from the primary result.
+    pub cleanup_disposition: TemporaryWindowCleanupDisposition,
+    /// Ordered states durably summarized by this terminal receipt.
+    pub states: Vec<TemporaryWindowsTerminalLifecycleState>,
+    /// Exact anchor cardinality when observation succeeded.
+    pub anchor_tabitem_match_count: Option<u32>,
+    /// Ancestor Window/HWND cardinality when observation succeeded.
+    pub ancestor_window_match_count: Option<u32>,
+    /// Whether the exact HWND was resolved.
+    pub exact_hwnd_resolved: bool,
+    /// Whether immutable exact ownership was created before cleanup.
+    pub immutable_ownership_record_created: bool,
+    /// Registered temporary-window count, or unproven before ownership.
+    pub temporary_windows_created: Option<u32>,
+    /// Exact-owned close count, or unproven before ownership.
+    pub temporary_windows_closed: Option<u32>,
+    /// Exact-owned remainder, or unproven before ownership.
+    pub owned_temporary_wt_remaining: Option<u32>,
+    /// Ambiguous pre-ownership windows are always left untouched.
+    pub ambiguous_window_left_untouched: bool,
+    /// Owner windows are never targeted by this lifecycle.
+    pub owner_windows_closed: u32,
+    /// Broad Windows Terminal kill is forbidden.
+    pub broad_windows_terminal_kill: bool,
+    /// Content-minimal primary failure classification.
+    pub primary_detail: String,
+    /// Content-minimal registration classification.
+    pub registration_detail: String,
+    /// Content-minimal cleanup classification.
+    pub cleanup_detail: String,
+}
+
+/// Result of the exact ownership-acquisition portion of the lifecycle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemporaryWindowsTerminalAcquisition {
+    /// Exact ownership is registered and later work may begin.
+    Registered {
+        /// Immutable ownership record path.
+        ownership_path: PathBuf,
+    },
+    /// Acquisition failed, and its cleanup result was durably recorded.
+    Failed(TemporaryWindowsTerminalLifecycleReceipt),
+}
+
+/// Creates the immutable content-minimal PREPARED record before `wt.exe` launch.
+///
+/// # Errors
+///
+/// Returns a classified identity, process, evidence, or filesystem error. The
+/// record uses create-new semantics and never contains terminal content.
+pub fn prepare_temporary_windows_terminal_lifecycle<B: ExactOwnedWindowRecoveryBackend>(
+    backend: &B,
+    evidence_root: &Path,
+    run_id: &str,
+    anchor_title: &str,
+    window_routing_id: &str,
+    creator_process_id: u32,
+) -> VisualResult<TemporaryWindowsTerminalPreparedRun> {
+    validate_registration(evidence_root, run_id, anchor_title, window_routing_id)?;
+    if creator_process_id == 0 {
+        return Err(VisualError::Platform(
+            "temporary Windows Terminal creator process ID must be nonzero".to_owned(),
+        ));
+    }
+    let creator_process_started_unix_ms = backend
+        .creator_process_started_unix_ms(creator_process_id)?
+        .ok_or_else(|| {
+            VisualError::Platform(
+                "temporary Windows Terminal creator process is not active at preparation"
+                    .to_owned(),
+            )
+        })?;
+    let prepared_unix_ms = unix_ms();
+    if creator_process_started_unix_ms > prepared_unix_ms {
+        return Err(VisualError::Platform(
+            "temporary Windows Terminal creator process time is newer than its prepared record"
+                .to_owned(),
+        ));
+    }
+    let record = TemporaryWindowsTerminalPreparedRecord {
+        schema: PREPARED_SCHEMA.to_owned(),
+        run_id: run_id.to_owned(),
+        anchor_title_sha256: hex_sha256(anchor_title.as_bytes()),
+        window_routing_id_sha256: hex_sha256(window_routing_id.as_bytes()),
+        creator_process_id,
+        creator_process_started_unix_ms,
+        prepared_unix_ms,
+        state: TemporaryWindowsTerminalLifecycleState::Prepared,
+    };
+    let path = evidence_root.join(format!("temporary-wt-{run_id}.prepared.json"));
+    write_new_json(&path, &record)?;
+    Ok(TemporaryWindowsTerminalPreparedRun {
+        path,
+        evidence_root: evidence_root.to_path_buf(),
+        run_id: run_id.to_owned(),
+        anchor_title: anchor_title.to_owned(),
+        window_routing_id: window_routing_id.to_owned(),
+        creator_process_id,
+        creator_process_started_unix_ms,
+    })
+}
+
+/// Completes ownership acquisition after one launch attempt on every path.
+///
+/// An early launch/dispatcher error does not short-circuit registration. If an
+/// exact creator-bound anchor exists, it is registered and cleaned. Ambiguous
+/// pre-ownership state is durably blocked and left untouched.
+///
+/// # Errors
+///
+/// Returns only evidence/filesystem validation errors that prevent durable
+/// accounting. Expected launch, registration, and cleanup failures are returned
+/// as a typed [`TemporaryWindowsTerminalAcquisition::Failed`] receipt.
+pub fn complete_temporary_windows_terminal_acquisition<B: ExactOwnedWindowRecoveryBackend>(
+    backend: &B,
+    prepared: &TemporaryWindowsTerminalPreparedRun,
+    registration_budget: Duration,
+    launch_error: Option<&str>,
+) -> VisualResult<TemporaryWindowsTerminalAcquisition> {
+    if validate_prepared_run(prepared).is_err() {
+        let observation = backend.observe_exact_anchor(&prepared.anchor_title);
+        let receipt = preownership_failure_receipt(
+            prepared,
+            launch_error,
+            "PREPARED_RECORD_INVALID",
+            &observation,
+        );
+        write_lifecycle_receipt(prepared, &receipt)?;
+        return Ok(TemporaryWindowsTerminalAcquisition::Failed(receipt));
+    }
+    let Ok(creator_process_started_unix_ms) =
+        backend.creator_process_started_unix_ms(prepared.creator_process_id)
+    else {
+        let observation = backend.observe_exact_anchor(&prepared.anchor_title);
+        let receipt = preownership_failure_receipt(
+            prepared,
+            launch_error,
+            "CREATOR_INSTANCE_OBSERVATION_FAILED",
+            &observation,
+        );
+        write_lifecycle_receipt(prepared, &receipt)?;
+        return Ok(TemporaryWindowsTerminalAcquisition::Failed(receipt));
+    };
+    if creator_process_started_unix_ms != Some(prepared.creator_process_started_unix_ms) {
+        let observation = backend.observe_exact_anchor(&prepared.anchor_title);
+        let receipt = preownership_failure_receipt(
+            prepared,
+            launch_error,
+            "CREATOR_INSTANCE_MISMATCH_REFUSED",
+            &observation,
+        );
+        write_lifecycle_receipt(prepared, &receipt)?;
+        return Ok(TemporaryWindowsTerminalAcquisition::Failed(receipt));
+    }
+    let registration = register_temporary_windows_terminal_with_retry(
+        backend,
+        &prepared.evidence_root,
+        &prepared.run_id,
+        &prepared.anchor_title,
+        &prepared.window_routing_id,
+        prepared.creator_process_id,
+        registration_budget,
+    );
+    match registration {
+        Ok(ownership_path) if launch_error.is_none() => {
+            Ok(TemporaryWindowsTerminalAcquisition::Registered { ownership_path })
+        }
+        Ok(ownership_path) => {
+            let cleanup = match cleanup_temporary_windows_terminal(
+                backend,
+                &ownership_path,
+                TemporaryWindowProductDisposition::Fail,
+            ) {
+                Ok(receipt) if receipt.temporary_wt_cleanup != "PASS" => {
+                    retry_temporary_windows_terminal_cleanup(
+                        backend,
+                        &ownership_path,
+                        prepared.creator_process_id,
+                    )
+                }
+                result => result,
+            };
+            let receipt = acquisition_receipt_from_registered_cleanup(
+                prepared,
+                launch_error.unwrap_or("LAUNCH_FAILED"),
+                cleanup,
+            );
+            write_lifecycle_receipt(prepared, &receipt)?;
+            Ok(TemporaryWindowsTerminalAcquisition::Failed(receipt))
+        }
+        Err(registration_error) => {
+            let registration_detail = registration_error.to_string();
+            let observation = backend.observe_exact_anchor(&prepared.anchor_title);
+            let receipt = preownership_failure_receipt(
+                prepared,
+                launch_error,
+                &registration_detail,
+                &observation,
+            );
+            write_lifecycle_receipt(prepared, &receipt)?;
+            Ok(TemporaryWindowsTerminalAcquisition::Failed(receipt))
+        }
+    }
+}
+
+/// Finalizes one registered lifecycle around capture or another bounded body.
+///
+/// Cleanup is attempted for primary PASS, FAIL, BLOCKED, timeout, exception,
+/// and cancellation dispositions. The returned error always names both the
+/// normalized primary and cleanup dispositions, while the durable lifecycle
+/// receipt retains them as separate typed fields.
+///
+/// # Errors
+///
+/// Returns a classified error when the primary body failed, exact cleanup did
+/// not pass, ownership no longer matches the prepared run, or durable receipt
+/// creation failed. Cleanup is never discarded.
+pub fn finalize_temporary_windows_terminal_lifecycle<B: ExactOwnedWindowRecoveryBackend, T>(
+    backend: &B,
+    prepared: &TemporaryWindowsTerminalPreparedRun,
+    ownership_path: &Path,
+    primary_result: VisualResult<T>,
+    product_disposition: TemporaryWindowProductDisposition,
+) -> VisualResult<(T, TemporaryWindowsTerminalCleanupReceipt)> {
+    if validate_prepared_run(prepared).is_err() {
+        let receipt = ownership_refusal_receipt(prepared, false, "PREPARED_RECORD_INVALID");
+        write_lifecycle_receipt(prepared, &receipt)?;
+        return Err(VisualError::Platform(
+            "PRIMARY_DISPOSITION=BLOCKED CLEANUP_DISPOSITION=AMBIGUOUS: prepared run record missing or invalid"
+                .to_owned(),
+        ));
+    }
+    let primary_disposition = normalize_primary_disposition(product_disposition);
+    let (ownership, _) = match read_validated_ownership(ownership_path) {
+        Ok(ownership) => ownership,
+        Err(error) => {
+            let receipt = ownership_refusal_receipt(
+                prepared,
+                false,
+                "IMMUTABLE_OWNERSHIP_RECORD_MISSING_OR_INVALID",
+            );
+            write_lifecycle_receipt(prepared, &receipt)?;
+            return Err(VisualError::Platform(format!(
+                "PRIMARY_DISPOSITION=BLOCKED CLEANUP_DISPOSITION=AMBIGUOUS: immutable ownership record missing or invalid: {error}"
+            )));
+        }
+    };
+    if ownership.run_id != prepared.run_id
+        || ownership.anchor_title != prepared.anchor_title
+        || ownership.window_routing_id != prepared.window_routing_id
+        || ownership.creator_process_id != prepared.creator_process_id
+        || ownership.creator_process_started_unix_ms
+            != Some(prepared.creator_process_started_unix_ms)
+    {
+        let receipt =
+            ownership_refusal_receipt(prepared, true, "IMMUTABLE_OWNERSHIP_RECORD_MISMATCH");
+        write_lifecycle_receipt(prepared, &receipt)?;
+        return Err(VisualError::Platform(
+            "PRIMARY_DISPOSITION=BLOCKED CLEANUP_DISPOSITION=AMBIGUOUS: immutable ownership record mismatch"
+                .to_owned(),
+        ));
+    }
+
+    let cleanup =
+        match cleanup_temporary_windows_terminal(backend, ownership_path, product_disposition) {
+            Ok(receipt) if receipt.temporary_wt_cleanup != "PASS" => {
+                retry_temporary_windows_terminal_cleanup(
+                    backend,
+                    ownership_path,
+                    prepared.creator_process_id,
+                )
+            }
+            result => result,
+        };
+    let lifecycle = lifecycle_receipt_from_final_cleanup(
+        prepared,
+        primary_disposition,
+        primary_result.as_ref().err().map(ToString::to_string),
+        cleanup.as_ref(),
+    );
+    write_lifecycle_receipt(prepared, &lifecycle)?;
+
+    match (primary_result, cleanup) {
+        (Ok(value), Ok(cleanup)) if cleanup.temporary_wt_cleanup == "PASS" => Ok((value, cleanup)),
+        (Ok(_), Ok(cleanup)) => Err(VisualError::Platform(format!(
+            "PRIMARY_DISPOSITION=PASS CLEANUP_DISPOSITION=FAIL: {}",
+            cleanup.detail
+        ))),
+        (Ok(_), Err(cleanup_error)) => Err(VisualError::Platform(format!(
+            "PRIMARY_DISPOSITION=PASS CLEANUP_DISPOSITION=FAIL: {cleanup_error}"
+        ))),
+        (Err(primary_error), Ok(cleanup)) => Err(VisualError::Platform(format!(
+            "PRIMARY_DISPOSITION={} CLEANUP_DISPOSITION={}: {primary_error}; {}",
+            primary_disposition_name(primary_disposition),
+            if cleanup.temporary_wt_cleanup == "PASS" {
+                "PASS"
+            } else {
+                "FAIL"
+            },
+            cleanup.detail
+        ))),
+        (Err(primary_error), Err(cleanup_error)) => Err(VisualError::Platform(format!(
+            "PRIMARY_DISPOSITION={} CLEANUP_DISPOSITION=FAIL: {primary_error}; {cleanup_error}",
+            primary_disposition_name(primary_disposition)
+        ))),
+    }
+}
+
+fn ownership_refusal_receipt(
+    prepared: &TemporaryWindowsTerminalPreparedRun,
+    immutable_ownership_record_created: bool,
+    registration_detail: &str,
+) -> TemporaryWindowsTerminalLifecycleReceipt {
+    let mut states = vec![
+        TemporaryWindowsTerminalLifecycleState::Prepared,
+        TemporaryWindowsTerminalLifecycleState::LaunchAttempted,
+    ];
+    if immutable_ownership_record_created {
+        states.extend([
+            TemporaryWindowsTerminalLifecycleState::AnchorDiscovered,
+            TemporaryWindowsTerminalLifecycleState::ExactOwnershipRegistered,
+        ]);
+    }
+    states.extend([
+        TemporaryWindowsTerminalLifecycleState::CaptureActive,
+        TemporaryWindowsTerminalLifecycleState::CleanupStarted,
+        TemporaryWindowsTerminalLifecycleState::CleanupComplete,
+    ]);
+    TemporaryWindowsTerminalLifecycleReceipt {
+        schema: LIFECYCLE_SCHEMA.to_owned(),
+        run_id: prepared.run_id.clone(),
+        primary_disposition: TemporaryWindowProductDisposition::Blocked,
+        cleanup_disposition: TemporaryWindowCleanupDisposition::Ambiguous,
+        states,
+        anchor_tabitem_match_count: None,
+        ancestor_window_match_count: None,
+        exact_hwnd_resolved: false,
+        immutable_ownership_record_created,
+        temporary_windows_created: immutable_ownership_record_created.then_some(1),
+        temporary_windows_closed: Some(0),
+        owned_temporary_wt_remaining: None,
+        ambiguous_window_left_untouched: true,
+        owner_windows_closed: 0,
+        broad_windows_terminal_kill: false,
+        primary_detail: "OWNERSHIP_IDENTITY_UNPROVEN_BLOCKED".to_owned(),
+        registration_detail: registration_detail.to_owned(),
+        cleanup_detail: "AMBIGUOUS_WINDOW_LEFT_UNTOUCHED".to_owned(),
+    }
+}
+
+fn normalize_primary_disposition(
+    disposition: TemporaryWindowProductDisposition,
+) -> TemporaryWindowProductDisposition {
+    match disposition {
+        TemporaryWindowProductDisposition::Pass => TemporaryWindowProductDisposition::Pass,
+        TemporaryWindowProductDisposition::Blocked => TemporaryWindowProductDisposition::Blocked,
+        TemporaryWindowProductDisposition::Fail
+        | TemporaryWindowProductDisposition::Timeout
+        | TemporaryWindowProductDisposition::Exception
+        | TemporaryWindowProductDisposition::Cancelled => TemporaryWindowProductDisposition::Fail,
+    }
+}
+
+fn primary_disposition_name(disposition: TemporaryWindowProductDisposition) -> &'static str {
+    match disposition {
+        TemporaryWindowProductDisposition::Pass => "PASS",
+        TemporaryWindowProductDisposition::Blocked => "BLOCKED",
+        _ => "FAIL",
+    }
+}
+
+fn lifecycle_receipt_from_final_cleanup(
+    prepared: &TemporaryWindowsTerminalPreparedRun,
+    primary_disposition: TemporaryWindowProductDisposition,
+    primary_error: Option<String>,
+    cleanup: Result<&TemporaryWindowsTerminalCleanupReceipt, &VisualError>,
+) -> TemporaryWindowsTerminalLifecycleReceipt {
+    let states = vec![
+        TemporaryWindowsTerminalLifecycleState::Prepared,
+        TemporaryWindowsTerminalLifecycleState::LaunchAttempted,
+        TemporaryWindowsTerminalLifecycleState::AnchorDiscovered,
+        TemporaryWindowsTerminalLifecycleState::ExactOwnershipRegistered,
+        TemporaryWindowsTerminalLifecycleState::CaptureActive,
+        TemporaryWindowsTerminalLifecycleState::CleanupStarted,
+        TemporaryWindowsTerminalLifecycleState::CleanupComplete,
+    ];
+    match cleanup {
+        Ok(cleanup) => TemporaryWindowsTerminalLifecycleReceipt {
+            schema: LIFECYCLE_SCHEMA.to_owned(),
+            run_id: prepared.run_id.clone(),
+            primary_disposition,
+            cleanup_disposition: if cleanup.temporary_wt_cleanup == "PASS" {
+                TemporaryWindowCleanupDisposition::Pass
+            } else {
+                TemporaryWindowCleanupDisposition::Fail
+            },
+            states,
+            anchor_tabitem_match_count: Some(1),
+            ancestor_window_match_count: Some(1),
+            exact_hwnd_resolved: true,
+            immutable_ownership_record_created: true,
+            temporary_windows_created: Some(cleanup.temporary_windows_created),
+            temporary_windows_closed: Some(cleanup.temporary_windows_closed),
+            owned_temporary_wt_remaining: Some(cleanup.owned_temporary_wt_remaining),
+            ambiguous_window_left_untouched: false,
+            owner_windows_closed: cleanup.owner_windows_closed,
+            broad_windows_terminal_kill: cleanup.broad_window_kill_used,
+            primary_detail: primary_error.map_or_else(
+                || "PASS".to_owned(),
+                |_| "QUALIFICATION_BODY_FAILED".to_owned(),
+            ),
+            registration_detail: "PASS".to_owned(),
+            cleanup_detail: cleanup.detail.clone(),
+        },
+        Err(error) => TemporaryWindowsTerminalLifecycleReceipt {
+            schema: LIFECYCLE_SCHEMA.to_owned(),
+            run_id: prepared.run_id.clone(),
+            primary_disposition,
+            cleanup_disposition: TemporaryWindowCleanupDisposition::Fail,
+            states,
+            anchor_tabitem_match_count: Some(1),
+            ancestor_window_match_count: Some(1),
+            exact_hwnd_resolved: true,
+            immutable_ownership_record_created: true,
+            temporary_windows_created: Some(1),
+            temporary_windows_closed: Some(0),
+            owned_temporary_wt_remaining: Some(1),
+            ambiguous_window_left_untouched: false,
+            owner_windows_closed: 0,
+            broad_windows_terminal_kill: false,
+            primary_detail: primary_error.map_or_else(
+                || "PASS".to_owned(),
+                |_| "QUALIFICATION_BODY_FAILED".to_owned(),
+            ),
+            registration_detail: "PASS".to_owned(),
+            cleanup_detail: format!("CLEANUP_ACCOUNTING_ERROR: {error}"),
+        },
+    }
+}
+
+fn validate_prepared_run(prepared: &TemporaryWindowsTerminalPreparedRun) -> VisualResult<()> {
+    let bytes = fs::read(&prepared.path)?;
+    let record: TemporaryWindowsTerminalPreparedRecord = serde_json::from_slice(&bytes)?;
+    if record.schema != PREPARED_SCHEMA
+        || record.run_id != prepared.run_id
+        || record.anchor_title_sha256 != hex_sha256(prepared.anchor_title.as_bytes())
+        || record.window_routing_id_sha256 != hex_sha256(prepared.window_routing_id.as_bytes())
+        || record.creator_process_id != prepared.creator_process_id
+        || record.creator_process_started_unix_ms != prepared.creator_process_started_unix_ms
+        || record.prepared_unix_ms == 0
+        || record.state != TemporaryWindowsTerminalLifecycleState::Prepared
+    {
+        return Err(VisualError::Platform(
+            "invalid temporary Windows Terminal prepared record".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn acquisition_receipt_from_registered_cleanup(
+    prepared: &TemporaryWindowsTerminalPreparedRun,
+    _launch_detail: &str,
+    cleanup: VisualResult<TemporaryWindowsTerminalCleanupReceipt>,
+) -> TemporaryWindowsTerminalLifecycleReceipt {
+    let states = vec![
+        TemporaryWindowsTerminalLifecycleState::Prepared,
+        TemporaryWindowsTerminalLifecycleState::LaunchAttempted,
+        TemporaryWindowsTerminalLifecycleState::AnchorDiscovered,
+        TemporaryWindowsTerminalLifecycleState::ExactOwnershipRegistered,
+        TemporaryWindowsTerminalLifecycleState::CleanupStarted,
+        TemporaryWindowsTerminalLifecycleState::CleanupComplete,
+    ];
+    match cleanup {
+        Ok(cleanup) => TemporaryWindowsTerminalLifecycleReceipt {
+            schema: LIFECYCLE_SCHEMA.to_owned(),
+            run_id: prepared.run_id.clone(),
+            primary_disposition: TemporaryWindowProductDisposition::Fail,
+            cleanup_disposition: if cleanup.temporary_wt_cleanup == "PASS" {
+                TemporaryWindowCleanupDisposition::Pass
+            } else {
+                TemporaryWindowCleanupDisposition::Fail
+            },
+            states,
+            anchor_tabitem_match_count: Some(1),
+            ancestor_window_match_count: Some(1),
+            exact_hwnd_resolved: true,
+            immutable_ownership_record_created: true,
+            temporary_windows_created: Some(cleanup.temporary_windows_created),
+            temporary_windows_closed: Some(cleanup.temporary_windows_closed),
+            owned_temporary_wt_remaining: Some(cleanup.owned_temporary_wt_remaining),
+            ambiguous_window_left_untouched: false,
+            owner_windows_closed: cleanup.owner_windows_closed,
+            broad_windows_terminal_kill: cleanup.broad_window_kill_used,
+            primary_detail: "LAUNCH_OR_DISPATCH_FAILED".to_owned(),
+            registration_detail: "PASS".to_owned(),
+            cleanup_detail: cleanup.detail,
+        },
+        Err(error) => TemporaryWindowsTerminalLifecycleReceipt {
+            schema: LIFECYCLE_SCHEMA.to_owned(),
+            run_id: prepared.run_id.clone(),
+            primary_disposition: TemporaryWindowProductDisposition::Fail,
+            cleanup_disposition: TemporaryWindowCleanupDisposition::Fail,
+            states,
+            anchor_tabitem_match_count: Some(1),
+            ancestor_window_match_count: Some(1),
+            exact_hwnd_resolved: true,
+            immutable_ownership_record_created: true,
+            temporary_windows_created: Some(1),
+            temporary_windows_closed: Some(0),
+            owned_temporary_wt_remaining: Some(1),
+            ambiguous_window_left_untouched: false,
+            owner_windows_closed: 0,
+            broad_windows_terminal_kill: false,
+            primary_detail: "LAUNCH_OR_DISPATCH_FAILED".to_owned(),
+            registration_detail: "PASS".to_owned(),
+            cleanup_detail: format!("CLEANUP_ACCOUNTING_ERROR: {error}"),
+        },
+    }
+}
+
+fn preownership_failure_receipt(
+    prepared: &TemporaryWindowsTerminalPreparedRun,
+    launch_error: Option<&str>,
+    registration_detail: &str,
+    observation: &VisualResult<ExactWindowObservation>,
+) -> TemporaryWindowsTerminalLifecycleReceipt {
+    let creator_mismatch = registration_detail.contains("CREATOR_INSTANCE")
+        || registration_detail.contains("PREPARED_RECORD");
+    let (anchor_count, window_count, exact_hwnd_resolved, cleanup_disposition) = match observation {
+        Ok(observation)
+            if !creator_mismatch
+                && observation.anchor_tab_match_count == 0
+                && observation.target_window_match_count == 0
+                && observation.native_window_id.is_none() =>
+        {
+            (
+                Some(0),
+                Some(0),
+                false,
+                TemporaryWindowCleanupDisposition::NotOwned,
+            )
+        }
+        Ok(observation) => (
+            Some(observation.anchor_tab_match_count),
+            Some(observation.target_window_match_count),
+            observation.native_window_id.is_some_and(|hwnd| hwnd != 0),
+            TemporaryWindowCleanupDisposition::Ambiguous,
+        ),
+        Err(_) => (
+            None,
+            None,
+            false,
+            TemporaryWindowCleanupDisposition::Ambiguous,
+        ),
+    };
+    let mut states = vec![
+        TemporaryWindowsTerminalLifecycleState::Prepared,
+        TemporaryWindowsTerminalLifecycleState::LaunchAttempted,
+    ];
+    if anchor_count == Some(1) && window_count == Some(1) && exact_hwnd_resolved {
+        states.push(TemporaryWindowsTerminalLifecycleState::AnchorDiscovered);
+    }
+    states.extend([
+        TemporaryWindowsTerminalLifecycleState::CleanupStarted,
+        TemporaryWindowsTerminalLifecycleState::CleanupComplete,
+    ]);
+    let ambiguous = cleanup_disposition == TemporaryWindowCleanupDisposition::Ambiguous;
+    TemporaryWindowsTerminalLifecycleReceipt {
+        schema: LIFECYCLE_SCHEMA.to_owned(),
+        run_id: prepared.run_id.clone(),
+        primary_disposition: if ambiguous {
+            TemporaryWindowProductDisposition::Blocked
+        } else if launch_error.is_some() {
+            TemporaryWindowProductDisposition::Fail
+        } else {
+            TemporaryWindowProductDisposition::Blocked
+        },
+        cleanup_disposition,
+        states,
+        anchor_tabitem_match_count: anchor_count,
+        ancestor_window_match_count: window_count,
+        exact_hwnd_resolved,
+        immutable_ownership_record_created: false,
+        temporary_windows_created: None,
+        temporary_windows_closed: Some(0),
+        owned_temporary_wt_remaining: None,
+        ambiguous_window_left_untouched: ambiguous,
+        owner_windows_closed: 0,
+        broad_windows_terminal_kill: false,
+        primary_detail: if launch_error.is_some() {
+            "LAUNCH_OR_DISPATCH_FAILED".to_owned()
+        } else {
+            "OWNERSHIP_REGISTRATION_BLOCKED".to_owned()
+        },
+        registration_detail: registration_detail.to_owned(),
+        cleanup_detail: match cleanup_disposition {
+            TemporaryWindowCleanupDisposition::NotOwned => {
+                "EXACT_ANCHOR_NOT_PRESENT_NO_CLOSE_ATTEMPTED".to_owned()
+            }
+            TemporaryWindowCleanupDisposition::Ambiguous => {
+                "AMBIGUOUS_WINDOW_LEFT_UNTOUCHED".to_owned()
+            }
+            _ => unreachable!("pre-ownership recovery cannot pass or close"),
+        },
+    }
+}
+
+fn lifecycle_receipt_path(prepared: &TemporaryWindowsTerminalPreparedRun) -> PathBuf {
+    prepared
+        .evidence_root
+        .join(format!("temporary-wt-{}.lifecycle.json", prepared.run_id))
+}
+
+fn write_lifecycle_receipt(
+    prepared: &TemporaryWindowsTerminalPreparedRun,
+    receipt: &TemporaryWindowsTerminalLifecycleReceipt,
+) -> VisualResult<()> {
+    write_new_json(&lifecycle_receipt_path(prepared), receipt)
 }
 
 /// Registers one already-launched exact-owned window and writes immutable proof.
@@ -468,37 +1158,6 @@ pub fn recover_stale_temporary_windows_terminals<B: ExactOwnedWindowRecoveryBack
     Ok(receipts)
 }
 
-/// Safely closes a just-launched window when durable registration itself
-/// failed. No action is taken unless the complete anchor resolves to exactly
-/// one ancestor HWND.
-///
-/// # Errors
-///
-/// Returns a platform error when the anchor is ambiguous, lacks an HWND, or
-/// the exact UIA close cannot be proved.
-pub fn close_unregistered_exact_anchor<B: ExactOwnedWindowBackend>(
-    backend: &B,
-    anchor_title: &str,
-) -> VisualResult<bool> {
-    let observation = backend.observe_exact_anchor(anchor_title)?;
-    if observation.anchor_tab_match_count == 0 && observation.target_window_match_count == 0 {
-        return Ok(false);
-    }
-    if observation.anchor_tab_match_count != 1 || observation.target_window_match_count != 1 {
-        return Err(VisualError::Platform(
-            "unregistered temporary Windows Terminal cleanup refused ambiguous ownership"
-                .to_owned(),
-        ));
-    }
-    let hwnd = observation.native_window_id.ok_or_else(|| {
-        VisualError::Platform(
-            "unregistered temporary Windows Terminal cleanup refused missing HWND".to_owned(),
-        )
-    })?;
-    backend.close_exact_anchor(anchor_title, hwnd)?;
-    Ok(true)
-}
-
 fn collect_unfinished_ownership_records(
     directory: &Path,
     depth: u8,
@@ -790,10 +1449,12 @@ mod tests {
 
     use super::{
         ExactOwnedWindowBackend, ExactOwnedWindowRecoveryBackend, ExactWindowObservation,
-        TemporaryWindowProductDisposition, cleanup_receipt_path,
-        cleanup_temporary_windows_terminal, close_unregistered_exact_anchor,
-        recover_stale_temporary_windows_terminals, register_temporary_windows_terminal,
-        retry_temporary_windows_terminal_cleanup,
+        TemporaryWindowCleanupDisposition, TemporaryWindowProductDisposition,
+        TemporaryWindowsTerminalAcquisition, cleanup_receipt_path,
+        cleanup_temporary_windows_terminal, complete_temporary_windows_terminal_acquisition,
+        finalize_temporary_windows_terminal_lifecycle,
+        prepare_temporary_windows_terminal_lifecycle, recover_stale_temporary_windows_terminals,
+        register_temporary_windows_terminal, retry_temporary_windows_terminal_cleanup,
     };
     use crate::visual::VisualResult;
 
@@ -949,6 +1610,11 @@ mod tests {
     #[test]
     fn caught_exception_still_closes_the_exact_owned_window() {
         assert_disposition_closes(TemporaryWindowProductDisposition::Exception);
+    }
+
+    #[test]
+    fn cancellation_still_closes_the_exact_owned_window() {
+        assert_disposition_closes(TemporaryWindowProductDisposition::Cancelled);
     }
 
     #[test]
@@ -1171,23 +1837,6 @@ mod tests {
     }
 
     #[test]
-    fn unregistered_cleanup_refuses_ambiguity_and_closes_one_exact_hwnd() {
-        let backend = FakeBackend::exact();
-        assert!(
-            close_unregistered_exact_anchor(&backend, "TB-WT-ANCHOR-TBWT-abc")
-                .expect("one exact HWND closes")
-        );
-        assert_eq!(backend.close_calls.get(), 1);
-
-        let ambiguous = FakeBackend::exact();
-        ambiguous.anchor_matches.set(2);
-        ambiguous.window_matches.set(2);
-        ambiguous.native_window_id.set(None);
-        assert!(close_unregistered_exact_anchor(&ambiguous, "TB-WT-ANCHOR-TBWT-abc").is_err());
-        assert_eq!(ambiguous.close_calls.get(), 0);
-    }
-
-    #[test]
     fn next_run_recovers_a_nested_stale_exact_owned_record() {
         let registry = TestRoot::new();
         let run_root = registry.0.join("prior-run");
@@ -1267,6 +1916,24 @@ mod tests {
             "recovery requires positive creator-instance evidence"
         );
         assert_eq!(recovery_backend.close_calls.get(), 0);
+    }
+
+    #[test]
+    fn stale_recovery_refuses_ambiguous_anchor_without_closing() {
+        let registry = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let ownership = register(&registry, &backend);
+        assert!(ownership.is_file());
+        backend.creator_process_started_unix_ms.set(None);
+        backend.anchor_matches.set(2);
+        backend.window_matches.set(2);
+        backend.native_window_id.set(None);
+
+        assert!(
+            recover_stale_temporary_windows_terminals(&backend, &registry.0).is_err(),
+            "ambiguous stale recovery must fail closed"
+        );
+        assert_eq!(backend.close_calls.get(), 0);
     }
 
     #[test]
@@ -1382,5 +2049,467 @@ mod tests {
             "PID reuse cannot inherit exact ownership"
         );
         assert_eq!(backend.close_calls.get(), 1);
+    }
+
+    #[test]
+    fn launch_error_recovers_registers_and_cleans_one_exact_anchor() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let prepared = prepare_temporary_windows_terminal_lifecycle(
+            &backend,
+            &root.0,
+            "TBWT-launch-error-exact",
+            "TB-WT-ANCHOR-TBWT-launch-error-exact",
+            "tabbeacon-TBWT-launch-error-exact",
+            4242,
+        )
+        .expect("durable PREPARED record");
+
+        let outcome = complete_temporary_windows_terminal_acquisition(
+            &backend,
+            &prepared,
+            std::time::Duration::ZERO,
+            Some("synthetic launch error"),
+        )
+        .expect("launch failure is durably accounted");
+        let TemporaryWindowsTerminalAcquisition::Failed(receipt) = outcome else {
+            panic!("launch failure must not return a live session");
+        };
+
+        assert_eq!(
+            receipt.primary_disposition,
+            TemporaryWindowProductDisposition::Fail
+        );
+        assert_eq!(
+            receipt.cleanup_disposition,
+            TemporaryWindowCleanupDisposition::Pass
+        );
+        assert!(receipt.immutable_ownership_record_created);
+        assert!(!receipt.ambiguous_window_left_untouched);
+        assert_eq!(receipt.temporary_windows_created, Some(1));
+        assert_eq!(receipt.temporary_windows_closed, Some(1));
+        assert_eq!(receipt.owned_temporary_wt_remaining, Some(0));
+        assert_eq!(backend.close_calls.get(), 1);
+    }
+
+    #[test]
+    fn launch_error_before_anchor_records_not_owned_without_closing() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let prepared = prepare_temporary_windows_terminal_lifecycle(
+            &backend,
+            &root.0,
+            "TBWT-launch-error-zero",
+            "TB-WT-ANCHOR-TBWT-launch-error-zero",
+            "tabbeacon-TBWT-launch-error-zero",
+            4242,
+        )
+        .expect("durable PREPARED record");
+        backend.anchor_matches.set(0);
+        backend.window_matches.set(0);
+        backend.native_window_id.set(None);
+
+        let outcome = complete_temporary_windows_terminal_acquisition(
+            &backend,
+            &prepared,
+            std::time::Duration::ZERO,
+            Some("synthetic launch error"),
+        )
+        .expect("zero anchor is durably accounted");
+        let TemporaryWindowsTerminalAcquisition::Failed(receipt) = outcome else {
+            panic!("zero anchor must not return a live session");
+        };
+
+        assert_eq!(
+            receipt.cleanup_disposition,
+            TemporaryWindowCleanupDisposition::NotOwned
+        );
+        assert!(!receipt.immutable_ownership_record_created);
+        assert!(!receipt.ambiguous_window_left_untouched);
+        assert_eq!(receipt.anchor_tabitem_match_count, Some(0));
+        assert_eq!(receipt.ancestor_window_match_count, Some(0));
+        assert_eq!(backend.close_calls.get(), 0);
+    }
+
+    #[test]
+    fn ambiguous_preownership_recovery_is_blocked_and_left_untouched() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let prepared = prepare_temporary_windows_terminal_lifecycle(
+            &backend,
+            &root.0,
+            "TBWT-launch-error-ambiguous",
+            "TB-WT-ANCHOR-TBWT-launch-error-ambiguous",
+            "tabbeacon-TBWT-launch-error-ambiguous",
+            4242,
+        )
+        .expect("durable PREPARED record");
+        backend.anchor_matches.set(2);
+        backend.window_matches.set(2);
+        backend.native_window_id.set(None);
+
+        let outcome = complete_temporary_windows_terminal_acquisition(
+            &backend,
+            &prepared,
+            std::time::Duration::ZERO,
+            Some("synthetic launch error"),
+        )
+        .expect("ambiguous recovery is durably accounted");
+        let TemporaryWindowsTerminalAcquisition::Failed(receipt) = outcome else {
+            panic!("ambiguity must not return a live session");
+        };
+
+        assert_eq!(
+            receipt.primary_disposition,
+            TemporaryWindowProductDisposition::Blocked
+        );
+        assert_eq!(
+            receipt.cleanup_disposition,
+            TemporaryWindowCleanupDisposition::Ambiguous
+        );
+        assert!(receipt.ambiguous_window_left_untouched);
+        assert_eq!(receipt.anchor_tabitem_match_count, Some(2));
+        assert_eq!(receipt.ancestor_window_match_count, Some(2));
+        assert_eq!(receipt.owner_windows_closed, 0);
+        assert!(!receipt.broad_windows_terminal_kill);
+        assert_eq!(backend.close_calls.get(), 0);
+    }
+
+    #[test]
+    fn prepared_creator_instance_mismatch_refuses_pid_reuse_without_closing() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let prepared = prepare_temporary_windows_terminal_lifecycle(
+            &backend,
+            &root.0,
+            "TBWT-prepared-pid-reuse",
+            "TB-WT-ANCHOR-TBWT-prepared-pid-reuse",
+            "tabbeacon-TBWT-prepared-pid-reuse",
+            4242,
+        )
+        .expect("durable PREPARED record");
+        backend.creator_process_started_unix_ms.set(Some(42));
+
+        let outcome = complete_temporary_windows_terminal_acquisition(
+            &backend,
+            &prepared,
+            std::time::Duration::ZERO,
+            None,
+        )
+        .expect("creator mismatch is durably accounted");
+        let TemporaryWindowsTerminalAcquisition::Failed(receipt) = outcome else {
+            panic!("PID reuse must not inherit ownership");
+        };
+
+        assert_eq!(
+            receipt.cleanup_disposition,
+            TemporaryWindowCleanupDisposition::Ambiguous
+        );
+        assert!(receipt.ambiguous_window_left_untouched);
+        assert_eq!(backend.close_calls.get(), 0);
+    }
+
+    #[test]
+    fn post_launch_prepared_record_failure_is_durably_accounted_without_unsafe_close() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let prepared = prepare_temporary_windows_terminal_lifecycle(
+            &backend,
+            &root.0,
+            "TBWT-prepared-missing-after-launch",
+            "TB-WT-ANCHOR-TBWT-prepared-missing-after-launch",
+            "tabbeacon-TBWT-prepared-missing-after-launch",
+            4242,
+        )
+        .expect("durable PREPARED record");
+        fs::remove_file(&prepared.path).expect("owned prepared record removes");
+
+        let outcome = complete_temporary_windows_terminal_acquisition(
+            &backend,
+            &prepared,
+            std::time::Duration::ZERO,
+            None,
+        )
+        .expect("post-launch prepared failure is durably accounted");
+        let TemporaryWindowsTerminalAcquisition::Failed(receipt) = outcome else {
+            panic!("invalid PREPARED proof must not return a live session");
+        };
+
+        assert_eq!(
+            receipt.primary_disposition,
+            TemporaryWindowProductDisposition::Blocked
+        );
+        assert_eq!(
+            receipt.cleanup_disposition,
+            TemporaryWindowCleanupDisposition::Ambiguous
+        );
+        assert!(receipt.ambiguous_window_left_untouched);
+        assert_eq!(backend.close_calls.get(), 0);
+        assert!(
+            root.0
+                .join("temporary-wt-TBWT-prepared-missing-after-launch.lifecycle.json")
+                .is_file()
+        );
+    }
+
+    #[test]
+    fn capture_failure_flows_through_cleanup_and_retains_both_results() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let prepared = prepare_temporary_windows_terminal_lifecycle(
+            &backend,
+            &root.0,
+            "TBWT-capture-error",
+            "TB-WT-ANCHOR-TBWT-capture-error",
+            "tabbeacon-TBWT-capture-error",
+            4242,
+        )
+        .expect("durable PREPARED record");
+        let TemporaryWindowsTerminalAcquisition::Registered { ownership_path } =
+            complete_temporary_windows_terminal_acquisition(
+                &backend,
+                &prepared,
+                std::time::Duration::ZERO,
+                None,
+            )
+            .expect("exact ownership acquisition")
+        else {
+            panic!("exact anchor must register");
+        };
+
+        let result: VisualResult<((), super::TemporaryWindowsTerminalCleanupReceipt)> =
+            finalize_temporary_windows_terminal_lifecycle(
+                &backend,
+                &prepared,
+                &ownership_path,
+                Err(crate::visual::VisualError::Platform(
+                    "synthetic capture failure".to_owned(),
+                )),
+                TemporaryWindowProductDisposition::Fail,
+            );
+        let detail = result
+            .expect_err("primary capture failure must remain failure")
+            .to_string();
+
+        assert!(detail.contains("PRIMARY_DISPOSITION=FAIL"));
+        assert!(detail.contains("CLEANUP_DISPOSITION=PASS"));
+        assert_eq!(backend.close_calls.get(), 1);
+        let lifecycle: super::TemporaryWindowsTerminalLifecycleReceipt = serde_json::from_slice(
+            &fs::read(
+                root.0
+                    .join("temporary-wt-TBWT-capture-error.lifecycle.json"),
+            )
+            .expect("lifecycle receipt bytes"),
+        )
+        .expect("lifecycle receipt JSON");
+        assert_eq!(
+            lifecycle.primary_disposition,
+            TemporaryWindowProductDisposition::Fail
+        );
+        assert_eq!(
+            lifecycle.cleanup_disposition,
+            TemporaryWindowCleanupDisposition::Pass
+        );
+        assert!(
+            lifecycle
+                .states
+                .contains(&super::TemporaryWindowsTerminalLifecycleState::CaptureActive)
+        );
+    }
+
+    #[test]
+    fn cleanup_failure_is_propagated_when_primary_would_pass() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let prepared = prepare_temporary_windows_terminal_lifecycle(
+            &backend,
+            &root.0,
+            "TBWT-cleanup-error",
+            "TB-WT-ANCHOR-TBWT-cleanup-error",
+            "tabbeacon-TBWT-cleanup-error",
+            4242,
+        )
+        .expect("durable PREPARED record");
+        let TemporaryWindowsTerminalAcquisition::Registered { ownership_path } =
+            complete_temporary_windows_terminal_acquisition(
+                &backend,
+                &prepared,
+                std::time::Duration::ZERO,
+                None,
+            )
+            .expect("exact ownership acquisition")
+        else {
+            panic!("exact anchor must register");
+        };
+        backend.close_fails.set(true);
+
+        let result = finalize_temporary_windows_terminal_lifecycle(
+            &backend,
+            &prepared,
+            &ownership_path,
+            Ok(()),
+            TemporaryWindowProductDisposition::Pass,
+        );
+        let detail = result.expect_err("cleanup failure blocks PASS").to_string();
+
+        assert!(detail.contains("PRIMARY_DISPOSITION=PASS"));
+        assert!(detail.contains("CLEANUP_DISPOSITION=FAIL"));
+        assert_eq!(
+            backend.close_calls.get(),
+            2,
+            "one retry is bounded to the exact owner"
+        );
+    }
+
+    #[test]
+    fn timeout_is_normalized_to_primary_failure_while_cleanup_still_runs() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let prepared = prepare_temporary_windows_terminal_lifecycle(
+            &backend,
+            &root.0,
+            "TBWT-timeout",
+            "TB-WT-ANCHOR-TBWT-timeout",
+            "tabbeacon-TBWT-timeout",
+            4242,
+        )
+        .expect("durable PREPARED record");
+        let TemporaryWindowsTerminalAcquisition::Registered { ownership_path } =
+            complete_temporary_windows_terminal_acquisition(
+                &backend,
+                &prepared,
+                std::time::Duration::ZERO,
+                None,
+            )
+            .expect("exact ownership acquisition")
+        else {
+            panic!("exact anchor must register");
+        };
+
+        let result: VisualResult<((), super::TemporaryWindowsTerminalCleanupReceipt)> =
+            finalize_temporary_windows_terminal_lifecycle(
+                &backend,
+                &prepared,
+                &ownership_path,
+                Err(crate::visual::VisualError::Platform(
+                    "synthetic bounded timeout".to_owned(),
+                )),
+                TemporaryWindowProductDisposition::Timeout,
+            );
+        let detail = result.expect_err("timeout remains failure").to_string();
+
+        assert!(detail.contains("PRIMARY_DISPOSITION=FAIL"));
+        assert!(detail.contains("CLEANUP_DISPOSITION=PASS"));
+        assert_eq!(backend.close_calls.get(), 1);
+    }
+
+    #[test]
+    fn missing_ownership_record_is_refused_and_durably_accounted() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let prepared = prepare_temporary_windows_terminal_lifecycle(
+            &backend,
+            &root.0,
+            "TBWT-missing-ownership",
+            "TB-WT-ANCHOR-TBWT-missing-ownership",
+            "tabbeacon-TBWT-missing-ownership",
+            4242,
+        )
+        .expect("durable PREPARED record");
+        let TemporaryWindowsTerminalAcquisition::Registered { ownership_path } =
+            complete_temporary_windows_terminal_acquisition(
+                &backend,
+                &prepared,
+                std::time::Duration::ZERO,
+                None,
+            )
+            .expect("exact ownership acquisition")
+        else {
+            panic!("exact anchor must register");
+        };
+        fs::remove_file(&ownership_path).expect("owned test record removes");
+
+        let result = finalize_temporary_windows_terminal_lifecycle(
+            &backend,
+            &prepared,
+            &ownership_path,
+            Ok(()),
+            TemporaryWindowProductDisposition::Pass,
+        );
+        let detail = result
+            .expect_err("missing ownership must fail closed")
+            .to_string();
+
+        assert!(detail.contains("PRIMARY_DISPOSITION=BLOCKED"));
+        assert!(detail.contains("CLEANUP_DISPOSITION=AMBIGUOUS"));
+        assert_eq!(backend.close_calls.get(), 0);
+        let lifecycle: super::TemporaryWindowsTerminalLifecycleReceipt = serde_json::from_slice(
+            &fs::read(
+                root.0
+                    .join("temporary-wt-TBWT-missing-ownership.lifecycle.json"),
+            )
+            .expect("lifecycle receipt bytes"),
+        )
+        .expect("lifecycle receipt JSON");
+        assert_eq!(
+            lifecycle.cleanup_disposition,
+            TemporaryWindowCleanupDisposition::Ambiguous
+        );
+        assert!(lifecycle.ambiguous_window_left_untouched);
+    }
+
+    #[test]
+    fn missing_prepared_record_after_registration_is_durably_refused() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let prepared = prepare_temporary_windows_terminal_lifecycle(
+            &backend,
+            &root.0,
+            "TBWT-finalize-prepared-missing",
+            "TB-WT-ANCHOR-TBWT-finalize-prepared-missing",
+            "tabbeacon-TBWT-finalize-prepared-missing",
+            4242,
+        )
+        .expect("durable PREPARED record");
+        let TemporaryWindowsTerminalAcquisition::Registered { ownership_path } =
+            complete_temporary_windows_terminal_acquisition(
+                &backend,
+                &prepared,
+                std::time::Duration::ZERO,
+                None,
+            )
+            .expect("exact ownership acquisition")
+        else {
+            panic!("exact anchor must register");
+        };
+        fs::remove_file(&prepared.path).expect("owned prepared record removes");
+
+        let result = finalize_temporary_windows_terminal_lifecycle(
+            &backend,
+            &prepared,
+            &ownership_path,
+            Ok(()),
+            TemporaryWindowProductDisposition::Pass,
+        );
+        let detail = result
+            .expect_err("missing prepared proof must fail closed")
+            .to_string();
+
+        assert!(detail.contains("PRIMARY_DISPOSITION=BLOCKED"));
+        assert!(detail.contains("CLEANUP_DISPOSITION=AMBIGUOUS"));
+        assert_eq!(backend.close_calls.get(), 0);
+        let lifecycle: super::TemporaryWindowsTerminalLifecycleReceipt = serde_json::from_slice(
+            &fs::read(
+                root.0
+                    .join("temporary-wt-TBWT-finalize-prepared-missing.lifecycle.json"),
+            )
+            .expect("lifecycle receipt bytes"),
+        )
+        .expect("lifecycle receipt JSON");
+        assert_eq!(
+            lifecycle.cleanup_disposition,
+            TemporaryWindowCleanupDisposition::Ambiguous
+        );
+        assert!(lifecycle.ambiguous_window_left_untouched);
     }
 }
