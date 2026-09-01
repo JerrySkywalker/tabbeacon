@@ -66,6 +66,8 @@ $requiredFiles = @(
     'docs/design/branding.md',
     'docs/development/build-and-test.md',
     'docs/development/release-process.md',
+    'docs/v0.7.3-release-notes.md',
+    'docs/v0.7.3-upgrade.md',
     'CONTRIBUTING.md',
     'SECURITY.md'
 )
@@ -226,6 +228,19 @@ $currentReleaseProofs = @(
 foreach ($proof in $currentReleaseProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw -Encoding UTF8
     Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not declare v0.7.2 as the current public release"
+}
+
+$releaseCandidateProofs = @(
+    @{ Path = 'Cargo.toml'; Pattern = '(?m)^version = "0\.7\.3"$' },
+    @{ Path = 'Cargo.lock'; Pattern = '(?ms)name = "tabbeacon"\r?\nversion = "0\.7\.3"' },
+    @{ Path = 'CHANGELOG.md'; Pattern = '## \[0\.7\.3\] - 2026-09-01' },
+    @{ Path = 'docs/v0.7.3-release-notes.md'; Pattern = '# TabBeacon v0\.7\.3' },
+    @{ Path = 'docs/v0.7.3-upgrade.md'; Pattern = '# Upgrade from v0\.7\.2 to v0\.7\.3' },
+    @{ Path = 'goals/TB-G102-V072-HARDENING-RELEASE.md'; Pattern = 'TARGET_PUBLIC_RELEASE=v0\.7\.3' }
+)
+foreach ($proof in $releaseCandidateProofs) {
+    $content = Get-Content -LiteralPath $proof.Path -Raw -Encoding UTF8
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not preserve the v0.7.3 release-candidate contract"
 }
 
 $releaseTargetProofs = @(

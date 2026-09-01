@@ -77,8 +77,8 @@ The production visual backend is title-first and intentionally compact:
 
 ## Quick Start
 
-Current public release: **v0.7.2**. The admitted v0.7.3 promotion is in its
-distribution-preparation train; public publishing remains a separate
+Current public release: **v0.7.2**. The admitted v0.7.3 release candidate is in
+pre-publication validation; public publishing remains a separate
 Owner-authorized boundary.
 
 Install the public CLI, run the guided setup, then launch Codex as usual:
