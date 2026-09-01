@@ -20,6 +20,7 @@ include = [
     "rustfmt.toml",
     "src/**",
     "tests/**",
+    "scripts/generate-promo-assets.ps1",
     "scripts/run-windows-terminal-tui-smoke.ps1",
     "scripts/invoke-windows-terminal-tui-smoke-child.ps1",
     "scripts/compare-codex-compatibility.ps1",
