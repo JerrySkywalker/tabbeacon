@@ -94,6 +94,12 @@ affected package/version rows:
 | `lru 0.12.5` via `ratatui 0.29.0` | `RUSTSEC-2026-0002`, `RUSTSEC-2026-0253` | Active memory-safety advisories; the latter requires `lru >= 0.18.2` | Separate security-maintenance investigation; this may require a `ratatui` compatibility update. |
 | `paste 1.0.15` | `RUSTSEC-2024-0436` | Unmaintained warning, not a version-patched security advisory | Include in the same maintenance review, without mislabeling it as a vulnerability. |
 
+After Dependabot alerts were enabled, GitHub reported one open low-severity
+default-branch alert: `GHSA-rhfx-m35p-ff5j` for `lru`, first patched in
+`0.16.3`. It corroborates `RUSTSEC-2026-0002`; the later
+`RUSTSEC-2026-0253` still makes `0.18.2` the stricter known target for the
+separate maintenance investigation.
+
 ```text
 CHACHA20_YANKED=true
 CHACHA20_SECURITY_ADVISORY=NONE_CURRENTLY_AFFECTING_0.10.1
