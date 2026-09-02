@@ -119,37 +119,67 @@ The check context `Windows / Hosted / Exact Head` is safe to require: it was
 the successful exact-head check on each of merged PRs #108 through #112, and
 the current CI workflow declares that stable job name.
 
-The final supported-API hardening and independent reread are recorded below
-before this PR is finalized.
+The supported-API hardening was then applied and independently reread. Classic
+protection is used rather than a ruleset. The deliberate solo-maintainer
+break-glass path is preserved by not enforcing the rule for administrators;
+normal work still requires a pull request.
 
 ```text
-MAIN_PROTECTED=PENDING
-PROTECTION_METHOD=PENDING
+MAIN_PROTECTED=true
+PROTECTION_METHOD=CLASSIC
+RULESETS_COUNT=0
+REQUIRE_PULL_REQUEST_BEFORE_MERGE=true
+REQUIRED_APPROVING_REVIEWS=0
 REQUIRED_STATUS_CHECKS=Windows / Hosted / Exact Head
-AUTO_DELETE_MERGED_HEAD_BRANCHES=PENDING
-DEPENDABOT_SECURITY_UPDATES=PENDING
-PRIVATE_VULNERABILITY_REPORTING=PENDING
+BLOCK_FORCE_PUSH=true
+BLOCK_BRANCH_DELETION=true
+ADMIN_BYPASS=BREAK_GLASS_ALLOWED
+AUTO_DELETE_MERGED_HEAD_BRANCHES=true
+DEPENDENCY_GRAPH=enabled
+VULNERABILITY_ALERTS=enabled
+DEPENDABOT_SECURITY_UPDATES=enabled
+DEPENDABOT_VERSION_UPDATE_CONFIG=NOT_CREATED
 SECRET_SCANNING=enabled
 SECRET_SCANNING_PUSH_PROTECTION=enabled
+PRIVATE_VULNERABILITY_REPORTING=enabled
 ACTIONS_PERMISSION_CHANGE=PASS_ALREADY_SAFE
 ```
 
 ## Remote branch hygiene
 
-The fresh inventory contains 103 remote branches excluding the symbolic
-`origin/HEAD` reference. Four remote branches are checked out by registered
-local TabBeacon worktrees and are protected regardless of merge ancestry. No
-open pull request existed at inventory time. Seven remote tips were not proven
-ancestors of current `origin/main`; they remain protected pending explicit
-future evidence.
+The fresh inventory contained 103 remote branches excluding the symbolic
+`origin/HEAD` reference. Four remote branches were checked out by registered
+local TabBeacon worktrees and were protected regardless of merge ancestry. No
+open pull request existed at initial inventory time. Seven historical remote
+tips were not proven ancestors of current `origin/main`; they remain protected
+pending explicit future evidence.
 
 Only exact, individually recorded branch deletions that satisfy all of these
 conditions are eligible: not `main`, not this goal branch, no open PR, no local
 worktree or relevant running-process reference, and a successful fresh
 `merge-base --is-ancestor <tip> origin/main` proof. Tags are excluded.
 
-The final deletion receipts, protected-branch groups, and post-prune count are
-added before this PR is finalized.
+Ninety-three individually revalidated historical branches were removed. Each
+had an exact tip match, successful `merge-base --is-ancestor <tip>
+origin/main`, no open PR, no registered local worktree, and no relevant active
+process reference. The compact branch/tip receipt is retained on this audit
+PR; every row has the same recorded ancestry, PR, worktree, and process checks.
+
+At the post-delete observation point, 11 remote branches remained: `main`,
+this open audit-PR head, four locally checked-out branches, and five unmerged
+or planning/recovery branches. The audit head remains protected until merge;
+the enabled automatic head-branch deletion will remove it after the PR is
+merged. No tag was mutated.
+
+```text
+REMOTE_BRANCH_COUNT_START=103
+REMOTE_BRANCHES_DELETED=93
+REMOTE_BRANCH_COUNT_POSTDELETE_PREMERGE=11
+REMOTE_TAGS_MUTATED=false
+OPEN_PR_BRANCHES_PROTECTED=1
+LOCAL_WORKTREE_BRANCHES_PROTECTED=4
+AMBIGUOUS_OR_UNMERGED_REMOTE_BRANCHES_PROTECTED=5
+```
 
 ## Explicit deferrals
 
