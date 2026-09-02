@@ -11,6 +11,18 @@ for provider use, and fails closed when configuration/process ownership is not
 proven. Start with the [documentation portal](docs/README.md) for product
 context.
 
+## Where to report what
+
+- A reproducible bug or a Codex/Agy/Windows Terminal compatibility regression:
+  open an [Issue](https://github.com/JerrySkywalker/tabbeacon/issues/new/choose).
+- A concrete feature request: open an [Issue](https://github.com/JerrySkywalker/tabbeacon/issues/new/choose).
+- A question, usage-help request, exploratory idea, design discussion, or
+  showcase: start a [Discussion](https://github.com/JerrySkywalker/tabbeacon/discussions).
+- A security-sensitive concern: follow the [Security Policy](SECURITY.md), not
+  the public issue tracker.
+- A proposed change: open a focused pull request after reading the relevant
+  contribution guidance below.
+
 ## Prerequisites
 
 - Git

@@ -1,0 +1,41 @@
+name: Feature request
+description: Propose a concrete improvement to TabBeacon.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the user problem rather than a specific implementation. TabBeacon preserves literal daily `codex` and `agy` commands: it does not use a launcher wrapper or PATH shadow, automatically bypass Hook trust, or take unsafe process ownership. Unsupported providers are not treated as partially supported; Claude and OpenCode are not currently supported.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What is difficult today, and in what situation?
+    validations:
+      required: true
+  - type: textarea
+    id: beneficiaries
+    attributes:
+      label: Who benefits?
+      description: Describe the users or workflows that would benefit.
+    validations:
+      required: true
+  - type: textarea
+    id: desired-behavior
+    attributes:
+      label: Desired behavior
+      description: Describe the outcome you would like to see.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives or workarounds
+      description: What have you tried, if anything?
+    validations:
+      required: true
+  - type: textarea
+    id: implementation
+    attributes:
+      label: Optional implementation thoughts
+      description: Suggestions are welcome, but a solution design is not required.

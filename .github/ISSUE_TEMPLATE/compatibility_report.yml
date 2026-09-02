@@ -1,0 +1,96 @@
+name: Compatibility regression report
+description: Report an upstream Codex, Agy, or Windows Terminal change that regressed TabBeacon compatibility.
+title: "[Compatibility]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for a regression following an upstream Codex CLI, Agy CLI, Windows Terminal, or related platform update. For an ordinary reproducible TabBeacon problem, use the bug report form instead.
+
+        Do **not** include credentials or tokens, prompts, assistant content, tool input/output, private repository contents, unnecessary private full paths, raw sensitive Hook payloads, or unredacted environment/process dumps.
+  - type: dropdown
+    id: upstream-component
+    attributes:
+      label: Affected upstream component
+      options:
+        - Codex CLI
+        - Agy CLI
+        - Windows Terminal
+        - Windows
+        - Other upstream component
+    validations:
+      required: true
+  - type: input
+    id: last-known-working
+    attributes:
+      label: Last-known-working upstream version
+      description: If none is known, write `not known`.
+    validations:
+      required: true
+  - type: input
+    id: first-known-failing
+    attributes:
+      label: First-known-failing or current upstream version
+    validations:
+      required: true
+  - type: input
+    id: tabbeacon-version
+    attributes:
+      label: TabBeacon version
+      description: For example, v0.7.3.
+    validations:
+      required: true
+  - type: dropdown
+    id: failure-surface
+    attributes:
+      label: Failure surface
+      options:
+        - Setup
+        - Hook/event observation
+        - Title/presentation
+        - Worker/activity
+        - Cleanup
+        - Doctor/diagnostics
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: regression
+    attributes:
+      label: Exact observed regression
+      description: Describe what changed after the upstream update and what you observe now.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest redacted sequence that demonstrates the regression.
+      placeholder: |
+        1. Use upstream version ...
+        2. Run ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: dropdown
+    id: daily-command-usable
+    attributes:
+      label: Did daily `codex` or `agy` use remain usable?
+      options:
+        - "Yes"
+        - "No"
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Optional relevant excerpts or screenshots. Redact private information; do not attach raw dumps.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy acknowledgment
+      options:
+        - label: I removed sensitive and unnecessary private information from this report.
+          required: true

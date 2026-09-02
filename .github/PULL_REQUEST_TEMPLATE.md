@@ -1,30 +1,31 @@
-## Goal / scope
+## Summary
 
-- Goal ID:
-- Intended scope:
-- Explicit non-goals:
+What does this change do?
 
-## Exact head
+## Why
 
-- EXPECTED_HEAD:
-- CODE_HEAD:
-- VISUAL_HEAD: N/A / `<sha>`
+What problem does it solve? Link a related issue or discussion if applicable.
+
+## Changes
+
+- Describe the focused changes.
 
 ## Validation
 
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo clippy --all-targets --all-features -- -D warnings`
-- [ ] `cargo test --all-targets --all-features`
-- [ ] `cargo build --locked --all-targets`
-- [ ] Relevant integration checks
-- [ ] Visual CI (when presentation-affecting and G03 is available)
+- [ ] Relevant tests or checks were run.
+- [ ] Formatting was run where code changed.
+- [ ] Documentation was updated where needed.
+- [ ] Visual evidence is attached when presentation changed.
 
-## Safety / drift
+## Safety / privacy
 
-- [ ] No unrelated drift was modified.
-- [ ] External configuration changes are ownership-safe and reversible, if applicable.
-- [ ] Fail-open behavior is preserved, if applicable.
+- [ ] No unrelated configuration changed.
+- [ ] No credentials or private provider content are included.
+- [ ] Existing fail-open and ownership boundaries are preserved where relevant.
 
-## Evidence disposition
+## Maintainer metadata (optional)
 
-`PASS` / `FAIL` / `BLOCKED` / `UNPROVEN`
+- Goal ID:
+- Exact accepted head:
+- Risk class:
+- Visual head/evidence (where applicable):

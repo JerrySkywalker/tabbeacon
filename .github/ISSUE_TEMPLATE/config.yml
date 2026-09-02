@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions, usage help, and open-ended ideas
+    url: https://github.com/JerrySkywalker/tabbeacon/discussions
+    about: Please use GitHub Discussions for general Q&A, usage questions, design discussion, open-ended ideas, and showcases or feedback.
+  - name: Security concerns
+    url: https://github.com/JerrySkywalker/tabbeacon/security/policy
+    about: Please follow the repository Security Policy instead of opening a public issue.
