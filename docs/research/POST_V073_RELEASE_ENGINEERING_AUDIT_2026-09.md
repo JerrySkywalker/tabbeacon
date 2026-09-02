@@ -110,7 +110,7 @@ DEPENDENCY_LOCKFILE_MUTATED=false
 ```
 
 The disposable `chacha20 0.10.2` candidate passed `cargo test --locked`
-(417 tests across the executed test binaries, zero failures). No dependency
+(22 successful test summaries: 603 passed, 0 failed, 1 ignored). No dependency
 update is included in this post-release documentation change.
 
 ## GitHub protection and security posture
