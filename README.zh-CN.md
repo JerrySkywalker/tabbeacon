@@ -106,6 +106,48 @@ cargo install tabbeacon --version 0.7.3 --locked
 > `tabbeacon setup --quick` 只处理缺失、过期或需要操作的设置工作。应用前请审查
 > 所有建议的变更；它不会把 TabBeacon 变成启动器。
 
+## 升级
+
+对于通过 Cargo 安装的 TabBeacon，最容易记的顺序是 **版本 → 预检 → 安装 →
+诊断**：
+
+```powershell
+tabbeacon --version
+tabbeacon upgrade-preflight
+cargo install tabbeacon --version 0.7.3 --locked --force
+tabbeacon --version
+tabbeacon doctor
+```
+
+`upgrade-preflight` 是只读操作。如果它明确报告某个由 TabBeacon 精确证明所有权的
+工作器或 MCP 子进程阻止替换，只能通过 TabBeacon 自己的所有权感知路径进行 drain，
+然后重新预检：
+
+```powershell
+tabbeacon upgrade-preflight --drain
+tabbeacon upgrade-preflight
+```
+
+如果某个进程被报告为未证明所有权或存在歧义，请**不要**按进程名直接终止；让对应的
+编码智能体会话正常退出后再重新运行预检。
+
+升级到 v0.7.3 本身不要求重新运行 `tabbeacon setup`。只有当
+`tabbeacon doctor` 明确报告受管 Codex 集成需要协调时，再运行：
+
+```powershell
+tabbeacon setup codex
+```
+
+之后仍需手动审查任何发生变化的 Hook 定义；TabBeacon 永远不会自动授予 Hook 信任。
+完整的所有权边界请参阅 [v0.7.3 升级指南](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/v0.7.3-upgrade.md)。
+
+> [!NOTE]
+> 使用已发布 v0.7.3 的锁文件安装时，Cargo 可能警告传递依赖
+> `chacha20 0.10.1` 已被 crates.io yank。发布后审计将这一 registry yank 与安全公告
+> 区分处理；依赖维护已跟踪在 [Issue #114](https://github.com/JerrySkywalker/tabbeacon/issues/114)。
+> 复现或升级到已发布的 v0.7.3 依赖图时，请保留 `--locked`，不要仅为了消除该警告而
+> 去掉它。
+
 ## 兼容性
 
 TabBeacon 面向 Windows 上的 Windows Terminal。Codex 支持由本地观察到的必需能力

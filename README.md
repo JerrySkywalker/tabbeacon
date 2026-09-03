@@ -110,6 +110,51 @@ cargo install tabbeacon --version 0.7.3 --locked
 > work. Review any proposed change before applying it; it does not turn
 > TabBeacon into a launcher.
 
+## Upgrade
+
+For a Cargo-installed copy, the short sequence is **version → preflight →
+install → doctor**:
+
+```powershell
+tabbeacon --version
+tabbeacon upgrade-preflight
+cargo install tabbeacon --version 0.7.3 --locked --force
+tabbeacon --version
+tabbeacon doctor
+```
+
+`upgrade-preflight` is read-only. If it reports that replacement is blocked by
+an exact-owned TabBeacon worker or MCP child, drain only through TabBeacon's
+ownership-aware path and then rerun preflight:
+
+```powershell
+tabbeacon upgrade-preflight --drain
+tabbeacon upgrade-preflight
+```
+
+If a process is reported as unowned or ambiguous, do **not** terminate it by
+image name; let the owning coding-agent session exit normally and retry the
+preflight.
+
+v0.7.3 does not require `tabbeacon setup` merely because the package was
+upgraded. If `tabbeacon doctor` specifically reports that the managed Codex
+integration needs reconciliation, run:
+
+```powershell
+tabbeacon setup codex
+```
+
+Then review any changed Hook definitions manually. TabBeacon never grants Hook
+trust automatically. See the [v0.7.3 upgrade guide](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/v0.7.3-upgrade.md)
+for the full ownership boundary.
+
+> [!NOTE]
+> The published v0.7.3 lockfile can make Cargo warn that the transitive
+> `chacha20 0.10.1` package is yanked. The post-release audit distinguishes
+> that registry yank from a security advisory; dependency maintenance is
+> tracked in [Issue #114](https://github.com/JerrySkywalker/tabbeacon/issues/114).
+> Keep `--locked` when reproducing or upgrading to the published v0.7.3 graph.
+
 ## Compatibility
 
 TabBeacon targets Windows Terminal on Windows. Codex support is derived from
