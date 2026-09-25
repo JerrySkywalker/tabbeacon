@@ -500,30 +500,32 @@ fn config_provider(
         print_provider_config(target, &resolved, false);
         return ExitCode::SUCCESS;
     }
-    if draft == current {
-        print_provider_config(target, &resolved, false);
-        return ExitCode::SUCCESS;
+    let changed = draft != current;
+    if let Err(error) = apply_provider_override(&store, &snapshot, target, current, draft) {
+        return management_error_for_output("CONFIG", &error, output_mode, language);
     }
-    let receipt = match store.save_provider_override_snapshot_if_unchanged(&snapshot, target, draft)
+    print_provider_config(target, &resolved, changed);
+    ExitCode::SUCCESS
+}
+
+fn apply_provider_override(
+    store: &PresentationSettingsStore,
+    snapshot: &PresentationSettingsSnapshot,
+    target: CliTarget,
+    current: PresentationOverride,
+    draft: PresentationOverride,
+) -> io::Result<()> {
+    if draft == current {
+        return Ok(());
+    }
+    let receipt = match store.save_provider_override_snapshot_if_unchanged(snapshot, target, draft)
     {
         Ok(SnapshotSaveOutcome::Saved(receipt)) => receipt,
-        Ok(SnapshotSaveOutcome::Conflict) => {
-            return management_error_for_output(
-                "CONFIG",
-                &settings_conflict_error(),
-                output_mode,
-                language,
-            );
-        }
-        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
+        Ok(SnapshotSaveOutcome::Conflict) => return Err(settings_conflict_error()),
+        Err(error) => return Err(io::Error::other(error)),
     };
     if !matches!(store.write_receipt_is_current(&receipt), Ok(true)) {
-        return management_error_for_output(
-            "CONFIG",
-            &settings_conflict_error(),
-            output_mode,
-            language,
-        );
+        return Err(settings_conflict_error());
     }
     if target == CliTarget::Codex {
         let previous = resolve_presentation(
@@ -532,29 +534,30 @@ fn config_provider(
             PresentationCapabilities::CODEX,
             ApplicationStatus::Unproven,
         );
+        let next = resolve_presentation(
+            snapshot.settings(),
+            draft,
+            PresentationCapabilities::CODEX,
+            ApplicationStatus::Unproven,
+        );
         if previous.effective.title().owns_tabbeacon_title()
-            != resolved.effective.title().owns_tabbeacon_title()
+            != next.effective.title().owns_tabbeacon_title()
         {
             let reconcile = CodexIntegration::from_environment().and_then(|integration| {
-                integration
-                    .reconcile_title_ownership(resolved.effective.title().owns_tabbeacon_title())
+                integration.reconcile_title_ownership(next.effective.title().owns_tabbeacon_title())
             });
             if let Err(error) = reconcile {
                 let restored = matches!(
-                    store.restore_snapshot_if_unchanged(&receipt, &snapshot),
+                    store.restore_snapshot_if_unchanged(&receipt, snapshot),
                     Ok(ConditionalSaveOutcome::Saved)
                 );
-                return management_error_for_output(
-                    "CONFIG",
-                    &io::Error::other(format!("{error}; rollback_verified={restored}")),
-                    output_mode,
-                    language,
-                );
+                return Err(io::Error::other(format!(
+                    "{error}; rollback_verified={restored}"
+                )));
             }
         }
     }
-    print_provider_config(target, &resolved, true);
-    ExitCode::SUCCESS
+    Ok(())
 }
 
 fn admitted_provider_mode(target: CliTarget, mode: ConfigProviderMode) -> Option<PresentationMode> {
@@ -4971,6 +4974,16 @@ fn ui() -> ExitCode {
         apply_control_center_workspace_override,
         || collect_control_center_refresh(&store, &interface_store, false),
         apply_control_center_repair,
+        |provider, expected_global, before, after| {
+            let snapshot = store.snapshot_read_only().map_err(io::Error::other)?;
+            let current = snapshot
+                .provider_override(provider)
+                .map_err(io::Error::other)?;
+            if current != before || snapshot.settings() != expected_global {
+                return Err(settings_conflict_error());
+            }
+            apply_provider_override(&store, &snapshot, provider, before, after)
+        },
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => management_error("UI", &error),
@@ -4982,10 +4995,31 @@ fn collect_control_center_refresh(
     interface_store: &InterfacePreferencesStore,
     include_workspace: bool,
 ) -> io::Result<tabbeacon::control_center::ControlCenterRefresh> {
-    let presentation = settings_store
+    let settings_snapshot = settings_store
         .snapshot_read_only()
-        .map_err(io::Error::other)?
-        .settings();
+        .map_err(io::Error::other)?;
+    let presentation = settings_snapshot.settings();
+    let provider_presentation = [CliTarget::Codex, CliTarget::Agy, CliTarget::Cursor]
+        .into_iter()
+        .map(|provider| {
+            let override_for_cli = settings_snapshot
+                .provider_override(provider)
+                .map_err(io::Error::other)?;
+            let capabilities = match provider {
+                CliTarget::Codex => PresentationCapabilities::CODEX,
+                CliTarget::Agy | CliTarget::Cursor => PresentationCapabilities::NONE,
+            };
+            Ok((
+                provider,
+                resolve_presentation(
+                    presentation,
+                    override_for_cli,
+                    capabilities,
+                    ApplicationStatus::Unproven,
+                ),
+            ))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
     let interface = interface_store
         .snapshot_read_only()
         .map_err(io::Error::other)?
@@ -5014,6 +5048,7 @@ fn collect_control_center_refresh(
     );
     Ok(tabbeacon::control_center::ControlCenterRefresh {
         presentation,
+        provider_presentation,
         interface,
         snapshot: ManagementSnapshot::from_diagnostics(&report),
         overview: tabbeacon::management::ManagementOverview::from_diagnostics(&report),

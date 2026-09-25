@@ -60,8 +60,14 @@ pub fn normalize_hook(raw: &[u8]) -> Result<Option<CursorLifecycle>, CursorParse
         "sessionEnd" => CursorEvent::SessionEnd,
         _ => return Ok(None),
     };
-    let session_id = bounded_identity(object, "conversation_id")
-        .or_else(|| bounded_identity(object, "session_id"))
+    let conversation_id = bounded_identity(object, "conversation_id");
+    let hook_session_id = bounded_identity(object, "session_id");
+    if conversation_id.is_some() && hook_session_id.is_some() && conversation_id != hook_session_id
+    {
+        return Err(CursorParseError::MissingIdentity);
+    }
+    let session_id = conversation_id
+        .or(hook_session_id)
         .ok_or(CursorParseError::MissingIdentity)?;
     let generation_id = match event {
         CursorEvent::BeforeSubmitPrompt | CursorEvent::Stop => Some(
@@ -159,5 +165,28 @@ mod tests {
             normalize_hook(br#"{"hook_event_name":"stop","conversation_id":"s","generation_id":"g","status":"unknown"}"#),
             Err(CursorParseError::UnsupportedOutcome)
         );
+        assert_eq!(
+            normalize_hook(br#"{"hook_event_name":"stop","conversation_id":"s1","session_id":"s2","generation_id":"g","status":"completed"}"#),
+            Err(CursorParseError::MissingIdentity)
+        );
+    }
+
+    #[test]
+    fn new_structured_prompt_clears_prior_health_without_retaining_prompt() {
+        let event = normalize_hook(br#"{"hook_event_name":"beforeSubmitPrompt","conversation_id":"s","generation_id":"g2","prompt":"secret text"}"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(event.event, CursorEvent::BeforeSubmitPrompt);
+        assert_eq!(event.session_id, "s");
+        assert_eq!(event.generation_id.as_deref(), Some("g2"));
+        assert_eq!(event.patch.phase, FieldUpdate::set(Phase::Working));
+        assert_eq!(event.patch.health, FieldUpdate::clear());
+        assert!(!format!("{event:?}").contains("secret text"));
+    }
+
+    #[test]
+    fn oversize_payload_is_rejected_before_json_parse() {
+        let oversized = vec![b'x'; MAX_CURSOR_HOOK_BYTES + 1];
+        assert_eq!(normalize_hook(&oversized), Err(CursorParseError::Oversize));
     }
 }

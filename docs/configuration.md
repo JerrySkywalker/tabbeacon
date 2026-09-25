@@ -53,6 +53,15 @@ tabbeacon config provider cursor show
 tabbeacon config provider cursor inherit --apply
 ```
 
+`tabbeacon config wizard` now starts with a global/Codex/Agy/Cursor target
+choice. A provider mode is previewed before a separate Apply/Cancel decision;
+cancel leaves the saved preference untouched. The Control Center Integrations
+screen shows requested/effective provider preferences and application status.
+Keys `1`/`2`/`3` select Codex/Agy/Cursor, arrow keys choose an admitted mode,
+`r` chooses inheritance, and `v` previews. Only `a` in that preview requests
+the snapshot-guarded write; Esc cancels without a write. The saved setting still
+does not prove current-session application.
+
 The output separates requested and capability-limited effective channels.
 `LIVE_APPLICATION=UNPROVEN` means the stored choice has not been proved active
 in the current CLI session. Current Cursor terminal routing is unqualified, so
@@ -104,6 +113,11 @@ Exports without provider overrides retain `tabbeacon-export-v1`; exports with
 partial provider overrides use `tabbeacon-export-v2`. The v0.8.0 candidate
 accepts both. The v2 document contains preferences only, never Hook trust,
 provider authentication, terminal binding, or installed integration state.
+If an import would change Codex terminal-title ownership, the candidate
+reports the conflict during preview and refuses the write. Apply that Codex
+mode through `tabbeacon config provider codex apply` so the owned Hook
+configuration can be reconciled. A general import transaction for that case is
+not yet qualified.
 
 ## Separate boundaries
 
