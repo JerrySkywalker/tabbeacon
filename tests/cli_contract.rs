@@ -12,6 +12,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use tabbeacon::{
+    presentation_policy::{CliTarget, PresentationMode, PresentationOverride},
+    settings::PresentationSettingsStore,
+};
+
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 static ORIGINAL_PATH: OnceLock<PathBuf> = OnceLock::new();
 
@@ -1176,6 +1181,78 @@ fn export_import_is_preview_first_portable_and_non_tty_apply_is_explicit() {
         String::from_utf8(alias.stdout)
             .expect("alias receipt is UTF-8")
             .contains("CUSTOM_ALIAS=TB")
+    );
+}
+
+#[test]
+fn ownership_changing_provider_import_previews_without_writing_and_refuses_apply() {
+    let source = TestRoot::new("provider-export-source");
+    let target = TestRoot::new("provider-import-target");
+    let export_path = source.child("provider-settings.json");
+    let source_store =
+        PresentationSettingsStore::new(source.child("local-appdata/TabBeacon/config.toml"));
+    let source_snapshot = source_store
+        .snapshot_read_only()
+        .expect("isolated source reads");
+    let source_override =
+        PresentationOverride::default().with_mode(PresentationMode::PreserveNative);
+    source_store
+        .save_provider_override_snapshot_if_unchanged(
+            &source_snapshot,
+            CliTarget::Codex,
+            source_override,
+        )
+        .expect("isolated fixture preference writes");
+    let exported = isolated_command(&source)
+        .args([
+            "export",
+            "--output",
+            export_path.to_str().expect("test path is UTF-8"),
+            "--plain",
+        ])
+        .output()
+        .expect("provider export starts");
+    assert!(exported.status.success());
+    assert!(
+        fs::read_to_string(&export_path)
+            .expect("provider export reads")
+            .contains("tabbeacon-export-v2")
+    );
+
+    let settings_path = target.child("local-appdata/TabBeacon/config.toml");
+    let preview = isolated_command(&target)
+        .args([
+            "import",
+            export_path.to_str().expect("test path is UTF-8"),
+            "--plain",
+        ])
+        .output()
+        .expect("ownership-changing preview starts");
+    assert!(
+        preview.status.success(),
+        "read-only preview failed: {}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    assert!(String::from_utf8_lossy(&preview.stdout).contains("IMPORT=PREVIEW"));
+    assert!(
+        !settings_path.exists(),
+        "preview wrote provider preferences"
+    );
+
+    let apply = isolated_command(&target)
+        .args([
+            "import",
+            export_path.to_str().expect("test path is UTF-8"),
+            "--apply",
+            "--plain",
+        ])
+        .output()
+        .expect("ownership-changing Apply starts");
+    assert!(!apply.status.success(), "unsafe Apply was admitted");
+    assert!(String::from_utf8_lossy(&apply.stderr).contains("IMPORT=FAIL"));
+    assert!(
+        !settings_path.exists(),
+        "refused Apply wrote provider preferences"
     );
 }
 
