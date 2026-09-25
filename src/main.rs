@@ -434,6 +434,7 @@ fn config_command(
     }
 }
 
+#[allow(clippy::too_many_lines)] // Preview, guarded save, and title reconciliation form one operation.
 fn config_provider(
     provider: ConfigProvider,
     command: &ProviderConfigCommand,
@@ -499,6 +500,10 @@ fn config_provider(
         print_provider_config(target, &resolved, false);
         return ExitCode::SUCCESS;
     }
+    if draft == current {
+        print_provider_config(target, &resolved, false);
+        return ExitCode::SUCCESS;
+    }
     let receipt = match store.save_provider_override_snapshot_if_unchanged(&snapshot, target, draft)
     {
         Ok(SnapshotSaveOutcome::Saved(receipt)) => receipt,
@@ -512,6 +517,14 @@ fn config_provider(
         }
         Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
     };
+    if !matches!(store.write_receipt_is_current(&receipt), Ok(true)) {
+        return management_error_for_output(
+            "CONFIG",
+            &settings_conflict_error(),
+            output_mode,
+            language,
+        );
+    }
     if target == CliTarget::Codex {
         let previous = resolve_presentation(
             snapshot.settings(),
@@ -4302,6 +4315,15 @@ fn import_settings(path: &std::path::Path, apply: bool, output: HumanOutputArgs)
     };
 
     print_import_summary(&plan, &document, None, output);
+    if plan.changes_codex_title_ownership(&presentation_snapshot) {
+        return transfer_failure(
+            "IMPORT",
+            &io::Error::other(
+                "import changes Codex title ownership; apply the Codex provider mode with `tabbeacon config provider codex apply` so Hook ownership can be reconciled",
+            ),
+            output,
+        );
+    }
     if !plan.is_applicable() {
         return ExitCode::from(2);
     }
@@ -4327,15 +4349,6 @@ fn import_settings(path: &std::path::Path, apply: bool, output: HumanOutputArgs)
 
     if !apply {
         return ExitCode::SUCCESS;
-    }
-    if plan.changes_codex_title_ownership(&presentation_snapshot) {
-        return transfer_failure(
-            "IMPORT",
-            &io::Error::other(
-                "import changes Codex title ownership; apply the Codex provider mode with `tabbeacon config provider codex apply` so Hook ownership can be reconciled",
-            ),
-            output,
-        );
     }
     let outcome = apply_import_plan(
         &plan,

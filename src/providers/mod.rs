@@ -8,5 +8,6 @@ pub mod agy;
 pub mod agy_backend;
 pub mod agy_qualification;
 pub mod codex;
+pub mod cursor;
 pub mod registry;
 pub mod visual_identity;
