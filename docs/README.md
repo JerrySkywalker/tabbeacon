@@ -4,8 +4,11 @@ This is the English-canonical documentation for TabBeacon. The project landing
 pages are available in [English](../README.md) and [Simplified Chinese](../README.zh-CN.md);
 technical guides remain English-canonical.
 
-Current public release: **v0.7.3**. The repository is in long-term dogfood with
-no active feature development, and no authoritative v0.8 roadmap exists.
+Current public release: **v0.7.3**. The Owner-approved
+[v0.8.0 Goal Train](../dev_governance_files/ROADMAP_V08.md) admits bounded development
+of independent CLI presentation, Cursor color-only integration, Codex abnormal-state
+recovery, and bilingual terminology. These are planned features, not claims about
+the published v0.7.3 binary.
 
 ## Start here
 
@@ -38,6 +41,9 @@ no active feature development, and no authoritative v0.8 roadmap exists.
 
 ## Development
 
+- [v0.8.0 Goal Train and scope](../dev_governance_files/ROADMAP_V08.md)
+- [v0.8.0 acceptance matrix](../dev_governance_files/V080_ACCEPTANCE_MATRIX.md)
+- [v0.8.0 ZenBook Duo execution runbook](../dev_governance_files/V080_EXECUTION_RUNBOOK.md)
 - [Build and test](development/build-and-test.md)
 - [Contributing](../CONTRIBUTING.md)
 - [Release process](development/release-process.md)

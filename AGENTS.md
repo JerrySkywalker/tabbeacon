@@ -5,6 +5,17 @@ VMCell-style ownership model remains the safety baseline; gate selection is gove
 `dev_governance_files/QUALITY_GATES.md` (Fast Lane v2). `FAST_LANE.md` is only a compact
 execution reference.
 
+## Active development train
+
+The Owner-approved v0.8.0 scope is
+[`dev_governance_files/ROADMAP_V08.md`](dev_governance_files/ROADMAP_V08.md).
+Read its [acceptance matrix](dev_governance_files/V080_ACCEPTANCE_MATRIX.md) and
+[execution runbook](dev_governance_files/V080_EXECUTION_RUNBOOK.md) before work.
+That admission supersedes the post-v0.7.3 feature pause for the bounded P/C/E/T train
+only; historical roadmaps and `V08_OPTIONS.md` do not authorize additional scope.
+No product feature is complete merely because its planning PR merged. Public release
+and Owner production mutation retain their separate explicit authorization boundaries.
+
 ## 1. Writer model
 
 - Ordinary development has exactly one active Implementer writer per worktree/branch.
@@ -176,15 +187,13 @@ Do not require irrelevant fields for ceremony.
 
 ## Local Rust build-storage discipline
 
-- Daily agent launch remains literally `codex`.
-- Temporary and non-canonical TabBeacon worktrees route ordinary Cargo artifacts to
-  the admitted shared local target, `V:\build\tabbeacon\codex-target`, instead of
-  accumulating worktree-local targets.
-- The canonical checkout, `V:\src\tabbeacon`, may retain its local HOT target.
-- Goal-specific Cargo targets are forbidden unless technical isolation is explicitly
-  required and documented with `REASON`, `EXPECTED_STORAGE_GB`, `TARGET_PATH`, and
-  `RETENTION_AFTER_GOAL`.
-- Capacity pressure fails safely: never delete repository source, `.git`, worktree
-  roots, or evidence as automatic remediation.
-- Storage governance must not introduce a Codex wrapper, fake `codex.exe`, PATH
-  shadow, PTY host, or global daemon.
+- Daily agent launch remains literally `codex`; the Owner may use native Codex CLI flags for development without introducing a TabBeacon wrapper.
+- Resolve the current host's admitted development roots before builds. Historical absolute paths are not portable defaults.
+- On **ZenBook Duo**, the canonical checkout is `C:\Dev\src\tabbeacon`, active worktrees are under `C:\Dev\worktrees\tabbeacon`, and temporary/non-canonical worktrees use the shared Cargo target `C:\Dev\build\tabbeacon\codex-target`.
+- ZenBook Duo cache and evidence roots are `C:\Dev\cache` and `C:\Dev\artifacts`; do not fall back to V drive or write directly under the C-drive root.
+- These host-specific roots do not relocate another machine. Other hosts require their own verified admitted roots.
+- The canonical checkout may retain its existing local HOT target; do not move or delete it automatically.
+- Validate inherited `DEV_*` and `CARGO_TARGET_DIR`. Prefer a validated session-local target override; do not rewrite the user's global profile or environment as part of a build.
+- Goal-specific Cargo targets are forbidden unless technical isolation is explicitly required and documented with `REASON`, `EXPECTED_STORAGE_GB`, `TARGET_PATH`, and `RETENTION_AFTER_GOAL`.
+- Capacity pressure fails safely: never delete repository source, `.git`, worktree roots, or evidence as automatic remediation.
+- Storage governance must not introduce a Codex wrapper, fake `codex.exe`, PATH shadow, PTY host, or global daemon.

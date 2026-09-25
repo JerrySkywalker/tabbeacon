@@ -1,123 +1,76 @@
-# Development scope after v0.7.3
+# Development scope — v0.8.0 admitted after v0.7.3
+
+The historical filename is retained for existing links. The Owner's 2026-09-26
+approval, effective when the admission documentation PR merges, resumes bounded
+feature development under [ROADMAP_V08.md](ROADMAP_V08.md). This is a plan admission,
+not a claim that local implementation, qualification, or publication has occurred.
 
 ```text
 CURRENT_PUBLIC_RELEASE=v0.7.3
-CURRENT_PUBLIC_TARGET=v0.7.3
+CURRENT_DEVELOPMENT_TARGET=v0.8.0
 V073_IMPLEMENTATION=COMPLETE
-ACTIVE_FEATURE_DEVELOPMENT=PAUSED
-NO_ACTIVE_FEATURE_DEVELOPMENT=true
-DOGFOOD_MODE=LONG_TERM_DOGFOOD_NO_ACTIVE_DEVELOPMENT
-DOGFOOD_MINIMUM_WEEKS=4
-DOGFOOD_PREFERRED_WEEKS=6-8
-V08_OPTIONS_STATUS=NON_AUTHORITATIVE
-ROADMAP_V08_CREATED=false
-NEXT_RECOMMENDED_GOAL=LONG_TERM_DOGFOOD_NO_ACTIVE_DEVELOPMENT
+ACTIVE_FEATURE_DEVELOPMENT=V080_ADMITTED
+IMPLEMENTATION_EXECUTION=NOT_STARTED_BY_DOCUMENTATION_PR
+ACTIVE_GOAL_ID=TB-V080-MULTICLI-TRUSTED-STATE-TRAIN-001
+ROADMAP_V08_CREATED=true
+V08_OPTIONS_STATUS=HISTORICAL_NON_AUTHORITATIVE
+NEXT_RECOMMENDED_GOAL=V080_G00_RESUME_AUDIT_THEN_CONTINUOUS_IMPLEMENTATION
+PUBLIC_RELEASE_AUTHORIZED=false
+OWNER_PRODUCTION_MUTATION_AUTHORIZED=false
 ```
 
-TabBeacon v0.7.3 is publicly released from
-`1485b4dc0fe634a21634adc9ec539deb76beaad2`. The crates.io package, immutable
-tag, GitHub Release, Windows x64 ZIP and sidecar, exact locked install, default
-install, and fresh GitHub-asset consumer are verified.
+## Active scope and authority
+
+The admitted train contains per-CLI presentation policy, Cursor strict color-only
+integration, Codex abnormal-state/recovery repair, and an English/Chinese terminology
+index. All four belong to one v0.8.0 stable release. Self-hosted runner migration,
+organization transfer, Fleet integration, and extra providers are excluded.
+
+Use the [acceptance matrix](V080_ACCEPTANCE_MATRIX.md) and
+[ZenBook Duo runbook](V080_EXECUTION_RUNBOOK.md). AGENTS.md, QUALITY_GATES.md, and
+RELEASE_CRITERIA.md remain in force. After local Owner invocation, proceed through
+G00-G06 without requiring a fresh permission at every car. G07 public publication
+and Owner production changes still require explicit transaction-specific authority.
+
+The prior four-week minimum/six-to-eight-week preferred dogfood-only policy is
+superseded for this Owner-approved scope. It must not block G00 or trigger the old
+options program. Outside this scope, no new feature train is admitted.
+
+## Historical v0.7.3 release facts
+
+The previous release closeout recorded v0.7.3 at
+`1485b4dc0fe634a21634adc9ec539deb76beaad2`, with crates.io, immutable tag, GitHub
+Release, Windows x64 ZIP/sidecar, exact locked install, default install, and a fresh
+GitHub-asset consumer verified. These are retained historical facts, not a current
+inspection of the Owner's installed binary.
 
 ```text
-CRATES_IO_VERSION=0.7.3
-CRATES_IO_YANKED=false
-TAG=v0.7.3
-GITHUB_RELEASE=v0.7.3
-WINDOWS_ZIP_SHA256=9d78a49319c3e8680479d47bbbf8fd5e459b008300029164b768b896609be14c
+HISTORICAL_CRATES_IO_VERSION=0.7.3
+HISTORICAL_CRATES_IO_YANKED=false
+HISTORICAL_TAG=v0.7.3
+HISTORICAL_GITHUB_RELEASE=v0.7.3
+HISTORICAL_WINDOWS_ZIP_SHA256=9d78a49319c3e8680479d47bbbf8fd5e459b008300029164b768b896609be14c
 ```
 
-## Long-term dogfood contract
+The v0.7.3 train changed no runtime/provider behavior. Its production support was
+Codex capability-based admission and the exact Agy 1.1.19 profile. Cursor remains a
+v0.8.0 implementation target until actually qualified; it is not supported by the
+published v0.7.3 binary merely because this documentation merges. Native tab icons
+remain NO_GO; Claude, OpenCode, and Codex app-server remain deferred.
 
-The repository is in long-term dogfood with no active feature development.
-The minimum observation period is four weeks; six to eight weeks is preferred.
-Normal dogfood observations do not authorize source changes or a v0.8 train.
+Historical PRs #108, #109, and #110 accepted the clean v0.7.3 successor train. PR #100
+was closed without merge, superseded by #108. The previously pending social-preview
+Settings upload is non-blocking historical work and does not authorize browser or
+account-setting mutation in this train.
 
-A bounded maintenance admission may interrupt the pause only for:
+## Production and release boundaries
 
-- a P0/P1 production defect;
-- a security issue; or
-- an upstream compatibility break that requires bounded maintenance.
+This documentation admission does not install or upgrade TabBeacon, alter Codex/Agy/
+Cursor configuration, grant Hook trust, change the CI runner infrastructure, or
+publish a release. G00 must inventory the real host rather than assume production
+adoption from repository release status.
 
-Do not automatically start Operational Reliability v2, Provider Platform v2,
-Multi-Agent Presentation UX v3, a new provider, native tab-icon work, terminal
-expansion, an installer, package-manager distribution, or auto-update work.
-
-Suggested evidence before any future planning admission:
-
-```text
-P0_COUNT=0
-P1_COUNT=0
-REPEATED_UNKNOWN_HOOK_FAILURE=false
-REPEATED_MANUAL_RECOVERY=false
-STALE_TEMP_WT=false
-UNSAFE_PROCESS_CLEANUP=false
-MEANINGFUL_REAL_USE_ACROSS_MULTIPLE_CODEX_UPGRADES=true_required
-```
-
-## Product and provider boundary
-
-The v0.7.3 train did not change runtime or provider behavior.
-
-```text
-RUNTIME_BEHAVIOR_CHANGED=false
-PROVIDER_BEHAVIOR_CHANGED=false
-NEW_PROVIDER_ADDED=false
-DAILY_COMMAND_CODEX=codex
-DAILY_COMMAND_AGY=agy
-NO_WRAPPER=true
-NO_PATH_SHADOW=true
-NO_PTY_HOST=true
-NO_GLOBAL_DAEMON=true
-HOOK_TIMEOUT_CHANGED=false
-HOOK_TRUST_BOUNDARY_CHANGED=false
-NATIVE_TAB_ICON_DISPOSITION=NO_GO
-CODEX_SUPPORT=production_capability_based
-AGY_SUPPORT=production_exact_1.1.19
-CLAUDE_SUPPORT=deferred
-OPENCODE_SUPPORT=deferred
-CODEX_APP_SERVER=deferred
-```
-
-`Codex and more` remains discovery positioning rather than a compatibility
-wildcard. Deferred providers are not partially supported.
-
-## Historical v0.7.3 train disposition
-
-The clean successor train was accepted through PRs #108, #109, and #110.
-Historical PR #100 was closed without merge after its desired G99/G100 scope
-was proven represented and strengthened by PR #108.
-
-```text
-PR100_STATE=CLOSED_SUPERSEDED
-PR100_SUPERSEDED=true
-PR100_MERGED=false
-PR100_SUPERSEDED_BY_PR=108
-SOCIAL_PREVIEW_UPLOAD=WAITING_OWNER_UI
-```
-
-The committed social-preview SVG and PNG remain ready for an Owner Settings UI
-upload. The missing Settings UI action is non-blocking and does not authorize
-browser-session automation.
-
-## Owner production environment boundary
-
-The public release and repository dogfood state do not authorize production
-adoption or configuration mutation.
-
-```text
-OWNER_PRODUCTION_TABBEACON_UPGRADE=false
-PRODUCTION_CODEX_CONFIGURATION_MUTATED=false
-PRODUCTION_HOOK_TRUST_MUTATED=false
-PRODUCTION_AGY_CONFIGURATION_MUTATED=false
-```
-
-An Owner production upgrade to the official v0.7.3 binary is a separate,
-explicitly authorized adoption step after this release Goal.
-
-## Future admission boundary
-
-`V08_OPTIONS.md` remains non-authoritative and `ROADMAP_V08.md` does not exist.
-Any future implementation or release requires a fresh Goal, exact current-main
-admission, one active Implementer writer, risk-based gates, and explicit
-authority for any public or production mutation.
+The existing official-channel convergence requirements remain applicable to a future
+public release. No historical production-non-adoption exception is extended by this
+file. An unresolved required capability or real-provider/visual gate stays
+BLOCKED/UNPROVEN; it cannot become PASS through a documentation status change.

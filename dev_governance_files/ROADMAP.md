@@ -2,6 +2,10 @@
 
 Roadmap IDs are stable governance identifiers. `X` suffixes denote experimental work that does not block the adjacent production release unless promoted by a later decision.
 
+Current development is the Owner-approved [v0.8.0 Goal Train](ROADMAP_V08.md).
+The prior release sequences below are retained as historical records, not active
+implementation instructions. Public v0.7.3 support remains unchanged by plan admission.
+
 ## v0.6.1 production release — COMPLETE
 
 `TB-V061-12H-FORWARD-COMPAT-VISUAL-001` began the v0.6.1 train. Its completed
@@ -29,15 +33,16 @@ RELEASE_SHA=b3c1ee91036683bee9ebd1e15020364cb556c2a4
 TAG=v0.6.1
 ```
 
-## Current production baseline
+## Current production baseline and development admission
 
 CURRENT_PUBLIC_RELEASE=v0.7.3
 CURRENT_PUBLIC_TARGET=v0.7.3
+CURRENT_DEVELOPMENT_TARGET=v0.8.0
 V073_IMPLEMENTATION=COMPLETE
-ACTIVE_FEATURE_DEVELOPMENT=PAUSED
-V08_OPTIONS_STATUS=NON_AUTHORITATIVE
-ROADMAP_V08_CREATED=false
-NEXT_RECOMMENDED_GOAL=LONG_TERM_DOGFOOD_NO_ACTIVE_DEVELOPMENT
+ACTIVE_FEATURE_DEVELOPMENT=V080_ADMITTED
+V08_OPTIONS_STATUS=HISTORICAL_NON_AUTHORITATIVE
+ROADMAP_V08_CREATED=true
+NEXT_RECOMMENDED_GOAL=V080_G00_RESUME_AUDIT_THEN_CONTINUOUS_IMPLEMENTATION
 
 The v0.7.3 discoverability and distribution maintenance release is publicly
 distributed. Its accepted release source, immutable tag, registry package, and
@@ -53,12 +58,14 @@ PR100_SUPERSEDED=true
 PR100_MERGED=false
 ```
 
-Active feature development is paused for long-term dogfood: four weeks minimum
-and six to eight weeks preferred. PR #100 is closed without merge after exact
+Bounded feature development resumes under [ROADMAP_V08.md](ROADMAP_V08.md),
+with the current-scope summary in [DEVELOPMENT_PAUSE.md](DEVELOPMENT_PAUSE.md).
+The old dogfood-only pause no longer blocks the approved P/C/E/T train. Plan
+admission does not implement features, publish v0.8.0, or authorize production
+configuration changes. PR #100 remains closed without merge after exact
 supersession by the accepted v0.7.3 Train A. `ROADMAP_V073.md` remains the
-release execution record, and `DEVELOPMENT_PAUSE.md` is the authoritative
-current-scope boundary. Historical production evidence remains below and does
-not supersede this public baseline.
+historical release execution record. Historical production evidence below does
+not supersede the current public baseline or the bounded v0.8.0 admission.
 
 ## Historical v0.4 production baseline
 
