@@ -116,6 +116,28 @@ pub struct ImportPlan {
 }
 
 impl ImportPlan {
+    /// Whether applying this plan would change who owns Codex terminal titles.
+    /// Callers must reconcile the Codex Hook configuration before reporting an
+    /// applied import; a portable file cannot grant that external authority.
+    #[must_use]
+    pub fn changes_codex_title_ownership(&self, snapshot: &PresentationSettingsSnapshot) -> bool {
+        let before_global = snapshot.settings();
+        let after_global = self.presentation.unwrap_or(before_global);
+        let before_override = snapshot
+            .provider_override(CliTarget::Codex)
+            .unwrap_or_default();
+        let after_override = self
+            .provider_overrides
+            .iter()
+            .find_map(|(provider, replacement)| {
+                (*provider == CliTarget::Codex).then_some(*replacement)
+            })
+            .unwrap_or(before_override);
+        let before_title = before_override.title.unwrap_or(before_global.title());
+        let after_title = after_override.title.unwrap_or(after_global.title());
+        before_title.owns_tabbeacon_title() != after_title.owns_tabbeacon_title()
+    }
+
     /// Whether the plan has no conflicts and may be applied explicitly.
     #[must_use]
     pub const fn is_applicable(&self) -> bool {
@@ -1219,6 +1241,33 @@ mod tests {
             ),
             ImportApplyOutcome::RolledBack
         );
+        assert!(!presentation_store.path().exists());
+    }
+
+    #[test]
+    fn import_identifies_codex_title_ownership_change_before_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let presentation_store = PresentationSettingsStore::new(root.path().join("config.toml"));
+        let interface_store = InterfacePreferencesStore::new(root.path().join("interface.toml"));
+        let workspace_store = WorkspacePreferenceStore::new(root.path().join("preferences.json"));
+        let presentation_snapshot = presentation_store.snapshot_read_only().unwrap();
+        let interface_snapshot = interface_store.snapshot_read_only().unwrap();
+        let workspace_snapshot = workspace_store.snapshot_read_only().unwrap();
+        let document = SettingsExportV1::new(None, None, &WorkspacePreferences::default())
+            .with_provider_overrides(BTreeMap::from([(
+                CliTarget::Codex,
+                PresentationOverride::default().with_mode(PresentationMode::PreserveNative),
+            )]));
+        let plan = document
+            .import_plan(
+                &presentation_snapshot,
+                &interface_snapshot,
+                &workspace_snapshot,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert!(plan.changes_codex_title_ownership(&presentation_snapshot));
         assert!(!presentation_store.path().exists());
     }
 

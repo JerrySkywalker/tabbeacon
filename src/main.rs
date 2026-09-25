@@ -3109,6 +3109,17 @@ fn config_wizard(output_mode: OutputMode, language: Option<InterfaceLanguage>) -
             language,
         );
     }
+    let Ok(target) = Select::new()
+        .with_prompt("Configure target / 配置目标")
+        .items(["Global defaults / 全局默认", "Codex", "Agy", "Cursor"])
+        .default(0)
+        .interact()
+    else {
+        return wizard_error("target selection was interrupted", output_mode, language);
+    };
+    if target != 0 {
+        return config_provider_wizard(target, output_mode, language);
+    }
     let store = match settings_store() {
         Ok(store) => store,
         Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
@@ -3170,6 +3181,89 @@ fn config_wizard(output_mode: OutputMode, language: Option<InterfaceLanguage>) -
         output_mode,
         language,
     )
+}
+
+fn config_provider_wizard(
+    target: usize,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
+    let (provider, choices): (ConfigProvider, &[(&str, Option<ConfigProviderMode>)]) = match target
+    {
+        1 => (
+            ConfigProvider::Codex,
+            &[
+                (
+                    "Full takeover / 完整接管",
+                    Some(ConfigProviderMode::FullTakeover),
+                ),
+                ("Title only / 仅标题", Some(ConfigProviderMode::TitleOnly)),
+                ("Color only / 仅颜色", Some(ConfigProviderMode::ColorOnly)),
+                (
+                    "Preserve native / 保留原生",
+                    Some(ConfigProviderMode::PreserveNative),
+                ),
+                ("Inherit / 继承", None),
+                ("Cancel / 取消", None),
+            ],
+        ),
+        2 => (
+            ConfigProvider::Agy,
+            &[
+                ("Title only / 仅标题", Some(ConfigProviderMode::TitleOnly)),
+                ("Inherit / 继承", None),
+                ("Cancel / 取消", None),
+            ],
+        ),
+        3 => (
+            ConfigProvider::Cursor,
+            &[
+                ("Color only / 仅颜色", Some(ConfigProviderMode::ColorOnly)),
+                (
+                    "Preserve native / 保留原生",
+                    Some(ConfigProviderMode::PreserveNative),
+                ),
+                ("Inherit / 继承", None),
+                ("Cancel / 取消", None),
+            ],
+        ),
+        _ => return wizard_error("invalid provider selection", output_mode, language),
+    };
+    let labels: Vec<&str> = choices.iter().map(|(label, _)| *label).collect();
+    let Ok(choice) = Select::new()
+        .with_prompt("Presentation mode / 呈现模式")
+        .items(&labels)
+        .default(0)
+        .interact()
+    else {
+        return wizard_error("mode selection was interrupted", output_mode, language);
+    };
+    if choice == choices.len() - 1 {
+        return ExitCode::SUCCESS;
+    }
+    let preview = match choices[choice].1 {
+        Some(mode) => ProviderConfigCommand::Preview { mode },
+        None => ProviderConfigCommand::Inherit { apply: false },
+    };
+    let result = config_provider(provider, &preview, output_mode, language);
+    if result != ExitCode::SUCCESS {
+        return result;
+    }
+    let Ok(apply) = Confirm::new()
+        .with_prompt("Apply this provider preference? / 应用此 CLI 偏好？")
+        .default(false)
+        .interact()
+    else {
+        return wizard_error("apply confirmation was interrupted", output_mode, language);
+    };
+    if !apply {
+        return ExitCode::SUCCESS;
+    }
+    let command = match choices[choice].1 {
+        Some(mode) => ProviderConfigCommand::Apply { mode },
+        None => ProviderConfigCommand::Inherit { apply: true },
+    };
+    config_provider(provider, &command, output_mode, language)
 }
 
 #[allow(clippy::too_many_lines)] // One grouped document mirrors the visible Setup summary.
@@ -4233,6 +4327,15 @@ fn import_settings(path: &std::path::Path, apply: bool, output: HumanOutputArgs)
 
     if !apply {
         return ExitCode::SUCCESS;
+    }
+    if plan.changes_codex_title_ownership(&presentation_snapshot) {
+        return transfer_failure(
+            "IMPORT",
+            &io::Error::other(
+                "import changes Codex title ownership; apply the Codex provider mode with `tabbeacon config provider codex apply` so Hook ownership can be reconciled",
+            ),
+            output,
+        );
     }
     let outcome = apply_import_plan(
         &plan,
