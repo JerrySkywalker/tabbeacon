@@ -23,6 +23,7 @@ use crate::{
         InterfacePreferencesSnapshotSaveOutcome, InterfacePreferencesStore,
         InterfacePreferencesWriteReceipt,
     },
+    presentation_policy::{CliTarget, PresentationOverride},
     repo::{
         CanonicalRepositoryIdentity, RepositoryAlias, WorkspacePreferenceStore,
         WorkspacePreferences, WorkspacePreferencesConditionalOutcome, WorkspacePreferencesSnapshot,
@@ -37,6 +38,8 @@ use crate::{
 
 /// Stable schema identifier for portable user configuration exports.
 pub const EXPORT_SCHEMA_V1: &str = "tabbeacon-export-v1";
+/// Portable format carrying explicit per-provider presentation overrides.
+pub const EXPORT_SCHEMA_V2: &str = "tabbeacon-export-v2";
 /// Hard bound before JSON parsing so an import cannot become an unbounded log
 /// or arbitrary system image.
 pub const MAX_EXPORT_BYTES: usize = 1024 * 1024;
@@ -104,6 +107,7 @@ pub enum ImportPlanConflict {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportPlan {
     presentation: Option<PresentationSettings>,
+    provider_overrides: Vec<(CliTarget, PresentationOverride)>,
     interface: Option<InterfacePreferences>,
     workspace_preferences: Option<WorkspacePreferences>,
     portable_matches: usize,
@@ -140,6 +144,7 @@ impl ImportPlan {
     #[must_use]
     pub const fn has_changes(&self) -> bool {
         self.presentation.is_some()
+            || !self.provider_overrides.is_empty()
             || self.interface.is_some()
             || self.workspace_preferences.is_some()
     }
@@ -147,7 +152,7 @@ impl ImportPlan {
     /// Whether Presentation settings would change on Apply.
     #[must_use]
     pub const fn changes_presentation(&self) -> bool {
-        self.presentation.is_some()
+        self.presentation.is_some() || !self.provider_overrides.is_empty()
     }
 
     /// Whether Interface preferences would change on Apply.
@@ -184,6 +189,8 @@ pub enum ImportApplyOutcome {
 pub struct SettingsExportV1 {
     schema: String,
     presentation: Option<PresentationExport>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    provider_presentation: BTreeMap<String, ProviderOverrideExport>,
     interface: Option<InterfaceExport>,
     workspace_aliases: BTreeMap<String, String>,
     omitted_device_local_workspace_aliases: usize,
@@ -199,6 +206,63 @@ struct PresentationExport {
     theme: String,
     #[serde(default = "default_provider_badge")]
     provider_badge: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderOverrideExport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tab_color: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activity: Option<String>,
+}
+
+impl From<PresentationOverride> for ProviderOverrideExport {
+    fn from(value: PresentationOverride) -> Self {
+        Self {
+            title: value.title.map(|value| value.as_str().to_owned()),
+            tab_color: value.tab_color.map(|value| value.as_str().to_owned()),
+            activity: value.activity.map(|value| value.as_str().to_owned()),
+        }
+    }
+}
+
+impl ProviderOverrideExport {
+    fn settings(&self) -> Result<PresentationOverride, SettingsTransferError> {
+        Ok(PresentationOverride {
+            title: self
+                .title
+                .as_deref()
+                .map(TitleMode::parse)
+                .transpose_option()?,
+            tab_color: self
+                .tab_color
+                .as_deref()
+                .map(TabColorMode::parse)
+                .transpose_option()?,
+            activity: self
+                .activity
+                .as_deref()
+                .map(ActivityMode::parse)
+                .transpose_option()?,
+        })
+    }
+}
+
+trait OptionOptionExt<T> {
+    fn transpose_option(self) -> Result<Option<T>, SettingsTransferError>;
+}
+
+impl<T> OptionOptionExt<T> for Option<Option<T>> {
+    fn transpose_option(self) -> Result<Option<T>, SettingsTransferError> {
+        match self {
+            Some(Some(value)) => Ok(Some(value)),
+            None => Ok(None),
+            Some(None) => Err(SettingsTransferError::InvalidDocument),
+        }
+    }
 }
 
 fn default_provider_badge() -> String {
@@ -238,10 +302,41 @@ impl SettingsExportV1 {
         Self {
             schema: EXPORT_SCHEMA_V1.to_owned(),
             presentation: presentation.map(PresentationExport::from),
+            provider_presentation: BTreeMap::new(),
             interface: interface.map(InterfaceExport::from),
             workspace_aliases,
             omitted_device_local_workspace_aliases,
         }
+    }
+
+    /// Adds only user-owned provider preferences. Trust and integration state
+    /// are deliberately absent from the portable format.
+    #[must_use]
+    pub fn with_provider_overrides(
+        mut self,
+        overrides: BTreeMap<CliTarget, PresentationOverride>,
+    ) -> Self {
+        self.provider_presentation = overrides
+            .into_iter()
+            .filter(|(_, value)| *value != PresentationOverride::default())
+            .map(|(provider, value)| (provider.as_str().to_owned(), value.into()))
+            .collect();
+        if !self.provider_presentation.is_empty() {
+            EXPORT_SCHEMA_V2.clone_into(&mut self.schema);
+        }
+        self
+    }
+
+    /// Exact portable schema of this document.
+    #[must_use]
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+
+    /// Number of provider-specific preferences, never integration/trust state.
+    #[must_use]
+    pub fn provider_override_count(&self) -> usize {
+        self.provider_presentation.len()
     }
 
     /// Produces deterministic, locale-independent canonical JSON bytes.
@@ -269,7 +364,10 @@ impl SettingsExportV1 {
         }
         let document: Self =
             serde_json::from_slice(bytes).map_err(|_| SettingsTransferError::InvalidDocument)?;
-        if document.schema != EXPORT_SCHEMA_V1 {
+        if document.schema != EXPORT_SCHEMA_V1 && document.schema != EXPORT_SCHEMA_V2 {
+            return Err(SettingsTransferError::InvalidDocument);
+        }
+        if document.schema == EXPORT_SCHEMA_V1 && !document.provider_presentation.is_empty() {
             return Err(SettingsTransferError::InvalidDocument);
         }
         document.validate()?;
@@ -350,6 +448,18 @@ impl SettingsExportV1 {
         let presentation = self
             .presentation()?
             .filter(|candidate| *candidate != presentation_snapshot.settings());
+        let mut provider_overrides = Vec::new();
+        for (provider_name, portable) in &self.provider_presentation {
+            let provider =
+                CliTarget::parse(provider_name).ok_or(SettingsTransferError::InvalidDocument)?;
+            let replacement = portable.settings()?;
+            let current = presentation_snapshot
+                .provider_override(provider)
+                .map_err(|_| SettingsTransferError::InvalidDocument)?;
+            if replacement != current {
+                provider_overrides.push((provider, replacement));
+            }
+        }
         let interface = self
             .interface()?
             .filter(|candidate| *candidate != interface_snapshot.preferences());
@@ -412,6 +522,7 @@ impl SettingsExportV1 {
 
         Ok(ImportPlan {
             presentation,
+            provider_overrides,
             interface,
             workspace_preferences,
             portable_matches: self.workspace_aliases.len() - unmatched_entries,
@@ -423,6 +534,12 @@ impl SettingsExportV1 {
     fn validate(&self) -> Result<(), SettingsTransferError> {
         let _ = self.presentation()?;
         let _ = self.interface()?;
+        for (provider, override_for_cli) in &self.provider_presentation {
+            if CliTarget::parse(provider).is_none() {
+                return Err(SettingsTransferError::InvalidDocument);
+            }
+            let _ = override_for_cli.settings()?;
+        }
         if self.workspace_aliases.iter().any(|(key, alias)| {
             key.len() != 64
                 || !key.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -633,8 +750,12 @@ pub fn apply_import_plan(
     let mut interface_receipt = None;
     let mut workspace_receipt = None;
 
-    if let Some(replacement) = plan.presentation {
-        match presentation_store.save_snapshot_if_unchanged(presentation_snapshot, replacement) {
+    if plan.presentation.is_some() || !plan.provider_overrides.is_empty() {
+        match presentation_store.save_portable_snapshot_if_unchanged(
+            presentation_snapshot,
+            plan.presentation,
+            &plan.provider_overrides,
+        ) {
             Ok(SnapshotSaveOutcome::Saved(receipt)) => presentation_receipt = Some(receipt),
             Ok(SnapshotSaveOutcome::Conflict) => return ImportApplyOutcome::Conflict,
             // A storage error can arrive after an atomic commit reached disk.
@@ -931,6 +1052,7 @@ mod tests {
         interface_preferences::{
             HumanColor, InterfaceLanguage, InterfacePreferences, InterfacePreferencesStore,
         },
+        presentation_policy::{CliTarget, PresentationMode, PresentationOverride},
         repo::{
             CanonicalRepositoryIdentity, RepositoryAlias, WorkspacePreferenceStore,
             WorkspacePreferences,
@@ -942,8 +1064,9 @@ mod tests {
     };
 
     use super::{
-        EXPORT_SCHEMA_V1, ImportApplyOutcome, ImportPlanConflict, MAX_EXPORT_BYTES,
-        SettingsExportV1, SettingsTransferError, apply_import_plan, portable_workspace_key,
+        EXPORT_SCHEMA_V1, EXPORT_SCHEMA_V2, ImportApplyOutcome, ImportPlanConflict,
+        MAX_EXPORT_BYTES, SettingsExportV1, SettingsTransferError, apply_import_plan,
+        portable_workspace_key,
     };
 
     fn temporary_root(name: &str) -> std::path::PathBuf {
@@ -989,6 +1112,114 @@ mod tests {
         assert!(text.contains("provider_badge"));
         assert!(!text.contains(git.as_str()));
         assert!(!text.contains("dir-v1:"));
+    }
+
+    #[test]
+    fn portable_v2_round_trips_provider_preferences_without_trust_or_machine_state() {
+        let root = tempfile::tempdir().unwrap();
+        let presentation_store = PresentationSettingsStore::new(root.path().join("config.toml"));
+        let interface_store = InterfacePreferencesStore::new(root.path().join("interface.toml"));
+        let workspace_store = WorkspacePreferenceStore::new(root.path().join("preferences.json"));
+        let cursor = PresentationOverride::default().with_mode(PresentationMode::ColorOnly);
+        let document = SettingsExportV1::new(
+            Some(PresentationSettings::default()),
+            None,
+            &WorkspacePreferences::default(),
+        )
+        .with_provider_overrides(BTreeMap::from([(CliTarget::Cursor, cursor)]));
+        let bytes = document.to_canonical_json().unwrap();
+        let parsed = SettingsExportV1::parse(&bytes).unwrap();
+        assert_eq!(parsed.schema(), EXPORT_SCHEMA_V2);
+        assert_eq!(parsed.provider_override_count(), 1);
+        let portable = String::from_utf8(bytes).unwrap();
+        assert!(!portable.contains("trusted_hash"));
+        assert!(!portable.contains("WT_SESSION"));
+        let presentation_snapshot = presentation_store.snapshot_read_only().unwrap();
+        let interface_snapshot = interface_store.snapshot_read_only().unwrap();
+        let workspace_snapshot = workspace_store.snapshot_read_only().unwrap();
+        let plan = parsed
+            .import_plan(
+                &presentation_snapshot,
+                &interface_snapshot,
+                &workspace_snapshot,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert!(plan.changes_presentation());
+        assert_eq!(
+            apply_import_plan(
+                &plan,
+                &presentation_store,
+                &presentation_snapshot,
+                &interface_store,
+                &interface_snapshot,
+                &workspace_store,
+                &workspace_snapshot,
+            ),
+            ImportApplyOutcome::Applied
+        );
+        assert_eq!(
+            presentation_store
+                .load_provider_override_read_only(CliTarget::Cursor)
+                .unwrap(),
+            cursor
+        );
+        assert_eq!(
+            presentation_store
+                .load_provider_override_read_only(CliTarget::Codex)
+                .unwrap(),
+            PresentationOverride::default()
+        );
+    }
+
+    #[test]
+    fn portable_v2_provider_write_rolls_back_after_interface_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let presentation_store = PresentationSettingsStore::new(root.path().join("config.toml"));
+        let interface_store = InterfacePreferencesStore::new(root.path().join("interface.toml"));
+        let workspace_store = WorkspacePreferenceStore::new(root.path().join("preferences.json"));
+        let document = SettingsExportV1::new(
+            None,
+            Some(InterfacePreferences::new(
+                InterfaceLanguage::ZhCn,
+                HumanColor::Never,
+                true,
+            )),
+            &WorkspacePreferences::default(),
+        )
+        .with_provider_overrides(BTreeMap::from([(
+            CliTarget::Cursor,
+            PresentationOverride::default().with_mode(PresentationMode::ColorOnly),
+        )]));
+        let presentation_snapshot = presentation_store.snapshot_read_only().unwrap();
+        let interface_snapshot = interface_store.snapshot_read_only().unwrap();
+        let workspace_snapshot = workspace_store.snapshot_read_only().unwrap();
+        let plan = document
+            .import_plan(
+                &presentation_snapshot,
+                &interface_snapshot,
+                &workspace_snapshot,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        interface_store
+            .save(InterfacePreferences::default().with_color(HumanColor::Always))
+            .unwrap();
+        assert_eq!(
+            apply_import_plan(
+                &plan,
+                &presentation_store,
+                &presentation_snapshot,
+                &interface_store,
+                &interface_snapshot,
+                &workspace_store,
+                &workspace_snapshot,
+            ),
+            ImportApplyOutcome::RolledBack
+        );
+        assert!(!presentation_store.path().exists());
     }
 
     #[test]

@@ -1638,7 +1638,7 @@ fn content(app: &ControlCenterApp) -> Paragraph<'static> {
 fn overlay_lines(app: &ControlCenterApp) -> String {
     match &app.overlay {
         ControlCenterOverlay::Help => format!(
-            "{}\n\n{}\n{}\n{}\n{}\n{}",
+            "{}\n\n{}\n{}\n{}\n{}\nTerminology / 术语: https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/terminology.md\n{}",
             catalog(app.locale(), HumanMessageKey::HelpNavigation),
             catalog(app.locale(), HumanMessageKey::HelpSettings),
             catalog(app.locale(), HumanMessageKey::HelpWorkspaceSessions),

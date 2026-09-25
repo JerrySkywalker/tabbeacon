@@ -2,6 +2,7 @@
 
 Configuration changes presentation preferences; it does not grant provider
 compatibility, Hook trust, configuration ownership, or runtime authority.
+The [English/Chinese terminology](terminology.md) keeps these states distinct.
 
 ## Guided setup and Control Center
 
@@ -34,6 +35,29 @@ tabbeacon config reset
 The typed settings cover title presentation, activity/spinner behavior, tab
 color, theme, and named presets. Use `tabbeacon preview --theme muted-dark`
 for a temporary visual preview; preview does not persist a change.
+
+For the v0.8.0 development train, a partial provider override inherits each
+unspecified field from the existing user-global default. `native` leaves that
+channel to the provider or terminal; `off` disables TabBeacon output on the
+channel. Neither value suppresses a provider's own title. Saving a preference
+does not establish that the integration is installed, trusted, or applied to an
+already running CLI session. The published v0.7.3 commands above remain the
+current user-facing contract until the new CLI and integration are qualified.
+
+The candidate CLI requires a separate preview and explicit apply verb:
+
+```powershell
+tabbeacon config provider cursor preview color-only
+tabbeacon config provider cursor apply color-only
+tabbeacon config provider cursor show
+tabbeacon config provider cursor inherit --apply
+```
+
+The output separates requested and capability-limited effective channels.
+`LIVE_APPLICATION=UNPROVEN` means the stored choice has not been proved active
+in the current CLI session. Current Cursor terminal routing is unqualified, so
+its requested color remains capability-limited; this command does not install
+Cursor Hooks or claim the color appeared.
 
 ## Human interface preferences
 
@@ -76,6 +100,10 @@ tabbeacon import tabbeacon-settings.json --apply
 
 Review the plan before `--apply`. Non-interactive import never mutates merely
 because a file was supplied.
+Exports without provider overrides retain `tabbeacon-export-v1`; exports with
+partial provider overrides use `tabbeacon-export-v2`. The v0.8.0 candidate
+accepts both. The v2 document contains preferences only, never Hook trust,
+provider authentication, terminal binding, or installed integration state.
 
 ## Separate boundaries
 

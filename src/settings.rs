@@ -14,6 +14,11 @@ use std::{
 use atomic_write_file::AtomicWriteFile;
 use toml_edit::{DocumentMut, Item, Table, value};
 
+use crate::presentation_policy::{
+    ApplicationStatus, CliTarget, PresentationCapabilities, PresentationOverride,
+    ResolvedPresentation, resolve_presentation,
+};
+
 const CONFIG_FILE: &str = "config.toml";
 const LOCK_FILE: &str = "config.lock";
 
@@ -329,6 +334,7 @@ pub struct PresentationSettings {
     spinner: SpinnerPreset,
     theme: PresentationTheme,
     provider_badge: ProviderBadgePolicy,
+    strict_channel_policy: bool,
 }
 
 impl PresentationSettings {
@@ -368,6 +374,7 @@ impl PresentationSettings {
             spinner,
             theme,
             provider_badge,
+            strict_channel_policy: false,
         }
     }
 
@@ -405,6 +412,19 @@ impl PresentationSettings {
     #[must_use]
     pub const fn provider_badge(self) -> ProviderBadgePolicy {
         self.provider_badge
+    }
+
+    /// Whether an explicit provider mode forbids writes to unmanaged channels.
+    #[must_use]
+    pub const fn strict_channel_policy(self) -> bool {
+        self.strict_channel_policy
+    }
+
+    /// Marks an effective provider mode without changing legacy stored values.
+    #[must_use]
+    pub const fn with_strict_channel_policy(mut self, strict: bool) -> Self {
+        self.strict_channel_policy = strict;
+        self
     }
 
     /// Returns a copy with one title mode.
@@ -569,6 +589,26 @@ impl PresentationSettingsSnapshot {
         self.contents.is_none()
     }
 
+    /// Parses one provider override from the same exact bytes as the global
+    /// settings used by this snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed or unsupported configuration bytes.
+    pub fn provider_override(
+        &self,
+        provider: CliTarget,
+    ) -> Result<PresentationOverride, SettingsError> {
+        let Some(bytes) = self.contents.as_deref() else {
+            return Ok(PresentationOverride::default());
+        };
+        let document = std::str::from_utf8(bytes)
+            .map_err(|_| SettingsError::Malformed)?
+            .parse::<DocumentMut>()
+            .map_err(|_| SettingsError::Malformed)?;
+        provider_override_from_document(&document, provider)
+    }
+
     fn matches(&self, other: &Self) -> bool {
         self.contents == other.contents
     }
@@ -665,6 +705,136 @@ impl PresentationSettingsStore {
     /// [`Self::load`].
     pub fn load_read_only(&self) -> Result<PresentationSettings, SettingsError> {
         Ok(self.snapshot_read_only()?.settings())
+    }
+
+    /// Reads one partial provider override without creating a lock or file.
+    /// Legacy v0.7.3 documents have no overrides and retain their global meaning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed, unreadable, or unsafe configuration.
+    pub fn load_provider_override_read_only(
+        &self,
+        provider: CliTarget,
+    ) -> Result<PresentationOverride, SettingsError> {
+        self.reject_symbolic_link()?;
+        let Some(bytes) = read_optional_bytes(&self.path)? else {
+            return Ok(PresentationOverride::default());
+        };
+        let document = std::str::from_utf8(&bytes)
+            .map_err(|_| SettingsError::Malformed)?
+            .parse::<DocumentMut>()
+            .map_err(|_| SettingsError::Malformed)?;
+        // A malformed global section must never be hidden by an override read.
+        settings_from_document(&document)?;
+        provider_override_from_document(&document, provider)
+    }
+
+    /// Projects one provider's saved preference through proved capabilities.
+    /// The caller supplies live application status; reading the file alone can
+    /// never establish installation, Hook trust, or live application.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed, unreadable, or unsafe configuration.
+    pub fn resolve_provider_read_only(
+        &self,
+        provider: CliTarget,
+        capabilities: PresentationCapabilities,
+        application: ApplicationStatus,
+    ) -> Result<ResolvedPresentation, SettingsError> {
+        let snapshot = self.snapshot_read_only()?;
+        let override_for_cli = match snapshot.contents.as_deref() {
+            Some(bytes) => {
+                let document = std::str::from_utf8(bytes)
+                    .map_err(|_| SettingsError::Malformed)?
+                    .parse::<DocumentMut>()
+                    .map_err(|_| SettingsError::Malformed)?;
+                provider_override_from_document(&document, provider)?
+            }
+            None => PresentationOverride::default(),
+        };
+        Ok(resolve_presentation(
+            snapshot.settings(),
+            override_for_cli,
+            capabilities,
+            application,
+        ))
+    }
+
+    /// Saves only the selected CLI's override if the exact preview bytes remain
+    /// current. Unknown TOML and other provider tables are preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact-owned configuration cannot be safely
+    /// parsed, locked, or atomically written.
+    pub fn save_provider_override_snapshot_if_unchanged(
+        &self,
+        expected: &PresentationSettingsSnapshot,
+        provider: CliTarget,
+        replacement: PresentationOverride,
+    ) -> Result<SnapshotSaveOutcome, SettingsError> {
+        self.with_lock(|| {
+            let current = self.snapshot_unlocked()?;
+            if !current.matches(expected) {
+                return Ok(SnapshotSaveOutcome::Conflict);
+            }
+            let mut document = match current.contents.as_deref() {
+                Some(bytes) => std::str::from_utf8(bytes)
+                    .map_err(|_| SettingsError::Malformed)?
+                    .parse::<DocumentMut>()
+                    .map_err(|_| SettingsError::Malformed)?,
+                None => DocumentMut::new(),
+            };
+            write_provider_override(&mut document, provider, replacement)?;
+            let contents = document.to_string().into_bytes();
+            if current.contents.as_deref() != Some(contents.as_slice()) {
+                atomic_write(&self.path, &contents)?;
+            }
+            Ok(SnapshotSaveOutcome::Saved(
+                PresentationSettingsWriteReceipt { contents },
+            ))
+        })
+    }
+
+    /// Applies a portable global setting and provider overrides as one atomic
+    /// presentation-document write guarded by the preview's exact bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact-owned configuration cannot be safely
+    /// parsed, locked, or atomically written.
+    pub fn save_portable_snapshot_if_unchanged(
+        &self,
+        expected: &PresentationSettingsSnapshot,
+        global: Option<PresentationSettings>,
+        overrides: &[(CliTarget, PresentationOverride)],
+    ) -> Result<SnapshotSaveOutcome, SettingsError> {
+        self.with_lock(|| {
+            let current = self.snapshot_unlocked()?;
+            if !current.matches(expected) {
+                return Ok(SnapshotSaveOutcome::Conflict);
+            }
+            let mut document = match current.contents.as_deref() {
+                Some(bytes) => std::str::from_utf8(bytes)
+                    .map_err(|_| SettingsError::Malformed)?
+                    .parse::<DocumentMut>()
+                    .map_err(|_| SettingsError::Malformed)?,
+                None => DocumentMut::new(),
+            };
+            if let Some(global) = global {
+                write_settings(&mut document, global)?;
+            }
+            for (provider, override_for_cli) in overrides {
+                write_provider_override(&mut document, *provider, *override_for_cli)?;
+            }
+            let contents = document.to_string().into_bytes();
+            atomic_write(&self.path, &contents)?;
+            Ok(SnapshotSaveOutcome::Saved(
+                PresentationSettingsWriteReceipt { contents },
+            ))
+        })
     }
 
     /// Captures the current document without creating a state directory or lock.
@@ -898,6 +1068,80 @@ fn parse_settings_bytes(bytes: &[u8]) -> Result<PresentationSettings, SettingsEr
         .parse::<DocumentMut>()
         .map_err(|_| SettingsError::Malformed)?;
     settings_from_document(&document)
+}
+
+fn provider_override_from_document(
+    document: &DocumentMut,
+    provider: CliTarget,
+) -> Result<PresentationOverride, SettingsError> {
+    let Some(root) = document.get("provider_presentation") else {
+        return Ok(PresentationOverride::default());
+    };
+    let root = root.as_table_like().ok_or(SettingsError::Malformed)?;
+    let Some(entry) = root.get(provider.as_str()) else {
+        return Ok(PresentationOverride::default());
+    };
+    let entry = entry.as_table_like().ok_or(SettingsError::Malformed)?;
+    Ok(PresentationOverride {
+        title: parse_optional_value(entry.get("title"), TitleMode::parse)?,
+        tab_color: parse_optional_value(entry.get("tab_color"), TabColorMode::parse)?,
+        activity: parse_optional_value(entry.get("activity"), ActivityMode::parse)?,
+    })
+}
+
+fn parse_optional_value<T>(
+    item: Option<&Item>,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<Option<T>, SettingsError> {
+    item.map(|value| {
+        value
+            .as_str()
+            .and_then(parse)
+            .ok_or(SettingsError::Malformed)
+    })
+    .transpose()
+}
+
+fn write_provider_override(
+    document: &mut DocumentMut,
+    provider: CliTarget,
+    replacement: PresentationOverride,
+) -> Result<(), SettingsError> {
+    if replacement == PresentationOverride::default() {
+        if let Some(root) = document.get_mut("provider_presentation") {
+            let root = root.as_table_like_mut().ok_or(SettingsError::Malformed)?;
+            root.remove(provider.as_str());
+            if root.is_empty() {
+                document.as_table_mut().remove("provider_presentation");
+            }
+        }
+        return Ok(());
+    }
+    if !document.as_table().contains_key("provider_presentation") {
+        document["provider_presentation"] = Item::Table(Table::new());
+    }
+    let root = document["provider_presentation"]
+        .as_table_like_mut()
+        .ok_or(SettingsError::Malformed)?;
+    if root.get(provider.as_str()).is_none() {
+        root.insert(provider.as_str(), Item::Table(Table::new()));
+    }
+    let entry = root
+        .get_mut(provider.as_str())
+        .and_then(Item::as_table_like_mut)
+        .ok_or(SettingsError::Malformed)?;
+    for (key, selected) in [
+        ("title", replacement.title.map(TitleMode::as_str)),
+        ("tab_color", replacement.tab_color.map(TabColorMode::as_str)),
+        ("activity", replacement.activity.map(ActivityMode::as_str)),
+    ] {
+        if let Some(selected) = selected {
+            entry.insert(key, value(selected));
+        } else {
+            entry.remove(key);
+        }
+    }
+    Ok(())
 }
 
 fn settings_from_document(document: &DocumentMut) -> Result<PresentationSettings, SettingsError> {

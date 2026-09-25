@@ -16,6 +16,20 @@ tabbeacon upgrade-preflight --json
 These commands make bounded observations. They do not grant Hook trust or
 terminate a provider.
 
+[`Ready`](terminology.md#tb-t16) means no active work is known;
+[`ResultReady`](terminology.md#tb-t17) means an agent result is
+available for review. Neither proves the user's whole goal is complete. The
+[English/Chinese terminology](terminology.md) defines these states and their
+ownership boundaries.
+
+For [Issue #116](https://github.com/JerrySkywalker/tabbeacon/issues/116), the
+original visible HTTP 404 symptom is not itself a structured Codex failure
+signal. The [current Codex Hook contract](https://learn.chatgpt.com/docs/hooks)
+shows that `Stop` input exposes a turn ID but no failure category;
+`Interrupt` identifies an interrupted main turn. A warning or failed-turn color
+must be based on proved structured evidence. If that evidence is unavailable,
+TabBeacon remains fail-open and the original 404 class stays unresolved.
+
 ## Hook trust needs review
 
 Codex Hook trust is deliberately manual. Use the supported setup flow, inspect

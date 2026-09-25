@@ -15,6 +15,8 @@
 
 <p align="center"><a href="https://github.com/JerrySkywalker/tabbeacon/releases">发布版本</a> · <a href="https://crates.io/crates/tabbeacon">crates.io</a> · <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/README.md">文档</a> · <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/LICENSE">MIT 许可证</a></p>
 
+中英产品用语：[TabBeacon 术语表](docs/terminology.md)。
+
 <!-- tabbeacon:critical-invariants install=cargo-install-tabbeacon setup=tabbeacon-setup codex=codex agy=agy providers=codex-agy claude=deferred opencode=deferred trust=manual fail-open=true privacy=content-minimal -->
 
 <p align="center">

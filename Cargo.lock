@@ -1056,6 +1056,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "terminal-ui-contract",
  "toml_edit",
  "uiautomation",

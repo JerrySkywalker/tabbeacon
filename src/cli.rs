@@ -17,7 +17,7 @@ use crate::interface_preferences::InterfaceLanguage;
     name = "tabbeacon",
     version,
     about = "Live identity and status beacons for coding-agent tabs in Windows Terminal.",
-    after_help = "Common commands:\n  tabbeacon setup codex\n  tabbeacon setup agy\n  tabbeacon status --json\n  tabbeacon sessions --json\n  tabbeacon hooks --json\n  tabbeacon doctor --json\n  tabbeacon config show\n  tabbeacon alias show\n  tabbeacon completions powershell"
+    after_help = "Common commands:\n  tabbeacon setup codex\n  tabbeacon setup agy\n  tabbeacon status --json\n  tabbeacon sessions --json\n  tabbeacon hooks --json\n  tabbeacon doctor --json\n  tabbeacon config show\n  tabbeacon alias show\n  tabbeacon completions powershell\nTerminology / 术语: https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/terminology.md"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -587,6 +587,52 @@ pub enum ConfigCommand {
     Reset,
     /// Run the legacy prompt-by-prompt settings wizard.
     Wizard,
+    /// Inspect or stage a partial presentation preference for one CLI.
+    Provider {
+        #[arg(value_enum)]
+        provider: ConfigProvider,
+        #[command(subcommand)]
+        command: ProviderConfigCommand,
+    },
+}
+
+/// Stable CLI targets for independent presentation preferences.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ConfigProvider {
+    Codex,
+    Agy,
+    Cursor,
+}
+
+/// A named mode; custom field-level editing remains in the underlying schema.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum ConfigProviderMode {
+    FullTakeover,
+    TitleOnly,
+    ColorOnly,
+    PreserveNative,
+}
+
+/// A provider change is read-only unless `apply` is selected explicitly.
+#[derive(Debug, Subcommand)]
+pub enum ProviderConfigCommand {
+    /// Show requested and capability-limited effective channels.
+    Show,
+    /// Preview a mode without changing configuration.
+    Preview {
+        #[arg(value_enum)]
+        mode: ConfigProviderMode,
+    },
+    /// Save a mode with an exact-snapshot drift check.
+    Apply {
+        #[arg(value_enum)]
+        mode: ConfigProviderMode,
+    },
+    /// Preview or apply removal of this provider's three channel overrides.
+    Inherit {
+        #[arg(long)]
+        apply: bool,
+    },
 }
 
 /// User-local Interface preference operations.
@@ -885,6 +931,54 @@ mod tests {
             parsed.command,
             Some(Command::Convergence {
                 command: ConvergenceCommand::Verify { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn provider_configuration_requires_an_explicit_apply_verb() {
+        use super::{ConfigCommand, ConfigProvider, ConfigProviderMode, ProviderConfigCommand};
+        let preview = Cli::try_parse_from([
+            "tabbeacon",
+            "config",
+            "provider",
+            "cursor",
+            "preview",
+            "color-only",
+            "--plain",
+        ])
+        .expect("preview parses");
+        assert!(matches!(
+            preview.command,
+            Some(Command::Config {
+                command: ConfigCommand::Provider {
+                    provider: ConfigProvider::Cursor,
+                    command: ProviderConfigCommand::Preview {
+                        mode: ConfigProviderMode::ColorOnly
+                    },
+                },
+                ..
+            })
+        ));
+        let apply = Cli::try_parse_from([
+            "tabbeacon",
+            "config",
+            "provider",
+            "codex",
+            "apply",
+            "preserve-native",
+        ])
+        .expect("explicit apply parses");
+        assert!(matches!(
+            apply.command,
+            Some(Command::Config {
+                command: ConfigCommand::Provider {
+                    provider: ConfigProvider::Codex,
+                    command: ProviderConfigCommand::Apply {
+                        mode: ConfigProviderMode::PreserveNative
+                    },
+                },
+                ..
             })
         ));
     }

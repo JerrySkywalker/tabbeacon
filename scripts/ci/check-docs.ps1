@@ -41,6 +41,10 @@ function Test-RelativeMarkdownLinks {
             if ($target -match '^(https?:|mailto:|#)') {
                 continue
             }
+            if ($target -match 'terminology\.md#(?<fragment>[^\s]+)$') {
+                $glossaryContent = Get-Content -LiteralPath (Join-Path $repositoryRoot 'docs/terminology.md') -Raw -Encoding UTF8
+                Assert-Docs ($glossaryContent.Contains(('id="{0}"' -f $Matches['fragment']))) "$path links to a missing glossary anchor: $target"
+            }
             $targetPath = $target.Split('#', 2)[0]
             if ([string]::IsNullOrWhiteSpace($targetPath)) {
                 continue
@@ -68,6 +72,7 @@ $requiredFiles = @(
     'docs/configuration.md',
     'docs/coding-agent-support.md',
     'docs/troubleshooting.md',
+    'docs/terminology.md',
     'docs/faq.md',
     'docs/design/product-principles.md',
     'docs/design/visual-language.md',
@@ -85,6 +90,26 @@ $requiredFiles += $trainDocPaths
 foreach ($path in $requiredFiles) {
     [void](Get-RequiredContent $path)
 }
+
+$glossary = Get-RequiredContent 'docs/terminology.md'
+$termRows = [regex]::Matches($glossary, '(?m)^\| <a id="(?<anchor>tb-t\d{2})"></a>(?<id>TB-T\d{2}) \| (?<english>[^|]+) \| (?<chinese>[^|]+) \| (?<definition>[^|]+) \|$')
+$termIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$termNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+foreach ($row in $termRows) {
+    $id = $row.Groups['id'].Value
+    Assert-Docs ($termIds.Add($id)) "duplicate glossary ID: $id"
+    Assert-Docs ($row.Groups['anchor'].Value -eq $id.ToLowerInvariant()) "glossary ID $id has a mismatched anchor"
+    $english = $row.Groups['english'].Value.Trim()
+    $chinese = $row.Groups['chinese'].Value.Trim()
+    $definition = $row.Groups['definition'].Value.Trim()
+    Assert-Docs ($termNames.Add($english)) "duplicate glossary English term: $english"
+    Assert-Docs (-not [string]::IsNullOrWhiteSpace($chinese)) "missing Chinese term for $id"
+    Assert-Docs ($definition.Contains(' / ')) "missing bilingual definition for $id"
+}
+foreach ($required in @('Provider', 'CLI', 'Session', 'Turn', 'Workspace', 'Title', 'Tab Color', 'Activity', 'Progress', 'Ownership', 'Native', 'Off', 'Capability', 'Evidence', 'Hook Trust', 'Ready', 'ResultReady', 'Warning', 'Interrupted', 'Failed', 'Inheritance', 'Override', 'Saved configuration', 'Installed integration', 'Effective settings')) {
+    Assert-Docs ($termNames.Contains($required)) "missing required glossary term: $required"
+}
+Assert-Docs ($termRows.Count -eq 25) "expected 25 glossary entries; found $($termRows.Count)"
 
 $englishReadme = Get-RequiredContent 'README.md'
 $chineseReadme = Get-RequiredContent 'README.zh-CN.md'

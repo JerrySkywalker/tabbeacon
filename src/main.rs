@@ -13,9 +13,10 @@ use clap_complete::generate;
 use dialoguer::{Confirm, Select};
 use tabbeacon::cli::{
     AgyPreadmissionCommand, AgyQualificationCommand, AgyQualificationWorkspaceArgs, AliasCommand,
-    Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, ExplainCommand, HumanOutputArgs,
-    InterfaceCommand, InterfacePreferenceKey, OutputMode, PreviewArgs, Provider, RepairCommand,
-    SetupCommand, TitlePolicyCommand, UninstallProvider, UpgradePreflightArgs,
+    Cli, Command, ConfigCommand, ConfigProvider, ConfigProviderMode, ConvergenceCommand,
+    DoctorArgs, ExplainCommand, HumanOutputArgs, InterfaceCommand, InterfacePreferenceKey,
+    OutputMode, PreviewArgs, Provider, ProviderConfigCommand, RepairCommand, SetupCommand,
+    TitlePolicyCommand, UninstallProvider, UpgradePreflightArgs,
 };
 use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_hook_runtime_probe,
@@ -64,6 +65,10 @@ use tabbeacon::{
     presentation::{
         PresentationPolicy, SemanticPresentationInput, WindowsTerminalCapabilities,
         WindowsTerminalRenderer,
+    },
+    presentation_policy::{
+        ApplicationStatus, CliTarget, PresentationCapabilities, PresentationMode,
+        PresentationOverride, resolve_presentation,
     },
     repo::{
         AliasCandidate, RepositoryAlias, StableAliasRegistry, WorkspaceAliasError,
@@ -423,7 +428,155 @@ fn config_command(
         ConfigCommand::Preset { name } => config_preset(&name, output_mode, language),
         ConfigCommand::Reset => config_reset(output_mode, language),
         ConfigCommand::Wizard => config_wizard(output_mode, language),
+        ConfigCommand::Provider { provider, command } => {
+            config_provider(provider, &command, output_mode, language)
+        }
     }
+}
+
+fn config_provider(
+    provider: ConfigProvider,
+    command: &ProviderConfigCommand,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
+    let target = match provider {
+        ConfigProvider::Codex => CliTarget::Codex,
+        ConfigProvider::Agy => CliTarget::Agy,
+        ConfigProvider::Cursor => CliTarget::Cursor,
+    };
+    let store = match settings_store() {
+        Ok(store) => store,
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
+    };
+    let snapshot = match store.snapshot_read_only() {
+        Ok(snapshot) => snapshot,
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
+    };
+    let current = match store.load_provider_override_read_only(target) {
+        Ok(current) => current,
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
+    };
+    let (draft, apply) = match command {
+        ProviderConfigCommand::Show => (current, false),
+        ProviderConfigCommand::Inherit { apply } => (PresentationOverride::default(), *apply),
+        ProviderConfigCommand::Preview { mode } => {
+            let Some(mode) = admitted_provider_mode(target, *mode) else {
+                return management_error_for_output(
+                    "CONFIG",
+                    &io::Error::other("mode is not admitted for this CLI"),
+                    output_mode,
+                    language,
+                );
+            };
+            (current.with_mode(mode), false)
+        }
+        ProviderConfigCommand::Apply { mode } => {
+            let Some(mode) = admitted_provider_mode(target, *mode) else {
+                return management_error_for_output(
+                    "CONFIG",
+                    &io::Error::other("mode is not admitted for this CLI"),
+                    output_mode,
+                    language,
+                );
+            };
+            (current.with_mode(mode), true)
+        }
+    };
+    let capabilities = match target {
+        CliTarget::Codex => PresentationCapabilities::CODEX,
+        // The current Agy profile and Cursor terminal route need positive
+        // local admission before CLI can claim these settings effective.
+        CliTarget::Agy | CliTarget::Cursor => PresentationCapabilities::NONE,
+    };
+    let resolved = resolve_presentation(
+        snapshot.settings(),
+        draft,
+        capabilities,
+        ApplicationStatus::Unproven,
+    );
+    if !apply {
+        print_provider_config(target, &resolved, false);
+        return ExitCode::SUCCESS;
+    }
+    let receipt = match store.save_provider_override_snapshot_if_unchanged(&snapshot, target, draft)
+    {
+        Ok(SnapshotSaveOutcome::Saved(receipt)) => receipt,
+        Ok(SnapshotSaveOutcome::Conflict) => {
+            return management_error_for_output(
+                "CONFIG",
+                &settings_conflict_error(),
+                output_mode,
+                language,
+            );
+        }
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
+    };
+    if target == CliTarget::Codex {
+        let previous = resolve_presentation(
+            snapshot.settings(),
+            current,
+            PresentationCapabilities::CODEX,
+            ApplicationStatus::Unproven,
+        );
+        if previous.effective.title().owns_tabbeacon_title()
+            != resolved.effective.title().owns_tabbeacon_title()
+        {
+            let reconcile = CodexIntegration::from_environment().and_then(|integration| {
+                integration
+                    .reconcile_title_ownership(resolved.effective.title().owns_tabbeacon_title())
+            });
+            if let Err(error) = reconcile {
+                let restored = matches!(
+                    store.restore_snapshot_if_unchanged(&receipt, &snapshot),
+                    Ok(ConditionalSaveOutcome::Saved)
+                );
+                return management_error_for_output(
+                    "CONFIG",
+                    &io::Error::other(format!("{error}; rollback_verified={restored}")),
+                    output_mode,
+                    language,
+                );
+            }
+        }
+    }
+    print_provider_config(target, &resolved, true);
+    ExitCode::SUCCESS
+}
+
+fn admitted_provider_mode(target: CliTarget, mode: ConfigProviderMode) -> Option<PresentationMode> {
+    let mode = match mode {
+        ConfigProviderMode::FullTakeover => PresentationMode::FullTakeover,
+        ConfigProviderMode::TitleOnly => PresentationMode::TitleOnly,
+        ConfigProviderMode::ColorOnly => PresentationMode::ColorOnly,
+        ConfigProviderMode::PreserveNative => PresentationMode::PreserveNative,
+    };
+    match (target, mode) {
+        (CliTarget::Cursor, PresentationMode::ColorOnly | PresentationMode::PreserveNative)
+        | (CliTarget::Agy, PresentationMode::TitleOnly)
+        | (CliTarget::Codex, _) => Some(mode),
+        _ => None,
+    }
+}
+
+fn print_provider_config(
+    target: CliTarget,
+    resolved: &tabbeacon::presentation_policy::ResolvedPresentation,
+    saved: bool,
+) {
+    println!("PROVIDER={}", target.as_str());
+    println!("CHANGE_APPLIED={saved}");
+    println!("REQUESTED_TITLE={}", resolved.requested.title());
+    println!("REQUESTED_TAB_COLOR={}", resolved.requested.tab_color());
+    println!("REQUESTED_ACTIVITY={}", resolved.requested.activity());
+    println!("EFFECTIVE_TITLE={}", resolved.effective.title());
+    println!("EFFECTIVE_TAB_COLOR={}", resolved.effective.tab_color());
+    println!("EFFECTIVE_ACTIVITY={}", resolved.effective.activity());
+    println!("TITLE_CAPABILITY_LIMITED={}", resolved.title_limited);
+    println!("COLOR_CAPABILITY_LIMITED={}", resolved.color_limited);
+    println!("ACTIVITY_CAPABILITY_LIMITED={}", resolved.activity_limited);
+    println!("LIVE_APPLICATION=UNPROVEN");
+    println!("RESTART_MAY_BE_REQUIRED=true");
 }
 
 fn interface_command(
@@ -3937,8 +4090,23 @@ fn export_settings(
         Ok(store) => store,
         Err(error) => return transfer_failure("EXPORT", &error, output),
     };
-    let presentation = match presentation_store.snapshot_read_only() {
-        Ok(snapshot) => (!snapshot.is_absent()).then_some(snapshot.settings()),
+    let (presentation, provider_overrides) = match presentation_store.snapshot_read_only() {
+        Ok(snapshot) => {
+            let mut overrides = BTreeMap::new();
+            for provider in [CliTarget::Codex, CliTarget::Agy, CliTarget::Cursor] {
+                let preference = match snapshot.provider_override(provider) {
+                    Ok(preference) => preference,
+                    Err(error) => return transfer_failure("EXPORT", &error, output),
+                };
+                if preference != PresentationOverride::default() {
+                    overrides.insert(provider, preference);
+                }
+            }
+            (
+                (!snapshot.is_absent()).then_some(snapshot.settings()),
+                overrides,
+            )
+        }
         Err(error) => return transfer_failure("EXPORT", &error, output),
     };
     let interface = match interface_store.snapshot_read_only() {
@@ -3949,7 +4117,8 @@ fn export_settings(
         Ok(snapshot) => snapshot.preferences().clone(),
         Err(error) => return transfer_failure("EXPORT", &error, output),
     };
-    let document = SettingsExportV1::new(presentation, interface, &workspace);
+    let document = SettingsExportV1::new(presentation, interface, &workspace)
+        .with_provider_overrides(provider_overrides);
     let bytes = match document.to_canonical_json() {
         Ok(bytes) => bytes,
         Err(error) => return transfer_failure("EXPORT", &error, output),
@@ -4095,7 +4264,11 @@ fn import_outcome_name(outcome: ImportApplyOutcome) -> &'static str {
 fn print_export_summary(document: &SettingsExportV1, output: HumanOutputArgs) {
     if output.mode() == OutputMode::Plain {
         println!("EXPORT=PASS");
-        println!("EXPORT_SCHEMA=tabbeacon-export-v1");
+        println!("EXPORT_SCHEMA={}", document.schema());
+        println!(
+            "PROVIDER_OVERRIDES_EXPORTED={}",
+            document.provider_override_count()
+        );
         println!("PRESENTATION_EXPORTED={}", document.has_presentation());
         println!("INTERFACE_EXPORTED={}", document.has_interface());
         println!(
@@ -4147,7 +4320,11 @@ fn print_import_summary(
 ) {
     if output.mode() == OutputMode::Plain {
         println!("IMPORT={}", outcome.unwrap_or("PREVIEW"));
-        println!("IMPORT_SCHEMA=tabbeacon-export-v1");
+        println!("IMPORT_SCHEMA={}", document.schema());
+        println!(
+            "PROVIDER_OVERRIDES_IN_DOCUMENT={}",
+            document.provider_override_count()
+        );
         println!("PRESENTATION_CHANGES={}", plan.changes_presentation());
         println!("INTERFACE_CHANGES={}", plan.changes_interface());
         println!(

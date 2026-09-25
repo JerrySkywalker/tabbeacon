@@ -32,6 +32,7 @@ use crate::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleMarkBackend,
         WindowsTerminalCapabilities,
     },
+    presentation_policy::{ApplicationStatus, CliTarget, PresentationCapabilities},
     providers::registry::ProviderRegistry,
     repo::{RepositoryAlias, StableAliasRegistry, WorkspaceIdentityResolver},
     settings::{PresentationSettings, PresentationSettingsStore},
@@ -573,10 +574,18 @@ impl AgyTitleRuntime {
         let Ok(state_root) = StableAliasRegistry::default_state_root() else {
             return fallback_title(AgyTitleDispatchOutcome::DegradedStateRoot);
         };
-        let settings = PresentationSettingsStore::from_environment().map_or_else(
-            |_| PresentationSettings::default(),
-            |store| store.load_or_default(),
-        );
+        let settings = PresentationSettingsStore::from_environment()
+            .ok()
+            .and_then(|store| {
+                store
+                    .resolve_provider_read_only(
+                        CliTarget::Agy,
+                        PresentationCapabilities::AGY_TITLE_ONLY,
+                        ApplicationStatus::Unproven,
+                    )
+                    .ok()
+            })
+            .map_or_else(PresentationSettings::default, |resolved| resolved.effective);
         let runtime = Self::new(&state_root, settings);
         runtime.dispatch_to(raw, SystemTime::now())
     }

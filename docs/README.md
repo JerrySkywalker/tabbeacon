@@ -16,6 +16,8 @@ the published v0.7.3 binary.
   literal provider commands.
 - [Configuration](configuration.md) — presentation preferences, workspace
   aliases, and portable settings.
+- [English/Chinese terminology](terminology.md) — stable definitions for the
+  v0.8.0 development train.
 - [Supported coding agents](coding-agent-support.md) — current provider and
   capability boundaries.
 - [Troubleshooting](troubleshooting.md) — safe diagnosis before any repair.

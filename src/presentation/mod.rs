@@ -621,8 +621,17 @@ impl WindowsTerminalRenderer {
                 if let Some(title) = self.title_for(state) {
                     append_title(&mut bytes, &title);
                 }
-                append_progress(&mut bytes, configured_progress(state, self.settings));
+                if !self.settings.strict_channel_policy()
+                    || self.settings.activity().uses_windows_terminal_ring()
+                {
+                    append_progress(&mut bytes, configured_progress(state, self.settings));
+                }
                 if self.capabilities.frame_color_supported() {
+                    if self.settings.strict_channel_policy()
+                        && self.settings.tab_color() != TabColorMode::TabBeacon
+                    {
+                        return bytes;
+                    }
                     let color = if self.settings.tab_color() == TabColorMode::TabBeacon {
                         state.tab_color()
                     } else {
@@ -646,8 +655,17 @@ impl WindowsTerminalRenderer {
         let mut bytes = Vec::new();
         match action {
             PresentationAction::Apply(state) | PresentationAction::Reset(state) => {
-                append_progress(&mut bytes, configured_progress(state, self.settings));
+                if !self.settings.strict_channel_policy()
+                    || self.settings.activity().uses_windows_terminal_ring()
+                {
+                    append_progress(&mut bytes, configured_progress(state, self.settings));
+                }
                 if self.capabilities.frame_color_supported() {
+                    if self.settings.strict_channel_policy()
+                        && self.settings.tab_color() != TabColorMode::TabBeacon
+                    {
+                        return bytes;
+                    }
                     let color = if self.settings.tab_color() == TabColorMode::TabBeacon {
                         state.tab_color()
                     } else {

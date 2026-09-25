@@ -3,6 +3,8 @@
 TabBeacon normalizes provider evidence into a provider-neutral presentation
 model. A provider is production-supported only to the extent its current
 contract is admitted by evidence.
+See the [English/Chinese terminology](terminology.md) for the distinct meanings
+of capability, evidence, installed integration, Hook trust, and effective setting.
 
 ## Current support
 
@@ -15,6 +17,12 @@ contract is admitted by evidence.
 
 Deferred does not mean partially supported. It means no production provider is
 enabled or implied.
+
+Cursor Agent is being investigated for the v0.8.0 train. Its original command
+is `agent` on the observed ZenBook Duo installation. [Current Cursor Hook documentation](https://prod.cursor.com/docs/hooks)
+names a structured `stop.status` outcome, but exact Windows Terminal color
+routing and the original-command live lifecycle remain unproven. Cursor is not
+included in the current production support table until those gates pass.
 
 ## Setup paths
 

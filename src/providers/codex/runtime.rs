@@ -14,6 +14,7 @@ use crate::{
         PresentationPolicy, SemanticPresentationInput, TitleMarkBackend,
         WindowsTerminalCapabilities,
     },
+    presentation_policy::{ApplicationStatus, CliTarget, PresentationCapabilities},
     providers::registry::ProviderRegistry,
     repo::{StableAliasRegistry, WorkspaceIdentityResolver},
     settings::{PresentationSettings, PresentationSettingsStore},
@@ -127,10 +128,18 @@ impl CodexHookRuntime {
         let state_root = StableAliasRegistry::default_state_root()
             .map_err(|_| HookDispatchOutcome::DegradedStateRoot)?;
         let frame_color_supported = std::env::var_os("WT_SESSION").is_some();
-        let settings = PresentationSettingsStore::from_environment().map_or_else(
-            |_| PresentationSettings::default(),
-            |store| store.load_or_default(),
-        );
+        let settings = PresentationSettingsStore::from_environment()
+            .ok()
+            .and_then(|store| {
+                store
+                    .resolve_provider_read_only(
+                        CliTarget::Codex,
+                        PresentationCapabilities::CODEX,
+                        ApplicationStatus::Unproven,
+                    )
+                    .ok()
+            })
+            .map_or_else(PresentationSettings::default, |resolved| resolved.effective);
         let mut runtime = Self::with_settings(&state_root, frame_color_supported, settings);
         runtime.activity = ActivityCoordinator::system(&state_root)
             .unwrap_or_else(|_| ActivityCoordinator::disabled(&state_root));
@@ -179,10 +188,18 @@ impl CodexHookRuntime {
 
         let started = Instant::now();
         let frame_color_supported = std::env::var_os("WT_SESSION").is_some();
-        let settings = PresentationSettingsStore::from_environment().map_or_else(
-            |_| PresentationSettings::default(),
-            |store| store.load_or_default(),
-        );
+        let settings = PresentationSettingsStore::from_environment()
+            .ok()
+            .and_then(|store| {
+                store
+                    .resolve_provider_read_only(
+                        CliTarget::Codex,
+                        PresentationCapabilities::CODEX,
+                        ApplicationStatus::Unproven,
+                    )
+                    .ok()
+            })
+            .map_or_else(PresentationSettings::default, |resolved| resolved.effective);
         let mut runtime = Self::with_settings(&state_root, frame_color_supported, settings);
         runtime.activity = ActivityCoordinator::system(&state_root)
             .unwrap_or_else(|_| ActivityCoordinator::disabled(&state_root));
