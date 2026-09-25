@@ -32,6 +32,8 @@ pub enum CodexHookEvent {
     SubagentStop,
     /// A root turn produced its final response.
     Stop,
+    /// The user interrupted the active main-thread turn.
+    Interrupt,
 }
 
 impl CodexHookEvent {
@@ -50,6 +52,7 @@ impl CodexHookEvent {
             "SubagentStart" => Self::SubagentStart,
             "SubagentStop" => Self::SubagentStop,
             "Stop" => Self::Stop,
+            "Interrupt" => Self::Interrupt,
             _ => return None,
         })
     }
@@ -69,6 +72,7 @@ impl CodexHookEvent {
             Self::SubagentStart => "SubagentStart",
             Self::SubagentStop => "SubagentStop",
             Self::Stop => "Stop",
+            Self::Interrupt => "Interrupt",
         }
     }
 
@@ -81,7 +85,10 @@ impl CodexHookEvent {
     /// Whether the admitted wire schema can identify a thread-spawned subagent.
     #[must_use]
     pub const fn supports_subagent_context(self) -> bool {
-        !matches!(self, Self::SessionStart | Self::SessionEnd | Self::Stop)
+        !matches!(
+            self,
+            Self::SessionStart | Self::SessionEnd | Self::Stop | Self::Interrupt
+        )
     }
 
     /// Whether this is an explicit subagent lifecycle event.

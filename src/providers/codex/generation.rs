@@ -157,7 +157,7 @@ impl CodexGenerationStore {
                     AdmissionDecision::RejectStale
                 }
             }
-            CodexHookEvent::Stop => {
+            CodexHookEvent::Stop | CodexHookEvent::Interrupt => {
                 let turn = turn_digest(context)?;
                 let matches_current = state.current_turn.as_deref() == Some(&turn);
                 if matches_current {
@@ -384,6 +384,39 @@ mod tests {
         assert_eq!(
             first.turn_sha256(),
             Some(identifier_digest("turn-a").as_str())
+        );
+    }
+
+    #[test]
+    fn interrupt_retires_its_turn_and_late_old_events_cannot_override_new_work() {
+        let root = TestRoot::new("interrupt-order");
+        let store = CodexGenerationStore::new(&root.0);
+        let first_prompt = context(CodexHookEvent::UserPromptSubmit, Some("turn-a"));
+        let interrupt = context(CodexHookEvent::Interrupt, Some("turn-a"));
+        let old_stop = context(CodexHookEvent::Stop, Some("turn-a"));
+        let next_prompt = context(CodexHookEvent::UserPromptSubmit, Some("turn-b"));
+
+        assert!(matches!(
+            store
+                .admit(&first_prompt, RequestedHandling::Apply)
+                .unwrap(),
+            GenerationAdmission::Apply(_)
+        ));
+        assert!(matches!(
+            store.admit(&interrupt, RequestedHandling::Apply).unwrap(),
+            GenerationAdmission::Apply(_)
+        ));
+        assert_eq!(
+            store.admit(&old_stop, RequestedHandling::Apply).unwrap(),
+            GenerationAdmission::RejectStale
+        );
+        assert!(matches!(
+            store.admit(&next_prompt, RequestedHandling::Apply).unwrap(),
+            GenerationAdmission::Apply(_)
+        ));
+        assert_eq!(
+            store.admit(&interrupt, RequestedHandling::Apply).unwrap(),
+            GenerationAdmission::RejectStale
         );
     }
 }

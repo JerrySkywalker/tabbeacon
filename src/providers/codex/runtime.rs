@@ -499,7 +499,8 @@ impl CodexHookRuntime {
             super::CodexHookEvent::PreToolUse
             | super::CodexHookEvent::PostToolUse
             | super::CodexHookEvent::PermissionRequest
-            | super::CodexHookEvent::Stop => {
+            | super::CodexHookEvent::Stop
+            | super::CodexHookEvent::Interrupt => {
                 let observed_location =
                     WorkspaceIdentityResolver::fast_workspace_location_sha256(context.cwd()).ok();
                 self.root_workspace_anchors
@@ -846,6 +847,7 @@ const fn hook_event_name(event: super::CodexHookEvent) -> &'static str {
         super::CodexHookEvent::PostToolUse => "PostToolUse",
         super::CodexHookEvent::PermissionRequest => "PermissionRequest",
         super::CodexHookEvent::Stop => "Stop",
+        super::CodexHookEvent::Interrupt => "Interrupt",
         super::CodexHookEvent::PreCompact => "PreCompact",
         super::CodexHookEvent::PostCompact => "PostCompact",
         super::CodexHookEvent::SubagentStart => "SubagentStart",
