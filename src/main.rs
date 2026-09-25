@@ -4318,15 +4318,6 @@ fn import_settings(path: &std::path::Path, apply: bool, output: HumanOutputArgs)
     };
 
     print_import_summary(&plan, &document, None, output);
-    if plan.changes_codex_title_ownership(&presentation_snapshot) {
-        return transfer_failure(
-            "IMPORT",
-            &io::Error::other(
-                "import changes Codex title ownership; apply the Codex provider mode with `tabbeacon config provider codex apply` so Hook ownership can be reconciled",
-            ),
-            output,
-        );
-    }
     if !plan.is_applicable() {
         return ExitCode::from(2);
     }
@@ -4352,6 +4343,15 @@ fn import_settings(path: &std::path::Path, apply: bool, output: HumanOutputArgs)
 
     if !apply {
         return ExitCode::SUCCESS;
+    }
+    if plan.changes_codex_title_ownership(&presentation_snapshot) {
+        return transfer_failure(
+            "IMPORT",
+            &io::Error::other(
+                "import changes Codex title ownership; apply the Codex provider mode with `tabbeacon config provider codex apply` so Hook ownership can be reconciled",
+            ),
+            output,
+        );
     }
     let outcome = apply_import_plan(
         &plan,
