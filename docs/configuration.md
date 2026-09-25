@@ -113,8 +113,9 @@ Exports without provider overrides retain `tabbeacon-export-v1`; exports with
 partial provider overrides use `tabbeacon-export-v2`. The v0.8.0 candidate
 accepts both. The v2 document contains preferences only, never Hook trust,
 provider authentication, terminal binding, or installed integration state.
-If an import would change Codex terminal-title ownership, the candidate
-reports the conflict during preview and refuses the write. Apply that Codex
+If an import would change Codex terminal-title ownership, preview still shows
+the proposed change without writing. Apply refuses the import until Hook
+ownership can be reconciled in the same guarded transaction. Apply that Codex
 mode through `tabbeacon config provider codex apply` so the owned Hook
 configuration can be reconciled. A general import transaction for that case is
 not yet qualified.
