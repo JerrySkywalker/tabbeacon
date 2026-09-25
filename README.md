@@ -77,8 +77,11 @@ The production visual backend is title-first and intentionally compact:
 
 ## Quick Start
 
-Current public release: **v0.7.3**. Active feature development is paused for a
-long-term dogfood period, and no authoritative v0.8 roadmap has been created.
+Current public release: **v0.7.3**. The Owner-approved
+[v0.8.0 Goal Train](dev_governance_files/ROADMAP_V08.md) resumes bounded development
+of independent CLI presentation, Cursor color-only integration, Codex abnormal-state
+recovery, and bilingual terminology. These planned features are not yet included
+in the published v0.7.3 binary; all four will be qualified for one v0.8.0 release.
 
 Install the public CLI, run the guided setup, then launch Codex as usual:
 
