@@ -51,6 +51,15 @@ function Test-RelativeMarkdownLinks {
     }
 }
 
+$trainDocPaths = @(
+    'AGENTS.md',
+    'dev_governance_files/ROADMAP.md',
+    'dev_governance_files/DEVELOPMENT_PAUSE.md',
+    'dev_governance_files/ROADMAP_V08.md',
+    'dev_governance_files/V080_ACCEPTANCE_MATRIX.md',
+    'dev_governance_files/V080_EXECUTION_RUNBOOK.md'
+)
+
 $requiredFiles = @(
     'README.md',
     'README.zh-CN.md',
@@ -71,6 +80,7 @@ $requiredFiles = @(
     'CONTRIBUTING.md',
     'SECURITY.md'
 )
+$requiredFiles += $trainDocPaths
 
 foreach ($path in $requiredFiles) {
     [void](Get-RequiredContent $path)
@@ -178,6 +188,7 @@ for ($index = 0; $index -lt $expectedGlyphCells.Count; $index++) {
 }
 
 $markdownPaths = @(Get-ChildItem -Path @('README.md', 'README.zh-CN.md', 'CONTRIBUTING.md', 'SECURITY.md', 'docs') -Recurse -File -Filter '*.md' | ForEach-Object { $_.FullName })
+$markdownPaths += @($trainDocPaths | ForEach-Object { (Resolve-Path -LiteralPath $_).Path })
 Test-RelativeMarkdownLinks $markdownPaths
 
 $fencePaths = @(
@@ -186,6 +197,7 @@ $fencePaths = @(
     'docs/troubleshooting.md', 'docs/faq.md', 'docs/development/build-and-test.md',
     'docs/development/release-process.md'
 )
+$fencePaths += $trainDocPaths
 foreach ($path in $fencePaths) {
     $insideFence = $false
     foreach ($line in Get-Content -LiteralPath $path) {
@@ -245,7 +257,6 @@ foreach ($proof in $releaseProofs) {
 
 $releaseTargetProofs = @(
     @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_TARGET=v0\.7\.3' },
-    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'CURRENT_PUBLIC_TARGET=v0\.7\.3' },
     @{ Path = 'docs/v0.7.3-release-notes.md'; Pattern = '# TabBeacon v0\.7\.3' },
     @{ Path = 'docs/v0.7.2-release-notes.md'; Pattern = '# TabBeacon v0\.7\.2' }
 )
@@ -254,19 +265,55 @@ foreach ($proof in $releaseTargetProofs) {
     Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not identify the current or immediately prior release record"
 }
 
-$pauseStateProofs = @(
-    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'ACTIVE_FEATURE_DEVELOPMENT=PAUSED' },
-    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'ACTIVE_FEATURE_DEVELOPMENT=PAUSED' },
+# The Owner-approved v0.8.0 admission supersedes the dogfood-only pause.
+# Assert the new authority positively; retain all public v0.7.3 release proofs above.
+$developmentStateProofs = @(
+    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = '(?m)^ACTIVE_FEATURE_DEVELOPMENT=V080_ADMITTED\r?$' },
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = '(?m)^ACTIVE_FEATURE_DEVELOPMENT=V080_ADMITTED\r?$' },
+    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = '(?m)^CURRENT_DEVELOPMENT_TARGET=v0\.8\.0\r?$' },
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = '(?m)^CURRENT_DEVELOPMENT_TARGET=v0\.8\.0\r?$' },
     @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'V073_IMPLEMENTATION=COMPLETE' },
-    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'NO_ACTIVE_FEATURE_DEVELOPMENT=true' },
-    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'V08_OPTIONS_STATUS=NON_AUTHORITATIVE' },
-    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'ROADMAP_V08_CREATED=false' },
-    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'PR100_SUPERSEDED=true' },
-    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'NEXT_RECOMMENDED_GOAL=LONG_TERM_DOGFOOD_NO_ACTIVE_DEVELOPMENT' }
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'V073_IMPLEMENTATION=COMPLETE' },
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'V08_OPTIONS_STATUS=HISTORICAL_NON_AUTHORITATIVE' },
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = '(?m)^ROADMAP_V08_CREATED=true\r?$' },
+    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'PR100_SUPERSEDED=true' },
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'NEXT_RECOMMENDED_GOAL=V080_G00_RESUME_AUDIT_THEN_CONTINUOUS_IMPLEMENTATION' },
+    @{ Path = 'dev_governance_files/ROADMAP_V08.md'; Pattern = '(?m)^TARGET_RELEASE=v0\.8\.0\r?$' },
+    @{ Path = 'dev_governance_files/V080_EXECUTION_RUNBOOK.md'; Pattern = '(?m)^HOST_TARGET=zenbookduo\r?$' }
 )
-foreach ($proof in $pauseStateProofs) {
-    $content = Get-Content -LiteralPath $proof.Path -Raw
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not preserve the post-v0.7.3 dogfood pause"
+foreach ($proof in $developmentStateProofs) {
+    $content = Get-RequiredContent $proof.Path
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not preserve the approved v0.8.0 development admission"
+}
+
+$trainGoal = 'TB-V080-MULTICLI-TRUSTED-STATE-TRAIN-001'
+foreach ($path in @(
+    'dev_governance_files/ROADMAP_V08.md',
+    'dev_governance_files/V080_ACCEPTANCE_MATRIX.md',
+    'dev_governance_files/V080_EXECUTION_RUNBOOK.md'
+)) {
+    $content = Get-RequiredContent $path
+    Assert-Docs ($content.Contains("GOAL_ID=$trainGoal")) "$path has inconsistent Goal Train identity"
+}
+$roadmap = Get-RequiredContent 'dev_governance_files/ROADMAP_V08.md'
+$matrix = Get-RequiredContent 'dev_governance_files/V080_ACCEPTANCE_MATRIX.md'
+foreach ($package in @(
+    @{ Prefix = 'P'; Count = 8 },
+    @{ Prefix = 'C'; Count = 7 },
+    @{ Prefix = 'E'; Count = 7 },
+    @{ Prefix = 'T'; Count = 5 }
+)) {
+    foreach ($index in 1..$package.Count) {
+        $id = '{0}{1:D2}' -f $package.Prefix, $index
+        $rowPattern = '(?m)^\| ' + [regex]::Escape($id) + ' \|'
+        Assert-Docs ([regex]::Matches($roadmap, $rowPattern).Count -eq 1) "roadmap must contain exactly one deliverable row for $id"
+        Assert-Docs ([regex]::Matches($matrix, $rowPattern).Count -eq 1) "acceptance matrix must contain exactly one obligation row for $id"
+    }
+}
+foreach ($index in 1..8) {
+    $id = 'X{0:D2}' -f $index
+    $rowPattern = '(?m)^\| ' + [regex]::Escape($id) + ' \|'
+    Assert-Docs ([regex]::Matches($matrix, $rowPattern).Count -eq 1) "acceptance matrix must contain exactly one cross-feature row for $id"
 }
 
 Write-Host 'README_BADGE_COUNT=2'
@@ -285,4 +332,7 @@ Write-Host 'README_HERO_LOGO=PASS'
 Write-Host 'INTERNAL_MARKDOWN_LINKS_VALID=true'
 Write-Host 'DOCS_PORTAL_LINKS_VALID=true'
 Write-Host 'STALE_CURRENT_RELEASE_MARKERS=0'
+Write-Host 'V080_ADMISSION_DOCS=PASS'
+Write-Host 'V080_TASK_ROWS=27'
+Write-Host 'V080_CROSS_FEATURE_ROWS=8'
 Write-Host 'DOCS_CHECK=PASS'
