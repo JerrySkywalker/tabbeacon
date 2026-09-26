@@ -688,4 +688,103 @@ mod tests {
             CursorDispatchOutcome::RouteAdmitted
         );
     }
+
+    #[test]
+    fn start_only_terminal_cannot_change_a_second_terminals_color_or_end() {
+        let workspace = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let executable = workspace.path().join("tabbeacon.exe");
+        fs::write(&executable, b"synthetic binary").unwrap();
+        CursorHookIntegration::new(workspace.path(), &executable)
+            .unwrap()
+            .install()
+            .unwrap();
+        let resolved = resolve_presentation(
+            PresentationSettings::default(),
+            PresentationOverride::default().with_mode(PresentationMode::ColorOnly),
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        );
+        let dispatch = |name: &str,
+                        session: &str,
+                        generation: Option<&str>,
+                        terminal: &str,
+                        sink: &mut Vec<u8>| {
+            let mut payload = serde_json::json!({"hook_event_name":name,"session_id":session});
+            if let Some(generation) = generation {
+                payload["generation_id"] = generation.into();
+            }
+            if name == "stop" {
+                payload["status"] = "completed".into();
+            }
+            let digest = format!("{:x}", Sha256::digest(terminal.as_bytes()));
+            dispatch_with_output_bounded(
+                payload.to_string().as_bytes(),
+                workspace.path(),
+                &executable,
+                state.path(),
+                &digest,
+                terminal,
+                true,
+                &resolved,
+                sink,
+            )
+            .unwrap()
+        };
+        let mut first_output = Vec::new();
+        let mut second_output = Vec::new();
+        assert_eq!(
+            dispatch(
+                "sessionStart",
+                "start-only",
+                None,
+                "wt-a",
+                &mut first_output
+            ),
+            CursorDispatchOutcome::RouteAdmitted
+        );
+        assert_eq!(
+            dispatch(
+                "sessionStart",
+                "completed",
+                None,
+                "wt-b",
+                &mut second_output
+            ),
+            CursorDispatchOutcome::RouteAdmitted
+        );
+        assert_eq!(
+            dispatch(
+                "beforeSubmitPrompt",
+                "completed",
+                Some("g1"),
+                "wt-b",
+                &mut second_output
+            ),
+            CursorDispatchOutcome::OutputFlushed
+        );
+        assert_eq!(
+            dispatch("stop", "completed", Some("g1"), "wt-b", &mut second_output),
+            CursorDispatchOutcome::OutputFlushed
+        );
+        assert_eq!(
+            dispatch("sessionEnd", "completed", None, "wt-b", &mut second_output),
+            CursorDispatchOutcome::OutputFlushed
+        );
+        assert!(first_output.is_empty());
+        assert!(second_output.ends_with(b"\x1b]104;264\x1b\\"));
+        let session_a =
+            normalize_hook(br#"{"hook_event_name":"sessionStart","session_id":"start-only"}"#)
+                .unwrap()
+                .unwrap()
+                .session_sha256;
+        let session_b =
+            normalize_hook(br#"{"hook_event_name":"sessionStart","session_id":"completed"}"#)
+                .unwrap()
+                .unwrap()
+                .session_sha256;
+        let routes = state.path().join("cursor-route-v1");
+        assert!(routes.join(format!("{session_a}.json")).exists());
+        assert!(!routes.join(format!("{session_b}.json")).exists());
+    }
 }
