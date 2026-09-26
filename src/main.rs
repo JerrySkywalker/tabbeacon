@@ -14,9 +14,9 @@ use dialoguer::{Confirm, Select};
 use tabbeacon::cli::{
     AgyPreadmissionCommand, AgyQualificationCommand, AgyQualificationWorkspaceArgs, AliasCommand,
     Cli, Command, ConfigCommand, ConfigProvider, ConfigProviderMode, ConvergenceCommand,
-    DoctorArgs, ExplainCommand, HumanOutputArgs, InterfaceCommand, InterfacePreferenceKey,
-    OutputMode, PreviewArgs, Provider, ProviderConfigCommand, RepairCommand, SetupCommand,
-    TitlePolicyCommand, UninstallProvider, UpgradePreflightArgs,
+    CursorCommand, DoctorArgs, ExplainCommand, HumanOutputArgs, InterfaceCommand,
+    InterfacePreferenceKey, OutputMode, PreviewArgs, Provider, ProviderConfigCommand,
+    RepairCommand, SetupCommand, TitlePolicyCommand, UninstallProvider, UpgradePreflightArgs,
 };
 use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_hook_runtime_probe,
@@ -47,6 +47,7 @@ use tabbeacon::providers::codex::{
     CodexHookRuntime, CodexIntegration, CodexRepairDisposition, CodexRepairReport, SetupOutcome,
     TitleOwnershipOutcome, UninstallOutcome,
 };
+use tabbeacon::providers::cursor_integration::{CursorHookIntegration, CursorHookState};
 use tabbeacon::providers::registry::ProviderRegistry;
 use tabbeacon::setup::{
     GuidedSetupApplyResult, GuidedSetupPlan, SetupDecision, SetupDiscovery, WindowsTerminalState,
@@ -195,6 +196,11 @@ fn dispatch(cli: Cli) -> ExitCode {
             output,
             ..
         }) => setup_agy(output.mode()),
+        Some(Command::Setup {
+            command: Some(SetupCommand::Cursor { workspace }),
+            output,
+            ..
+        }) => manage_cursor_hooks(&workspace, true, output.mode()),
         Some(Command::Repair {
             command:
                 RepairCommand::Codex {
@@ -221,6 +227,14 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Status(output)) => status(output.mode(), output.language.preference()),
         Some(Command::Sessions(output)) => sessions(output.mode(), output.language.preference()),
         Some(Command::Hooks(output)) => hooks(output.mode(), output.language.preference()),
+        Some(Command::Cursor { command }) => match command {
+            CursorCommand::Check { workspace, output } => {
+                check_cursor_hooks(&workspace, output.mode())
+            }
+            CursorCommand::Uninstall { workspace, output } => {
+                manage_cursor_hooks(&workspace, false, output.mode())
+            }
+        },
         Some(Command::Agy { command }) => agy_preadmission(command),
         Some(Command::UpgradePreflight(arguments)) => upgrade_preflight(arguments),
         Some(Command::TitlePolicy { command }) => match command {
@@ -246,6 +260,7 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Hook {
             provider: Provider::Codex,
         }) => run_codex_hook(),
+        Some(Command::CursorHook) => run_cursor_hook(),
         Some(Command::McpHookStdio) => {
             let _ = tabbeacon::providers::codex::run_stdio_hook_server();
             ExitCode::SUCCESS
@@ -505,13 +520,37 @@ fn provider_presentation_admission(
 ) -> (PresentationCapabilities, ApplicationStatus) {
     match target {
         CliTarget::Codex => (PresentationCapabilities::CODEX, ApplicationStatus::Unproven),
-        CliTarget::Cursor => (PresentationCapabilities::NONE, ApplicationStatus::Unproven),
+        CliTarget::Cursor => cursor_presentation_admission(),
         CliTarget::Agy => {
             let Ok(setup) = AgyProductionSetup::from_environment() else {
                 return (PresentationCapabilities::NONE, ApplicationStatus::Unproven);
             };
             agy_presentation_admission(setup.inspect().state)
         }
+    }
+}
+
+fn cursor_presentation_admission() -> (PresentationCapabilities, ApplicationStatus) {
+    let (Ok(workspace), Ok(executable)) = (std::env::current_dir(), std::env::current_exe()) else {
+        return (PresentationCapabilities::NONE, ApplicationStatus::Unproven);
+    };
+    let Ok(integration) = CursorHookIntegration::new(&workspace, &executable) else {
+        return (PresentationCapabilities::NONE, ApplicationStatus::Unproven);
+    };
+    match integration.check() {
+        Ok(CursorHookState::Installed) => (
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        ),
+        Ok(CursorHookState::NotInstalled) => (
+            PresentationCapabilities::NONE,
+            ApplicationStatus::NotInstalled,
+        ),
+        Ok(CursorHookState::Partial | CursorHookState::Drift) => (
+            PresentationCapabilities::NONE,
+            ApplicationStatus::InstalledUntrusted,
+        ),
+        Err(_) => (PresentationCapabilities::NONE, ApplicationStatus::Unproven),
     }
 }
 
@@ -1395,6 +1434,51 @@ fn setup_agy(output_mode: OutputMode) -> ExitCode {
         Ok(outcome) => print_agy_setup_outcome(outcome, output_mode),
         Err(error) => print_agy_setup_error(error, output_mode),
     }
+}
+
+fn cursor_hook_integration(workspace: &std::path::Path) -> std::io::Result<CursorHookIntegration> {
+    CursorHookIntegration::new(workspace, &std::env::current_exe()?)
+}
+
+fn check_cursor_hooks(workspace: &std::path::Path, output_mode: OutputMode) -> ExitCode {
+    let result = cursor_hook_integration(workspace).and_then(|integration| integration.check());
+    print_cursor_hook_result(result, output_mode)
+}
+
+fn manage_cursor_hooks(
+    workspace: &std::path::Path,
+    install: bool,
+    output_mode: OutputMode,
+) -> ExitCode {
+    let result = cursor_hook_integration(workspace).and_then(|integration| {
+        if install {
+            integration.install()
+        } else {
+            integration.uninstall()
+        }
+    });
+    print_cursor_hook_result(result, output_mode)
+}
+
+fn print_cursor_hook_result(
+    result: std::io::Result<tabbeacon::providers::cursor_integration::CursorHookState>,
+    output_mode: OutputMode,
+) -> ExitCode {
+    let state = match result {
+        Ok(state) => state,
+        Err(error) => {
+            return management_error_for_output("CURSOR_HOOKS", &error, output_mode, None);
+        }
+    };
+    match output_mode {
+        OutputMode::Json => println!(
+            "{}",
+            serde_json::json!({"provider":"cursor","integration":state.as_str()})
+        ),
+        OutputMode::Plain => println!("CURSOR_INTEGRATION={}", state.as_str()),
+        OutputMode::Human => println!("Cursor Hook integration: {}.", state.as_str()),
+    }
+    ExitCode::SUCCESS
 }
 
 fn print_agy_setup_outcome(
@@ -3065,6 +3149,20 @@ fn run_codex_hook() -> ExitCode {
     }
     // Hook ingress is intentionally silent and fail open. In particular it
     // emits no hook control JSON and never blocks an agent operation.
+    ExitCode::SUCCESS
+}
+
+fn run_cursor_hook() -> ExitCode {
+    let mut input = Vec::new();
+    let mut bounded =
+        std::io::stdin().take((tabbeacon::providers::cursor::MAX_CURSOR_HOOK_BYTES + 1) as u64);
+    if bounded.read_to_end(&mut input).is_ok()
+        && input.len() <= tabbeacon::providers::cursor::MAX_CURSOR_HOOK_BYTES
+    {
+        let _ = tabbeacon::providers::cursor_runtime::dispatch_system(&input);
+    }
+    // Cursor's Hook protocol requires JSON; terminal presentation uses CONOUT$.
+    println!("{{}}");
     ExitCode::SUCCESS
 }
 

@@ -17,7 +17,7 @@ use crate::interface_preferences::InterfaceLanguage;
     name = "tabbeacon",
     version,
     about = "Live identity and status beacons for coding-agent tabs in Windows Terminal.",
-    after_help = "Common commands:\n  tabbeacon setup codex\n  tabbeacon setup agy\n  tabbeacon status --json\n  tabbeacon sessions --json\n  tabbeacon hooks --json\n  tabbeacon doctor --json\n  tabbeacon config show\n  tabbeacon alias show\n  tabbeacon completions powershell\nTerminology / 术语: https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/terminology.md"
+    after_help = "Common commands:\n  tabbeacon setup codex\n  tabbeacon setup agy\n  tabbeacon setup cursor --workspace <PATH>\n  tabbeacon cursor check --workspace <PATH>\n  tabbeacon status --json\n  tabbeacon sessions --json\n  tabbeacon hooks --json\n  tabbeacon doctor --json\n  tabbeacon config show\n  tabbeacon alias show\n  tabbeacon completions powershell\nTerminology / 术语: https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/terminology.md"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -53,6 +53,11 @@ pub enum Command {
     Sessions(OutputArgs),
     /// Inspect the provider-neutral, command-redacted Hook inventory.
     Hooks(OutputArgs),
+    /// Inspect or remove exact-owned Cursor project Hooks in an explicit workspace.
+    Cursor {
+        #[command(subcommand)]
+        command: CursorCommand,
+    },
     /// Run bounded legacy Agy qualification helpers; they never alter production setup.
     Agy {
         #[command(subcommand)]
@@ -80,6 +85,9 @@ pub enum Command {
     },
     /// Receive a fail-open Codex hook payload from stdin.
     Hook { provider: Provider },
+    /// Receive one fail-open Cursor Hook payload without contaminating JSON stdout.
+    #[command(name = "__cursor-hook-v1", hide = true)]
+    CursorHook,
     /// Session-scoped internal MCP Hook transport for admitted Codex profiles.
     #[command(name = "__mcp-hook-stdio-v1", hide = true)]
     McpHookStdio,
@@ -191,6 +199,30 @@ pub enum SetupCommand {
     Codex,
     /// Install or reconcile the admitted Agy title callback.
     Agy,
+    /// Install or reconcile project Hooks in an explicit Cursor workspace.
+    Cursor {
+        #[arg(long)]
+        workspace: PathBuf,
+    },
+}
+
+/// Cursor project Hook management; no ambient user profile is selected.
+#[derive(Debug, Subcommand)]
+pub enum CursorCommand {
+    /// Read-only exact-owned Hook status.
+    Check {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
+    /// Remove only exact-owned Hook declarations.
+    Uninstall {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[command(flatten)]
+        output: OutputArgs,
+    },
 }
 
 /// Explicit ownership-safe repair operations.
