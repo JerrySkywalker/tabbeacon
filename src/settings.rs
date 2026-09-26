@@ -1346,6 +1346,7 @@ mod tests {
             ),
             Ok(super::SnapshotSaveOutcome::Saved(_))
         ));
+        let after_saved = fs::read(&path).unwrap();
         assert!(matches!(
             store.save_provider_override_snapshot_if_unchanged_guarded::<()>(
                 &before,
@@ -1355,6 +1356,7 @@ mod tests {
             ),
             Ok(super::SnapshotSaveOutcome::Conflict)
         ));
+        assert_eq!(fs::read(&path).unwrap(), after_saved);
         assert!(
             fs::read_to_string(path)
                 .unwrap()
