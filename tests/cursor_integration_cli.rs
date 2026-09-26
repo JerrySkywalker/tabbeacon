@@ -88,6 +88,30 @@ fn public_cursor_management_preserves_foreign_project_hooks() {
     fs::create_dir(&data_root).unwrap();
     let registered_command = value["hooks"]["stop"][1]["command"].as_str().unwrap();
     let expected_terminal = format!("{:x}", Sha256::digest(b"synthetic-wt-session"));
+    let route_directory = data_root.join("tabbeacon/cursor-route-v1");
+    let mut unbound = Command::new("cmd")
+        .args(["/D", "/C"])
+        .raw_arg(registered_command)
+        .current_dir(root.path())
+        .env("CURSOR_DATA_DIR", &data_root)
+        .env("WT_SESSION", "synthetic-wt-session")
+        .env_remove("TABBEACON_CURSOR_EXPECTED_WT_SHA256")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    unbound
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"{\"hook_event_name\":\"sessionStart\",\"session_id\":\"synthetic-session\"}")
+        .unwrap();
+    let unbound_output = unbound.wait_with_output().unwrap();
+    assert!(unbound_output.status.success());
+    assert_eq!(unbound_output.stdout, b"{}\n");
+    assert!(unbound_output.stderr.is_empty());
+    assert!(!route_directory.exists());
     let mut hook = Command::new("cmd")
         .args(["/D", "/C"])
         .raw_arg(registered_command)
@@ -116,7 +140,6 @@ fn public_cursor_management_preserves_foreign_project_hooks() {
     assert!(output.stderr.is_empty());
     // A detached Hosted test process may have no owned console. In that case
     // dispatch refuses state creation; the public JSON protocol still holds.
-    let route_directory = data_root.join("tabbeacon/cursor-route-v1");
     if tabbeacon::console_output::open_owned_console().is_ok() {
         assert!(route_directory.exists());
         eprintln!("PUBLIC_CURSOR_ROUTE=ADMITTED_IN_OWNED_TEST_CONSOLE");

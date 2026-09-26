@@ -179,4 +179,78 @@ mod tests {
         assert_eq!(dispatch(end, "wt-1"), CursorDispatchOutcome::RouteAdmitted);
         assert_eq!(dispatch(prompt_two, "wt-1"), CursorDispatchOutcome::Ignored);
     }
+
+    #[test]
+    fn two_cursor_sessions_keep_independent_terminal_and_generation_routes() {
+        let workspace = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let executable = workspace.path().join("tabbeacon.exe");
+        fs::write(&executable, b"synthetic binary").unwrap();
+        CursorHookIntegration::new(workspace.path(), &executable)
+            .unwrap()
+            .install()
+            .unwrap();
+        let terminal_hash = |terminal: &str| format!("{:x}", Sha256::digest(terminal.as_bytes()));
+        let dispatch = |event: &str,
+                        session: &str,
+                        generation: Option<&str>,
+                        expected: &str,
+                        observed: &str| {
+            let mut payload = serde_json::json!({"hook_event_name":event,"session_id":session});
+            if let Some(generation) = generation {
+                payload["generation_id"] = generation.into();
+            }
+            if event == "stop" {
+                payload["status"] = "completed".into();
+            }
+            dispatch_bounded(
+                payload.to_string().as_bytes(),
+                workspace.path(),
+                &executable,
+                state.path(),
+                expected,
+                observed,
+                true,
+            )
+            .unwrap()
+        };
+        let a = terminal_hash("wt-a");
+        let b = terminal_hash("wt-b");
+        assert_eq!(
+            dispatch("sessionStart", "a", None, &a, "wt-a"),
+            CursorDispatchOutcome::RouteAdmitted
+        );
+        assert_eq!(
+            dispatch("sessionStart", "b", None, &b, "wt-b"),
+            CursorDispatchOutcome::RouteAdmitted
+        );
+        assert_eq!(
+            dispatch("beforeSubmitPrompt", "a", Some("a-1"), &a, "wt-a"),
+            CursorDispatchOutcome::RouteAdmitted
+        );
+        assert_eq!(
+            dispatch("beforeSubmitPrompt", "b", Some("b-1"), &b, "wt-b"),
+            CursorDispatchOutcome::RouteAdmitted
+        );
+        assert_eq!(
+            dispatch("stop", "a", Some("a-1"), &a, "wt-b"),
+            CursorDispatchOutcome::Ignored
+        );
+        assert_eq!(
+            dispatch("sessionEnd", "a", None, &a, "wt-a"),
+            CursorDispatchOutcome::RouteAdmitted
+        );
+        assert_eq!(
+            dispatch("stop", "b", Some("b-1"), &b, "wt-b"),
+            CursorDispatchOutcome::RouteAdmitted
+        );
+        assert_eq!(
+            dispatch("beforeSubmitPrompt", "a", Some("a-2"), &a, "wt-a"),
+            CursorDispatchOutcome::Ignored
+        );
+        assert_eq!(
+            dispatch("beforeSubmitPrompt", "b", Some("b-2"), &b, "wt-b"),
+            CursorDispatchOutcome::RouteAdmitted
+        );
+    }
 }
