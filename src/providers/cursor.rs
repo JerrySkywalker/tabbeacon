@@ -2,6 +2,7 @@
 //! Hook or claim a terminal route; runtime admission must bind both first.
 
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::core::{Attention, FieldUpdate, Health, Phase, StatePatch};
 
@@ -22,8 +23,8 @@ pub enum CursorEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CursorLifecycle {
     pub event: CursorEvent,
-    pub session_id: String,
-    pub generation_id: Option<String>,
+    pub session_sha256: String,
+    pub generation_sha256: Option<String>,
     pub patch: StatePatch,
 }
 
@@ -33,8 +34,8 @@ pub struct CursorLifecycle {
 #[derive(Debug, Clone)]
 pub struct CursorSessionRoute {
     terminal_binding_sha256: String,
-    session_id: String,
-    active_generation_id: Option<String>,
+    session_sha256: String,
+    active_generation_sha256: Option<String>,
     seen_generations: Vec<String>,
     ended: bool,
 }
@@ -54,8 +55,8 @@ impl CursorSessionRoute {
             && expected_terminal_binding_sha256 == observed_terminal_binding_sha256)
             .then(|| Self {
                 terminal_binding_sha256: expected_terminal_binding_sha256.to_owned(),
-                session_id: event.session_id.clone(),
-                active_generation_id: None,
+                session_sha256: event.session_sha256.clone(),
+                active_generation_sha256: None,
                 seen_generations: Vec::new(),
                 ended: false,
             })
@@ -72,17 +73,17 @@ impl CursorSessionRoute {
         if self.ended
             || !console_openable
             || observed_terminal_binding_sha256 != self.terminal_binding_sha256
-            || event.session_id != self.session_id
+            || event.session_sha256 != self.session_sha256
         {
             return false;
         }
         match event.event {
             CursorEvent::SessionStart => false,
             CursorEvent::BeforeSubmitPrompt => {
-                let Some(generation) = event.generation_id.as_ref() else {
+                let Some(generation) = event.generation_sha256.as_ref() else {
                     return false;
                 };
-                if self.active_generation_id.as_ref() == Some(generation) {
+                if self.active_generation_sha256.as_ref() == Some(generation) {
                     return true;
                 }
                 if self.seen_generations.contains(generation) {
@@ -94,18 +95,18 @@ impl CursorSessionRoute {
                     return false;
                 }
                 self.seen_generations.push(generation.clone());
-                self.active_generation_id = Some(generation.clone());
+                self.active_generation_sha256 = Some(generation.clone());
                 true
             }
             CursorEvent::Stop => {
-                if self.active_generation_id.as_ref() != event.generation_id.as_ref() {
+                if self.active_generation_sha256.as_ref() != event.generation_sha256.as_ref() {
                     return false;
                 }
-                self.active_generation_id = None;
+                self.active_generation_sha256 = None;
                 true
             }
             CursorEvent::SessionEnd => {
-                self.active_generation_id = None;
+                self.active_generation_sha256 = None;
                 self.ended = true;
                 true
             }
@@ -150,21 +151,22 @@ pub fn normalize_hook(raw: &[u8]) -> Result<Option<CursorLifecycle>, CursorParse
         "sessionEnd" => CursorEvent::SessionEnd,
         _ => return Ok(None),
     };
-    let conversation_id = bounded_identity(object, "conversation_id");
-    let hook_session_id = bounded_identity(object, "session_id");
+    let conversation_id = bounded_identity(object, "conversation_id", b"cursor-session-v1:");
+    let hook_session_id = bounded_identity(object, "session_id", b"cursor-session-v1:");
     if conversation_id.is_some() && hook_session_id.is_some() && conversation_id != hook_session_id
     {
         return Err(CursorParseError::MissingIdentity);
     }
-    let session_id = conversation_id
+    let session_sha256 = conversation_id
         .or(hook_session_id)
         .ok_or(CursorParseError::MissingIdentity)?;
-    let generation_id = match event {
+    let generation_sha256 = match event {
         CursorEvent::BeforeSubmitPrompt | CursorEvent::Stop => Some(
-            bounded_identity(object, "generation_id").ok_or(CursorParseError::MissingIdentity)?,
+            bounded_identity(object, "generation_id", b"cursor-generation-v1:")
+                .ok_or(CursorParseError::MissingIdentity)?,
         ),
         CursorEvent::SessionStart | CursorEvent::SessionEnd => {
-            bounded_identity(object, "generation_id")
+            bounded_identity(object, "generation_id", b"cursor-generation-v1:")
         }
     };
     let patch = match event {
@@ -206,16 +208,21 @@ pub fn normalize_hook(raw: &[u8]) -> Result<Option<CursorLifecycle>, CursorParse
     };
     Ok(Some(CursorLifecycle {
         event,
-        session_id,
-        generation_id,
+        session_sha256,
+        generation_sha256,
         patch,
     }))
 }
 
-fn bounded_identity(object: &Map<String, Value>, name: &str) -> Option<String> {
+fn bounded_identity(object: &Map<String, Value>, name: &str, domain: &[u8]) -> Option<String> {
     let value = object.get(name)?.as_str()?;
-    (!value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control))
-        .then(|| value.to_owned())
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(value.as_bytes());
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 #[cfg(test)]
@@ -238,6 +245,8 @@ mod tests {
             assert!(!debug.contains("secret@example.org"));
             assert!(!debug.contains("private-transcript"));
             assert!(!debug.contains("private-prompt"));
+            assert!(!debug.contains("session-a"));
+            assert!(!debug.contains("turn-a"));
         }
     }
 
@@ -267,8 +276,9 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(event.event, CursorEvent::BeforeSubmitPrompt);
-        assert_eq!(event.session_id, "s");
-        assert_eq!(event.generation_id.as_deref(), Some("g2"));
+        assert_eq!(event.session_sha256.len(), 64);
+        assert_eq!(event.generation_sha256.as_ref().map(String::len), Some(64));
+        assert!(!format!("{event:?}").contains("g2"));
         assert_eq!(event.patch.phase, FieldUpdate::set(Phase::Working));
         assert_eq!(event.patch.health, FieldUpdate::clear());
         assert!(!format!("{event:?}").contains("secret text"));
