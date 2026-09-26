@@ -1186,6 +1186,7 @@ mod tests {
             .join(format!("{}.json", start.session_sha256));
         let mut route = CursorSessionRoute::from_checkpoint(&fs::read(&path).unwrap()).unwrap();
         assert!(route.admit(&end, &terminal, true));
+        route.finish_end();
         fs::write(&path, route.checkpoint().unwrap()).unwrap();
         // The previous Hook process stopped after persisting the ended route,
         // before updating the tombstone and deleting its exact checkpoint.
