@@ -98,8 +98,9 @@ change the repository, terminal, or daily command.
 
 ## Export and import
 
-Portable settings use canonical `tabbeacon-export-v1` JSON. Export creates a
-new file by default; import previews before it can apply:
+Portable preferences use canonical `tabbeacon-export-v1` or
+`tabbeacon-export-v2` JSON. Export creates a new file by default; import
+previews before it can apply:
 
 ```powershell
 tabbeacon export --output tabbeacon-settings.json

@@ -111,7 +111,7 @@ pub enum Command {
         #[command(flatten)]
         output: OutputArgs,
     },
-    /// Export portable user configuration as canonical tabbeacon-export-v1 JSON.
+    /// Export portable user preferences as canonical v1 or v2 JSON.
     Export {
         /// Write the canonical document to a new file instead of stdout.
         #[arg(long = "output", value_name = "PATH")]
@@ -122,9 +122,9 @@ pub enum Command {
         #[command(flatten)]
         output: HumanOutputArgs,
     },
-    /// Preview or explicitly apply a portable user-configuration import.
+    /// Preview or explicitly apply portable user preferences.
     Import {
-        /// Bounded canonical tabbeacon-export-v1 JSON document to inspect.
+        /// Bounded canonical tabbeacon-export-v1 or -v2 JSON document to inspect.
         path: PathBuf,
         /// Apply the displayed plan; non-interactive imports never mutate without it.
         #[arg(long)]
