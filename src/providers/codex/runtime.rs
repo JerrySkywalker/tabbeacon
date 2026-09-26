@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::{
-    CodexHookNormalizer, CodexNormalization,
+    CodexHookNormalizer, CodexHookProfile, CodexIntegration, CodexNormalization,
     anchor::{RootWorkspaceAnchorStore, RootWorkspaceBindingSource, RootWorkspaceSelection},
     generation::{CodexGenerationStore, GenerationAdmission, RequestedHandling},
 };
@@ -70,6 +70,7 @@ pub enum HookDispatchOutcome {
 /// One-shot Codex hook execution through the existing product layers.
 #[derive(Debug, Clone)]
 pub struct CodexHookRuntime {
+    hook_profile: CodexHookProfile,
     identity_resolver: WorkspaceIdentityResolver,
     generation_store: CodexGenerationStore,
     root_workspace_anchors: RootWorkspaceAnchorStore,
@@ -104,6 +105,7 @@ impl CodexHookRuntime {
     ) -> Self {
         let state_root = state_root.into();
         Self {
+            hook_profile: CodexHookProfile::command_v1(),
             identity_resolver: WorkspaceIdentityResolver::new(&state_root),
             generation_store: CodexGenerationStore::new(&state_root),
             root_workspace_anchors: RootWorkspaceAnchorStore::new(&state_root),
@@ -113,6 +115,14 @@ impl CodexHookRuntime {
             ),
             activity: ActivityCoordinator::disabled(&state_root),
         }
+    }
+
+    /// Selects a positively established Hook profile for a bounded runtime.
+    /// This does not grant installation or trust by itself.
+    #[must_use]
+    pub fn with_hook_profile(mut self, profile: CodexHookProfile) -> Self {
+        self.hook_profile = profile;
+        self
     }
 
     /// Creates the production runtime once for a long-lived transport.
@@ -161,20 +171,39 @@ impl CodexHookRuntime {
     /// hook CLI exits successfully for every returned outcome.
     #[must_use]
     pub fn dispatch_system(raw: &[u8]) -> HookDispatchOutcome {
+        let profile = if CodexIntegration::from_environment()
+            .is_ok_and(|integration| integration.interrupt_runtime_admitted_read_only())
+        {
+            CodexHookProfile::command_interrupt_v1()
+        } else {
+            CodexHookProfile::command_v1()
+        };
+        Self::dispatch_system_with_profile(raw, profile)
+    }
+
+    /// Runs the public production path with an explicitly admitted profile.
+    /// The caller must have checked its installed declaration and trust.
+    #[must_use]
+    pub fn dispatch_system_with_profile(
+        raw: &[u8],
+        profile: CodexHookProfile,
+    ) -> HookDispatchOutcome {
         let mut timing = HookTimingCapture::from_environment();
         let mut session_end_probe = SessionEndProbeCapture::from_environment();
-        let outcome = Self::dispatch_system_with_timing(raw, &mut timing, &mut session_end_probe);
+        let outcome =
+            Self::dispatch_system_with_timing(raw, profile, &mut timing, &mut session_end_probe);
         timing.emit(outcome);
         outcome
     }
 
     fn dispatch_system_with_timing(
         raw: &[u8],
+        profile: CodexHookProfile,
         timing: &mut HookTimingCapture,
         session_end_probe: &mut Option<SessionEndProbeCapture>,
     ) -> HookDispatchOutcome {
         let observed_at = SystemTime::now();
-        let normalized = match Self::normalize_with_timing(raw, observed_at, timing) {
+        let normalized = match Self::normalize_with_timing(raw, observed_at, profile, timing) {
             Ok(normalized) => normalized,
             Err(outcome) => return outcome,
         };
@@ -202,7 +231,8 @@ impl CodexHookRuntime {
                     .ok()
             })
             .map_or_else(PresentationSettings::default, |resolved| resolved.effective);
-        let mut runtime = Self::with_settings(&state_root, frame_color_supported, settings);
+        let mut runtime = Self::with_settings(&state_root, frame_color_supported, settings)
+            .with_hook_profile(profile);
         runtime.activity = ActivityCoordinator::system(&state_root)
             .unwrap_or_else(|_| ActivityCoordinator::disabled(&state_root));
         timing.record("runtime_initialization", started);
@@ -248,10 +278,11 @@ impl CodexHookRuntime {
         timing: &mut HookTimingCapture,
         session_end_probe: &mut Option<SessionEndProbeCapture>,
     ) -> HookDispatchOutcome {
-        let normalized = match Self::normalize_with_timing(raw, observed_at, timing) {
-            Ok(normalized) => normalized,
-            Err(outcome) => return outcome,
-        };
+        let normalized =
+            match Self::normalize_with_timing(raw, observed_at, self.hook_profile, timing) {
+                Ok(normalized) => normalized,
+                Err(outcome) => return outcome,
+            };
         self.dispatch_normalized_with_timing(
             normalized,
             observed_at,
@@ -264,10 +295,12 @@ impl CodexHookRuntime {
     fn normalize_with_timing(
         raw: &[u8],
         observed_at: SystemTime,
+        profile: CodexHookProfile,
         timing: &mut HookTimingCapture,
     ) -> Result<CodexNormalization, HookDispatchOutcome> {
         let started = Instant::now();
-        let Ok(normalized) = CodexHookNormalizer.normalize(raw, observed_at) else {
+        let Ok(normalized) = CodexHookNormalizer.normalize_with_profile(raw, observed_at, profile)
+        else {
             timing.record("normalization", started);
             return Err(HookDispatchOutcome::DegradedInput);
         };
@@ -983,6 +1016,78 @@ mod tests {
             "an anchored ordinary Hook must not run Git discovery"
         );
 
+        fs::remove_dir_all(root).expect("owned test root removes");
+    }
+
+    #[test]
+    fn explicit_interrupt_profile_reaches_generation_and_terminal_dispatch() {
+        let root = test_root("interrupt-dispatch");
+        let repository = root.join("repository");
+        let state = root.join("state");
+        fs::create_dir_all(&repository).expect("repository directory creates");
+        initialize_repository(&repository);
+        let runtime = CodexHookRuntime::new(&state, true)
+            .with_hook_profile(crate::providers::codex::CodexHookProfile::command_interrupt_v1());
+        let event = |name: &str, turn: Option<&str>| {
+            let mut payload = json!({
+                "hook_event_name": name,
+                "session_id": "session-interrupt-dispatch",
+                "cwd": repository,
+            });
+            if let Some(turn) = turn {
+                payload["turn_id"] = turn.into();
+            }
+            if name == "SessionStart" {
+                payload["source"] = "startup".into();
+            }
+            serde_json::to_vec(&payload).expect("event serializes")
+        };
+        let mut sink = Vec::new();
+        assert_eq!(
+            runtime.dispatch_to(&event("SessionStart", None), UNIX_EPOCH, &mut sink),
+            HookDispatchOutcome::Applied
+        );
+        sink.clear();
+        assert_eq!(
+            runtime.dispatch_to(
+                &event("UserPromptSubmit", Some("turn-a")),
+                UNIX_EPOCH,
+                &mut sink
+            ),
+            HookDispatchOutcome::Applied
+        );
+        sink.clear();
+        assert_eq!(
+            runtime.dispatch_to(&event("Interrupt", Some("turn-a")), UNIX_EPOCH, &mut sink),
+            HookDispatchOutcome::Applied
+        );
+        assert!(
+            sink.windows(b"rgb:9b/59/b6".len())
+                .any(|window| window == b"rgb:9b/59/b6"),
+            "typed interrupted palette reaches terminal sink"
+        );
+        sink.clear();
+        assert_eq!(
+            runtime.dispatch_to(&event("Stop", Some("turn-a")), UNIX_EPOCH, &mut sink),
+            HookDispatchOutcome::RejectedStaleGeneration
+        );
+        assert!(
+            sink.is_empty(),
+            "late success cannot overwrite interruption"
+        );
+        assert_eq!(
+            runtime.dispatch_to(
+                &event("UserPromptSubmit", Some("turn-b")),
+                UNIX_EPOCH,
+                &mut sink
+            ),
+            HookDispatchOutcome::Applied
+        );
+        assert!(
+            sink.windows(b"rgb:2e/cc/71".len())
+                .any(|window| window == b"rgb:2e/cc/71"),
+            "new turn clears interrupted health"
+        );
         fs::remove_dir_all(root).expect("owned test root removes");
     }
 

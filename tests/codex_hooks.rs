@@ -740,6 +740,7 @@ fn codex_event_key(event: &str) -> &'static str {
         "SubagentStart" => "subagent_start",
         "SubagentStop" => "subagent_stop",
         "Stop" => "stop",
+        "Interrupt" => "interrupt",
         other => panic!("unsupported test event: {other}"),
     }
 }
@@ -1433,6 +1434,145 @@ fn bounded_capability_contracts_are_explicit_and_version_independent() {
     assert!(CodexCompatibilityState::Degraded(profile).is_supported());
     assert!(!CodexCompatibilityState::Incompatible.is_supported());
     assert!(!CodexCompatibilityState::Unproven.is_supported());
+}
+
+#[test]
+fn exact_interrupt_profile_requires_owned_declaration_and_fresh_trust() {
+    let root = TestRoot::new("interrupt-profile-trust");
+    let integration = test_integration_with_codex_fixture(&root, "codex_interrupt_probe.rs");
+    assert_eq!(
+        integration.setup().expect("isolated setup succeeds"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    let report = integration.doctor();
+    assert_eq!(
+        report.hook_profile(),
+        Some(CodexHookProfile::command_interrupt_v1())
+    );
+    assert_eq!(report.owned_hook_count(), Some(12));
+    assert!(!integration.interrupt_runtime_admitted_read_only());
+    let keys = install_current_codex_trust_state(&root.child("codex-home"));
+    assert_eq!(keys.len(), 12);
+    assert!(
+        integration.interrupt_runtime_admitted_read_only(),
+        "doctor: {:?}",
+        integration.doctor().checks()
+    );
+    let interrupt_key = keys
+        .iter()
+        .find(|key| key.contains(":interrupt:"))
+        .expect("Interrupt has its own trust key");
+    let config_path = root.child("codex-home/config.toml");
+    let mut config = fs::read_to_string(&config_path)
+        .unwrap()
+        .parse::<DocumentMut>()
+        .unwrap();
+    config["hooks"]["state"][interrupt_key]["trusted_hash"] = value("sha256:stale");
+    fs::write(&config_path, config.to_string()).unwrap();
+    assert!(!integration.interrupt_runtime_admitted_read_only());
+}
+
+#[test]
+fn interrupt_capability_cache_cannot_override_current_disabled_hooks() {
+    let root = TestRoot::new("interrupt-cache-disable");
+    let fixture = compile_codex_probe_fixture(&root, "codex_interrupt_probe.rs");
+    let executable = root.child("bin/tabbeacon.exe");
+    fs::create_dir_all(executable.parent().expect("binary parent")).expect("binary parent creates");
+    fs::write(&executable, b"test executable placeholder").expect("binary placeholder writes");
+    let integration =
+        CodexIntegration::new(root.child("codex-home"), root.child("state"), executable)
+            .with_codex_program(&fixture);
+    assert_eq!(
+        integration
+            .setup()
+            .expect("isolated setup caches capability"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    fs::write(
+        fixture
+            .parent()
+            .expect("fixture parent")
+            .join("hooks-disabled"),
+        b"",
+    )
+    .expect("fixture capability changes without binary replacement");
+    let doctor = integration.doctor();
+    assert_eq!(doctor.mutation_authority(), CodexMutationAuthority::Blocked);
+    assert_eq!(
+        doctor.compatibility_state(),
+        CodexCompatibilityState::Incompatible
+    );
+}
+
+#[test]
+fn public_hook_cli_admits_interrupt_only_after_isolated_declaration_and_trust() {
+    let root = TestRoot::new("interrupt-public-cli");
+    let binary = PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon"));
+    let codex_home = root.child("codex-home");
+    let local_app_data = root.child("local-app-data");
+    let fixture = compile_codex_probe_fixture(&root, "codex_interrupt_probe.rs");
+    let integration = CodexIntegration::new(
+        &codex_home,
+        local_app_data.join("TabBeacon/codex-integration"),
+        &binary,
+    )
+    .with_codex_program(fixture);
+    assert_eq!(
+        integration.setup().expect("isolated hook setup"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    let payload = serde_json::to_vec(&hook_payload("Interrupt", "public-interrupt", &root.path))
+        .expect("fixture serializes");
+    let run = |receipt: &str| {
+        let receipt = root.child(receipt);
+        let mut child = Command::new(&binary)
+            .args(["hook", "codex"])
+            .env("CODEX_HOME", &codex_home)
+            .env("LOCALAPPDATA", &local_app_data)
+            .env("USERPROFILE", &root.path)
+            .env("TABBEACON_HOOK_TIMING_FILE", &receipt)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("public hook CLI starts");
+        child
+            .stdin
+            .take()
+            .expect("hook stdin")
+            .write_all(&payload)
+            .expect("isolated hook payload writes");
+        let output = child.wait_with_output().expect("public hook CLI exits");
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty(), "Hook stdout stays untouched");
+        assert!(
+            output.stderr.is_empty(),
+            "Hook remains silent and fail open"
+        );
+        fs::read_to_string(receipt).expect("content-free timing receipt reads")
+    };
+    assert!(run("before-trust.txt").contains("event=unrecognized"));
+    assert_eq!(install_current_codex_trust_state(&codex_home).len(), 12);
+    let admitted = run("after-trust.txt");
+    assert!(admitted.contains("event=Interrupt"), "{admitted}");
+    assert!(
+        !admitted.contains("outcome=ignored_unsupported"),
+        "{admitted}"
+    );
+    let config_path = codex_home.join("config.toml");
+    let mut config = fs::read_to_string(&config_path)
+        .expect("isolated config reads")
+        .parse::<DocumentMut>()
+        .expect("isolated config parses");
+    let interrupt_key = config["hooks"]["state"]
+        .as_table_like()
+        .expect("hook trust table")
+        .iter()
+        .find_map(|(key, _)| key.contains(":interrupt:").then_some(key.to_owned()))
+        .expect("Interrupt trust key exists");
+    config["hooks"]["state"][&interrupt_key]["trusted_hash"] = value("sha256:stale");
+    fs::write(config_path, config.to_string()).expect("isolated trust drift writes");
+    assert!(run("after-drift.txt").contains("event=unrecognized"));
 }
 
 #[test]

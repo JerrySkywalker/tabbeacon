@@ -195,6 +195,24 @@ impl CodexHookNormalizer {
         )
     }
 
+    /// Health authority is available only from a declared structured
+    /// Interrupt event in the selected profile.
+    #[must_use]
+    pub fn capabilities_for_profile(profile: CodexHookProfile) -> BackendCapabilities {
+        BackendCapabilities::new(
+            AuthoritySet::LIFECYCLE,
+            AuthoritySet::LIFECYCLE,
+            if profile
+                .lifecycle_events()
+                .contains(&CodexHookEvent::Interrupt)
+            {
+                AuthoritySet::LIFECYCLE
+            } else {
+                AuthoritySet::NONE
+            },
+        )
+    }
+
     /// Normalizes a single raw hook object without retaining sensitive fields.
     ///
     /// # Errors
@@ -206,7 +224,28 @@ impl CodexHookNormalizer {
         raw: &[u8],
         observed_at: SystemTime,
     ) -> Result<CodexNormalization, CodexHookError> {
-        Self::normalize_internal(raw, observed_at, false)
+        self.normalize_with_profile(raw, observed_at, Self::profile())
+    }
+
+    /// Normalizes against an explicitly selected, positively established
+    /// Hook contract. A profile cannot infer delivery or trust on its own.
+    ///
+    /// # Errors
+    ///
+    /// Returns a content-free reason for malformed or incomplete input.
+    pub fn normalize_with_profile(
+        self,
+        raw: &[u8],
+        observed_at: SystemTime,
+        profile: CodexHookProfile,
+    ) -> Result<CodexNormalization, CodexHookError> {
+        Self::normalize_internal(
+            raw,
+            observed_at,
+            profile
+                .lifecycle_events()
+                .contains(&CodexHookEvent::Interrupt),
+        )
     }
 
     #[allow(clippy::too_many_lines)]
@@ -384,7 +423,10 @@ fn identity_digest(context: &CodexHookContext) -> String {
 mod abnormal_tests {
     use std::time::SystemTime;
 
-    use super::{CodexHookEvent, CodexHookNormalizer, CodexNormalization, hook_input_template};
+    use super::{
+        CodexHookEvent, CodexHookNormalizer, CodexHookProfile, CodexNormalization,
+        hook_input_template,
+    };
     use crate::core::{FieldUpdate, Health, Phase};
 
     #[test]
@@ -403,9 +445,13 @@ mod abnormal_tests {
                 .unwrap(),
             CodexNormalization::UnsupportedEvent
         );
-        let CodexNormalization::Evidence(interrupted) =
-            CodexHookNormalizer::normalize_internal(interrupt, SystemTime::UNIX_EPOCH, true)
-                .unwrap()
+        let CodexNormalization::Evidence(interrupted) = CodexHookNormalizer
+            .normalize_with_profile(
+                interrupt,
+                SystemTime::UNIX_EPOCH,
+                CodexHookProfile::command_interrupt_v1(),
+            )
+            .unwrap()
         else {
             panic!("explicit Interrupt is lifecycle evidence");
         };
@@ -420,9 +466,13 @@ mod abnormal_tests {
         assert!(!format!("{interrupted:?}").contains("private"));
 
         let next_prompt = br#"{"hook_event_name":"UserPromptSubmit","session_id":"session-a","turn_id":"turn-b","cwd":"/workspace"}"#;
-        let CodexNormalization::Evidence(recovered) =
-            CodexHookNormalizer::normalize_internal(next_prompt, SystemTime::UNIX_EPOCH, true)
-                .unwrap()
+        let CodexNormalization::Evidence(recovered) = CodexHookNormalizer
+            .normalize_with_profile(
+                next_prompt,
+                SystemTime::UNIX_EPOCH,
+                CodexHookProfile::command_interrupt_v1(),
+            )
+            .unwrap()
         else {
             panic!("new prompt is lifecycle evidence");
         };

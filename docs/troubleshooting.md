@@ -29,10 +29,12 @@ shows that `Stop` input exposes a turn ID but no failure category;
 `Interrupt` identifies an interrupted main turn. A warning or failed-turn color
 must be based on proved structured evidence. If that evidence is unavailable,
 TabBeacon remains fail-open and the original 404 class stays unresolved.
-The v0.8.0 candidate can normalize `Interrupt` in isolated fixtures; the
-currently admitted owned Codex Hook profile does not declare that event until
-installed-profile delivery is positively qualified. Fixture results are not a
-claim that an installed Codex session has reported an interruption.
+The v0.8.0 candidate has a separately admitted profile for the exact audited
+Codex 0.156.1 Hook contract. Isolated tests cover the owned `Interrupt`
+declaration, fresh trust, public Hook command, generation reconciliation, and
+terminal dispatch. The runtime refuses `Interrupt` when the declaration or
+trust is absent or drifted. Daily installed Hook delivery and visible output
+still need real qualification; the fixture is not a live interruption report.
 
 ## Hook trust needs review
 

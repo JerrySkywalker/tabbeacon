@@ -715,6 +715,40 @@ impl CodexIntegration {
         })
     }
 
+    /// Admits runtime interruption only for the exact owned command profile
+    /// whose installed declaration is currently trusted and enabled. This
+    /// read-only check performs no provider command, trust decision, or write.
+    #[must_use]
+    pub fn interrupt_runtime_admitted_read_only(&self) -> bool {
+        let Ok(Some(manifest)) = self.load_manifest() else {
+            return false;
+        };
+        if self.validate_manifest_scope(&manifest).is_err()
+            || manifest.mcp_server.is_some()
+            || manifest.executable != self.tabbeacon_executable
+        {
+            return false;
+        }
+        let Ok(expected) = owned_command_hooks_for_profile(
+            &manifest.executable,
+            CodexHookProfile::command_interrupt_v1(),
+        ) else {
+            return false;
+        };
+        if manifest.hooks != expected {
+            return false;
+        }
+        let (Ok(hooks), Ok(config)) = (
+            read_hooks_document(&self.hooks_path()),
+            read_config_document(&self.config_path()),
+        ) else {
+            return false;
+        };
+        validate_known_hook_wire_shape(&hooks).is_ok()
+            && hook_trust_check(&config, &self.hooks_path(), &hooks, &expected).status()
+                == DoctorStatus::Pass
+    }
+
     /// Audits binary, manifest, hook, trust, and terminal-title state read-only.
     #[must_use]
     #[allow(clippy::too_many_lines)] // Ordered read-only checks are the public doctor contract.
@@ -1991,7 +2025,7 @@ impl CodexIntegration {
                 return Ok(CodexRepairReport {
                     schema_version: 3,
                     disposition: CodexRepairDisposition::RepairedTrustReviewRequired,
-                    missing_declarations: HOOK_EVENTS.len(),
+                    missing_declarations: desired.len(),
                     target_digest,
                     third_party_groups_preserved: plan.third_party_groups_preserved,
                     postinstall_third_party_groups_preserved: plan
@@ -2004,7 +2038,7 @@ impl CodexIntegration {
             return Ok(CodexRepairReport {
                 schema_version: 3,
                 disposition: CodexRepairDisposition::ReadyToApply,
-                missing_declarations: HOOK_EVENTS.len(),
+                missing_declarations: desired.len(),
                 target_digest,
                 third_party_groups_preserved: plan.third_party_groups_preserved,
                 postinstall_third_party_groups_preserved: plan
@@ -2312,8 +2346,15 @@ impl CodexIntegration {
                         )
                 })
             }
-            None => owned_command_hooks(&manifest.executable, 1, false)
-                .is_ok_and(|expected| expected == manifest.hooks),
+            None => [
+                CodexHookProfile::command_v1(),
+                CodexHookProfile::command_interrupt_v1(),
+            ]
+            .into_iter()
+            .any(|profile| {
+                owned_command_hooks_for_profile(&manifest.executable, profile)
+                    .is_ok_and(|expected| expected == manifest.hooks)
+            }),
         }
     }
 
@@ -2736,11 +2777,7 @@ fn desired_hooks(
         )?);
         Ok(hooks)
     } else {
-        owned_command_hooks(
-            executable,
-            profile.timeout().declaration_timeout_seconds(),
-            !profile.timeout().synchronous_required(),
-        )
+        owned_command_hooks_for_profile(executable, profile)
     }
 }
 
@@ -2874,6 +2911,23 @@ fn owned_command_hooks(
     asynchronous: bool,
 ) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
     owned_command_hooks_for_events(executable, &HOOK_EVENTS, timeout_seconds, asynchronous)
+}
+
+fn owned_command_hooks_for_profile(
+    executable: &Path,
+    profile: CodexHookProfile,
+) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
+    let events = profile
+        .lifecycle_events()
+        .iter()
+        .map(|event| event.as_str())
+        .collect::<Vec<_>>();
+    owned_command_hooks_for_events(
+        executable,
+        &events,
+        profile.timeout().declaration_timeout_seconds(),
+        !profile.timeout().synchronous_required(),
+    )
 }
 
 fn owned_command_hooks_for_events(
@@ -4816,6 +4870,7 @@ fn event_key_label(event: &str) -> &'static str {
         "SubagentStart" => "subagent_start",
         "SubagentStop" => "subagent_stop",
         "Stop" => "stop",
+        "Interrupt" => "interrupt",
         _ => "unsupported",
     }
 }

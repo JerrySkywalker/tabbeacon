@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 
 use super::{CodexCompatibilityState, CodexHookProfile};
 
-const CACHE_SCHEMA: &str = "tabbeacon-codex-capability-v2";
+const CACHE_SCHEMA: &str = "tabbeacon-codex-capability-v3";
 const CACHE_FILE: &str = "capability-v1.json";
 
 /// Content-minimal result of a local Codex capability probe.
@@ -68,16 +68,36 @@ struct CapabilityCacheRecord {
 #[serde(rename_all = "snake_case")]
 enum CachedCapabilityState {
     Full,
+    FullInterrupt,
     Degraded,
+    DegradedInterrupt,
     Incompatible,
     Unproven,
 }
 
 impl CachedCapabilityState {
-    const fn from_state(state: CodexCompatibilityState) -> Self {
+    fn from_state(state: CodexCompatibilityState) -> Self {
         match state {
-            CodexCompatibilityState::Full(_) => Self::Full,
-            CodexCompatibilityState::Degraded(_) => Self::Degraded,
+            CodexCompatibilityState::Full(profile) => {
+                if profile
+                    .lifecycle_events()
+                    .contains(&super::CodexHookEvent::Interrupt)
+                {
+                    Self::FullInterrupt
+                } else {
+                    Self::Full
+                }
+            }
+            CodexCompatibilityState::Degraded(profile) => {
+                if profile
+                    .lifecycle_events()
+                    .contains(&super::CodexHookEvent::Interrupt)
+                {
+                    Self::DegradedInterrupt
+                } else {
+                    Self::Degraded
+                }
+            }
             CodexCompatibilityState::Incompatible => Self::Incompatible,
             CodexCompatibilityState::Unproven => Self::Unproven,
         }
@@ -89,7 +109,13 @@ impl CachedCapabilityState {
             // transport. An existing exact hybrid transport is selected from
             // the separately validated ownership manifest, never a cache.
             Self::Full => CodexCompatibilityState::Full(CodexHookProfile::command_v1()),
+            Self::FullInterrupt => {
+                CodexCompatibilityState::Full(CodexHookProfile::command_interrupt_v1())
+            }
             Self::Degraded => CodexCompatibilityState::Degraded(CodexHookProfile::command_v1()),
+            Self::DegradedInterrupt => {
+                CodexCompatibilityState::Degraded(CodexHookProfile::command_interrupt_v1())
+            }
             Self::Incompatible => CodexCompatibilityState::Incompatible,
             Self::Unproven => CodexCompatibilityState::Unproven,
         }
@@ -105,12 +131,22 @@ pub(crate) fn probe(
     persist_cache: bool,
 ) -> CodexCapabilityProbe {
     let version = probe_version(codex_program);
+    // The feature flag can change in user configuration while the executable
+    // remains byte-identical. A cache entry never overrides current evidence
+    // that Hooks are disabled or unavailable.
+    let hook_feature = probe_hook_feature(codex_program);
     let executable_identity = executable_identity(codex_program);
     let cache_path = state_root.join(CACHE_FILE);
     if let Some(identity) = executable_identity.as_deref()
         && let Some(record) = read_cache(&cache_path)
         && record.schema == CACHE_SCHEMA
         && record.executable_identity == identity
+        && hook_feature == HookFeature::Enabled
+        && (version.as_deref() == Some("0.156.1"))
+            == matches!(
+                record.state,
+                CachedCapabilityState::FullInterrupt | CachedCapabilityState::DegradedInterrupt
+            )
     {
         return CodexCapabilityProbe {
             version,
@@ -123,20 +159,24 @@ pub(crate) fn probe(
         };
     }
 
-    let hook_feature = probe_hook_feature(codex_program);
+    // This exact installed release was audited against its matching upstream
+    // source tag. Other release numbers retain command-v1; ordering grants no
+    // event authority.
+    let command_profile = if version.as_deref() == Some("0.156.1") {
+        CodexHookProfile::command_interrupt_v1()
+    } else {
+        CodexHookProfile::command_v1()
+    };
     let (state, schema_fingerprint) = match hook_feature {
         HookFeature::Enabled => match probe_schema(codex_program) {
             Some(schema) => (
                 // A generated schema is diagnostic-only. In particular, an
                 // unrelated `mcp_tool` string does not positively establish
                 // the actual Hook MCP declaration contract.
-                CodexCompatibilityState::Full(CodexHookProfile::command_v1()),
+                CodexCompatibilityState::Full(command_profile),
                 Some(schema.fingerprint),
             ),
-            None => (
-                CodexCompatibilityState::Degraded(CodexHookProfile::command_v1()),
-                None,
-            ),
+            None => (CodexCompatibilityState::Degraded(command_profile), None),
         },
         HookFeature::Disabled => (CodexCompatibilityState::Incompatible, None),
         HookFeature::Unproven => (CodexCompatibilityState::Unproven, None),

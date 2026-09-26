@@ -41,7 +41,7 @@ title. See [Native](terminology.md#tb-t11), [Off](terminology.md#tb-t12), and
 
 | Candidate fact | Codex CLI | Cursor Agent |
 | --- | --- | --- |
-| Structured interruption | Internal fixture mapping exists; installed `Interrupt` delivery is unproven. | No admitted live interruption route. |
+| Structured interruption | The exact 0.156.1 source-audited profile, isolated owned declaration and trust gate, public Hook CLI, and runtime dispatch have deterministic proof. Daily installed `Interrupt` delivery and visible output remain unproven. | No admitted live interruption route. |
 | Structured warning or failed main turn | Unproven for the original HTTP 404 class in [Issue #116](https://github.com/JerrySkywalker/tabbeacon/issues/116). | `stop.status` is documented; live delivery and session binding remain unproven. |
 | Strict native presentation | Owned-channel release has deterministic tests; final visible transition proof is pending. | Native title and progress preservation with color-only output needs original-command terminal proof. |
 
