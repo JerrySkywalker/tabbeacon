@@ -778,6 +778,31 @@ impl PresentationSettingsStore {
         provider: CliTarget,
         replacement: PresentationOverride,
     ) -> Result<SnapshotSaveOutcome, SettingsError> {
+        self.save_provider_override_snapshot_if_unchanged_guarded(
+            expected,
+            provider,
+            replacement,
+            || Ok(()),
+        )
+    }
+
+    /// Saves an exact provider draft while holding the settings lock before
+    /// acquiring a caller-provided output guard. Cursor uses the route guard
+    /// so a stalled settings writer cannot hold up all admitted Hook output.
+    /// The guard is acquired only after the current snapshot has matched and
+    /// the candidate document has rendered, and is held through the write.
+    ///
+    /// # Errors
+    ///
+    /// Rejects drift, an unsafe settings target, or a failed output guard
+    /// before writing the candidate document.
+    pub fn save_provider_override_snapshot_if_unchanged_guarded<G>(
+        &self,
+        expected: &PresentationSettingsSnapshot,
+        provider: CliTarget,
+        replacement: PresentationOverride,
+        acquire_guard: impl FnOnce() -> Result<G, SettingsError>,
+    ) -> Result<SnapshotSaveOutcome, SettingsError> {
         self.with_lock(|| {
             let current = self.snapshot_unlocked()?;
             if !current.matches(expected) {
@@ -792,6 +817,7 @@ impl PresentationSettingsStore {
             };
             write_provider_override(&mut document, provider, replacement)?;
             let contents = document.to_string().into_bytes();
+            let _guard = acquire_guard()?;
             if current.contents.as_deref() != Some(contents.as_slice()) {
                 atomic_write(&self.path, &contents)?;
             }
@@ -1287,6 +1313,54 @@ mod tests {
         ActivityMode, ConditionalSaveOutcome, PresentationSettings, PresentationSettingsStore,
         PresentationTheme, ProviderBadgePolicy, SpinnerPreset, TabColorMode, TitleMode,
     };
+
+    use crate::presentation_policy::{CliTarget, PresentationMode, PresentationOverride};
+
+    #[test]
+    fn guarded_provider_save_refuses_output_lock_failure_before_any_write() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        fs::write(&path, "[foreign]\nkey = \"preserved\"\n").unwrap();
+        let store = PresentationSettingsStore::new(&path);
+        let before = store.snapshot_read_only().unwrap();
+        let original = fs::read(&path).unwrap();
+        let draft = PresentationOverride::default().with_mode(PresentationMode::PreserveNative);
+        let failed = store.save_provider_override_snapshot_if_unchanged_guarded::<()>(
+            &before,
+            CliTarget::Cursor,
+            draft,
+            || {
+                Err(super::SettingsError::Io(std::io::Error::other(
+                    "route lock failed",
+                )))
+            },
+        );
+        assert!(failed.is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(matches!(
+            store.save_provider_override_snapshot_if_unchanged_guarded(
+                &before,
+                CliTarget::Cursor,
+                draft,
+                || Ok(()),
+            ),
+            Ok(super::SnapshotSaveOutcome::Saved(_))
+        ));
+        assert!(matches!(
+            store.save_provider_override_snapshot_if_unchanged_guarded::<()>(
+                &before,
+                CliTarget::Cursor,
+                PresentationOverride::default(),
+                || panic!("drift must reject before the route lock is acquired"),
+            ),
+            Ok(super::SnapshotSaveOutcome::Conflict)
+        ));
+        assert!(
+            fs::read_to_string(path)
+                .unwrap()
+                .contains("key = \"preserved\"")
+        );
+    }
 
     fn temporary_config(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(

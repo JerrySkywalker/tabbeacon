@@ -328,3 +328,42 @@ fn public_cursor_apply_waits_for_the_existing_route_output_lock() {
     assert!(child.wait().unwrap().success());
     assert_ne!(fs::read(settings_path).unwrap(), before);
 }
+
+#[test]
+fn waiting_for_settings_lock_does_not_hold_the_cursor_route_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let local_appdata = root.path().join("local-appdata");
+    let state_root = local_appdata.join("TabBeacon");
+    fs::create_dir_all(&state_root).unwrap();
+    let binary = Path::new(env!("CARGO_BIN_EXE_tabbeacon"));
+    let settings_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(state_root.join("config.lock"))
+        .unwrap();
+    settings_lock.lock().unwrap();
+    let mut child = Command::new(binary)
+        .args([
+            "config",
+            "--plain",
+            "provider",
+            "cursor",
+            "apply",
+            "color-only",
+        ])
+        .current_dir(root.path())
+        .env("LOCALAPPDATA", &local_appdata)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(40));
+    assert!(child.try_wait().unwrap().is_none());
+    CursorRouteStore::new(&state_root)
+        .with_route_lock(|| Ok(()))
+        .expect("a settings-lock waiter must not block Hook routing");
+    fs::File::unlock(&settings_lock).unwrap();
+    assert!(child.wait().unwrap().success());
+}

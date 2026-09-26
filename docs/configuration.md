@@ -82,10 +82,17 @@ Control Center shows the same boundary. No output is claimed as applied merely
 because the preference was saved or a title callback was reconciled.
 For the direct Cursor provider Apply command, TabBeacon orders the settings
 write with the installed Hook's exact route/output lock. The Hook resolves the
-saved preference inside that lock before writing color. A busy lock rejects
+saved preference inside that lock before writing color. Apply acquires the
+settings lock before attempting the bounded route lock, so waiting for a
+settings writer does not hold up Hook routing. A busy route lock rejects
 the Apply before the preference write; no remote terminal is reset. Global
 settings and portable import have separate transaction paths and are not
 covered by this direct-Apply ordering claim.
+This ordering applies to Hook processes running the current TabBeacon binary.
+An already running older Hook process may have resolved an earlier preference
+before entering the lock; an upgrade must not treat this source change as proof
+that such a process cannot write later. The public isolated test exercises the
+current binary with a synthetic output sink, not an older in-flight process.
 
 ## Human interface preferences
 

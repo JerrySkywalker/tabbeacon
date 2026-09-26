@@ -293,6 +293,17 @@ pub struct CursorRouteStore {
     directory: PathBuf,
 }
 
+/// Held cross-process route/output lock. Dropping it releases the file lock.
+pub struct CursorRouteGuard {
+    lock: File,
+}
+
+impl Drop for CursorRouteGuard {
+    fn drop(&mut self) {
+        let _ = File::unlock(&self.lock);
+    }
+}
+
 impl CursorRouteStore {
     /// Places route state under a caller-owned local state root.
     #[must_use]
@@ -461,6 +472,18 @@ impl CursorRouteStore {
     /// Refuses unsafe paths and a route lock that stays busy beyond the Hook
     /// budget; no preference write is attempted in that case.
     pub fn with_route_lock<T>(&self, action: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        let _guard = self.acquire_route_lock()?;
+        action()
+    }
+
+    /// Acquires the bounded route/output lock so a settings writer can enter
+    /// it only after acquiring the settings lock. This prevents a slow settings
+    /// lock from blocking the entire Hook route while it waits.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unsafe paths or a route lock that remains busy past the budget.
+    pub fn acquire_route_lock(&self) -> io::Result<CursorRouteGuard> {
         for ancestor in self.directory.ancestors() {
             reject_route_symlink(ancestor)?;
         }
@@ -489,11 +512,7 @@ impl CursorRouteStore {
                 Err(error) => return Err(error.into()),
             }
         }
-        let result = action();
-        // The handle drop releases the lock even if an explicit unlock reports
-        // an error. Preserve the actual output disposition from the callback.
-        let _ = File::unlock(&lock);
-        result
+        Ok(CursorRouteGuard { lock })
     }
 
     fn admit_locked(

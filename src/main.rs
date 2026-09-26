@@ -586,32 +586,47 @@ fn apply_provider_override(
     draft: PresentationOverride,
 ) -> io::Result<()> {
     if draft == current {
-        return Ok(());
+        return store
+            .snapshot_is_current(snapshot)
+            .map_err(io::Error::other)?
+            .then_some(())
+            .ok_or_else(settings_conflict_error);
     }
-    if target == CliTarget::Cursor {
-        let state_root = store
-            .path()
-            .parent()
-            .ok_or_else(|| io::Error::other("Cursor state root is unavailable"))?;
-        return CursorRouteStore::new(state_root).with_route_lock(|| {
-            apply_provider_override_after_route_lock(store, snapshot, target, current, draft)
-        });
-    }
-    apply_provider_override_after_route_lock(store, snapshot, target, current, draft)
+    apply_changed_provider_override(store, snapshot, target, current, draft)
 }
 
-fn apply_provider_override_after_route_lock(
+fn apply_changed_provider_override(
     store: &PresentationSettingsStore,
     snapshot: &PresentationSettingsSnapshot,
     target: CliTarget,
     current: PresentationOverride,
     draft: PresentationOverride,
 ) -> io::Result<()> {
-    let receipt = match store.save_provider_override_snapshot_if_unchanged(snapshot, target, draft)
-    {
+    let save = || {
+        if target == CliTarget::Cursor {
+            let state_root = store
+                .path()
+                .parent()
+                .ok_or_else(|| io::Error::other("Cursor state root is unavailable"))?;
+            let route = CursorRouteStore::new(state_root);
+            store
+                .save_provider_override_snapshot_if_unchanged_guarded(
+                    snapshot,
+                    target,
+                    draft,
+                    || route.acquire_route_lock().map_err(Into::into),
+                )
+                .map_err(io::Error::other)
+        } else {
+            store
+                .save_provider_override_snapshot_if_unchanged(snapshot, target, draft)
+                .map_err(io::Error::other)
+        }
+    };
+    let receipt = match save() {
         Ok(SnapshotSaveOutcome::Saved(receipt)) => receipt,
         Ok(SnapshotSaveOutcome::Conflict) => return Err(settings_conflict_error()),
-        Err(error) => return Err(io::Error::other(error)),
+        Err(error) => return Err(error),
     };
     if !matches!(store.write_receipt_is_current(&receipt), Ok(true)) {
         return Err(settings_conflict_error());
@@ -5497,6 +5512,28 @@ mod tests {
         assert!(!native.effective.title().owns_tabbeacon_title());
         assert_eq!(native.effective.tab_color(), TabColorMode::Native);
         assert_eq!(native.effective.activity(), ActivityMode::Native);
+    }
+
+    #[test]
+    fn cursor_no_change_apply_refuses_a_stale_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let store = PresentationSettingsStore::new(root.path().join("config.toml"));
+        let before = store.snapshot_read_only().unwrap();
+        let current = PresentationOverride::default();
+        assert!(matches!(
+            store.save_provider_override_snapshot_if_unchanged(
+                &before,
+                CliTarget::Cursor,
+                current.with_mode(PresentationMode::ColorOnly),
+            ),
+            Ok(SnapshotSaveOutcome::Saved(_))
+        ));
+        assert!(
+            apply_provider_override(&store, &before, CliTarget::Cursor, current, current)
+                .unwrap_err()
+                .to_string()
+                .contains("concurrently")
+        );
     }
 
     #[test]
