@@ -25,7 +25,7 @@ use crate::{
     core::{Attention, Health, Phase},
     presentation::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleStatus,
-        WindowsTerminalCapabilities, WindowsTerminalRenderer,
+        WindowsTerminalCapabilities, WindowsTerminalRenderer, owned_channel_release_bytes,
     },
     providers::visual_identity::ProviderVisualIdentity,
     repo::RepositoryAlias,
@@ -1085,17 +1085,25 @@ impl ActivityCoordinator {
         event_sequence: u64,
         render: ActivityRender,
         bytes: &[u8],
+        desired_channels: OwnedTerminalChannels,
+        strict_channel_policy: bool,
         sink: &mut impl Write,
     ) -> io::Result<()> {
         match render {
             ActivityRender::Suppress => Ok(()),
             ActivityRender::UncoordinatedFull => {
+                if strict_channel_policy {
+                    // A strict provider preference needs the exact session
+                    // lease before it may acquire terminal output ownership.
+                    return Ok(());
+                }
                 sink.write_all(bytes)?;
                 sink.flush()
             }
             ActivityRender::Full | ActivityRender::WithoutTitle => {
                 let ActivityExecution::System {
                     terminal_binding_sha256,
+                    owner_sha256,
                     ..
                 } = &self.execution
                 else {
@@ -1111,12 +1119,40 @@ impl ActivityCoordinator {
                 // competing Hook transition. A delayed event that admitted
                 // before a newer event cannot write after the newer lease.
                 self.store.with_lock(|| {
-                    let current = self.store.load(key.digest())?;
-                    if current.as_ref().is_some_and(|lease| {
-                        lease.generation == generation && lease.event_sequence == event_sequence
-                    }) {
+                    let Some(mut current) = self.store.load(key.digest())? else {
+                        return Ok(());
+                    };
+                    if current.generation == generation
+                        && current.event_sequence == event_sequence
+                        && current.session_sha256 == session_sha256
+                        && current.terminal_binding_sha256 == *terminal_binding_sha256
+                        && current.owner_sha256 == *owner_sha256
+                    {
+                        let release = OwnedTerminalChannels {
+                            color: strict_channel_policy
+                                && current.owned_channels.color
+                                && !desired_channels.color,
+                            progress: strict_channel_policy
+                                && current.owned_channels.progress
+                                && !desired_channels.progress,
+                        };
+                        // Revoke release authority before touching the terminal.
+                        // A failed write may leave decoration behind, but cannot
+                        // authorize a later reset of a foreign replacement.
+                        if release != OwnedTerminalChannels::default() {
+                            current.owned_channels.color &= !release.color;
+                            current.owned_channels.progress &= !release.progress;
+                            self.store.write(&current)?;
+                        }
+                        let release_bytes =
+                            owned_channel_release_bytes(release.color, release.progress);
+                        sink.write_all(&release_bytes)?;
                         sink.write_all(bytes)?;
                         sink.flush()?;
+                        if current.owned_channels != desired_channels {
+                            current.owned_channels = desired_channels;
+                            self.store.write(&current)?;
+                        }
                     }
                     Ok(())
                 })
@@ -1392,8 +1428,18 @@ struct WorkerLease {
     runtime_image_sha256: Option<String>,
     active: bool,
     presentation: Option<WorkerPresentation>,
+    /// Only channels actually written by this exact session and terminal
+    /// binding are eligible for a later strict-native release.
+    #[serde(default)]
+    owned_channels: OwnedTerminalChannels,
     updated_unix_ms: u64,
     expires_unix_ms: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OwnedTerminalChannels {
+    pub(crate) color: bool,
+    pub(crate) progress: bool,
 }
 
 impl WorkerLease {
@@ -1658,6 +1704,12 @@ impl ActivityLeaseStore {
             runtime_image_sha256: runtime_image_sha256.map(str::to_owned),
             active: true,
             presentation: Some(presentation.clone()),
+            owned_channels: current
+                .as_ref()
+                .filter(|lease| lease.owner_sha256 == owner_sha256)
+                .map_or(OwnedTerminalChannels::default(), |lease| {
+                    lease.owned_channels
+                }),
             updated_unix_ms: now,
             expires_unix_ms,
         };
@@ -1708,6 +1760,12 @@ impl ActivityLeaseStore {
                 runtime_image_sha256: None,
                 active: false,
                 presentation: None,
+                owned_channels: current
+                    .as_ref()
+                    .filter(|lease| lease.owner_sha256 == owner_sha256)
+                    .map_or(OwnedTerminalChannels::default(), |lease| {
+                        lease.owned_channels
+                    }),
                 updated_unix_ms: now,
                 expires_unix_ms: now,
             };
@@ -3029,6 +3087,7 @@ fn open_owned_console(probe_enabled: bool) -> io::Result<Box<dyn Write>> {
 mod tests {
     use std::{
         fs,
+        io::{self, Write},
         path::PathBuf,
         process::{Command, Stdio},
         time::{Duration, Instant, SystemTime},
@@ -3036,12 +3095,12 @@ mod tests {
 
     use super::{
         ActivityCoordinator, ActivityExecution, ActivityLeaseHealth, ActivityLeaseStore,
-        ActivityRender, CleanupObserverAction, LeaseTransition, PublishedWorkerStartup,
-        SESSIONS_SCHEMA_VERSION, STATIC_ATTENTION_LEASE_TTL_MS, SessionWorkspaceObservability,
-        TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation, WorkerProcessLiveness,
-        already_active_worker_render, append_windows_argument, cleanup_identity_recheck_due,
-        cleanup_observer_action, cleanup_observer_poll_ms, command_output_with_timeout,
-        inspect_activity_leases_read_only, inspect_sessions_read_only,
+        ActivityRender, CleanupObserverAction, LeaseTransition, OwnedTerminalChannels,
+        PublishedWorkerStartup, SESSIONS_SCHEMA_VERSION, STATIC_ATTENTION_LEASE_TTL_MS,
+        SessionWorkspaceObservability, TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation,
+        WorkerProcessLiveness, already_active_worker_render, append_windows_argument,
+        cleanup_identity_recheck_due, cleanup_observer_action, cleanup_observer_poll_ms,
+        command_output_with_timeout, inspect_activity_leases_read_only, inspect_sessions_read_only,
         next_animation_frame_deadline, normalized_windows_path, persistent_worker_presentation,
         record_provider_session_observation, start_published_worker, system_powershell_path,
         tasklist_output_reports_absence,
@@ -3938,6 +3997,8 @@ mod tests {
                 21,
                 ActivityRender::WithoutTitle,
                 b"stale",
+                OwnedTerminalChannels::default(),
+                false,
                 &mut stale_output,
             )
             .expect("stale write is suppressed without error");
@@ -3952,10 +4013,271 @@ mod tests {
                 22,
                 ActivityRender::WithoutTitle,
                 b"current",
+                OwnedTerminalChannels::default(),
+                false,
                 &mut current_output,
             )
             .expect("current write succeeds");
         assert_eq!(current_output, b"current");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One ordered ownership scenario spans acquisition, restart, release, and stale delivery.
+    fn strict_native_releases_only_recorded_channels_for_the_exact_session() {
+        let root = TestRoot::new("owned-output-release");
+        let store = ActivityLeaseStore::new(&root.0);
+        let execution = ActivityExecution::System {
+            executable: root.0.join("unused.exe"),
+            owner_sha256: digest('d'),
+            terminal_binding_sha256: digest('c'),
+        };
+        let first = key(1, 'a', 'c');
+        let foreign = key(1, 'e', 'c');
+        let owned = OwnedTerminalChannels {
+            color: true,
+            progress: true,
+        };
+        let mut coordinator = ActivityCoordinator {
+            store: store.clone(),
+            execution: execution.clone(),
+        };
+
+        store
+            .publish_stopped(&first, 1, &digest('d'), 1_000)
+            .expect("first session admits a one-shot event");
+        let mut never_owned = Vec::new();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                1,
+                ActivityRender::Full,
+                b"",
+                OwnedTerminalChannels::default(),
+                true,
+                &mut never_owned,
+            )
+            .expect("native from an untouched state is inert");
+        assert!(never_owned.is_empty());
+
+        store
+            .publish_active(&first, 2, &digest('d'), &presentation(), 1_100)
+            .expect("owned activity event admits");
+        let mut acquired = Vec::new();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                2,
+                ActivityRender::Full,
+                b"owned-output",
+                owned,
+                true,
+                &mut acquired,
+            )
+            .expect("owned output records after a successful write");
+        assert_eq!(acquired, b"owned-output");
+
+        // A new Hook process reads the durable session/terminal ledger.
+        coordinator = ActivityCoordinator {
+            store: store.clone(),
+            execution,
+        };
+        store
+            .publish_stopped(&foreign, 1, &digest('d'), 1_150)
+            .expect("foreign session admits");
+        let mut foreign_output = Vec::new();
+        coordinator
+            .write_rendered(
+                &digest('e'),
+                Some(&digest('b')),
+                1,
+                1,
+                ActivityRender::Full,
+                b"",
+                OwnedTerminalChannels::default(),
+                true,
+                &mut foreign_output,
+            )
+            .expect("foreign session remains inert");
+        assert!(foreign_output.is_empty());
+
+        let second = key(2, 'a', 'c');
+        let stopped = store
+            .publish_stopped(&second, 3, &digest('d'), 1_200)
+            .expect("new generation revokes old activity");
+        assert!(matches!(
+            stopped,
+            LeaseTransition::Stopped {
+                predecessor: Some(_)
+            }
+        ));
+        let mut released = Vec::new();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                2,
+                3,
+                ActivityRender::Full,
+                b"",
+                OwnedTerminalChannels::default(),
+                true,
+                &mut released,
+            )
+            .expect("recorded channels release");
+        assert!(released.windows(8).any(|part| part == b"]9;4;0;0"));
+        assert!(released.windows(8).any(|part| part == b"]104;264"));
+        assert!(!released.windows(3).any(|part| part == b"]0;"));
+
+        let mut late = Vec::new();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                2,
+                ActivityRender::Full,
+                b"late",
+                owned,
+                true,
+                &mut late,
+            )
+            .expect("superseded event is suppressed");
+        assert!(late.is_empty());
+        assert_eq!(
+            store.load(second.digest()).unwrap().unwrap().owned_channels,
+            OwnedTerminalChannels::default()
+        );
+    }
+
+    #[test]
+    fn strict_channels_do_not_acquire_output_without_an_exact_terminal_lease() {
+        let root = TestRoot::new("strict-no-binding");
+        let coordinator = ActivityCoordinator::disabled(&root.0);
+        let mut output = Vec::new();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                1,
+                ActivityRender::UncoordinatedFull,
+                b"would-own-color",
+                OwnedTerminalChannels {
+                    color: true,
+                    progress: false,
+                },
+                true,
+                &mut output,
+            )
+            .expect("lack of binding remains fail-open");
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn failed_owned_release_cannot_authorize_a_later_reset() {
+        struct RejectWrites;
+        impl Write for RejectWrites {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("owned test sink refused output"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let root = TestRoot::new("release-sink-error");
+        let store = ActivityLeaseStore::new(&root.0);
+        let coordinator = ActivityCoordinator {
+            store: store.clone(),
+            execution: ActivityExecution::System {
+                executable: root.0.join("unused.exe"),
+                owner_sha256: digest('d'),
+                terminal_binding_sha256: digest('c'),
+            },
+        };
+        let key = key(1, 'a', 'c');
+        let color = OwnedTerminalChannels {
+            color: true,
+            progress: false,
+        };
+        store.publish_stopped(&key, 1, &digest('d'), 1_000).unwrap();
+        assert!(
+            coordinator
+                .write_rendered(
+                    &digest('a'),
+                    Some(&digest('b')),
+                    1,
+                    1,
+                    ActivityRender::Full,
+                    b"color",
+                    color,
+                    true,
+                    &mut RejectWrites,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store.load(key.digest()).unwrap().unwrap().owned_channels,
+            OwnedTerminalChannels::default(),
+            "failed acquisition never grants future reset authority"
+        );
+
+        store.publish_stopped(&key, 2, &digest('d'), 1_100).unwrap();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                2,
+                ActivityRender::Full,
+                b"color",
+                color,
+                true,
+                &mut Vec::new(),
+            )
+            .unwrap();
+        store.publish_stopped(&key, 3, &digest('d'), 1_200).unwrap();
+        assert!(
+            coordinator
+                .write_rendered(
+                    &digest('a'),
+                    Some(&digest('b')),
+                    1,
+                    3,
+                    ActivityRender::Full,
+                    b"",
+                    OwnedTerminalChannels::default(),
+                    true,
+                    &mut RejectWrites,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store.load(key.digest()).unwrap().unwrap().owned_channels,
+            OwnedTerminalChannels::default(),
+            "failed release cannot reset a future foreign color"
+        );
+        store.publish_stopped(&key, 4, &digest('d'), 1_300).unwrap();
+        let mut later = Vec::new();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                4,
+                ActivityRender::Full,
+                b"",
+                OwnedTerminalChannels::default(),
+                true,
+                &mut later,
+            )
+            .unwrap();
+        assert!(later.is_empty());
     }
 
     #[test]

@@ -8,16 +8,18 @@ use std::{
 use sha2::{Digest, Sha256};
 
 use crate::{
-    activity::{ActivityCoordinator, ActivityReconciliationTiming, ActivityRender},
+    activity::{
+        ActivityCoordinator, ActivityReconciliationTiming, ActivityRender, OwnedTerminalChannels,
+    },
     core::SessionReconciler,
     presentation::{
-        PresentationPolicy, SemanticPresentationInput, TitleMarkBackend,
+        PresentationPolicy, Progress, SemanticPresentationInput, TabColor, TitleMarkBackend,
         WindowsTerminalCapabilities,
     },
     presentation_policy::{ApplicationStatus, CliTarget, PresentationCapabilities},
     providers::registry::ProviderRegistry,
     repo::{StableAliasRegistry, WorkspaceIdentityResolver},
-    settings::{PresentationSettings, PresentationSettingsStore},
+    settings::{PresentationSettings, PresentationSettingsStore, TabColorMode},
 };
 
 use super::{
@@ -413,6 +415,19 @@ impl CodexHookRuntime {
         };
         timing.record("presentation_render", presentation_render_started);
 
+        let settings = self.renderer.settings();
+        let active_state = match &action {
+            crate::presentation::PresentationAction::Apply(state) => Some(state),
+            crate::presentation::PresentationAction::Reset(_) => None,
+        };
+        let desired_channels = OwnedTerminalChannels {
+            color: active_state.is_some_and(|state| state.tab_color() != TabColor::Default)
+                && settings.tab_color() == TabColorMode::TabBeacon
+                && self.renderer.frame_color_supported(),
+            progress: active_state.is_some_and(|state| state.progress() != Progress::Clear)
+                && settings.activity().uses_windows_terminal_ring(),
+        };
+
         let started = Instant::now();
         if self
             .activity
@@ -423,6 +438,8 @@ impl CodexHookRuntime {
                 admitted.event_sequence(),
                 render,
                 &bytes,
+                desired_channels,
+                settings.strict_channel_policy(),
                 sink,
             )
             .is_err()
