@@ -800,6 +800,9 @@ fn is_safe_worker_provider(provider: &str) -> bool {
 pub(crate) enum ActivityRender {
     /// Coordination is unavailable, so the Hook uses its static fail-open path.
     UncoordinatedFull,
+    /// A synchronous Hook could not establish lease ordering before its
+    /// budget; it must emit nothing rather than write stale output.
+    DegradedBusy,
     /// The Hook owns the complete static action.
     Full,
     /// A live worker owns title frames; the Hook owns other channels.
@@ -870,6 +873,21 @@ impl ActivityCoordinator {
         Self {
             store: ActivityLeaseStore::new(state_root),
             execution: ActivityExecution::Disabled,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_system_binding(
+        state_root: impl Into<PathBuf>,
+        executable: PathBuf,
+    ) -> Self {
+        Self {
+            store: ActivityLeaseStore::new(state_root),
+            execution: ActivityExecution::System {
+                executable,
+                owner_sha256: "d".repeat(64),
+                terminal_binding_sha256: "c".repeat(64),
+            },
         }
     }
 
@@ -988,6 +1006,9 @@ impl ActivityCoordinator {
                 Ok(Some(LeaseTransition::Published { .. } | LeaseTransition::Stopped { .. })) => {
                     unreachable!("existing runtime refresh only returns stale or active")
                 }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    return (ActivityRender::DegradedBusy, timing);
+                }
                 Err(_) => return (ActivityRender::UncoordinatedFull, timing),
             }
             // A long-lived worker must never map the package-installed CLI.
@@ -1006,8 +1027,12 @@ impl ActivityCoordinator {
                 now,
             );
             timing.runtime_image_preparation = Some(runtime_image_started.elapsed().as_millis());
-            let Ok((runtime_image, transition)) = published else {
-                return (ActivityRender::UncoordinatedFull, timing);
+            let (runtime_image, transition) = match published {
+                Ok(published) => published,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    return (ActivityRender::DegradedBusy, timing);
+                }
+                Err(_) => return (ActivityRender::UncoordinatedFull, timing),
             };
             match transition {
                 LeaseTransition::Stale => (ActivityRender::Suppress, timing),
@@ -1059,8 +1084,12 @@ impl ActivityCoordinator {
                 .store
                 .publish_stopped(&key, event_sequence, owner_sha256, now);
             timing.stop_cleanup = Some(stop_cleanup_started.elapsed().as_millis());
-            let Ok(transition) = stopped else {
-                return (ActivityRender::UncoordinatedFull, timing);
+            let transition = match stopped {
+                Ok(transition) => transition,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    return (ActivityRender::DegradedBusy, timing);
+                }
+                Err(_) => return (ActivityRender::UncoordinatedFull, timing),
             };
             match transition {
                 LeaseTransition::Stale => (ActivityRender::Suppress, timing),
@@ -1091,6 +1120,10 @@ impl ActivityCoordinator {
         sink: &mut impl Write,
     ) -> io::Result<()> {
         match render {
+            ActivityRender::DegradedBusy => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "activity lease order could not be established",
+            )),
             ActivityRender::Suppress => Ok(()),
             ActivityRender::UncoordinatedFull => {
                 if strict_channel_policy {
@@ -1119,7 +1152,7 @@ impl ActivityCoordinator {
                 // The lease lock orders the final one-shot write against every
                 // competing Hook transition. A delayed event that admitted
                 // before a newer event cannot write after the newer lease.
-                self.store.with_lock(|| {
+                self.store.with_lock_bounded(|| {
                     let Some(mut current) = self.store.load(key.digest())? else {
                         return Ok(());
                     };
@@ -1591,7 +1624,7 @@ impl ActivityLeaseStore {
         // This lock is the atomic ownership boundary for a runtime image:
         // another Hook cannot publish an active lease between collection's
         // proven lease scan and a stale image deletion.
-        self.with_lock(|| {
+        self.with_lock_bounded(|| {
             let runtime_image = runtime_store.publish(executable)?;
             let transition = self.publish_active_locked(
                 key,
@@ -1621,7 +1654,7 @@ impl ActivityLeaseStore {
         now: u64,
     ) -> io::Result<Option<LeaseTransition>> {
         let expires_unix_ms = now.saturating_add(presentation.lease_ttl_ms());
-        self.with_lock(|| {
+        self.with_lock_bounded(|| {
             let Some(mut current) = self.load(key.digest())? else {
                 return Ok(None);
             };
@@ -1729,7 +1762,7 @@ impl ActivityLeaseStore {
         owner_sha256: &str,
         now: u64,
     ) -> io::Result<LeaseTransition> {
-        self.with_lock(|| {
+        self.with_lock_bounded(|| {
             let current = self.load(key.digest())?;
             if current
                 .as_ref()
@@ -1956,6 +1989,21 @@ impl ActivityLeaseStore {
     }
 
     fn with_lock<T>(&self, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        self.with_lock_inner(None, operation)
+    }
+
+    /// Only one-shot Hook paths use the short budget. Workers and cleanup
+    /// observers retain their original wait so ordinary contention cannot
+    /// silently stop an otherwise live animation lease.
+    fn with_lock_bounded<T>(&self, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        self.with_lock_inner(Some(Duration::from_millis(100)), operation)
+    }
+
+    fn with_lock_inner<T>(
+        &self,
+        budget: Option<Duration>,
+        operation: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
         reject_symbolic_link(&self.directory)?;
         fs::create_dir_all(&self.directory)?;
         let lock_path = self.directory.join(LOCK_FILE);
@@ -1966,7 +2014,11 @@ impl ActivityLeaseStore {
             .read(true)
             .write(true)
             .open(lock_path)?;
-        try_lock_file_with_budget(&lock, Duration::from_millis(100))?;
+        if let Some(budget) = budget {
+            try_lock_file_with_budget(&lock, budget)?;
+        } else {
+            lock.lock()?;
+        }
         let result = operation();
         File::unlock(&lock)?;
         result
@@ -4176,6 +4228,77 @@ mod tests {
             )
             .expect("lack of binding remains fail-open");
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn busy_hook_lease_suppresses_stale_output_while_worker_wait_remains_intact() {
+        let root = TestRoot::new("busy-hook-lease");
+        let store = ActivityLeaseStore::new(&root.0);
+        fs::create_dir_all(&store.directory).unwrap();
+        let held = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(store.directory.join("activity-worker.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        let coordinator = ActivityCoordinator {
+            store: store.clone(),
+            execution: ActivityExecution::System {
+                executable: root.0.join("unused.exe"),
+                owner_sha256: digest('d'),
+                terminal_binding_sha256: digest('c'),
+            },
+        };
+        let action = PresentationPolicy::resolve(SemanticPresentationInput::new(
+            Phase::Working,
+            Attention::None,
+            Health::Normal,
+            "OWH",
+        ));
+        let (render, _) = coordinator.reconcile_with_workspace_observability(
+            &digest('a'),
+            Some(&digest('b')),
+            1,
+            1,
+            "codex",
+            "OWH",
+            &action,
+            PresentationSettings::default(),
+            SessionWorkspaceObservability::default(),
+            true,
+        );
+        assert_eq!(render, ActivityRender::DegradedBusy);
+        let mut output = Vec::new();
+        let refusal = coordinator.write_rendered(
+            &digest('a'),
+            Some(&digest('b')),
+            1,
+            1,
+            render,
+            b"stale-title-and-color",
+            OwnedTerminalChannels::default(),
+            false,
+            &mut output,
+        );
+        assert_eq!(refusal.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert!(output.is_empty());
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker_store = store.clone();
+        let worker = std::thread::spawn(move || {
+            done_tx.send(worker_store.with_lock(|| Ok(()))).unwrap();
+        });
+        assert!(done_rx.recv_timeout(Duration::from_millis(150)).is_err());
+        fs::File::unlock(&held).unwrap();
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .is_ok()
+        );
+        worker.join().unwrap();
     }
 
     #[test]

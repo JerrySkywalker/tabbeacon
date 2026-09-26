@@ -489,7 +489,7 @@ impl CodexHookRuntime {
                 self.renderer.render(&action)
             }
             ActivityRender::WithoutTitle => self.renderer.render_without_title(&action),
-            ActivityRender::Suppress => Vec::new(),
+            ActivityRender::Suppress | ActivityRender::DegradedBusy => Vec::new(),
         };
         timing.record("presentation_render", presentation_render_started);
 
@@ -561,7 +561,7 @@ impl CodexHookRuntime {
                 if !has_anchor {
                     let resolved = self
                         .identity_resolver
-                        .resolve(context.cwd())
+                        .resolve_runtime_bounded(context.cwd())
                         .map_err(|_| AnchorSelectionError::Workspace)?;
                     return self.bind_resolved_root_workspace(
                         &resolved,
@@ -624,7 +624,7 @@ impl CodexHookRuntime {
     ) -> Result<RootWorkspaceSelection, AnchorSelectionError> {
         let resolved = self
             .identity_resolver
-            .resolve(context.cwd())
+            .resolve_runtime_bounded(context.cwd())
             .map_err(|_| AnchorSelectionError::Workspace)?;
         self.bind_resolved_root_workspace(&resolved, admitted, observed_at_unix_seconds, source)
     }
@@ -966,7 +966,7 @@ mod tests {
     use serde_json::json;
 
     use crate::{
-        activity::ActivityReconciliationTiming,
+        activity::{ActivityCoordinator, ActivityReconciliationTiming},
         core::{Attention, Phase, SessionReconciler},
         presentation_policy::{CliTarget, PresentationMode, PresentationOverride},
         repo::WorkspaceIdentityResolver,
@@ -1357,6 +1357,49 @@ mod tests {
         config_lock.try_lock().unwrap();
         fs::File::unlock(&config_lock).unwrap();
         hook.join().unwrap();
+        fs::File::unlock(&held).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn busy_activity_lease_degrades_public_hook_without_stale_terminal_bytes() {
+        let root = test_root("runtime-busy-activity");
+        let repository = root.join("repository");
+        fs::create_dir_all(&repository).unwrap();
+        initialize_repository(&repository);
+        let state = root.join("state");
+        let store = PresentationSettingsStore::new(state.join("config.toml"));
+        let mut runtime = CodexHookRuntime::new(&state, true);
+        runtime.system_settings = Some(store);
+        runtime.activity =
+            ActivityCoordinator::with_test_system_binding(&state, root.join("unused.exe"));
+        let lease_dir = state.join("activity-worker-v1");
+        fs::create_dir_all(&lease_dir).unwrap();
+        let held = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lease_dir.join("activity-worker.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        let event = json!({
+            "hook_event_name": "SessionStart", "session_id": "busy-activity",
+            "cwd": repository, "source": "startup",
+        });
+        let mut output = Vec::new();
+        assert_eq!(
+            runtime.dispatch_to(event.to_string().as_bytes(), UNIX_EPOCH, &mut output),
+            HookDispatchOutcome::DegradedPresentationOutput
+        );
+        assert!(output.is_empty());
+        let config_lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(state.join("config.lock"))
+            .unwrap();
+        config_lock.try_lock().unwrap();
+        fs::File::unlock(&config_lock).unwrap();
         fs::File::unlock(&held).unwrap();
         fs::remove_dir_all(root).unwrap();
     }

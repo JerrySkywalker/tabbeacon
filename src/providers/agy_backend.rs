@@ -659,7 +659,10 @@ impl AgyTitleRuntime {
         ) {
             Ok(Some(selection)) => selection,
             Ok(None) => {
-                let Ok(workspace) = self.identity_resolver.resolve(&normalized.project_root) else {
+                let Ok(workspace) = self
+                    .identity_resolver
+                    .resolve_runtime_bounded(&normalized.project_root)
+                else {
                     record_callback_diagnostics(&self.state_root, raw, false, observed_at);
                     return fallback_title(AgyTitleDispatchOutcome::DegradedWorkspaceIdentity);
                 };
