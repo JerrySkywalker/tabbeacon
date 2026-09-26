@@ -132,9 +132,10 @@ impl TerminalTestSessionLauncher {
         replay: &FixtureReplay,
         run_id: &str,
         evidence_root: &Path,
+        phase_signal: Option<&Path>,
     ) -> VisualResult<TerminalTestSession> {
         let hold_millis = fixture_hold_millis(replay.case.expects_title_animation);
-        let arguments = [
+        let mut arguments = vec![
             "emit".to_owned(),
             "--fixture".to_owned(),
             replay.case.fixture_name.clone(),
@@ -143,6 +144,10 @@ impl TerminalTestSessionLauncher {
             "--hold-ms".to_owned(),
             hold_millis.to_string(),
         ];
+        if let Some(path) = phase_signal {
+            arguments.push("--phase-signal".to_owned());
+            arguments.push(path.display().to_string());
+        }
         self.launch_program(
             fixture_executable,
             run_id,

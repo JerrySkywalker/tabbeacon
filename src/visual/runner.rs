@@ -31,6 +31,7 @@ const LIVE_VISUAL_WORKER_STAGING_DIRECTORY: &str = ".tabbeacon-visual-worker";
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const WORKER_TERMINATION_BUDGET: Duration = Duration::from_secs(5);
 const WORKER_PROCESS_QUERY_BUDGET: Duration = Duration::from_secs(3);
+const PUBLIC_HOOK_PHASE_BUDGET: Duration = Duration::from_secs(5);
 const WORKER_BUDGET_ENVIRONMENT_VARIABLE: &str = "TABBEACON_VISUAL_WORKER_BUDGET_MILLIS";
 const WORKER_NONCE_ENVIRONMENT_VARIABLE: &str = "TABBEACON_VISUAL_WORKER_NONCE";
 
@@ -931,6 +932,7 @@ fn unobserved_worker_environment() -> MachineEnvironment {
     }
 }
 
+#[allow(clippy::too_many_lines)] // Keeps owned launch, phase gate, observation, and cleanup in one scope.
 fn observe_replay(
     writer: &EvidenceWriter,
     fixture_executable: &Path,
@@ -939,7 +941,30 @@ fn observe_replay(
     observation: &mut Observation,
 ) -> VisualResult<()> {
     let launcher = TerminalTestSessionLauncher::default();
-    let session = match launcher.launch(fixture_executable, replay, run_id, writer.directory()) {
+    let phase_signal = if matches!(
+        replay.case.fixture_name.as_str(),
+        super::CODEX_PUBLIC_COLOR_FIXTURE | super::CODEX_PUBLIC_NATIVE_FIXTURE
+    ) {
+        Some(
+            writer
+                .directory()
+                .with_extension(format!("{}.phase", replay.case.fixture_name)),
+        )
+    } else {
+        None
+    };
+    if let Some(path) = phase_signal.as_ref()
+        && path.exists()
+    {
+        return Err(VisualError::EvidenceArtifactExists(path.clone()));
+    }
+    let session = match launcher.launch(
+        fixture_executable,
+        replay,
+        run_id,
+        writer.directory(),
+        phase_signal.as_deref(),
+    ) {
         Ok(session) => session,
         Err(error) => {
             observation.record_uia_blocked(&replay.case.fixture_name, error.to_string());
@@ -947,6 +972,16 @@ fn observe_replay(
         }
     };
     let body_result = (|| -> VisualResult<()> {
+        if let Some(path) = phase_signal.as_ref()
+            && !wait_for_public_hook_phase(path, PUBLIC_HOOK_PHASE_BUDGET)?
+        {
+            observation.record_uia_blocked(
+                &replay.case.fixture_name,
+                "public Hook fixture did not reach the post-transition observation phase"
+                    .to_owned(),
+            );
+            return Ok(());
+        }
         let locator = WindowsUiaLocator;
         let target = match locate_activated_with_retry(locator, run_id, replay) {
             Ok(target) => target,
@@ -1011,6 +1046,13 @@ fn observe_replay(
         };
         observe_capture(writer, replay, &capture_target, tab_bounds, observation)
     })();
+    let phase_cleanup_result = if let Some(path) = phase_signal.as_ref()
+        && path.exists()
+    {
+        fs::remove_file(path)
+    } else {
+        Ok(())
+    };
 
     let product_disposition = if body_result.is_err() {
         TemporaryWindowProductDisposition::Exception
@@ -1035,7 +1077,25 @@ fn observe_replay(
             format!("exact-owned temporary Windows Terminal cleanup was unproven: {error}"),
         ),
     }
+    phase_cleanup_result.map_err(VisualError::Io)?;
     body_result
+}
+
+fn wait_for_public_hook_phase(path: &Path, budget: Duration) -> VisualResult<bool> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match fs::read(path) {
+            Ok(bytes) if bytes == b"post-public-hook" => return Ok(true),
+            Ok(bytes) if bytes.is_empty() => {}
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(VisualError::Io(error)),
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 struct ActivationRetryFailure {
@@ -1924,7 +1984,7 @@ mod tests {
         authorize_live_worker, clear_worker_authorization, consume_worker_authorization,
         create_worker_authorization, empty_uia_dump, evidence_integrity_matches, progress_roi,
         read_worker_stage, relative_roi, selected_replays, target_has_capturable_geometry,
-        wait_for_bounded_worker, write_worker_stage,
+        wait_for_bounded_worker, wait_for_public_hook_phase, write_worker_stage,
     };
 
     #[test]
@@ -1945,6 +2005,29 @@ mod tests {
         fs::write(root.join(format!("{run_id}.stage")), "private-window-title").unwrap();
         assert_eq!(read_worker_stage(&root, run_id), "unknown");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn public_hook_phase_blocks_early_capture_and_rejects_missing_or_wrong_marker() {
+        let path = std::env::temp_dir().join(format!(
+            "tabbeacon-public-phase-{}-{}.phase",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(!wait_for_public_hook_phase(&path, Duration::ZERO).unwrap());
+        let delayed = path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            fs::write(delayed, b"post-public-hook").unwrap();
+        });
+        assert!(wait_for_public_hook_phase(&path, Duration::from_secs(1)).unwrap());
+        writer.join().unwrap();
+        fs::write(&path, b"wrong-phase").unwrap();
+        assert!(!wait_for_public_hook_phase(&path, Duration::ZERO).unwrap());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

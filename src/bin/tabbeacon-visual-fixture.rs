@@ -81,7 +81,13 @@ fn emit(arguments: &[String]) -> VisualResult<()> {
         fixture_name.as_str(),
         CODEX_PUBLIC_COLOR_FIXTURE | CODEX_PUBLIC_NATIVE_FIXTURE
     ) {
-        return emit_codex_public_fixture(&fixture_name, &run_id, hold_millis);
+        let phase_signal = argument_value(arguments, "--phase-signal")?;
+        return emit_codex_public_fixture(
+            &fixture_name,
+            &run_id,
+            hold_millis,
+            Path::new(&phase_signal),
+        );
     }
     if matches!(
         fixture_name.as_str(),
@@ -300,7 +306,12 @@ fn run_isolated_cursor_apply(
 /// one fixture-owned terminal. Structured events and the version-only Codex
 /// capability fixture are synthetic; the terminal bytes come from the product.
 #[allow(clippy::too_many_lines)]
-fn emit_codex_public_fixture(name: &str, run_id: &str, hold_millis: u64) -> VisualResult<()> {
+fn emit_codex_public_fixture(
+    name: &str,
+    run_id: &str,
+    hold_millis: u64,
+    phase_signal: &Path,
+) -> VisualResult<()> {
     let replay = FixtureDriver::default().codex_public_replay(name, run_id)?;
     let temp = env::temp_dir().canonicalize()?;
     let root = temp.join(format!("tabbeacon-codex-public-{run_id}-{}", process::id()));
@@ -419,6 +430,13 @@ fn emit_codex_public_fixture(name: &str, run_id: &str, hold_millis: u64) -> Visu
             // again by the fixture. UIA checks only its final retention.
             hook("UserPromptSubmit", Some("turn-2"))?;
         }
+        // The runner may inspect UIA only after the final public Hook in this
+        // fixture has returned. The marker itself was set before the switch.
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(phase_signal)?
+            .write_all(b"post-public-hook")?;
         thread::sleep(Duration::from_millis(hold_millis));
         hook("SessionEnd", None)?;
         Ok(())
