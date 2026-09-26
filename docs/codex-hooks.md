@@ -405,8 +405,11 @@ Both are turn-aware, thread-spawn subagent-aware, and compact-aware. The 0.149
 audit uses `mcp_tool` through TabBeacon's own named session stdio server; the
 server is hidden from the model and has no machine-global daemon lifetime.
 TabBeacon reconciles only its exact owned server and Hook groups, and preserves
-external MCP servers and groups unchanged. A newer version never inherits either profile merely
-because its version number is higher.
+external MCP servers and groups unchanged. The v0.8.0 candidate also recognizes
+the exact audited 0.156.1 command Hook surface with `Interrupt`. Its owned
+declaration and fresh trust must both be present before the public runtime
+accepts that event; isolated proof does not establish daily installed delivery.
+A newer version never inherits a profile merely because its number is higher.
 
 ## Operational diagnostics
 
