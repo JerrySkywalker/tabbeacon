@@ -37,7 +37,7 @@ use crate::{
 
 use super::{
     CodexCompatibilityState, CodexHookProfile, MCP_HOOK_SERVER_NAME, MCP_HOOK_TOOL_NAME,
-    capability::{CodexCapabilityProbe, probe as probe_capabilities},
+    capability::{CodexCapabilityProbe, interrupt_runtime_capable, probe as probe_capabilities},
     hook_input_template,
     runtime::{SESSION_END_PROBE_RECEIPT_ENV, SESSION_END_PROBE_RECEIPT_FILE},
 };
@@ -737,12 +737,7 @@ impl CodexIntegration {
         // A trusted declaration can outlive the Codex executable or its
         // Hooks feature setting. Recheck the current local capability before
         // treating Interrupt as authoritative at runtime.
-        if self
-            .probe_codex_capabilities(false)
-            .state()
-            .supported_profile()
-            != Some(CodexHookProfile::command_interrupt_v1())
-        {
+        if !interrupt_runtime_capable(self.codex_program.as_deref(), &self.state_root) {
             return false;
         }
         if !matches!(self.load_title_transition_journal(), Ok(None)) {

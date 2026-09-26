@@ -1511,6 +1511,30 @@ fn interrupt_capability_cache_cannot_override_current_disabled_hooks() {
 }
 
 #[test]
+fn runtime_interrupt_admission_returns_before_hook_deadline_when_feature_probe_stalls() {
+    let root = TestRoot::new("interrupt-feature-stall");
+    let integration = test_integration_with_codex_fixture(&root, "codex_interrupt_probe.rs");
+    assert_eq!(
+        integration.setup().expect("isolated setup succeeds"),
+        SetupOutcome::InstalledTrustReviewRequired
+    );
+    assert_eq!(
+        install_current_codex_trust_state(&root.child("codex-home")).len(),
+        12
+    );
+    assert!(integration.interrupt_runtime_admitted_read_only());
+    let fixture = root.child(if cfg!(windows) {
+        "codex-version-probe.exe"
+    } else {
+        "codex-version-probe"
+    });
+    fs::write(fixture.parent().unwrap().join("hooks-stalled"), b"").unwrap();
+    let started = std::time::Instant::now();
+    assert!(!integration.interrupt_runtime_admitted_read_only());
+    assert!(started.elapsed() < Duration::from_millis(950));
+}
+
+#[test]
 fn public_hook_cli_admits_interrupt_only_after_isolated_declaration_and_trust() {
     let root = TestRoot::new("interrupt-public-cli");
     let binary = PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon"));
@@ -1578,6 +1602,14 @@ fn public_hook_cli_admits_interrupt_only_after_isolated_declaration_and_trust() 
         !admitted.contains("outcome=ignored_unsupported"),
         "{admitted}"
     );
+    fs::write(runtime_bin.join("hooks-stalled"), b"").unwrap();
+    let started = Instant::now();
+    assert!(run("after-stall.txt").contains("event=unrecognized"));
+    assert!(
+        started.elapsed() < Duration::from_millis(950),
+        "public Hook outlived its one-second declaration budget"
+    );
+    fs::remove_file(runtime_bin.join("hooks-stalled")).unwrap();
     let config_path = codex_home.join("config.toml");
     let mut config = fs::read_to_string(&config_path)
         .expect("isolated config reads")

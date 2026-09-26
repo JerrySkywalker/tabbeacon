@@ -7,9 +7,11 @@
 
 use std::{
     fs,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -19,6 +21,26 @@ use super::{CodexCompatibilityState, CodexHookProfile};
 
 const CACHE_SCHEMA: &str = "tabbeacon-codex-capability-v3";
 const CACHE_FILE: &str = "capability-v1.json";
+const RUNTIME_FEATURE_DEADLINE: Duration = Duration::from_millis(400);
+
+/// Runtime Hook admission uses the capability proven during owned setup,
+/// bound to the current executable bytes. Only the mutable feature flag is
+/// rechecked, with a short deadline; schema generation never runs in a Hook.
+pub(crate) fn interrupt_runtime_capable(codex_program: Option<&Path>, state_root: &Path) -> bool {
+    let Some(record) = read_cache(&state_root.join(CACHE_FILE)) else {
+        return false;
+    };
+    if record.schema != CACHE_SCHEMA
+        || !matches!(
+            record.state,
+            CachedCapabilityState::FullInterrupt | CachedCapabilityState::DegradedInterrupt
+        )
+        || executable_identity(codex_program).as_deref() != Some(&record.executable_identity)
+    {
+        return false;
+    }
+    probe_hook_feature_bounded(codex_program) == HookFeature::Enabled
+}
 
 /// Content-minimal result of a local Codex capability probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -220,7 +242,62 @@ fn probe_hook_feature(codex_program: Option<&Path>) -> HookFeature {
     if !output.status.success() {
         return HookFeature::Unproven;
     }
-    let Ok(stdout) = String::from_utf8(output.stdout) else {
+    parse_hook_feature(&output.stdout)
+}
+
+fn probe_hook_feature_bounded(codex_program: Option<&Path>) -> HookFeature {
+    // A file avoids a pipe held open by a descendant after the owned child
+    // exits. The response is capped and discarded on every path.
+    let Ok(mut output_file) = tempfile::tempfile() else {
+        return HookFeature::Unproven;
+    };
+    let Ok(child_stdout) = output_file.try_clone() else {
+        return HookFeature::Unproven;
+    };
+    let Ok(mut child) = command(codex_program)
+        .args(["features", "list"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(child_stdout))
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return HookFeature::Unproven;
+    };
+    let deadline = Instant::now() + RUNTIME_FEATURE_DEADLINE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return HookFeature::Unproven;
+                }
+                if output_file
+                    .metadata()
+                    .map_or(true, |meta| meta.len() > 4096)
+                    || output_file.seek(SeekFrom::Start(0)).is_err()
+                {
+                    return HookFeature::Unproven;
+                }
+                let mut bytes = Vec::new();
+                return if output_file.read_to_end(&mut bytes).is_ok() {
+                    parse_hook_feature(&bytes)
+                } else {
+                    HookFeature::Unproven
+                };
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            _ => {
+                // This is the child that this Hook started, not an ambient
+                // provider or another user's process.
+                let _ = child.kill();
+                let _ = child.wait();
+                return HookFeature::Unproven;
+            }
+        }
+    }
+}
+
+fn parse_hook_feature(bytes: &[u8]) -> HookFeature {
+    let Ok(stdout) = std::str::from_utf8(bytes) else {
         return HookFeature::Unproven;
     };
     for line in stdout.lines() {

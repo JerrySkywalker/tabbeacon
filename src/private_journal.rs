@@ -40,11 +40,15 @@ pub(crate) fn verify_private_journal_file(path: &Path) -> io::Result<()> {
 /// Seals a newly created owned journal file before writing, or immediately
 /// after an atomic replacement inside the verified private directory.
 pub(crate) fn seal_private_journal_file(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    return windows_private::seal_file(path);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+        return verify_private_journal_file(path);
     }
+    #[cfg(not(any(windows, unix)))]
     verify_private_journal_file(path)
 }
 
@@ -122,11 +126,12 @@ mod windows_private {
             Security::{
                 Authorization::{
                     ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
-                    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
-                    SE_FILE_OBJECT,
+                    ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
+                    GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
                 },
                 DACL_SECURITY_INFORMATION, GetTokenInformation, OWNER_SECURITY_INFORMATION,
-                PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
+                PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+                TokenUser,
             },
             Storage::FileSystem::CreateDirectoryW,
             System::Threading::{GetCurrentProcess, OpenProcessToken},
@@ -254,7 +259,48 @@ mod windows_private {
         }
     }
 
+    pub(super) fn seal_file(path: &Path) -> io::Result<()> {
+        // Elevated Windows tokens may create a file owned by Administrators
+        // even inside our private directory. First prove the inherited DACL
+        // is private, then assign the current token user as owner. The file
+        // still contains no bytes when first created; atomic replacements
+        // inherit the same directory DACL before their owner is corrected.
+        ensure(
+            path.parent()
+                .ok_or_else(|| io::Error::other("journal parent missing"))?,
+        )?;
+        verify_file_acl(path, false)?;
+        let sid = current_user_sid()?;
+        let sid_text = wide(OsStr::new(&sid));
+        let path_text = wide(path.as_os_str());
+        let mut parsed_sid = PSID::default();
+        // SAFETY: both strings are terminated, and parsed_sid is freed after
+        // SetNamedSecurityInfoW consumes it.
+        unsafe {
+            ConvertStringSidToSidW(PCWSTR(sid_text.as_ptr()), &mut parsed_sid)
+                .map_err(io::Error::other)?;
+            let status = SetNamedSecurityInfoW(
+                PWSTR(path_text.as_ptr().cast_mut()),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION,
+                Some(parsed_sid),
+                None,
+                None,
+                None,
+            );
+            let _ = LocalFree(Some(HLOCAL(parsed_sid.0.cast())));
+            if status.0 != 0 {
+                return Err(io::Error::from_raw_os_error(status.0 as i32));
+            }
+        }
+        verify_file(path)
+    }
+
     pub(super) fn verify_file(path: &Path) -> io::Result<()> {
+        verify_file_acl(path, true)
+    }
+
+    fn verify_file_acl(path: &Path, require_user_owner: bool) -> io::Result<()> {
         let metadata = fs::symlink_metadata(path)?;
         if !metadata.file_type().is_file() || metadata.file_attributes() & 0x400 != 0 {
             return Err(io::Error::other("journal file is not a regular owned file"));
@@ -285,7 +331,7 @@ mod windows_private {
         let (owner, dacl) = sddl.split_once("D:").ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "journal file DACL missing")
         })?;
-        if owner != format!("O:{sid}") {
+        if require_user_owner && owner != format!("O:{sid}") {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "journal file owner changed",
