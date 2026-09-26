@@ -1185,7 +1185,7 @@ fn export_import_is_preview_first_portable_and_non_tty_apply_is_explicit() {
 }
 
 #[test]
-fn ownership_changing_provider_import_previews_without_writing_and_refuses_apply() {
+fn ownership_changing_provider_import_previews_and_applies_without_installing_hooks() {
     let source = TestRoot::new("provider-export-source");
     let target = TestRoot::new("provider-import-target");
     let export_path = source.child("provider-settings.json");
@@ -1239,7 +1239,8 @@ fn ownership_changing_provider_import_previews_without_writing_and_refuses_apply
         "preview wrote provider preferences"
     );
 
-    let apply = isolated_command(&target)
+    let fake_codex = fake_codex_directory(&target, "0.156.1");
+    let apply = isolated_command_with_codex(&target, &fake_codex)
         .args([
             "import",
             export_path.to_str().expect("test path is UTF-8"),
@@ -1248,12 +1249,18 @@ fn ownership_changing_provider_import_previews_without_writing_and_refuses_apply
         ])
         .output()
         .expect("ownership-changing Apply starts");
-    assert!(!apply.status.success(), "unsafe Apply was admitted");
-    assert!(String::from_utf8_lossy(&apply.stderr).contains("IMPORT=FAIL"));
     assert!(
-        !settings_path.exists(),
-        "refused Apply wrote provider preferences"
+        apply.status.success(),
+        "isolated Apply failed: {}",
+        String::from_utf8_lossy(&apply.stderr)
     );
+    assert!(String::from_utf8_lossy(&apply.stdout).contains("IMPORT=applied"));
+    assert!(
+        settings_path.exists(),
+        "Apply did not write provider preferences"
+    );
+    assert!(!target.child("codex-home/hooks.json").exists());
+    assert!(!target.child("codex-home/config.toml").exists());
 }
 
 #[test]

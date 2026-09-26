@@ -121,6 +121,18 @@ impl ImportPlan {
     /// applied import; a portable file cannot grant that external authority.
     #[must_use]
     pub fn changes_codex_title_ownership(&self, snapshot: &PresentationSettingsSnapshot) -> bool {
+        self.codex_title_ownership_after(snapshot)
+            != snapshot
+                .provider_override(CliTarget::Codex)
+                .unwrap_or_default()
+                .title
+                .unwrap_or(snapshot.settings().title())
+                .owns_tabbeacon_title()
+    }
+
+    /// Resolved Codex title owner after this portable plan is applied.
+    #[must_use]
+    pub fn codex_title_ownership_after(&self, snapshot: &PresentationSettingsSnapshot) -> bool {
         let before_global = snapshot.settings();
         let after_global = self.presentation.unwrap_or(before_global);
         let before_override = snapshot
@@ -133,9 +145,8 @@ impl ImportPlan {
                 (*provider == CliTarget::Codex).then_some(*replacement)
             })
             .unwrap_or(before_override);
-        let before_title = before_override.title.unwrap_or(before_global.title());
         let after_title = after_override.title.unwrap_or(after_global.title());
-        before_title.owns_tabbeacon_title() != after_title.owns_tabbeacon_title()
+        after_title.owns_tabbeacon_title()
     }
 
     /// Whether the plan has no conflicts and may be applied explicitly.
@@ -764,7 +775,66 @@ pub fn apply_import_plan(
     workspace_store: &WorkspacePreferenceStore,
     workspace_snapshot: &WorkspacePreferencesSnapshot,
 ) -> ImportApplyOutcome {
+    // Library callers without a Hook coordinator cannot silently transfer
+    // title ownership by writing preferences alone.
+    if plan.changes_codex_title_ownership(presentation_snapshot) {
+        return ImportApplyOutcome::Conflict;
+    }
+    apply_import_plan_inner(
+        plan,
+        presentation_store,
+        presentation_snapshot,
+        interface_store,
+        interface_snapshot,
+        workspace_store,
+        workspace_snapshot,
+        None,
+    )
+}
+
+/// Applies a title-changing import with a caller-owned Codex reconciliation.
+/// The callback must itself enforce Hook ownership and trust boundaries.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn apply_import_plan_with_reconciliation(
+    plan: &ImportPlan,
+    presentation_store: &PresentationSettingsStore,
+    presentation_snapshot: &PresentationSettingsSnapshot,
+    interface_store: &InterfacePreferencesStore,
+    interface_snapshot: &InterfacePreferencesSnapshot,
+    workspace_store: &WorkspacePreferenceStore,
+    workspace_snapshot: &WorkspacePreferencesSnapshot,
+    mut reconcile: impl FnMut(bool) -> Result<(), String>,
+) -> ImportApplyOutcome {
+    apply_import_plan_inner(
+        plan,
+        presentation_store,
+        presentation_snapshot,
+        interface_store,
+        interface_snapshot,
+        workspace_store,
+        workspace_snapshot,
+        Some(&mut reconcile),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+fn apply_import_plan_inner(
+    plan: &ImportPlan,
+    presentation_store: &PresentationSettingsStore,
+    presentation_snapshot: &PresentationSettingsSnapshot,
+    interface_store: &InterfacePreferencesStore,
+    interface_snapshot: &InterfacePreferencesSnapshot,
+    workspace_store: &WorkspacePreferenceStore,
+    workspace_snapshot: &WorkspacePreferencesSnapshot,
+    mut reconcile: Option<&mut dyn FnMut(bool) -> Result<(), String>>,
+) -> ImportApplyOutcome {
     if !plan.is_applicable() {
+        return ImportApplyOutcome::Conflict;
+    }
+    let title_changes = plan.changes_codex_title_ownership(presentation_snapshot);
+    if title_changes && reconcile.is_none() {
         return ImportApplyOutcome::Conflict;
     }
 
@@ -954,6 +1024,51 @@ pub fn apply_import_plan(
         );
     }
 
+    if title_changes {
+        let previous_owner = !plan.codex_title_ownership_after(presentation_snapshot);
+        let next_owner = !previous_owner;
+        let coordinator = reconcile
+            .as_mut()
+            .expect("title change requires coordinator");
+        if coordinator(next_owner).is_err() {
+            // A failed external write might already have reached one owned
+            // Codex file. Attempt an ownership-checked compensation, but do
+            // not call the combined operation rolled back without a durable
+            // external receipt.
+            let _ = coordinator(previous_owner);
+            let _ = rollback_import(
+                presentation_store,
+                presentation_snapshot,
+                presentation_receipt.as_ref(),
+                interface_store,
+                interface_snapshot,
+                interface_receipt.as_ref(),
+                workspace_store,
+                workspace_snapshot,
+                workspace_receipt.as_ref(),
+                false,
+            );
+            return ImportApplyOutcome::PartialState;
+        }
+        // A callback can take long enough for another writer to change one
+        // of the three preference stores. Never report Applied on stale bytes.
+        let receipts_still_current = presentation_receipt.as_ref().is_none_or(|receipt| {
+            matches!(
+                presentation_store.write_receipt_is_current(receipt),
+                Ok(true)
+            )
+        }) && interface_receipt.as_ref().is_none_or(|receipt| {
+            matches!(interface_store.write_receipt_is_current(receipt), Ok(true))
+        }) && workspace_receipt.as_ref().is_none_or(|receipt| {
+            matches!(workspace_store.write_receipt_is_current(receipt), Ok(true))
+        });
+        if !receipts_still_current {
+            // Another writer may now own the preference. Do not change its
+            // Codex title setting by guessing its intended ownership.
+            return ImportApplyOutcome::PartialState;
+        }
+    }
+
     ImportApplyOutcome::Applied
 }
 
@@ -1088,7 +1203,7 @@ mod tests {
     use super::{
         EXPORT_SCHEMA_V1, EXPORT_SCHEMA_V2, ImportApplyOutcome, ImportPlanConflict,
         MAX_EXPORT_BYTES, SettingsExportV1, SettingsTransferError, apply_import_plan,
-        portable_workspace_key,
+        apply_import_plan_with_reconciliation, portable_workspace_key,
     };
 
     fn temporary_root(name: &str) -> std::path::PathBuf {
@@ -1269,6 +1384,155 @@ mod tests {
             .unwrap();
         assert!(plan.changes_codex_title_ownership(&presentation_snapshot));
         assert!(!presentation_store.path().exists());
+        assert_eq!(
+            apply_import_plan(
+                &plan,
+                &presentation_store,
+                &presentation_snapshot,
+                &interface_store,
+                &interface_snapshot,
+                &workspace_store,
+                &workspace_snapshot,
+            ),
+            ImportApplyOutcome::Conflict,
+            "uncoordinated library use cannot change Codex title ownership"
+        );
+        assert!(!presentation_store.path().exists());
+        let mut reconciled = Vec::new();
+        assert_eq!(
+            apply_import_plan_with_reconciliation(
+                &plan,
+                &presentation_store,
+                &presentation_snapshot,
+                &interface_store,
+                &interface_snapshot,
+                &workspace_store,
+                &workspace_snapshot,
+                |owned| {
+                    reconciled.push(owned);
+                    Ok(())
+                },
+            ),
+            ImportApplyOutcome::Applied
+        );
+        assert_eq!(reconciled, [false]);
+        assert_eq!(
+            presentation_store
+                .load_provider_override_read_only(CliTarget::Codex)
+                .unwrap()
+                .title,
+            Some(TitleMode::Native)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One isolated plan exercises prewrite, callback, and postwrite drift.
+    fn title_changing_import_rejects_drift_and_reports_external_failure_as_partial() {
+        let root = tempfile::tempdir().unwrap();
+        let presentation_store = PresentationSettingsStore::new(root.path().join("config.toml"));
+        let interface_store = InterfacePreferencesStore::new(root.path().join("interface.toml"));
+        let workspace_store = WorkspacePreferenceStore::new(root.path().join("preferences.json"));
+        let presentation_snapshot = presentation_store.snapshot_read_only().unwrap();
+        let interface_snapshot = interface_store.snapshot_read_only().unwrap();
+        let workspace_snapshot = workspace_store.snapshot_read_only().unwrap();
+        let document = SettingsExportV1::new(None, None, &WorkspacePreferences::default())
+            .with_provider_overrides(BTreeMap::from([(
+                CliTarget::Codex,
+                PresentationOverride::default().with_mode(PresentationMode::PreserveNative),
+            )]));
+        let plan = document
+            .import_plan(
+                &presentation_snapshot,
+                &interface_snapshot,
+                &workspace_snapshot,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        presentation_store
+            .save(PresentationSettings::default().with_theme(PresentationTheme::Classic))
+            .unwrap();
+        let mut called = false;
+        assert_eq!(
+            apply_import_plan_with_reconciliation(
+                &plan,
+                &presentation_store,
+                &presentation_snapshot,
+                &interface_store,
+                &interface_snapshot,
+                &workspace_store,
+                &workspace_snapshot,
+                |_| {
+                    called = true;
+                    Ok(())
+                },
+            ),
+            ImportApplyOutcome::Conflict
+        );
+        assert!(!called);
+        assert_eq!(
+            presentation_store.load().unwrap().theme(),
+            PresentationTheme::Classic
+        );
+
+        let current = presentation_store.snapshot_read_only().unwrap();
+        let plan = document
+            .import_plan(
+                &current,
+                &interface_snapshot,
+                &workspace_snapshot,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        let mut attempts = Vec::new();
+        assert_eq!(
+            apply_import_plan_with_reconciliation(
+                &plan,
+                &presentation_store,
+                &current,
+                &interface_store,
+                &interface_snapshot,
+                &workspace_store,
+                &workspace_snapshot,
+                |owned| {
+                    attempts.push(owned);
+                    Err("synthetic external failure".into())
+                },
+            ),
+            ImportApplyOutcome::PartialState
+        );
+        assert_eq!(attempts, [false, true]);
+        assert!(presentation_store.snapshot_is_current(&current).unwrap());
+
+        let plan = document
+            .import_plan(
+                &current,
+                &interface_snapshot,
+                &workspace_snapshot,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        assert_eq!(
+            apply_import_plan_with_reconciliation(
+                &plan,
+                &presentation_store,
+                &current,
+                &interface_store,
+                &interface_snapshot,
+                &workspace_store,
+                &workspace_snapshot,
+                |_| {
+                    presentation_store
+                        .save(PresentationSettings::default())
+                        .unwrap();
+                    Ok(())
+                },
+            ),
+            ImportApplyOutcome::PartialState,
+            "drift during external coordination cannot be reported as Applied"
+        );
     }
 
     #[test]
@@ -1349,7 +1613,7 @@ mod tests {
         assert_eq!(plan.portable_matches(), 1);
         assert_eq!(plan.unmatched_entries(), 0);
         assert_eq!(
-            apply_import_plan(
+            apply_import_plan_with_reconciliation(
                 &plan,
                 &presentation_store,
                 &presentation_snapshot,
@@ -1357,6 +1621,7 @@ mod tests {
                 &interface_snapshot,
                 &workspace_store,
                 &workspace_snapshot,
+                |_| Ok(()),
             ),
             ImportApplyOutcome::Applied
         );
@@ -1410,7 +1675,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            apply_import_plan(
+            apply_import_plan_with_reconciliation(
                 &plan,
                 &presentation_store,
                 &presentation_snapshot,
@@ -1418,6 +1683,7 @@ mod tests {
                 &interface_snapshot,
                 &workspace_store,
                 &workspace_snapshot,
+                |_| panic!("drift must reject before Hook reconciliation"),
             ),
             ImportApplyOutcome::RolledBack
         );

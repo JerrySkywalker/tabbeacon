@@ -114,11 +114,13 @@ partial provider overrides use `tabbeacon-export-v2`. The v0.8.0 candidate
 accepts both. The v2 document contains preferences only, never Hook trust,
 provider authentication, terminal binding, or installed integration state.
 If an import would change Codex terminal-title ownership, preview still shows
-the proposed change without writing. Apply refuses the import until Hook
-ownership can be reconciled in the same guarded transaction. Apply that Codex
-mode through `tabbeacon config provider codex apply` so the owned Hook
-configuration can be reconciled. A general import transaction for that case is
-not yet qualified.
+the proposed change without writing. Explicit Apply uses the owned Codex
+reconciliation path after snapshot-guarded preference writes. A changed store
+or an unprovable owned Hook/configuration refuses success. A failed external
+write is reported as `partial_state` even when preference compensation
+succeeds; inspect the owned integration before retrying. Process interruption
+recovery across preference and Hook files remains unqualified in this
+development candidate. Import never copies Hook trust or authentication.
 
 ## Separate boundaries
 
