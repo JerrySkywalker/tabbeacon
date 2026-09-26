@@ -9,6 +9,8 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
 };
 
 use atomic_write_file::AtomicWriteFile;
@@ -21,6 +23,7 @@ use crate::presentation_policy::{
 
 const CONFIG_FILE: &str = "config.toml";
 const LOCK_FILE: &str = "config.lock";
+const SETTINGS_OPERATION_LOCK_BUDGET: Duration = Duration::from_millis(750);
 
 /// Who owns terminal title updates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1057,9 +1060,38 @@ impl PresentationSettingsStore {
             .read(true)
             .write(true)
             .open(parent.join(LOCK_FILE))?;
-        lock.lock()?;
+        try_lock_with_budget(&lock, SETTINGS_OPERATION_LOCK_BUDGET)?;
         let result = operation();
         File::unlock(&lock)?;
+        result
+    }
+
+    /// Holds the existing settings lock across one Hook's route and output
+    /// decision. TabBeacon's presentation-document writers use this lock, so an older
+    /// Hook cannot finish writing after a newer global/import configuration
+    /// commit. A busy writer makes the Hook skip decoration within its budget.
+    pub(crate) fn with_runtime_lock_bounded<T>(
+        &self,
+        budget: Duration,
+        operation: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| io::Error::other("settings state root unavailable"))?;
+        fs::create_dir_all(parent)?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(parent.join(LOCK_FILE))?;
+        try_lock_with_budget(&lock, budget)?;
+        let result = operation();
+        // The Hook reports the output result itself. Closing this owned lock
+        // releases it without turning a successful flush into an apparent
+        // failure solely because a separate unlock call failed.
+        drop(lock);
         result
     }
 
@@ -1121,6 +1153,25 @@ impl PresentationSettingsStore {
             Ok(_) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error.into()),
+        }
+    }
+}
+
+fn try_lock_with_budget(lock: &File, budget: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "TabBeacon settings lock remained busy",
+                ));
+            }
+            Err(error) => return Err(error.into()),
         }
     }
 }
@@ -1306,7 +1357,7 @@ mod tests {
         fs,
         sync::{Arc, Barrier},
         thread,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
@@ -1315,6 +1366,31 @@ mod tests {
     };
 
     use crate::presentation_policy::{CliTarget, PresentationMode, PresentationOverride};
+
+    #[test]
+    fn busy_settings_lock_refuses_a_writer_without_an_unbounded_wait_or_write() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let store = PresentationSettingsStore::new(&path);
+        store.load().unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.path().join("config.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let started = Instant::now();
+        let refused = store.save(PresentationSettings::default());
+        assert!(matches!(
+            refused,
+            Err(super::SettingsError::Io(ref error)) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!path.exists());
+        fs::File::unlock(&lock).unwrap();
+        store.save(PresentationSettings::default()).unwrap();
+        assert!(path.exists());
+    }
 
     #[test]
     fn guarded_provider_save_refuses_output_lock_failure_before_any_write() {

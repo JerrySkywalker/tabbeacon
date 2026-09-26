@@ -5,6 +5,7 @@ use std::{
     env,
     io::{self, Write},
     path::Path,
+    time::Duration,
 };
 
 use sha2::{Digest, Sha256};
@@ -29,6 +30,8 @@ pub enum CursorDispatchOutcome {
     OutputFlushed,
     OutputFailed,
 }
+
+const CURSOR_SETTINGS_LOCK_BUDGET: Duration = Duration::from_millis(100);
 
 /// Routes one structured event after exact local installation and terminal checks.
 ///
@@ -109,25 +112,30 @@ pub fn dispatch_with_settings_bounded(
     if settings.path().parent() != Some(state_root) {
         return Ok(CursorDispatchOutcome::Ignored);
     }
-    dispatch_with(
-        raw,
-        workspace,
-        executable,
-        state_root,
-        expected_terminal_sha256,
-        terminal_identity,
-        console_openable,
-        |event, terminal| {
-            let resolved = settings
-                .resolve_provider_read_only(
-                    CliTarget::Cursor,
-                    PresentationCapabilities::CURSOR_COLOR_ONLY,
-                    ApplicationStatus::Unproven,
-                )
-                .map_err(io::Error::other)?;
-            cursor_color::apply_admitted(state_root, terminal, event, &resolved, sink)
-        },
-    )
+    // All presentation writers hold config.lock. Take it before the route
+    // lock and retain it until output finishes, including for global and
+    // portable-import changes that have no Cursor-specific Apply callback.
+    settings.with_runtime_lock_bounded(CURSOR_SETTINGS_LOCK_BUDGET, || {
+        dispatch_with(
+            raw,
+            workspace,
+            executable,
+            state_root,
+            expected_terminal_sha256,
+            terminal_identity,
+            console_openable,
+            |event, terminal| {
+                let resolved = settings
+                    .resolve_provider_read_only(
+                        CliTarget::Cursor,
+                        PresentationCapabilities::CURSOR_COLOR_ONLY,
+                        ApplicationStatus::Unproven,
+                    )
+                    .map_err(io::Error::other)?;
+                cursor_color::apply_admitted(state_root, terminal, event, &resolved, sink)
+            },
+        )
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -297,7 +305,191 @@ mod tests {
     use crate::presentation_policy::{
         PresentationMode, PresentationOverride, resolve_presentation,
     };
-    use crate::settings::PresentationSettings;
+    use crate::settings::{ConditionalSaveOutcome, PresentationSettings, TabColorMode};
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One barrier proves settings commit order across an in-flight Hook write.
+    fn global_config_commit_cannot_overtake_an_inflight_cursor_color_write() {
+        struct BlockingSink {
+            entered: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+            order: Arc<Mutex<Vec<&'static str>>>,
+        }
+        impl Write for BlockingSink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.entered.send(()).unwrap();
+                self.release.recv().unwrap();
+                self.order.lock().unwrap().push("hook-output");
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let executable = workspace.path().join("tabbeacon.exe");
+        fs::write(&executable, b"synthetic binary").unwrap();
+        CursorHookIntegration::new(workspace.path(), &executable)
+            .unwrap()
+            .install()
+            .unwrap();
+        let settings = PresentationSettingsStore::new(state.path().join("config.toml"));
+        let before = settings.load().unwrap();
+        let after = before.with_tab_color(TabColorMode::Native);
+        let terminal = "owned-test-terminal";
+        let digest = format!("{:x}", Sha256::digest(terminal.as_bytes()));
+        let start = br#"{"hook_event_name":"sessionStart","session_id":"owned"}"#;
+        let prompt = br#"{"hook_event_name":"beforeSubmitPrompt","session_id":"owned","generation_id":"g1"}"#;
+        let stop = br#"{"hook_event_name":"stop","session_id":"owned","generation_id":"g1","status":"completed"}"#;
+        assert_eq!(
+            dispatch_with_settings_bounded(
+                start,
+                workspace.path(),
+                &executable,
+                state.path(),
+                &digest,
+                terminal,
+                true,
+                &settings,
+                &mut Vec::new(),
+            )
+            .unwrap(),
+            CursorDispatchOutcome::RouteAdmitted
+        );
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let hook_order = Arc::clone(&order);
+        let hook = thread::spawn({
+            let workspace = workspace.path().to_path_buf();
+            let state = state.path().to_path_buf();
+            let executable = executable.clone();
+            let digest = digest.clone();
+            let settings = settings.clone();
+            move || {
+                dispatch_with_settings_bounded(
+                    prompt,
+                    &workspace,
+                    &executable,
+                    &state,
+                    &digest,
+                    terminal,
+                    true,
+                    &settings,
+                    &mut BlockingSink {
+                        entered: entered_tx,
+                        release: release_rx,
+                        order: hook_order,
+                    },
+                )
+            }
+        });
+        entered_rx.recv().unwrap();
+        let lock_probe = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(state.path().join("config.lock"))
+            .unwrap();
+        assert!(matches!(
+            lock_probe.try_lock(),
+            Err(fs::TryLockError::WouldBlock)
+        ));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (saved_tx, saved_rx) = mpsc::channel();
+        let writer_order = Arc::clone(&order);
+        let writer = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let saved = settings.save_if_unchanged(before, after);
+            writer_order.lock().unwrap().push("config-commit");
+            saved_tx.send(saved).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(saved_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            hook.join().unwrap().unwrap(),
+            CursorDispatchOutcome::OutputFlushed
+        );
+        assert!(matches!(
+            saved_rx.recv().unwrap(),
+            Ok(ConditionalSaveOutcome::Saved)
+        ));
+        writer.join().unwrap();
+        assert_eq!(*order.lock().unwrap(), ["hook-output", "config-commit"]);
+        let settings = PresentationSettingsStore::new(state.path().join("config.toml"));
+        let mut output = Vec::new();
+        assert_eq!(
+            dispatch_with_settings_bounded(
+                stop,
+                workspace.path(),
+                &executable,
+                state.path(),
+                &digest,
+                terminal,
+                true,
+                &settings,
+                &mut output,
+            )
+            .unwrap(),
+            CursorDispatchOutcome::OutputFlushed
+        );
+        assert_eq!(output, b"\x1b]104;264\x1b\\");
+    }
+
+    #[test]
+    fn busy_settings_writer_makes_cursor_hook_fail_open_within_budget() {
+        let workspace = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let executable = workspace.path().join("tabbeacon.exe");
+        fs::write(&executable, b"synthetic binary").unwrap();
+        CursorHookIntegration::new(workspace.path(), &executable)
+            .unwrap()
+            .install()
+            .unwrap();
+        let settings = PresentationSettingsStore::new(state.path().join("config.toml"));
+        settings.load().unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(state.path().join("config.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let terminal = "owned-test-terminal";
+        let digest = format!("{:x}", Sha256::digest(terminal.as_bytes()));
+        let start = br#"{"hook_event_name":"sessionStart","session_id":"owned"}"#;
+        let started = std::time::Instant::now();
+        let refused = dispatch_with_settings_bounded(
+            start,
+            workspace.path(),
+            &executable,
+            state.path(),
+            &digest,
+            terminal,
+            true,
+            &settings,
+            &mut Vec::new(),
+        );
+        assert_eq!(refused.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(!state.path().join("cursor-route-v1").exists());
+        fs::File::unlock(&lock).unwrap();
+        assert_eq!(
+            dispatch_with_settings_bounded(
+                start,
+                workspace.path(),
+                &executable,
+                state.path(),
+                &digest,
+                terminal,
+                true,
+                &settings,
+                &mut Vec::new(),
+            )
+            .unwrap(),
+            CursorDispatchOutcome::RouteAdmitted
+        );
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)] // One barrier covers the route and the final color write.
