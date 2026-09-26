@@ -71,6 +71,15 @@ One isolated original-command Cursor product run showed color and later-session
 release, but it does not qualify general live application or mixed-session
 routing. A saved choice does not install Cursor Hooks or prove color in a new
 terminal; `LIVE_APPLICATION=UNPROVEN` remains the honest general status.
+`CHANGE_APPLIED=true` reports only the saved preference. The public CLI,
+wizard, and Control Center cannot clear a different process's terminal at
+Apply time. An exact owned event can release the channels still recorded for
+that terminal. A normal original-command restart in the same tab may supply
+such an event; if it does not, close the old tab to end its visible output.
+Until then, the tab may retain its previous title or color. The CLI prints
+`VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE`, and the
+Control Center shows the same boundary. No output is claimed as applied merely
+because the preference was saved or a title callback was reconciled.
 
 ## Human interface preferences
 

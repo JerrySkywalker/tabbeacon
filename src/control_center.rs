@@ -2327,7 +2327,7 @@ fn integration_lines(app: &ControlCenterApp) -> String {
         .iter()
         .map(|(provider, resolved)| {
             format!(
-                "{}: requested={}/{}/{} effective={}/{}/{} origin={:?}/{:?}/{:?} application={:?}",
+                "{}: requested={}/{}/{} effective={}/{}/{} origin={:?}/{:?}/{:?} application={:?} visible_apply_boundary=next_owned_event_or_old_tab_close",
                 provider.as_str(),
                 resolved.requested.title().as_str(),
                 resolved.requested.tab_color().as_str(),
@@ -2344,7 +2344,7 @@ fn integration_lines(app: &ControlCenterApp) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "Provider preferences / 提供方偏好\n1 Codex · 2 Agy · 3 Cursor · ←/→ mode · r inherit · v preview\nSelected / 已选: {} · {}\n{provider_preferences}\nSaved preference is not live application / 已保存偏好不代表当前会话生效\n\n{integrations}",
+        "Provider preferences / 提供方偏好\n1 Codex · 2 Agy · 3 Cursor · ←/→ mode · r inherit · v preview\nSelected / 已选: {} · {}\n{provider_preferences}\nSaved preference is not live application; old output may remain until the next owned event or the old tab closes / 已保存偏好不代表当前会话生效，旧输出可能保留至下次自有事件或旧标签关闭\n\n{integrations}",
         app.selected_provider.as_str(),
         provider_mode_label(app.selected_provider_mode),
     )
@@ -2665,6 +2665,7 @@ mod tests {
         assert!(lines.contains("cursor: requested=native/tabbeacon/off"));
         assert!(lines.contains("effective=native/native/off"));
         assert!(lines.contains("application=Unproven"));
+        assert!(lines.contains("visible_apply_boundary=next_owned_event_or_old_tab_close"));
     }
 
     #[test]

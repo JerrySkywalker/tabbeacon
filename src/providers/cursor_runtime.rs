@@ -787,4 +787,92 @@ mod tests {
         assert!(routes.join(format!("{session_a}.json")).exists());
         assert!(!routes.join(format!("{session_b}.json")).exists());
     }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One replay keeps the old route while a new same-tab owner advances.
+    fn start_only_route_cannot_reclaim_same_terminal_after_new_session() {
+        let workspace = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let executable = workspace.path().join("tabbeacon.exe");
+        fs::write(&executable, b"synthetic binary").unwrap();
+        CursorHookIntegration::new(workspace.path(), &executable)
+            .unwrap()
+            .install()
+            .unwrap();
+        let color = resolve_presentation(
+            PresentationSettings::default(),
+            PresentationOverride::default().with_mode(PresentationMode::ColorOnly),
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        );
+        let terminal = "same-owned-tab";
+        let digest = format!("{:x}", Sha256::digest(terminal.as_bytes()));
+        let mut output = Vec::new();
+        let mut send = |name: &str, session: &str, generation: Option<&str>| {
+            let mut payload = serde_json::json!({"hook_event_name":name,"session_id":session});
+            if let Some(generation) = generation {
+                payload["generation_id"] = generation.into();
+            }
+            if name == "stop" {
+                payload["status"] = "completed".into();
+            }
+            let before = output.len();
+            let outcome = dispatch_with_output_bounded(
+                payload.to_string().as_bytes(),
+                workspace.path(),
+                &executable,
+                state.path(),
+                &digest,
+                terminal,
+                true,
+                &color,
+                &mut output,
+            )
+            .unwrap();
+            (outcome, output[before..].to_vec())
+        };
+
+        assert_eq!(
+            send("sessionStart", "old-start-only", None),
+            (CursorDispatchOutcome::RouteAdmitted, Vec::new())
+        );
+        assert_eq!(
+            send("sessionStart", "new", None),
+            (CursorDispatchOutcome::RouteAdmitted, Vec::new())
+        );
+        assert_eq!(
+            send("sessionStart", "old-start-only", None),
+            (CursorDispatchOutcome::Ignored, Vec::new())
+        );
+        assert_eq!(
+            send("beforeSubmitPrompt", "new", Some("g1")).0,
+            CursorDispatchOutcome::OutputFlushed
+        );
+        assert_eq!(
+            send("beforeSubmitPrompt", "old-start-only", Some("late-g1")),
+            (CursorDispatchOutcome::RouteAdmitted, Vec::new())
+        );
+        assert_eq!(
+            send("sessionEnd", "old-start-only", None),
+            (CursorDispatchOutcome::RouteAdmitted, Vec::new())
+        );
+        assert_eq!(
+            send("sessionEnd", "old-start-only", None),
+            (CursorDispatchOutcome::Ignored, Vec::new())
+        );
+        let (stop, bytes) = send("stop", "new", Some("g1"));
+        assert_eq!(stop, CursorDispatchOutcome::OutputFlushed);
+        assert!(bytes.starts_with(b"\x1b]4;264;rgb:"));
+        assert_eq!(
+            send("sessionEnd", "new", None),
+            (
+                CursorDispatchOutcome::OutputFlushed,
+                b"\x1b]104;264\x1b\\".to_vec()
+            )
+        );
+        assert_eq!(
+            send("beforeSubmitPrompt", "old-start-only", Some("late-g2")),
+            (CursorDispatchOutcome::Ignored, Vec::new())
+        );
+    }
 }

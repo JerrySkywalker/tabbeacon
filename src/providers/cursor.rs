@@ -1165,6 +1165,47 @@ mod tests {
     }
 
     #[test]
+    fn start_only_routes_reach_a_bounded_fail_closed_capacity_without_deletion() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CursorRouteStore::new(root.path());
+        fs::create_dir_all(&store.directory).unwrap();
+        let terminal = "a".repeat(64);
+        let mut first_path = None;
+        for number in 0..MAX_CURSOR_SESSION_FILES {
+            let input = serde_json::json!({
+                "hook_event_name":"sessionStart",
+                "session_id":format!("start-only-{number}")
+            });
+            let start = normalize_hook(input.to_string().as_bytes())
+                .unwrap()
+                .unwrap();
+            let route =
+                CursorSessionRoute::from_session_start(&start, &terminal, &terminal, true).unwrap();
+            let path = store
+                .directory
+                .join(format!("{}.json", start.session_sha256));
+            fs::write(&path, route.checkpoint().unwrap()).unwrap();
+            first_path.get_or_insert(path);
+        }
+        let next =
+            normalize_hook(br#"{"hook_event_name":"sessionStart","session_id":"one-too-many"}"#)
+                .unwrap()
+                .unwrap();
+        let error = store.admit(&next, &terminal, &terminal, true).unwrap_err();
+        assert!(error.to_string().contains("capacity reached"));
+        assert!(
+            first_path.unwrap().exists(),
+            "unknown live routes are retained"
+        );
+        assert!(
+            !store
+                .directory
+                .join(format!("{}.json", next.session_sha256))
+                .exists()
+        );
+    }
+
+    #[test]
     fn restart_finishes_only_an_exact_ended_checkpoint() {
         let root = tempfile::tempdir().unwrap();
         let store = CursorRouteStore::new(root.path());

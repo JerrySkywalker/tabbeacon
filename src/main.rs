@@ -698,6 +698,9 @@ fn print_provider_config(
         ApplicationStatus::Unproven => "UNPROVEN",
     };
     println!("LIVE_APPLICATION={application}");
+    // Saved preferences and reconciled callbacks cannot clear output in a
+    // different process's terminal. Cursor Apply has no cross-tab broadcast.
+    println!("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE");
     println!("RESTART_MAY_BE_REQUIRED=true");
 }
 

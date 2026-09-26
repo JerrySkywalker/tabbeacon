@@ -1,6 +1,7 @@
 #![cfg(windows)]
 
 use std::{
+    cell::RefCell,
     fs,
     io::Write,
     path::Path,
@@ -8,7 +9,16 @@ use std::{
 };
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::os::windows::process::CommandExt;
+use tabbeacon::{
+    presentation_policy::{ApplicationStatus, CliTarget, PresentationCapabilities},
+    providers::{
+        cursor_integration::CursorHookIntegration,
+        cursor_runtime::{CursorDispatchOutcome, dispatch_with_output_bounded},
+    },
+    settings::PresentationSettingsStore,
+};
 
 fn run(binary: &Path, arguments: &[&str]) -> Value {
     let output = Command::new(binary).args(arguments).output().unwrap();
@@ -149,4 +159,127 @@ fn public_cursor_management_preserves_foreign_project_hooks() {
     let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     assert_eq!(value["hooks"]["stop"][0]["command"], "foreign-hook");
     assert_eq!(value["unrelated"]["approval"], "unchanged");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Public Apply and the next admitted Hook form one transition proof.
+fn public_cursor_preference_apply_reports_deferred_visible_settlement() {
+    let root = tempfile::tempdir().unwrap();
+    let isolated_local_appdata = root.path().join("local-appdata");
+    fs::create_dir(&isolated_local_appdata).unwrap();
+    let binary = Path::new(env!("CARGO_BIN_EXE_tabbeacon"));
+    let run_config = |arguments: &[&str]| {
+        let output = Command::new(binary)
+            .args(["config", "--plain", "provider", "cursor"])
+            .args(arguments)
+            .current_dir(root.path())
+            .env("LOCALAPPDATA", &isolated_local_appdata)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "status={:?}", output.status);
+        assert!(output.stderr.is_empty());
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let settings_path = isolated_local_appdata.join("TabBeacon/config.toml");
+    let route_path = isolated_local_appdata.join("TabBeacon/cursor-route-v1");
+
+    let preview = run_config(&["preview", "color-only"]);
+    assert!(preview.contains("CHANGE_APPLIED=false"));
+    assert!(!settings_path.exists());
+    let color = run_config(&["apply", "color-only"]);
+    assert!(color.contains("CHANGE_APPLIED=true"));
+    assert!(color.contains("REQUESTED_TAB_COLOR=tabbeacon"));
+    assert!(color.contains("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE"));
+    assert!(settings_path.exists());
+    assert!(
+        !route_path.exists(),
+        "Apply must not claim a terminal route"
+    );
+
+    CursorHookIntegration::new(root.path(), binary)
+        .unwrap()
+        .install()
+        .unwrap();
+    let store = PresentationSettingsStore::new(&settings_path);
+    let terminal = "synthetic-owned-tab";
+    let digest = format!("{:x}", Sha256::digest(terminal.as_bytes()));
+    let sink = RefCell::new(Vec::new());
+    let dispatch = |event: &[u8]| {
+        let resolved = store
+            .resolve_provider_read_only(
+                CliTarget::Cursor,
+                PresentationCapabilities::CURSOR_COLOR_ONLY,
+                ApplicationStatus::Unproven,
+            )
+            .unwrap();
+        let mut output = sink.borrow_mut();
+        dispatch_with_output_bounded(
+            event,
+            root.path(),
+            binary,
+            settings_path.parent().unwrap(),
+            &digest,
+            terminal,
+            true,
+            &resolved,
+            &mut *output,
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        dispatch(br#"{"hook_event_name":"sessionStart","session_id":"owned"}"#),
+        CursorDispatchOutcome::RouteAdmitted
+    );
+    assert_eq!(
+        dispatch(br#"{"hook_event_name":"beforeSubmitPrompt","session_id":"owned","generation_id":"g1"}"#),
+        CursorDispatchOutcome::OutputFlushed
+    );
+    let before_native = sink.borrow().len();
+    assert!(before_native > 0);
+
+    let native = run_config(&["apply", "preserve-native"]);
+    assert!(native.contains("CHANGE_APPLIED=true"));
+    assert!(native.contains("REQUESTED_TAB_COLOR=native"));
+    assert!(native.contains("REQUESTED_TITLE=native"));
+    assert!(native.contains("EFFECTIVE_ACTIVITY=native"));
+    assert!(native.contains("LIVE_APPLICATION=UNPROVEN"));
+    assert!(native.contains("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE"));
+    assert_eq!(
+        sink.borrow().len(),
+        before_native,
+        "Apply does not emit terminal output"
+    );
+    assert_eq!(
+        dispatch(br#"{"hook_event_name":"stop","session_id":"owned","generation_id":"g1","status":"completed"}"#),
+        CursorDispatchOutcome::OutputFlushed
+    );
+    assert_eq!(&sink.borrow()[before_native..], b"\x1b]104;264\x1b\\");
+    let after_native = sink.borrow().len();
+    assert_eq!(
+        dispatch(br#"{"hook_event_name":"stop","session_id":"owned","generation_id":"g1","status":"completed"}"#),
+        CursorDispatchOutcome::Ignored
+    );
+    assert_eq!(sink.borrow().len(), after_native);
+
+    let inherited = run_config(&["inherit", "--apply"]);
+    assert!(inherited.contains("CHANGE_APPLIED=true"));
+    assert!(inherited.contains("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE"));
+    assert_eq!(
+        dispatch(br#"{"hook_event_name":"beforeSubmitPrompt","session_id":"owned","generation_id":"g2"}"#),
+        CursorDispatchOutcome::OutputFlushed
+    );
+    assert!(sink.borrow()[after_native..].starts_with(b"\x1b]4;264;rgb:"));
+    assert_eq!(
+        dispatch(br#"{"hook_event_name":"stop","session_id":"owned","generation_id":"g2","status":"completed"}"#),
+        CursorDispatchOutcome::OutputFlushed
+    );
+    let result_ready_bytes = sink.borrow().len();
+    let native_after_result = run_config(&["apply", "preserve-native"]);
+    assert!(native_after_result.contains("CHANGE_APPLIED=true"));
+    assert_eq!(sink.borrow().len(), result_ready_bytes);
+    assert_eq!(
+        dispatch(br#"{"hook_event_name":"sessionEnd","session_id":"owned"}"#),
+        CursorDispatchOutcome::OutputFlushed
+    );
+    assert_eq!(&sink.borrow()[result_ready_bytes..], b"\x1b]104;264\x1b\\");
 }
