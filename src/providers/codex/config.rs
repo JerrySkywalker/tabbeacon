@@ -2299,8 +2299,17 @@ impl CodexIntegration {
         if bytes.len() > MAX_TITLE_TRANSITION_JOURNAL_BYTES {
             return Err(CodexIntegrationError::TitleRecoveryBlocked);
         }
-        atomic_write(&path, &bytes)?;
-        crate::private_journal::seal_private_journal_file(&path)
+        let mut file = AtomicWriteFile::options().open(&path)?;
+        crate::private_journal::seal_private_journal_handle(
+            file.as_file(),
+            path.parent()
+                .ok_or(CodexIntegrationError::TitleRecoveryBlocked)?,
+        )
+        .map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?;
+        file.write_all(&bytes)?;
+        file.flush()?;
+        file.commit()?;
+        crate::private_journal::verify_private_journal_file(&path)
             .map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?;
         Ok(())
     }

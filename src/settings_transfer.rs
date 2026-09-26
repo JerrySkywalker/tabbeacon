@@ -26,7 +26,8 @@ use crate::{
     },
     presentation_policy::{CliTarget, PresentationOverride},
     private_journal::{
-        ensure_private_journal_dir, seal_private_journal_file, verify_private_journal_file,
+        ensure_private_journal_dir, seal_private_journal_file, seal_private_journal_handle,
+        verify_private_journal_file,
     },
     repo::{
         CanonicalRepositoryIdentity, RepositoryAlias, WorkspacePreferenceStore,
@@ -965,12 +966,13 @@ fn write_import_journal(path: &Path, journal: &ImportJournal, new: bool) -> Resu
             .write(true)
             .open(path)
             .map_err(|_| ())?;
-        seal_private_journal_file(path).map_err(|_| ())?;
+        seal_private_journal_handle(&file, path.parent().ok_or(())?).map_err(|_| ())?;
         file.write_all(&bytes).map_err(|_| ())?;
         file.sync_all().map_err(|_| ())?;
     } else {
         verify_private_journal_file(path).map_err(|_| ())?;
         let mut file = AtomicWriteFile::options().open(path).map_err(|_| ())?;
+        seal_private_journal_handle(file.as_file(), path.parent().ok_or(())?).map_err(|_| ())?;
         file.write_all(&bytes).map_err(|_| ())?;
         file.flush().map_err(|_| ())?;
         file.commit().map_err(|_| ())?;

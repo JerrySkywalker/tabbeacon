@@ -3,6 +3,8 @@
 
 use std::{fs, io, path::Path};
 
+use std::fs::File;
+
 /// Creates the exact owned directory with a private ACL or verifies an
 /// existing one before any sensitive journal bytes are written.
 pub(crate) fn ensure_private_journal_dir(path: &Path) -> io::Result<()> {
@@ -52,6 +54,41 @@ pub(crate) fn seal_private_journal_file(path: &Path) -> io::Result<()> {
     verify_private_journal_file(path)
 }
 
+/// Seals an already opened, newly created journal handle before any raw
+/// configuration bytes reach it. Atomic writers expose their temporary file
+/// through this handle while its final path does not yet exist.
+pub(crate) fn seal_private_journal_handle(file: &File, parent: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    return windows_private::seal_handle(file, parent);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        ensure_private_journal_dir(parent)?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        let metadata = file.metadata()?;
+        // SAFETY: geteuid has no arguments and only reads process identity.
+        let owner = unsafe { unix_private::geteuid() };
+        if !metadata.is_file()
+            || metadata.uid() != owner
+            || metadata.permissions().mode() & 0o077 != 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "journal handle is not private",
+            ));
+        }
+        return Ok(());
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = (file, parent);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "private journal handle unavailable",
+        ))
+    }
+}
+
 #[cfg(unix)]
 #[allow(unsafe_code)]
 mod unix_private {
@@ -59,7 +96,7 @@ mod unix_private {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 
     unsafe extern "C" {
-        fn geteuid() -> u32;
+        pub(super) fn geteuid() -> u32;
     }
 
     pub(super) fn ensure(path: &Path) -> io::Result<()> {
@@ -113,12 +150,16 @@ mod unix_private {
     clippy::cast_sign_loss
 )] // Win32 FFI uses raw out-pointers and fixed-width OS status/length types.
 mod windows_private {
-    use super::{Path, fs, io};
+    use super::{File, Path, fs, io};
     use std::{
-        ffi::OsStr,
+        ffi::{OsStr, OsString},
         iter,
         mem::size_of,
-        os::windows::{ffi::OsStrExt, fs::MetadataExt},
+        os::windows::{
+            ffi::{OsStrExt, OsStringExt},
+            fs::MetadataExt,
+            io::AsRawHandle,
+        },
     };
     use windows::{
         Win32::{
@@ -127,13 +168,13 @@ mod windows_private {
                 Authorization::{
                     ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
                     ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW,
-                    GetNamedSecurityInfoW, SE_FILE_OBJECT, SetNamedSecurityInfoW,
+                    GetNamedSecurityInfoW, GetSecurityInfo, SE_FILE_OBJECT, SetNamedSecurityInfoW,
                 },
-                DACL_SECURITY_INFORMATION, GetTokenInformation, OWNER_SECURITY_INFORMATION,
-                PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
-                TokenUser,
+                DACL_SECURITY_INFORMATION, EqualSid, GetTokenInformation,
+                OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+                TOKEN_QUERY, TOKEN_USER, TokenUser,
             },
-            Storage::FileSystem::CreateDirectoryW,
+            Storage::FileSystem::{CreateDirectoryW, GetFinalPathNameByHandleW, VOLUME_NAME_DOS},
             System::Threading::{GetCurrentProcess, OpenProcessToken},
         },
         core::{BOOL, PCWSTR, PWSTR},
@@ -193,6 +234,27 @@ mod windows_private {
             let value = text.to_string().map_err(io::Error::other);
             let _ = LocalFree(Some(HLOCAL(text.0.cast())));
             value
+        }
+    }
+
+    fn sid_text_equals(left: &str, right: &str) -> io::Result<bool> {
+        let mut left_sid = PSID::default();
+        let mut right_sid = PSID::default();
+        let left_text = wide(OsStr::new(left));
+        let right_text = wide(OsStr::new(right));
+        // SAFETY: both inputs are terminated SDDL trustees and both allocated
+        // SIDs are freed even if the second conversion fails.
+        unsafe {
+            ConvertStringSidToSidW(PCWSTR(left_text.as_ptr()), &mut left_sid)
+                .map_err(io::Error::other)?;
+            let result = ConvertStringSidToSidW(PCWSTR(right_text.as_ptr()), &mut right_sid)
+                .map(|()| EqualSid(left_sid, right_sid).is_ok())
+                .map_err(io::Error::other);
+            let _ = LocalFree(Some(HLOCAL(left_sid.0.cast())));
+            if !right_sid.0.is_null() {
+                let _ = LocalFree(Some(HLOCAL(right_sid.0.cast())));
+            }
+            result
         }
     }
 
@@ -296,6 +358,86 @@ mod windows_private {
         verify_file(path)
     }
 
+    pub(super) fn seal_handle(file: &File, parent: &Path) -> io::Result<()> {
+        ensure(parent)?;
+        verify_handle_acl(file, false)?;
+        // AtomicWriteFile opens its temporary handle for writing but without
+        // WRITE_OWNER. Resolve the name from that already opened handle, prove
+        // it is still inside the exact private parent, then use the path API
+        // to set ownership before writing any bytes.
+        let mut path_buffer = vec![0u16; 32_768];
+        // SAFETY: the result is written only into the supplied buffer.
+        let length = unsafe {
+            GetFinalPathNameByHandleW(
+                HANDLE(file.as_raw_handle()),
+                &mut path_buffer,
+                VOLUME_NAME_DOS,
+            )
+        } as usize;
+        if length == 0 || length >= path_buffer.len() {
+            return Err(io::Error::other("journal temporary path unavailable"));
+        }
+        let temporary_path = std::path::PathBuf::from(OsString::from_wide(&path_buffer[..length]));
+        let actual_parent = temporary_path
+            .parent()
+            .ok_or_else(|| io::Error::other("journal temporary parent missing"))?;
+        if fs::canonicalize(actual_parent)? != fs::canonicalize(parent)? {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "journal temporary file left private directory",
+            ));
+        }
+        seal_file(&temporary_path)?;
+        verify_handle_acl(file, true)
+    }
+
+    fn verify_handle_acl(file: &File, require_user_owner: bool) -> io::Result<()> {
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_file() || metadata.file_attributes() & 0x400 != 0 {
+            return Err(io::Error::other("journal handle is not a regular file"));
+        }
+        let sid = current_user_sid()?;
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        let mut owner = PSID::default();
+        // SAFETY: the descriptor returned for this owned file handle remains
+        // alive until after its owner and DACL have been examined.
+        unsafe {
+            let status = GetSecurityInfo(
+                HANDLE(file.as_raw_handle()),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                Some(&mut owner),
+                None,
+                None,
+                None,
+                Some(&mut descriptor),
+            );
+            if status.0 != 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("journal handle ACL read failed: {}", status.0),
+                ));
+            }
+            let result = (|| {
+                let sddl = descriptor_sddl(descriptor)?;
+                let owner_matches = if require_user_owner {
+                    let sid_text = wide(OsStr::new(&sid));
+                    let mut expected = PSID::default();
+                    ConvertStringSidToSidW(PCWSTR(sid_text.as_ptr()), &mut expected)
+                        .map_err(io::Error::other)?;
+                    let equal = EqualSid(owner, expected).is_ok();
+                    let _ = LocalFree(Some(HLOCAL(expected.0.cast())));
+                    equal
+                } else {
+                    true
+                };
+                verify_sddl_acl(&sddl, &sid, owner_matches)
+            })();
+            let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+            result
+        }
+    }
+
     pub(super) fn verify_file(path: &Path) -> io::Result<()> {
         verify_file_acl(path, true)
     }
@@ -308,14 +450,15 @@ mod windows_private {
         let sid = current_user_sid()?;
         let path_wide = wide(path.as_os_str());
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        let mut actual_owner = PSID::default();
         // SAFETY: the path is NUL terminated and the security descriptor is
         // returned by Windows, then freed after conversion.
-        let sddl = unsafe {
+        let (sddl, owner_matches) = unsafe {
             let status = GetNamedSecurityInfoW(
                 PCWSTR(path_wide.as_ptr()),
                 SE_FILE_OBJECT,
                 OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-                None,
+                Some(&mut actual_owner),
                 None,
                 None,
                 None,
@@ -324,14 +467,32 @@ mod windows_private {
             if status.0 != 0 {
                 return Err(io::Error::from_raw_os_error(status.0 as i32));
             }
-            let text = descriptor_sddl(descriptor);
+            let result = (|| {
+                let text = descriptor_sddl(descriptor)?;
+                let owner_matches = if require_user_owner {
+                    let sid_text = wide(OsStr::new(&sid));
+                    let mut expected_owner = PSID::default();
+                    ConvertStringSidToSidW(PCWSTR(sid_text.as_ptr()), &mut expected_owner)
+                        .map_err(io::Error::other)?;
+                    let matches = EqualSid(actual_owner, expected_owner).is_ok();
+                    let _ = LocalFree(Some(HLOCAL(expected_owner.0.cast())));
+                    matches
+                } else {
+                    true
+                };
+                Ok::<_, io::Error>((text, owner_matches))
+            })();
             let _ = LocalFree(Some(HLOCAL(descriptor.0)));
-            text?
+            result?
         };
-        let (owner, dacl) = sddl.split_once("D:").ok_or_else(|| {
+        verify_sddl_acl(&sddl, &sid, owner_matches)
+    }
+
+    fn verify_sddl_acl(sddl: &str, sid: &str, owner_matches: bool) -> io::Result<()> {
+        let (_, dacl) = sddl.split_once("D:").ok_or_else(|| {
             io::Error::new(io::ErrorKind::PermissionDenied, "journal file DACL missing")
         })?;
-        if require_user_owner && owner != format!("O:{sid}") {
+        if !owner_matches {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 "journal file owner changed",
@@ -354,15 +515,15 @@ mod windows_private {
                     "journal file ACE unsupported",
                 ));
             }
-            match fields[5] {
-                trustee if trustee == sid => user_allow = true,
-                "SY" => system_allow = true,
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::PermissionDenied,
-                        "journal file ACL grants another principal",
-                    ));
-                }
+            if sid_text_equals(fields[5], sid)? {
+                user_allow = true;
+            } else if sid_text_equals(fields[5], "SY")? {
+                system_allow = true;
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "journal file ACL grants another principal",
+                ));
             }
             entries += 1;
         }
@@ -379,6 +540,22 @@ mod windows_private {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn atomic_temporary_journal_is_private_before_write() {
+        let root = tempfile::tempdir().unwrap();
+        let parent = root.path().join("private-journal");
+        ensure_private_journal_dir(&parent).unwrap();
+        let path = parent.join("journal.json");
+        let mut file = atomic_write_file::AtomicWriteFile::options()
+            .open(&path)
+            .unwrap();
+        seal_private_journal_handle(file.as_file(), &parent).unwrap();
+        file.write_all(b"synthetic configuration").unwrap();
+        file.commit().unwrap();
+        verify_private_journal_file(&path).unwrap();
+    }
 
     #[test]
     fn owned_private_directory_is_verified_on_reopen() {
