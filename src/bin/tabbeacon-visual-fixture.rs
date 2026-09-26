@@ -414,10 +414,9 @@ fn emit_codex_public_fixture(name: &str, run_id: &str, hold_millis: u64) -> Visu
                 Some("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE"),
             )?;
             hook("Stop", Some("turn-1"))?;
-            // A new native turn after the release must leave this marker and
-            // the terminal's default tab color under native control.
-            stdout.write_all(format!("\x1b]0;{}\x1b\\", replay.case.expected_title).as_bytes())?;
-            stdout.flush()?;
+            // The marker written before the color-only Hook must survive
+            // both this release and a later native turn without being set
+            // again by the fixture. UIA checks only its final retention.
             hook("UserPromptSubmit", Some("turn-2"))?;
         }
         thread::sleep(Duration::from_millis(hold_millis));
