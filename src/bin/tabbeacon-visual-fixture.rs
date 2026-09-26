@@ -26,10 +26,12 @@ use tabbeacon::{
     providers::{
         codex::{CodexHookRuntime, HookDispatchOutcome},
         cursor_integration::CursorHookIntegration,
-        cursor_runtime::{CursorDispatchOutcome, dispatch_with_output_bounded},
+        cursor_runtime::{
+            CursorDispatchOutcome, dispatch_with_output_bounded, dispatch_with_settings_bounded,
+        },
     },
     repo::WorkspaceIdentityResolver,
-    settings::PresentationSettings,
+    settings::{PresentationSettings, PresentationSettingsStore},
     visual::{
         CURSOR_COLOR_COMPLETED_FIXTURE, CURSOR_COLOR_NATIVE_FIXTURE, CURSOR_COLOR_WORKING_FIXTURE,
         CaptureBackend, ExactOwnedWindowBackend, FixtureDriver, LiveVisualRunRequest,
@@ -125,12 +127,40 @@ fn emit_cursor_color_fixture(name: &str, run_id: &str, hold_millis: u64) -> Visu
     ));
     fs::create_dir(&root)?;
     let workspace = root.join("workspace");
-    let state_root = root.join("state");
+    let isolated_local_appdata = root.join("local-appdata");
+    let native_public_apply = name == CURSOR_COLOR_NATIVE_FIXTURE;
+    let state_root = if native_public_apply {
+        isolated_local_appdata.join("TabBeacon")
+    } else {
+        root.join("state")
+    };
     let result = (|| -> VisualResult<()> {
         fs::create_dir(&workspace)?;
-        fs::create_dir(&state_root)?;
-        let executable = env::current_exe()?;
+        if !native_public_apply {
+            fs::create_dir(&state_root)?;
+        }
+        let executable = if native_public_apply {
+            env::current_exe()?.with_file_name("tabbeacon.exe")
+        } else {
+            env::current_exe()?
+        };
+        if !executable.is_file() {
+            return Err(VisualError::Platform(
+                "owned Cursor visual fixture product binary is unavailable".to_owned(),
+            ));
+        }
         CursorHookIntegration::new(&workspace, &executable)?.install()?;
+        let settings =
+            PresentationSettingsStore::new(isolated_local_appdata.join("TabBeacon/config.toml"));
+        if native_public_apply {
+            fs::create_dir(&isolated_local_appdata)?;
+            run_isolated_cursor_apply(
+                &executable,
+                &workspace,
+                &isolated_local_appdata,
+                "color-only",
+            )?;
+        }
         let terminal = env::var("WT_SESSION").map_err(|_| {
             VisualError::Platform("owned Cursor visual tab has no WT_SESSION".to_owned())
         })?;
@@ -165,17 +195,32 @@ fn emit_cursor_color_fixture(name: &str, run_id: &str, hold_millis: u64) -> Visu
             if let Some(status) = status {
                 payload["status"] = status.into();
             }
-            let outcome = dispatch_with_output_bounded(
-                payload.to_string().as_bytes(),
-                &workspace,
-                &executable,
-                &state_root,
-                &digest,
-                &terminal,
-                true,
-                mode,
-                sink,
-            )?;
+            let raw = payload.to_string();
+            let outcome = if native_public_apply {
+                dispatch_with_settings_bounded(
+                    raw.as_bytes(),
+                    &workspace,
+                    &executable,
+                    &state_root,
+                    &digest,
+                    &terminal,
+                    true,
+                    &settings,
+                    sink,
+                )?
+            } else {
+                dispatch_with_output_bounded(
+                    raw.as_bytes(),
+                    &workspace,
+                    &executable,
+                    &state_root,
+                    &digest,
+                    &terminal,
+                    true,
+                    mode,
+                    sink,
+                )?
+            };
             if matches!(
                 outcome,
                 CursorDispatchOutcome::Ignored
@@ -190,6 +235,14 @@ fn emit_cursor_color_fixture(name: &str, run_id: &str, hold_millis: u64) -> Visu
         };
         call("sessionStart", None, None, &color, &mut console)?;
         call("beforeSubmitPrompt", Some("g1"), None, &color, &mut console)?;
+        if native_public_apply {
+            run_isolated_cursor_apply(
+                &executable,
+                &workspace,
+                &isolated_local_appdata,
+                "preserve-native",
+            )?;
+        }
         if name != CURSOR_COLOR_WORKING_FIXTURE {
             let mode = if name == CURSOR_COLOR_NATIVE_FIXTURE {
                 &native
@@ -210,6 +263,30 @@ fn emit_cursor_color_fixture(name: &str, run_id: &str, hold_millis: u64) -> Visu
     }
     fs::remove_dir_all(&owned)?;
     result
+}
+
+fn run_isolated_cursor_apply(
+    executable: &Path,
+    workspace: &Path,
+    local_appdata: &Path,
+    mode: &str,
+) -> VisualResult<()> {
+    let output = Command::new(executable)
+        .args(["config", "--plain", "provider", "cursor", "apply", mode])
+        .current_dir(workspace)
+        .env("LOCALAPPDATA", local_appdata)
+        .output()?;
+    if !output.status.success()
+        || !output.stderr.is_empty()
+        || !String::from_utf8_lossy(&output.stdout).contains("CHANGE_APPLIED=true")
+        || !String::from_utf8_lossy(&output.stdout)
+            .contains("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE")
+    {
+        return Err(VisualError::Platform(
+            "isolated public Cursor preference Apply was not admitted".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 const PROMO_FPS: u32 = 10;

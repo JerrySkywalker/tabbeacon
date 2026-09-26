@@ -31,6 +31,13 @@ if ($actualHead -ne $ExpectedHead) {
 
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
 
+if ($Fixture -eq 'cursor-color-native') {
+    & cargo build --locked --bin tabbeacon
+    if ($LASTEXITCODE -ne 0) {
+        throw "Owned Cursor public-Apply fixture product binary build failed: exit=$LASTEXITCODE"
+    }
+}
+
 $visualArguments = @('run', '--expected-head', $ExpectedHead, '--run-id', $RunId, '--evidence-root', $EvidenceRoot)
 if ($Fixture) { $visualArguments += @('--fixture', $Fixture) }
 & cargo run --locked --features visual-fixture --bin tabbeacon-visual-fixture -- @visualArguments
