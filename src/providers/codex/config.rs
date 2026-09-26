@@ -50,6 +50,7 @@ const MCP_MIGRATION_JOURNAL_FILE: &str = "mcp-to-command-migration-v1.json";
 const MCP_MIGRATION_RECOVERY_DIR: &str = "mcp-to-command-recovery-v1";
 const TITLE_TRANSITION_JOURNAL_SCHEMA: &str = "tabbeacon-codex-title-transition-v1";
 const TITLE_TRANSITION_JOURNAL_FILE: &str = "title-transition-v1.json";
+const PRIVATE_TITLE_JOURNAL_DIR: &str = "private-title-journal-v1";
 const MAX_TITLE_TRANSITION_JOURNAL_BYTES: usize = 4 * 1024 * 1024;
 
 #[cfg(test)]
@@ -733,6 +734,17 @@ impl CodexIntegration {
     /// read-only check performs no provider command, trust decision, or write.
     #[must_use]
     pub fn interrupt_runtime_admitted_read_only(&self) -> bool {
+        // A trusted declaration can outlive the Codex executable or its
+        // Hooks feature setting. Recheck the current local capability before
+        // treating Interrupt as authoritative at runtime.
+        if self
+            .probe_codex_capabilities(false)
+            .state()
+            .supported_profile()
+            != Some(CodexHookProfile::command_interrupt_v1())
+        {
+            return false;
+        }
         if !matches!(self.load_title_transition_journal(), Ok(None)) {
             return false;
         }
@@ -2230,14 +2242,30 @@ impl CodexIntegration {
     }
 
     fn title_transition_journal_path(&self) -> PathBuf {
-        self.state_root.join(TITLE_TRANSITION_JOURNAL_FILE)
+        self.state_root
+            .join(PRIVATE_TITLE_JOURNAL_DIR)
+            .join(TITLE_TRANSITION_JOURNAL_FILE)
     }
 
     fn load_title_transition_journal(
         &self,
     ) -> Result<Option<TitleTransitionJournal>, CodexIntegrationError> {
+        let legacy_path = self.state_root.join(TITLE_TRANSITION_JOURNAL_FILE);
+        reject_symbolic_link(&legacy_path)?;
+        if legacy_path.exists() {
+            return Err(CodexIntegrationError::TitleRecoveryBlocked);
+        }
         let path = self.title_transition_journal_path();
         reject_symbolic_link(&path)?;
+        if path.exists() {
+            crate::private_journal::ensure_private_journal_dir(
+                path.parent()
+                    .ok_or(CodexIntegrationError::TitleRecoveryBlocked)?,
+            )
+            .map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?;
+            crate::private_journal::verify_private_journal_file(&path)
+                .map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?;
+        }
         let Some(bytes) = read_optional_bytes(&path)? else {
             return Ok(None);
         };
@@ -2259,8 +2287,17 @@ impl CodexIntegration {
     ) -> Result<(), CodexIntegrationError> {
         let path = self.title_transition_journal_path();
         reject_symbolic_link(&path)?;
+        crate::private_journal::ensure_private_journal_dir(
+            path.parent()
+                .ok_or(CodexIntegrationError::TitleRecoveryBlocked)?,
+        )
+        .map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?;
         if new && path.exists() {
             return Err(CodexIntegrationError::TitleRecoveryBlocked);
+        }
+        if !new {
+            crate::private_journal::verify_private_journal_file(&path)
+                .map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?;
         }
         let bytes =
             serde_json::to_vec(journal).map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?;
@@ -2268,6 +2305,8 @@ impl CodexIntegration {
             return Err(CodexIntegrationError::TitleRecoveryBlocked);
         }
         atomic_write(&path, &bytes)?;
+        crate::private_journal::seal_private_journal_file(&path)
+            .map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?;
         Ok(())
     }
 
@@ -5380,6 +5419,11 @@ mod tests {
                 "stage={stage}; stdout={}",
                 String::from_utf8_lossy(&output.stdout)
             );
+            let journal = root
+                .path()
+                .join("state/private-title-journal-v1/title-transition-v1.json");
+            crate::private_journal::ensure_private_journal_dir(journal.parent().unwrap()).unwrap();
+            crate::private_journal::verify_private_journal_file(&journal).unwrap();
             let integration = title_transition_handle(root.path());
             let expected = stage != "applied";
             let outcome = integration
@@ -5389,7 +5433,12 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(outcome, TitleOwnershipOutcome::AlreadyConfigured);
-            assert!(!root.path().join("state/title-transition-v1.json").exists());
+            assert!(
+                !root
+                    .path()
+                    .join("state/private-title-journal-v1/title-transition-v1.json")
+                    .exists()
+            );
             let manifest = integration.load_manifest().unwrap().unwrap();
             assert_eq!(manifest.title_owned, expected);
             assert!(
@@ -5399,6 +5448,26 @@ mod tests {
                 "unrelated configuration survives stage={stage}"
             );
         }
+    }
+
+    #[test]
+    fn legacy_unprotected_title_journal_blocks_reconciliation() {
+        let root = tempfile::tempdir().unwrap();
+        let integration = install_title_transition_fixture(root.path());
+        let legacy = root.path().join("state/title-transition-v1.json");
+        fs::write(&legacy, b"unprotected legacy journal bytes").unwrap();
+        assert!(matches!(
+            integration.load_title_transition_journal(),
+            Err(CodexIntegrationError::TitleRecoveryBlocked)
+        ));
+        assert!(matches!(
+            integration.with_lock(|| integration.reconcile_title_ownership_locked(false)),
+            Err(CodexIntegrationError::TitleRecoveryBlocked)
+        ));
+        assert_eq!(
+            fs::read(legacy).unwrap(),
+            b"unprotected legacy journal bytes"
+        );
     }
 
     #[test]
@@ -5425,7 +5494,11 @@ mod tests {
             fs::read_to_string(&config_path).unwrap(),
             "[foreign]\nkeep = false\n"
         );
-        assert!(root.path().join("state/title-transition-v1.json").exists());
+        assert!(
+            root.path()
+                .join("state/private-title-journal-v1/title-transition-v1.json")
+                .exists()
+        );
     }
 
     fn combined_import_stores(
@@ -5514,10 +5587,15 @@ mod tests {
             assert!(
                 !root
                     .path()
-                    .join("import/import-transaction-v1.json")
+                    .join("import/private-import-journal-v1/import-transaction-v1.json")
                     .exists()
             );
-            assert!(!root.path().join("state/title-transition-v1.json").exists());
+            assert!(
+                !root
+                    .path()
+                    .join("state/private-title-journal-v1/title-transition-v1.json")
+                    .exists()
+            );
             assert!(integration.load_manifest().unwrap().unwrap().title_owned);
             assert!(
                 fs::read_to_string(root.path().join("codex-home/config.toml"))

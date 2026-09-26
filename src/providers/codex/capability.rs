@@ -8,7 +8,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -248,6 +248,8 @@ fn probe_schema(codex_program: Option<&Path>) -> Option<SchemaEvidence> {
     let status = command(codex_program)
         .args(["app-server", "generate-json-schema", "--out"])
         .arg(&root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .ok();
     let fingerprint = status

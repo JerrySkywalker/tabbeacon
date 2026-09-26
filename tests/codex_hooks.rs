@@ -1488,6 +1488,11 @@ fn interrupt_capability_cache_cannot_override_current_disabled_hooks() {
             .expect("isolated setup caches capability"),
         SetupOutcome::InstalledTrustReviewRequired
     );
+    assert_eq!(
+        install_current_codex_trust_state(&root.child("codex-home")).len(),
+        12
+    );
+    assert!(integration.interrupt_runtime_admitted_read_only());
     fs::write(
         fixture
             .parent()
@@ -1502,6 +1507,7 @@ fn interrupt_capability_cache_cannot_override_current_disabled_hooks() {
         doctor.compatibility_state(),
         CodexCompatibilityState::Incompatible
     );
+    assert!(!integration.interrupt_runtime_admitted_read_only());
 }
 
 #[test]
@@ -1516,11 +1522,23 @@ fn public_hook_cli_admits_interrupt_only_after_isolated_declaration_and_trust() 
         local_app_data.join("TabBeacon/codex-integration"),
         &binary,
     )
-    .with_codex_program(fixture);
+    .with_codex_program(&fixture);
     assert_eq!(
         integration.setup().expect("isolated hook setup"),
         SetupOutcome::InstalledTrustReviewRequired
     );
+    let runtime_bin = root.child("runtime-bin");
+    fs::create_dir_all(&runtime_bin).expect("isolated runtime bin creates");
+    fs::copy(
+        &fixture,
+        runtime_bin.join(if cfg!(windows) { "codex.exe" } else { "codex" }),
+    )
+    .expect("isolated Codex probe becomes the runtime command");
+    let runtime_path = env::join_paths(
+        std::iter::once(runtime_bin.clone())
+            .chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),
+    )
+    .expect("isolated runtime PATH joins");
     let payload = serde_json::to_vec(&hook_payload("Interrupt", "public-interrupt", &root.path))
         .expect("fixture serializes");
     let run = |receipt: &str| {
@@ -1530,6 +1548,7 @@ fn public_hook_cli_admits_interrupt_only_after_isolated_declaration_and_trust() 
             .env("CODEX_HOME", &codex_home)
             .env("LOCALAPPDATA", &local_app_data)
             .env("USERPROFILE", &root.path)
+            .env("PATH", &runtime_path)
             .env("TABBEACON_HOOK_TIMING_FILE", &receipt)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

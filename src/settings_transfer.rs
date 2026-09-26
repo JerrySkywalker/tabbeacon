@@ -25,6 +25,9 @@ use crate::{
         InterfacePreferencesWriteReceipt,
     },
     presentation_policy::{CliTarget, PresentationOverride},
+    private_journal::{
+        ensure_private_journal_dir, seal_private_journal_file, verify_private_journal_file,
+    },
     repo::{
         CanonicalRepositoryIdentity, RepositoryAlias, WorkspacePreferenceStore,
         WorkspacePreferences, WorkspacePreferencesConditionalOutcome, WorkspacePreferencesSnapshot,
@@ -60,6 +63,7 @@ fn interrupt_import_test_at(stage: &str) {
 const IMPORT_JOURNAL_SCHEMA: &str = "tabbeacon-import-journal-v1";
 const IMPORT_JOURNAL_FILE: &str = "import-transaction-v1.json";
 const IMPORT_JOURNAL_LOCK: &str = "import-transaction-v1.lock";
+const PRIVATE_IMPORT_JOURNAL_DIR: &str = "private-import-journal-v1";
 const MAX_IMPORT_JOURNAL_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -864,7 +868,13 @@ pub fn apply_import_plan_with_reconciliation(
 }
 
 fn import_journal_path(store: &PresentationSettingsStore) -> Option<PathBuf> {
-    Some(store.path().parent()?.join(IMPORT_JOURNAL_FILE))
+    Some(
+        store
+            .path()
+            .parent()?
+            .join(PRIVATE_IMPORT_JOURNAL_DIR)
+            .join(IMPORT_JOURNAL_FILE),
+    )
 }
 
 fn import_transaction_lock(store: &PresentationSettingsStore) -> Option<File> {
@@ -908,6 +918,21 @@ fn reject_import_reparse(path: &Path) -> Result<(), ()> {
 
 fn load_import_journal(path: &Path) -> Result<Option<ImportJournal>, ()> {
     reject_import_reparse(path)?;
+    let legacy_path = path
+        .parent()
+        .and_then(Path::parent)
+        .ok_or(())?
+        .join(IMPORT_JOURNAL_FILE);
+    reject_import_reparse(&legacy_path)?;
+    if legacy_path.exists() {
+        // Earlier development candidates could leave raw bytes beside the
+        // settings file. Never silently bypass such a pending transaction.
+        return Err(());
+    }
+    if path.exists() {
+        ensure_private_journal_dir(path.parent().ok_or(())?).map_err(|_| ())?;
+        verify_private_journal_file(path).map_err(|_| ())?;
+    }
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -929,6 +954,7 @@ fn load_import_journal(path: &Path) -> Result<Option<ImportJournal>, ()> {
 
 fn write_import_journal(path: &Path, journal: &ImportJournal, new: bool) -> Result<(), ()> {
     reject_import_reparse(path)?;
+    ensure_private_journal_dir(path.parent().ok_or(())?).map_err(|_| ())?;
     let bytes = serde_json::to_vec(journal).map_err(|_| ())?;
     if bytes.len() > MAX_IMPORT_JOURNAL_BYTES {
         return Err(());
@@ -939,13 +965,16 @@ fn write_import_journal(path: &Path, journal: &ImportJournal, new: bool) -> Resu
             .write(true)
             .open(path)
             .map_err(|_| ())?;
+        seal_private_journal_file(path).map_err(|_| ())?;
         file.write_all(&bytes).map_err(|_| ())?;
         file.sync_all().map_err(|_| ())?;
     } else {
+        verify_private_journal_file(path).map_err(|_| ())?;
         let mut file = AtomicWriteFile::options().open(path).map_err(|_| ())?;
         file.write_all(&bytes).map_err(|_| ())?;
         file.flush().map_err(|_| ())?;
         file.commit().map_err(|_| ())?;
+        seal_private_journal_file(path).map_err(|_| ())?;
     }
     Ok(())
 }
@@ -1698,6 +1727,11 @@ mod tests {
                 .output()
                 .unwrap();
             assert_eq!(output.status.code(), Some(77), "stage={stage}");
+            let journal = root
+                .path()
+                .join("private-import-journal-v1/import-transaction-v1.json");
+            crate::private_journal::ensure_private_journal_dir(journal.parent().unwrap()).unwrap();
+            crate::private_journal::verify_private_journal_file(&journal).unwrap();
             let (presentation, interface, workspace, _) = durable_import_fixture(root.path());
             let mut reconciled = Vec::new();
             assert_eq!(
@@ -1822,7 +1856,12 @@ mod tests {
             recover_pending_import(&presentation, &interface, &workspace, |_| Ok(())),
             None
         );
-        assert!(!root.path().join("import-transaction-v1.json").exists());
+        assert!(
+            !root
+                .path()
+                .join("private-import-journal-v1/import-transaction-v1.json")
+                .exists()
+        );
     }
 
     #[test]
@@ -1835,6 +1874,35 @@ mod tests {
             None
         );
         assert!(!directory.exists());
+    }
+
+    #[test]
+    fn legacy_unprotected_journal_blocks_new_import_without_reading_it() {
+        let root = tempfile::tempdir().unwrap();
+        let (presentation, interface, workspace, plan) = durable_import_fixture(root.path());
+        let legacy = root.path().join("import-transaction-v1.json");
+        fs::write(&legacy, b"unprotected legacy journal bytes").unwrap();
+        assert_eq!(
+            recover_pending_import(&presentation, &interface, &workspace, |_| Ok(())),
+            Some(ImportApplyOutcome::PartialState)
+        );
+        assert_eq!(
+            apply_import_plan_durable(
+                &plan,
+                &presentation,
+                &presentation.snapshot_read_only().unwrap(),
+                &interface,
+                &interface.snapshot_read_only().unwrap(),
+                &workspace,
+                &workspace.snapshot_read_only().unwrap(),
+                |_| Ok(()),
+            ),
+            ImportApplyOutcome::PartialState
+        );
+        assert_eq!(
+            fs::read(legacy).unwrap(),
+            b"unprotected legacy journal bytes"
+        );
     }
 
     #[test]

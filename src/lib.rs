@@ -20,6 +20,7 @@ pub mod management;
 pub(crate) mod mcp_runtime_lease;
 pub mod presentation;
 pub mod presentation_policy;
+pub(crate) mod private_journal;
 pub mod providers;
 pub mod repo;
 pub mod settings;

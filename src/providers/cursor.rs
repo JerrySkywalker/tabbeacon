@@ -22,6 +22,7 @@ const MAX_CURSOR_ROUTE_CHECKPOINT_BYTES: usize = 80 * 1024;
 const CURSOR_ROUTE_SCHEMA: &str = "tabbeacon-cursor-route-v1";
 const CURSOR_ROUTE_DIRECTORY: &str = "cursor-route-v1";
 const CURSOR_ROUTE_LOCK: &str = "route.lock";
+const CURSOR_ENDED_SESSIONS: &str = "ended-sessions.json";
 const MAX_CURSOR_SESSION_FILES: usize = 1_024;
 
 /// The small lifecycle subset needed for presentation.
@@ -67,6 +68,47 @@ struct CursorRouteCheckpoint {
     active_generation_sha256: Option<String>,
     seen_generation_bits: Vec<u8>,
     ended: bool,
+}
+
+/// An append-only bounded tombstone for completed session identities. Bloom
+/// false positives can refuse a new session, but cannot revive a late one.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EndedCursorSessions {
+    schema: String,
+    bits: Vec<u8>,
+}
+
+impl EndedCursorSessions {
+    fn empty() -> Self {
+        Self {
+            schema: "tabbeacon-cursor-ended-v1".to_owned(),
+            bits: vec![0; CURSOR_GENERATION_BITS_BYTES],
+        }
+    }
+
+    fn valid(&self) -> bool {
+        self.schema == "tabbeacon-cursor-ended-v1"
+            && self.bits.len() == CURSOR_GENERATION_BITS_BYTES
+    }
+
+    fn contains(&self, session: &str) -> bool {
+        CursorSessionRoute::generation_positions(session).is_some_and(|positions| {
+            positions
+                .iter()
+                .all(|position| self.bits[position / 8] & (1 << (position % 8)) != 0)
+        })
+    }
+
+    fn insert(&mut self, session: &str) -> bool {
+        let Some(positions) = CursorSessionRoute::generation_positions(session) else {
+            return false;
+        };
+        for position in positions {
+            self.bits[position / 8] |= 1 << (position % 8);
+        }
+        true
+    }
 }
 
 impl CursorSessionRoute {
@@ -243,6 +285,101 @@ impl CursorRouteStore {
         }
     }
 
+    fn ended_path(&self) -> PathBuf {
+        self.directory.join(CURSOR_ENDED_SESSIONS)
+    }
+
+    fn load_ended(&self) -> io::Result<EndedCursorSessions> {
+        let path = self.ended_path();
+        reject_route_symlink(&path)?;
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(EndedCursorSessions::empty());
+            }
+            Err(error) => return Err(error),
+        };
+        let mut bytes = Vec::new();
+        file.take((MAX_CURSOR_ROUTE_CHECKPOINT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        let ended: EndedCursorSessions = serde_json::from_slice(&bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid ended sessions"))?;
+        if !ended.valid() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid ended sessions",
+            ));
+        }
+        Ok(ended)
+    }
+
+    fn save_ended(&self, ended: &EndedCursorSessions) -> io::Result<()> {
+        let path = self.ended_path();
+        reject_route_symlink(&path)?;
+        let bytes = serde_json::to_vec(ended).map_err(io::Error::other)?;
+        let mut file = AtomicWriteFile::options().open(path)?;
+        file.write_all(&bytes)?;
+        file.flush()?;
+        file.commit()
+    }
+
+    fn remove_exact_ended_checkpoint(path: &Path, expected: &[u8]) -> io::Result<()> {
+        reject_route_symlink(path)?;
+        if fs::read(path)? != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Cursor route checkpoint changed before cleanup",
+            ));
+        }
+        fs::remove_file(path)
+    }
+
+    fn prune_ended(&self, ended: &mut EndedCursorSessions) -> io::Result<usize> {
+        let mut active = 0;
+        let mut scanned = 0;
+        for entry in fs::read_dir(&self.directory)? {
+            scanned += 1;
+            if scanned > MAX_CURSOR_SESSION_FILES + 16 {
+                return Err(io::Error::other("Cursor route directory capacity reached"));
+            }
+            let entry = entry?;
+            let path = entry.path();
+            let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if path.extension().is_none_or(|extension| extension != "json") || !is_sha256(stem) {
+                continue;
+            }
+            reject_route_symlink(&path)?;
+            let mut bytes = Vec::new();
+            File::open(&path)?
+                .take((MAX_CURSOR_ROUTE_CHECKPOINT_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            let Some(route) = CursorSessionRoute::from_checkpoint(&bytes) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid Cursor route checkpoint",
+                ));
+            };
+            if route.session_sha256 != stem {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Cursor route filename mismatch",
+                ));
+            }
+            if route.ended {
+                if !ended.contains(stem) {
+                    ended.insert(stem);
+                    self.save_ended(ended)?;
+                }
+                Self::remove_exact_ended_checkpoint(&path, &bytes)?;
+            } else {
+                active += 1;
+            }
+        }
+        Ok(active)
+    }
+
     /// Admits and persists an event under a cross-process lock.
     ///
     /// # Errors
@@ -292,6 +429,15 @@ impl CursorRouteStore {
         observed_terminal_binding_sha256: &str,
         console_openable: bool,
     ) -> io::Result<bool> {
+        let mut ended = self.load_ended()?;
+        let active_count = if event.event == CursorEvent::SessionStart {
+            self.prune_ended(&mut ended)?
+        } else {
+            0
+        };
+        if event.event == CursorEvent::SessionStart && ended.contains(&event.session_sha256) {
+            return Ok(false);
+        }
         let path = self
             .directory
             .join(format!("{}.json", event.session_sha256));
@@ -315,13 +461,7 @@ impl CursorRouteStore {
             if current.is_some() {
                 return Ok(false);
             }
-            let mut session_files = 0;
-            for entry in fs::read_dir(&self.directory)? {
-                if entry?.path().extension().is_some_and(|ext| ext == "json") {
-                    session_files += 1;
-                }
-            }
-            if session_files >= MAX_CURSOR_SESSION_FILES {
+            if active_count >= MAX_CURSOR_SESSION_FILES {
                 return Err(io::Error::other("Cursor route session capacity reached"));
             }
             let Some(route) = CursorSessionRoute::from_session_start(
@@ -356,6 +496,16 @@ impl CursorRouteStore {
         file.write_all(&bytes)?;
         file.flush()?;
         file.commit()?;
+        if route.ended {
+            if !ended.insert(&route.session_sha256) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid ended Cursor session",
+                ));
+            }
+            self.save_ended(&ended)?;
+            Self::remove_exact_ended_checkpoint(&path, &bytes)?;
+        }
         Ok(true)
     }
 }
@@ -749,5 +899,87 @@ mod tests {
                 .unwrap()
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ended_sessions_are_compacted_without_forgetting_late_or_duplicate_events() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CursorRouteStore::new(root.path());
+        let terminal = "a".repeat(64);
+        let foreign = store.directory.join("foreign.json");
+        for number in 0..=MAX_CURSOR_SESSION_FILES {
+            let session = format!("session-{number}");
+            let start = normalize_hook(
+                serde_json::json!({"hook_event_name":"sessionStart","session_id":session})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap()
+            .unwrap();
+            let end = normalize_hook(
+                serde_json::json!({"hook_event_name":"sessionEnd","session_id":session})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(store.admit(&start, &terminal, &terminal, true).unwrap());
+            if number == 0 {
+                fs::write(&foreign, b"foreign content").unwrap();
+            }
+            assert!(store.admit(&end, &terminal, &terminal, true).unwrap());
+            assert!(!store.admit(&start, &terminal, &terminal, true).unwrap());
+            assert!(!store.admit(&end, &terminal, &terminal, true).unwrap());
+            assert!(
+                !store
+                    .admit(&start, &terminal, &"b".repeat(64), true)
+                    .unwrap()
+            );
+        }
+        assert_eq!(fs::read(&foreign).unwrap(), b"foreign content");
+        let session_files = fs::read_dir(&store.directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(is_sha256)
+            })
+            .count();
+        assert_eq!(session_files, 0);
+    }
+
+    #[test]
+    fn restart_finishes_only_an_exact_ended_checkpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CursorRouteStore::new(root.path());
+        let terminal = "a".repeat(64);
+        let event = |name: &str, session: &str| {
+            normalize_hook(
+                serde_json::json!({"hook_event_name":name,"session_id":session})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let start = event("sessionStart", "interrupted-cleanup");
+        let end = event("sessionEnd", "interrupted-cleanup");
+        assert!(store.admit(&start, &terminal, &terminal, true).unwrap());
+        let path = store
+            .directory
+            .join(format!("{}.json", start.session_sha256));
+        let mut route = CursorSessionRoute::from_checkpoint(&fs::read(&path).unwrap()).unwrap();
+        assert!(route.admit(&end, &terminal, true));
+        fs::write(&path, route.checkpoint().unwrap()).unwrap();
+        // The previous Hook process stopped after persisting the ended route,
+        // before updating the tombstone and deleting its exact checkpoint.
+        let other = event("sessionStart", "new-session");
+        assert!(store.admit(&other, &terminal, &terminal, true).unwrap());
+        assert!(!path.exists());
+        assert!(!store.admit(&start, &terminal, &terminal, true).unwrap());
+        assert!(!store.admit(&end, &terminal, &terminal, true).unwrap());
     }
 }
