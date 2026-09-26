@@ -83,12 +83,14 @@ png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.151", features = ["preserve_order"] }
 sha2 = "0.10.9"
-tempfile = "3.27.0"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "std", "underline-color", "layout-cache"] }
 toml_edit = "0.25.13"
 unicode-width = "0.2.0"
 unicode-segmentation = "1.13.3"
 unicode-normalization = "0.1.25"
+
+[dev-dependencies]
+tempfile = "3.27.0"
 
 [target.'cfg(windows)'.dependencies]
 uiautomation = "0.25.0"

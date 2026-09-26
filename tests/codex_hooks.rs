@@ -1493,6 +1493,14 @@ fn interrupt_capability_cache_cannot_override_current_disabled_hooks() {
         12
     );
     assert!(integration.interrupt_runtime_admitted_read_only());
+    let config_path = root.child("codex-home/config.toml");
+    let mut config = fs::read_to_string(&config_path)
+        .unwrap()
+        .parse::<DocumentMut>()
+        .unwrap();
+    config["features"]["hooks"] = value(false);
+    fs::write(&config_path, config.to_string()).unwrap();
+    assert!(!integration.interrupt_runtime_admitted_read_only());
     fs::write(
         fixture
             .parent()
@@ -1511,7 +1519,7 @@ fn interrupt_capability_cache_cannot_override_current_disabled_hooks() {
 }
 
 #[test]
-fn runtime_interrupt_admission_returns_before_hook_deadline_when_feature_probe_stalls() {
+fn runtime_interrupt_admission_never_starts_a_provider_feature_probe() {
     let root = TestRoot::new("interrupt-feature-stall");
     let integration = test_integration_with_codex_fixture(&root, "codex_interrupt_probe.rs");
     assert_eq!(
@@ -1530,7 +1538,7 @@ fn runtime_interrupt_admission_returns_before_hook_deadline_when_feature_probe_s
     });
     fs::write(fixture.parent().unwrap().join("hooks-stalled"), b"").unwrap();
     let started = std::time::Instant::now();
-    assert!(!integration.interrupt_runtime_admitted_read_only());
+    assert!(integration.interrupt_runtime_admitted_read_only());
     assert!(started.elapsed() < Duration::from_millis(950));
 }
 
@@ -1604,7 +1612,7 @@ fn public_hook_cli_admits_interrupt_only_after_isolated_declaration_and_trust() 
     );
     fs::write(runtime_bin.join("hooks-stalled"), b"").unwrap();
     let started = Instant::now();
-    assert!(run("after-stall.txt").contains("event=unrecognized"));
+    assert!(run("after-stall.txt").contains("event=Interrupt"));
     assert!(
         started.elapsed() < Duration::from_millis(950),
         "public Hook outlived its one-second declaration budget"

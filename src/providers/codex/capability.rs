@@ -7,12 +7,11 @@
 
 use std::{
     fs,
-    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::mpsc,
     thread,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -22,12 +21,12 @@ use super::{CodexCompatibilityState, CodexHookProfile};
 
 const CACHE_SCHEMA: &str = "tabbeacon-codex-capability-v3";
 const CACHE_FILE: &str = "capability-v1.json";
-const RUNTIME_FEATURE_DEADLINE: Duration = Duration::from_millis(400);
 const RUNTIME_IDENTITY_DEADLINE: Duration = Duration::from_millis(250);
 
 /// Runtime Hook admission uses the capability proven during owned setup,
-/// bound to the current executable bytes. Only the mutable feature flag is
-/// rechecked, with a short deadline; schema generation never runs in a Hook.
+/// bound to the current executable bytes. Hook delivery and the separately
+/// validated live declaration supply the event evidence; no provider command
+/// or schema generator runs from a Hook subprocess.
 pub(crate) fn interrupt_runtime_capable(codex_program: Option<&Path>, state_root: &Path) -> bool {
     let program = codex_program.map(Path::to_path_buf);
     let cache_path = state_root.join(CACHE_FILE);
@@ -57,7 +56,7 @@ pub(crate) fn interrupt_runtime_capable(codex_program: Option<&Path>, state_root
     if !matches!(receiver.recv_timeout(RUNTIME_IDENTITY_DEADLINE), Ok(true)) {
         return false;
     }
-    probe_hook_feature_bounded(codex_program) == HookFeature::Enabled
+    true
 }
 
 /// Content-minimal result of a local Codex capability probe.
@@ -261,57 +260,6 @@ fn probe_hook_feature(codex_program: Option<&Path>) -> HookFeature {
         return HookFeature::Unproven;
     }
     parse_hook_feature(&output.stdout)
-}
-
-fn probe_hook_feature_bounded(codex_program: Option<&Path>) -> HookFeature {
-    let deadline = Instant::now() + RUNTIME_FEATURE_DEADLINE;
-    // A file avoids a pipe held open by a descendant after the owned child
-    // exits. The response is capped and discarded on every path.
-    let Ok(mut output_file) = tempfile::tempfile() else {
-        return HookFeature::Unproven;
-    };
-    let Ok(child_stdout) = output_file.try_clone() else {
-        return HookFeature::Unproven;
-    };
-    let Ok(mut child) = command(codex_program)
-        .args(["features", "list"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(child_stdout))
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return HookFeature::Unproven;
-    };
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return HookFeature::Unproven;
-                }
-                if Instant::now() >= deadline || output_file.seek(SeekFrom::Start(0)).is_err() {
-                    return HookFeature::Unproven;
-                }
-                let mut bytes = Vec::new();
-                return if output_file.take(4097).read_to_end(&mut bytes).is_ok()
-                    && bytes.len() <= 4096
-                    && Instant::now() < deadline
-                {
-                    parse_hook_feature(&bytes)
-                } else {
-                    HookFeature::Unproven
-                };
-            }
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            _ => {
-                // This is the child that this Hook started, not an ambient
-                // provider or another user's process.
-                if child.kill().is_ok() {
-                    let _ = child.try_wait();
-                }
-                return HookFeature::Unproven;
-            }
-        }
-    }
 }
 
 fn parse_hook_feature(bytes: &[u8]) -> HookFeature {

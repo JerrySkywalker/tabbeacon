@@ -731,12 +731,13 @@ impl CodexIntegration {
 
     /// Admits runtime interruption only for the exact owned command profile
     /// whose installed declaration is currently trusted and enabled. This
-    /// read-only check performs no provider command, trust decision, or write.
+    /// read-only check performs no provider command or write; it verifies the
+    /// exact installed declaration and current trust state.
     #[must_use]
     pub fn interrupt_runtime_admitted_read_only(&self) -> bool {
-        // A trusted declaration can outlive the Codex executable or its
-        // Hooks feature setting. Recheck the current local capability before
-        // treating Interrupt as authoritative at runtime.
+        // A trusted declaration can outlive the installed executable. Check
+        // its setup-time capability against the current bytes without running
+        // another provider command from this one-second Hook path.
         if !interrupt_runtime_capable(self.codex_program.as_deref(), &self.state_root) {
             return false;
         }
@@ -767,6 +768,17 @@ impl CodexIntegration {
         ) else {
             return false;
         };
+        if let Some(features) = config.get("features") {
+            let Some(features) = features.as_table_like() else {
+                return false;
+            };
+            if features
+                .get("hooks")
+                .is_some_and(|value| value.as_bool() != Some(true))
+            {
+                return false;
+            }
+        }
         validate_known_hook_wire_shape(&hooks).is_ok()
             && hook_trust_check(&config, &self.hooks_path(), &hooks, &expected).status()
                 == DoctorStatus::Pass
