@@ -1,6 +1,6 @@
 [package]
 name = "tabbeacon"
-version = "0.7.3"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.97.1"
 license = "MIT"
@@ -46,6 +46,12 @@ include = [
     "docs/v0.7.2-upgrade.md",
     "docs/v0.7.3-release-notes.md",
     "docs/v0.7.3-upgrade.md",
+    "docs/v0.8.0-release-notes.md",
+    "docs/v0.8.0-upgrade.md",
+    "docs/configuration.md",
+    "docs/coding-agent-support.md",
+    "docs/cursor-setup.md",
+    "docs/terminology.md",
     "AGENTS.md",
     "dev_governance_files/ROADMAP.md",
     "dev_governance_files/QUALITY_GATES.md",
