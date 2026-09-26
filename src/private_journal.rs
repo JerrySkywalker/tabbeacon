@@ -542,6 +542,18 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    fn write_private_fixture(parent: &Path, path: &Path) {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        seal_private_journal_handle(&file, parent).unwrap();
+        file.write_all(b"synthetic local configuration bytes")
+            .unwrap();
+        file.sync_all().unwrap();
+    }
+
     #[test]
     fn atomic_temporary_journal_is_private_before_write() {
         let root = tempfile::tempdir().unwrap();
@@ -564,12 +576,7 @@ mod tests {
         ensure_private_journal_dir(&path).unwrap();
         ensure_private_journal_dir(&path).unwrap();
         let file = path.join("journal.json");
-        fs::write(&file, b"synthetic local configuration bytes").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
-        }
+        write_private_fixture(&path, &file);
         verify_private_journal_file(&file).unwrap();
         assert!(fs::metadata(path).unwrap().is_dir());
     }
@@ -583,7 +590,7 @@ mod tests {
         let path = root.path().join("private-journal");
         ensure_private_journal_dir(&path).unwrap();
         let file = path.join("journal.json");
-        fs::write(&file, b"synthetic local configuration bytes").unwrap();
+        write_private_fixture(&path, &file);
         assert!(verify_private_journal_file(&file).is_ok());
         let status = Command::new("icacls")
             .arg(&file)
