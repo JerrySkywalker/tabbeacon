@@ -41,6 +41,10 @@ function Test-RelativeMarkdownLinks {
             if ($target -match '^(https?:|mailto:|#)') {
                 continue
             }
+            if ($target -match 'terminology\.md#(?<fragment>[^\s]+)$') {
+                $glossaryContent = Get-Content -LiteralPath (Join-Path $repositoryRoot 'docs/terminology.md') -Raw -Encoding UTF8
+                Assert-Docs ($glossaryContent.Contains(('id="{0}"' -f $Matches['fragment']))) "$path links to a missing glossary anchor: $target"
+            }
             $targetPath = $target.Split('#', 2)[0]
             if ([string]::IsNullOrWhiteSpace($targetPath)) {
                 continue
@@ -68,6 +72,7 @@ $requiredFiles = @(
     'docs/configuration.md',
     'docs/coding-agent-support.md',
     'docs/troubleshooting.md',
+    'docs/terminology.md',
     'docs/faq.md',
     'docs/design/product-principles.md',
     'docs/design/visual-language.md',
@@ -77,6 +82,8 @@ $requiredFiles = @(
     'docs/development/release-process.md',
     'docs/v0.7.3-release-notes.md',
     'docs/v0.7.3-upgrade.md',
+    'docs/v0.8.0-release-notes.md',
+    'docs/v0.8.0-upgrade.md',
     'CONTRIBUTING.md',
     'SECURITY.md'
 )
@@ -85,6 +92,26 @@ $requiredFiles += $trainDocPaths
 foreach ($path in $requiredFiles) {
     [void](Get-RequiredContent $path)
 }
+
+$glossary = Get-RequiredContent 'docs/terminology.md'
+$termRows = [regex]::Matches($glossary, '(?m)^\| <a id="(?<anchor>tb-t\d{2})"></a>(?<id>TB-T\d{2}) \| (?<english>[^|]+) \| (?<chinese>[^|]+) \| (?<definition>[^|]+) \|$')
+$termIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$termNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+foreach ($row in $termRows) {
+    $id = $row.Groups['id'].Value
+    Assert-Docs ($termIds.Add($id)) "duplicate glossary ID: $id"
+    Assert-Docs ($row.Groups['anchor'].Value -eq $id.ToLowerInvariant()) "glossary ID $id has a mismatched anchor"
+    $english = $row.Groups['english'].Value.Trim()
+    $chinese = $row.Groups['chinese'].Value.Trim()
+    $definition = $row.Groups['definition'].Value.Trim()
+    Assert-Docs ($termNames.Add($english)) "duplicate glossary English term: $english"
+    Assert-Docs (-not [string]::IsNullOrWhiteSpace($chinese)) "missing Chinese term for $id"
+    Assert-Docs ($definition.Contains(' / ')) "missing bilingual definition for $id"
+}
+foreach ($required in @('Provider', 'CLI', 'Session', 'Turn', 'Workspace', 'Title', 'Tab Color', 'Activity', 'Progress', 'Ownership', 'Native', 'Off', 'Capability', 'Evidence', 'Hook Trust', 'Ready', 'ResultReady', 'Warning', 'Interrupted', 'Failed', 'Inheritance', 'Override', 'Saved configuration', 'Installed integration', 'Effective settings')) {
+    Assert-Docs ($termNames.Contains($required)) "missing required glossary term: $required"
+}
+Assert-Docs ($termRows.Count -eq 25) "expected 25 glossary entries; found $($termRows.Count)"
 
 $englishReadme = Get-RequiredContent 'README.md'
 $chineseReadme = Get-RequiredContent 'README.zh-CN.md'
@@ -243,8 +270,8 @@ foreach ($proof in $currentReleaseProofs) {
 }
 
 $releaseProofs = @(
-    @{ Path = 'Cargo.toml'; Pattern = '(?m)^version = "0\.7\.3"$' },
-    @{ Path = 'Cargo.lock'; Pattern = '(?ms)name = "tabbeacon"\r?\nversion = "0\.7\.3"' },
+    @{ Path = 'Cargo.toml'; Pattern = '(?m)^version = "0\.8\.0"$' },
+    @{ Path = 'Cargo.lock'; Pattern = '(?ms)name = "tabbeacon"\r?\nversion = "0\.8\.0"' },
     @{ Path = 'CHANGELOG.md'; Pattern = '## \[0\.7\.3\] - 2026-09-01' },
     @{ Path = 'docs/v0.7.3-release-notes.md'; Pattern = '# TabBeacon v0\.7\.3' },
     @{ Path = 'docs/v0.7.3-upgrade.md'; Pattern = '# Upgrade from v0\.7\.2 to v0\.7\.3' },
@@ -252,7 +279,7 @@ $releaseProofs = @(
 )
 foreach ($proof in $releaseProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw -Encoding UTF8
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not preserve the v0.7.3 release contract"
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not preserve the public v0.7.3 record and v0.8.0 candidate metadata"
 }
 
 $releaseTargetProofs = @(

@@ -13,7 +13,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use atomic_write_file::AtomicWriteFile;
@@ -28,10 +28,12 @@ use crate::{
         EvidenceAuthority, EvidenceConfidence, EvidenceSource, EvidenceTieBreak, FieldUpdate,
         Phase, SessionReconciler, StatePatch,
     },
+    lock_budget::try_lock_file_with_budget,
     presentation::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleMarkBackend,
         WindowsTerminalCapabilities,
     },
+    presentation_policy::{ApplicationStatus, CliTarget, PresentationCapabilities},
     providers::registry::ProviderRegistry,
     repo::{RepositoryAlias, StableAliasRegistry, WorkspaceIdentityResolver},
     settings::{PresentationSettings, PresentationSettingsStore},
@@ -349,7 +351,10 @@ pub enum AgyTitleDispatchOutcome {
     DegradedWorkspaceIdentity,
     DegradedRootWorkspaceAnchor,
     DegradedStateRoot,
+    DegradedSettings,
 }
+
+const AGY_SETTINGS_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
 
 const AGY_ROOT_ANCHOR_SCHEMA: &str = "tabbeacon-agy-root-workspace-anchor-v1";
 const AGY_ROOT_ANCHOR_DIRECTORY: &str = "agy-root-workspace-anchor-v1";
@@ -461,7 +466,7 @@ impl AgyRootAnchorStore {
             .read(true)
             .write(true)
             .open(lock_path)?;
-        lock.lock()?;
+        try_lock_file_with_budget(&lock, Duration::from_millis(100))?;
         let path = self
             .directory
             .join(format!("session-{session_sha256}.json"));
@@ -573,12 +578,64 @@ impl AgyTitleRuntime {
         let Ok(state_root) = StableAliasRegistry::default_state_root() else {
             return fallback_title(AgyTitleDispatchOutcome::DegradedStateRoot);
         };
-        let settings = PresentationSettingsStore::from_environment().map_or_else(
-            |_| PresentationSettings::default(),
-            |store| store.load_or_default(),
-        );
+        let Ok(store) = PresentationSettingsStore::from_environment() else {
+            return fallback_title(AgyTitleDispatchOutcome::DegradedSettings);
+        };
+        let Ok(resolved) = store.resolve_provider_read_only(
+            CliTarget::Agy,
+            PresentationCapabilities::AGY_TITLE_ONLY,
+            ApplicationStatus::Unproven,
+        ) else {
+            return fallback_title(AgyTitleDispatchOutcome::DegradedSettings);
+        };
+        let settings = resolved.effective;
         let runtime = Self::new(&state_root, settings);
         runtime.dispatch_to(raw, SystemTime::now())
+    }
+
+    /// Handles the installed title callback while holding the presentation
+    /// writer lock through the final protocol flush. A preference committed
+    /// after this callback starts cannot be overtaken by its old title.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error only if the callback output sink fails. Settings
+    /// and state failures return the provider-native fallback title.
+    pub fn dispatch_system_to(
+        raw: &[u8],
+        sink: &mut impl Write,
+    ) -> io::Result<AgyTitleDispatchOutcome> {
+        let Ok(state_root) = StableAliasRegistry::default_state_root() else {
+            write_callback_title(sink, "Agy")?;
+            return Ok(AgyTitleDispatchOutcome::DegradedStateRoot);
+        };
+        let Ok(store) = PresentationSettingsStore::from_environment() else {
+            write_callback_title(sink, "Agy")?;
+            return Ok(AgyTitleDispatchOutcome::DegradedSettings);
+        };
+        let mut output_started = false;
+        let result = store.with_runtime_lock_bounded(AGY_SETTINGS_LOCK_BUDGET, || {
+            let resolved = store
+                .resolve_provider_read_only(
+                    CliTarget::Agy,
+                    PresentationCapabilities::AGY_TITLE_ONLY,
+                    ApplicationStatus::Unproven,
+                )
+                .map_err(io::Error::other)?;
+            let response =
+                Self::new(&state_root, resolved.effective).dispatch_to(raw, SystemTime::now());
+            output_started = true;
+            write_callback_title(sink, &response.title)?;
+            Ok(response.outcome)
+        });
+        match result {
+            Ok(outcome) => Ok(outcome),
+            Err(error) if output_started => Err(error),
+            Err(_) => {
+                write_callback_title(sink, "Agy")?;
+                Ok(AgyTitleDispatchOutcome::DegradedSettings)
+            }
+        }
     }
 
     /// Handles a callback with deterministic runtime dependencies.
@@ -602,7 +659,10 @@ impl AgyTitleRuntime {
         ) {
             Ok(Some(selection)) => selection,
             Ok(None) => {
-                let Ok(workspace) = self.identity_resolver.resolve(&normalized.project_root) else {
+                let Ok(workspace) = self
+                    .identity_resolver
+                    .resolve_runtime_bounded(&normalized.project_root)
+                else {
                     record_callback_diagnostics(&self.state_root, raw, false, observed_at);
                     return fallback_title(AgyTitleDispatchOutcome::DegradedWorkspaceIdentity);
                 };
@@ -682,6 +742,12 @@ fn fallback_title(outcome: AgyTitleDispatchOutcome) -> AgyProductionTitleRespons
         title: "Agy".to_owned(),
         outcome,
     }
+}
+
+fn write_callback_title(sink: &mut impl Write, title: &str) -> io::Result<()> {
+    sink.write_all(title.as_bytes())?;
+    sink.write_all(b"\n")?;
+    sink.flush()
 }
 
 const fn frozen_profile() -> AgyAdmittedProfile {
@@ -968,6 +1034,23 @@ impl AgyProductionSetup {
                 Some(version),
                 false,
             ),
+        }
+    }
+
+    /// Reconciles only `TabBeacon`'s owned title callback with the selected
+    /// presentation mode. Native mode never installs a callback.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an unproved owner or any configuration drift.
+    pub fn reconcile_title_ownership(
+        &self,
+        own_title: bool,
+    ) -> Result<AgyProductionSetupOutcome, AgyProductionSetupError> {
+        if own_title {
+            self.setup()
+        } else {
+            self.uninstall()
         }
     }
 
@@ -2205,6 +2288,47 @@ mod tests {
         assert_eq!(fs::read(&config).expect("restored"), original);
         assert_eq!(
             setup.uninstall(),
+            Ok(AgyProductionSetupOutcome::NotInstalled)
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_reconciliation_never_installs_and_releases_only_owned_callback() {
+        let root = temp_root("native-reconcile");
+        let config = root.join("home/.gemini/antigravity-cli/settings.json");
+        let state = root.join("state");
+        let executable = root.join("tabbeacon.exe");
+        fs::create_dir_all(config.parent().expect("parent")).expect("config parent");
+        fs::write(&executable, b"fixture executable").expect("executable");
+        fs::write(&config, br#"{"foreign":1}"#).expect("original");
+        let setup =
+            AgyProductionSetup::new(&config, &state, &executable, "agy").with_admitted_version();
+        assert_eq!(
+            setup.reconcile_title_ownership(false),
+            Ok(AgyProductionSetupOutcome::NotInstalled)
+        );
+        assert_eq!(fs::read(&config).expect("untouched"), br#"{"foreign":1}"#);
+        assert_eq!(
+            setup.reconcile_title_ownership(true),
+            Ok(AgyProductionSetupOutcome::Installed)
+        );
+        let mut changed: Value =
+            serde_json::from_slice(&fs::read(&config).expect("owned")).expect("owned json");
+        changed["other"] = json!("preserved");
+        fs::write(&config, serde_json::to_vec(&changed).expect("changed"))
+            .expect("write unrelated change");
+        assert_eq!(
+            setup.reconcile_title_ownership(false),
+            Ok(AgyProductionSetupOutcome::Removed)
+        );
+        let released: Value =
+            serde_json::from_slice(&fs::read(&config).expect("released")).expect("released json");
+        assert!(released.get("title").is_none());
+        assert_eq!(released["foreign"], 1);
+        assert_eq!(released["other"], "preserved");
+        assert_eq!(
+            setup.reconcile_title_ownership(false),
             Ok(AgyProductionSetupOutcome::NotInstalled)
         );
         fs::remove_dir_all(root).expect("cleanup");

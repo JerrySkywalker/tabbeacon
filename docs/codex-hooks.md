@@ -405,8 +405,20 @@ Both are turn-aware, thread-spawn subagent-aware, and compact-aware. The 0.149
 audit uses `mcp_tool` through TabBeacon's own named session stdio server; the
 server is hidden from the model and has no machine-global daemon lifetime.
 TabBeacon reconciles only its exact owned server and Hook groups, and preserves
-external MCP servers and groups unchanged. A newer version never inherits either profile merely
-because its version number is higher.
+external MCP servers and groups unchanged. The v0.8.0 candidate also recognizes
+the exact audited 0.156.1 and 0.157.1 command Hook surfaces with `Interrupt`.
+The 0.157.1 upstream event list, input schema, interrupt handler, declarations,
+and dispatcher match 0.156.1; its core Hook runtime changes tool-Hook
+working-directory selection and supplies `None` for Hook analytics turn
+metadata, without changing the Interrupt command contract. Its owned
+declaration and fresh trust must both be present before the public runtime
+accepts that event; isolated proof does not establish daily installed delivery.
+A newer version never inherits a profile merely because its number is higher.
+The exact [0.157.1 Hook event list](https://github.com/openai/codex/blob/rust-v0.157.1/codex-rs/hooks/src/lib.rs)
+has no Warning or Failed event, and its [Stop command input](https://github.com/openai/codex/blob/rust-v0.157.1/codex-rs/hooks/src/schema.rs)
+contains no main-turn backend-failure outcome. This bounds the command Hook
+contract only; it does not close the original HTTP 404 class in Issue #116 or
+exclude a separately qualified structured provider signal.
 
 ## Operational diagnostics
 
@@ -469,6 +481,7 @@ The hook backend represents only evidence Codex emits directly:
 | `PreCompact` / `PostCompact` | preserve current state |
 | `SubagentStart` / `SubagentStop` | ignore for root presentation |
 | `Stop` | result ready |
+| `Interrupt` (positively admitted 0.156.1/0.157.1 profile) | interrupted; real installed delivery still unproven for this candidate |
 | `SessionEnd` | reset |
 
 Turn-scoped root events must match the current bounded-contract `turn_id`.

@@ -32,6 +32,8 @@ pub enum CodexHookEvent {
     SubagentStop,
     /// A root turn produced its final response.
     Stop,
+    /// The user interrupted the active main-thread turn.
+    Interrupt,
 }
 
 impl CodexHookEvent {
@@ -50,6 +52,7 @@ impl CodexHookEvent {
             "SubagentStart" => Self::SubagentStart,
             "SubagentStop" => Self::SubagentStop,
             "Stop" => Self::Stop,
+            "Interrupt" => Self::Interrupt,
             _ => return None,
         })
     }
@@ -69,6 +72,7 @@ impl CodexHookEvent {
             Self::SubagentStart => "SubagentStart",
             Self::SubagentStop => "SubagentStop",
             Self::Stop => "Stop",
+            Self::Interrupt => "Interrupt",
         }
     }
 
@@ -81,7 +85,10 @@ impl CodexHookEvent {
     /// Whether the admitted wire schema can identify a thread-spawned subagent.
     #[must_use]
     pub const fn supports_subagent_context(self) -> bool {
-        !matches!(self, Self::SessionStart | Self::SessionEnd | Self::Stop)
+        !matches!(
+            self,
+            Self::SessionStart | Self::SessionEnd | Self::Stop | Self::Interrupt
+        )
     }
 
     /// Whether this is an explicit subagent lifecycle event.
@@ -343,6 +350,24 @@ const RUST_V0_147_0_EVENTS: [CodexHookEvent; 11] = [
     CodexHookEvent::Stop,
 ];
 
+// Exact source-audited 0.156.1/0.157.1 command surface. This is a capability profile,
+// not a version-order rule: unknown releases retain the conservative profile
+// until their local protocol evidence is positively established.
+const RUST_V0_156_1_EVENTS: [CodexHookEvent; 12] = [
+    CodexHookEvent::PreToolUse,
+    CodexHookEvent::PermissionRequest,
+    CodexHookEvent::PostToolUse,
+    CodexHookEvent::PreCompact,
+    CodexHookEvent::PostCompact,
+    CodexHookEvent::SessionStart,
+    CodexHookEvent::SessionEnd,
+    CodexHookEvent::UserPromptSubmit,
+    CodexHookEvent::SubagentStart,
+    CodexHookEvent::SubagentStop,
+    CodexHookEvent::Stop,
+    CodexHookEvent::Interrupt,
+];
+
 const RUST_COMMAND_HOOK_WIRE_V1: CodexHookWireShape = CodexHookWireShape {
     id: "codex-command-hooks-wire-v1",
     root_key: "hooks",
@@ -377,6 +402,12 @@ const COMMAND_HOOKS_V1_PROFILE: CodexHookProfile = CodexHookProfile {
     unknown_event_policy: UnknownEventPolicy::IgnoreFailOpen,
     wire_shape: RUST_COMMAND_HOOK_WIRE_V1,
     reconciliation_note: "owned-command-hooks-only",
+};
+
+const COMMAND_HOOKS_INTERRUPT_V1_PROFILE: CodexHookProfile = CodexHookProfile {
+    id: "codex-hooks-command-interrupt-v1",
+    lifecycle_events: &RUST_V0_156_1_EVENTS,
+    ..COMMAND_HOOKS_V1_PROFILE
 };
 
 // The source audit found an added `mcp_tool` handler family, a session-owned
@@ -415,6 +446,13 @@ impl CodexHookProfile {
     #[must_use]
     pub const fn command_v1() -> Self {
         COMMAND_HOOKS_V1_PROFILE
+    }
+
+    /// Exact 0.156.1/0.157.1 command profile with an explicit main-turn Interrupt.
+    /// Hook trust and real delivery remain separate runtime requirements.
+    #[must_use]
+    pub const fn command_interrupt_v1() -> Self {
+        COMMAND_HOOKS_INTERRUPT_V1_PROFILE
     }
 
     /// The existing hybrid MCP contract. It is selected only for a manifest

@@ -1,15 +1,17 @@
 //! Local, bounded Codex capability discovery.
 //!
-//! Codex release numbers are useful diagnostics, but they are deliberately not
-//! an input to compatibility or mutation authority. The probe uses only local
-//! noninteractive commands and stores no configuration, Hook payload, prompt,
-//! or credential data.
+//! Codex release numbers do not grant baseline compatibility by ordering.
+//! Explicit main-turn Interrupt authority also needs an exact source-audited
+//! release contract. The probe uses only local noninteractive commands and
+//! stores no Hook payload, prompt, or credential data.
 
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -17,8 +19,53 @@ use sha2::{Digest, Sha256};
 
 use super::{CodexCompatibilityState, CodexHookProfile};
 
-const CACHE_SCHEMA: &str = "tabbeacon-codex-capability-v2";
+const CACHE_SCHEMA: &str = "tabbeacon-codex-capability-v3";
 const CACHE_FILE: &str = "capability-v1.json";
+const RUNTIME_IDENTITY_DEADLINE: Duration = Duration::from_millis(250);
+
+fn interrupt_source_audited(version: Option<&str>) -> bool {
+    // These exact source tags share the Hook event list, command input
+    // schema, Interrupt dispatcher and trust/declaration contract. The
+    // The 0.157.1 core Hook runtime diff changes tool-Hook cwd selection and
+    // passes None as Hook analytics turn metadata, not Interrupt input.
+    matches!(version, Some("0.156.1" | "0.157.1"))
+}
+
+/// Runtime Hook admission uses the capability proven during owned setup,
+/// bound to the current executable bytes. Hook delivery and the separately
+/// validated live declaration supply the event evidence; no provider command
+/// or schema generator runs from a Hook subprocess.
+pub(crate) fn interrupt_runtime_capable(codex_program: Option<&Path>, state_root: &Path) -> bool {
+    let program = codex_program.map(Path::to_path_buf);
+    let cache_path = state_root.join(CACHE_FILE);
+    let (sender, receiver) = mpsc::sync_channel(1);
+    // The identity check may encounter a slow filesystem. It runs in a
+    // bounded-lived Hook process, and the main Hook never waits beyond this
+    // budget before conservatively declining Interrupt authority.
+    if thread::Builder::new()
+        .name("tabbeacon-codex-identity".to_owned())
+        .spawn(move || {
+            let admitted = read_cache(&cache_path).is_some_and(|record| {
+                record.schema == CACHE_SCHEMA
+                    && matches!(
+                        record.state,
+                        CachedCapabilityState::FullInterrupt
+                            | CachedCapabilityState::DegradedInterrupt
+                    )
+                    && executable_identity(program.as_deref()).as_deref()
+                        == Some(&record.executable_identity)
+            });
+            let _ = sender.send(admitted);
+        })
+        .is_err()
+    {
+        return false;
+    }
+    if !matches!(receiver.recv_timeout(RUNTIME_IDENTITY_DEADLINE), Ok(true)) {
+        return false;
+    }
+    true
+}
 
 /// Content-minimal result of a local Codex capability probe.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,16 +115,36 @@ struct CapabilityCacheRecord {
 #[serde(rename_all = "snake_case")]
 enum CachedCapabilityState {
     Full,
+    FullInterrupt,
     Degraded,
+    DegradedInterrupt,
     Incompatible,
     Unproven,
 }
 
 impl CachedCapabilityState {
-    const fn from_state(state: CodexCompatibilityState) -> Self {
+    fn from_state(state: CodexCompatibilityState) -> Self {
         match state {
-            CodexCompatibilityState::Full(_) => Self::Full,
-            CodexCompatibilityState::Degraded(_) => Self::Degraded,
+            CodexCompatibilityState::Full(profile) => {
+                if profile
+                    .lifecycle_events()
+                    .contains(&super::CodexHookEvent::Interrupt)
+                {
+                    Self::FullInterrupt
+                } else {
+                    Self::Full
+                }
+            }
+            CodexCompatibilityState::Degraded(profile) => {
+                if profile
+                    .lifecycle_events()
+                    .contains(&super::CodexHookEvent::Interrupt)
+                {
+                    Self::DegradedInterrupt
+                } else {
+                    Self::Degraded
+                }
+            }
             CodexCompatibilityState::Incompatible => Self::Incompatible,
             CodexCompatibilityState::Unproven => Self::Unproven,
         }
@@ -89,7 +156,13 @@ impl CachedCapabilityState {
             // transport. An existing exact hybrid transport is selected from
             // the separately validated ownership manifest, never a cache.
             Self::Full => CodexCompatibilityState::Full(CodexHookProfile::command_v1()),
+            Self::FullInterrupt => {
+                CodexCompatibilityState::Full(CodexHookProfile::command_interrupt_v1())
+            }
             Self::Degraded => CodexCompatibilityState::Degraded(CodexHookProfile::command_v1()),
+            Self::DegradedInterrupt => {
+                CodexCompatibilityState::Degraded(CodexHookProfile::command_interrupt_v1())
+            }
             Self::Incompatible => CodexCompatibilityState::Incompatible,
             Self::Unproven => CodexCompatibilityState::Unproven,
         }
@@ -105,12 +178,22 @@ pub(crate) fn probe(
     persist_cache: bool,
 ) -> CodexCapabilityProbe {
     let version = probe_version(codex_program);
+    // The feature flag can change in user configuration while the executable
+    // remains byte-identical. A cache entry never overrides current evidence
+    // that Hooks are disabled or unavailable.
+    let hook_feature = probe_hook_feature(codex_program);
     let executable_identity = executable_identity(codex_program);
     let cache_path = state_root.join(CACHE_FILE);
     if let Some(identity) = executable_identity.as_deref()
         && let Some(record) = read_cache(&cache_path)
         && record.schema == CACHE_SCHEMA
         && record.executable_identity == identity
+        && hook_feature == HookFeature::Enabled
+        && interrupt_source_audited(version.as_deref())
+            == matches!(
+                record.state,
+                CachedCapabilityState::FullInterrupt | CachedCapabilityState::DegradedInterrupt
+            )
     {
         return CodexCapabilityProbe {
             version,
@@ -123,20 +206,24 @@ pub(crate) fn probe(
         };
     }
 
-    let hook_feature = probe_hook_feature(codex_program);
+    // These exact installed releases were audited against matching upstream
+    // source tags. Other release numbers retain command-v1; ordering grants
+    // no event authority.
+    let command_profile = if interrupt_source_audited(version.as_deref()) {
+        CodexHookProfile::command_interrupt_v1()
+    } else {
+        CodexHookProfile::command_v1()
+    };
     let (state, schema_fingerprint) = match hook_feature {
         HookFeature::Enabled => match probe_schema(codex_program) {
             Some(schema) => (
                 // A generated schema is diagnostic-only. In particular, an
                 // unrelated `mcp_tool` string does not positively establish
                 // the actual Hook MCP declaration contract.
-                CodexCompatibilityState::Full(CodexHookProfile::command_v1()),
+                CodexCompatibilityState::Full(command_profile),
                 Some(schema.fingerprint),
             ),
-            None => (
-                CodexCompatibilityState::Degraded(CodexHookProfile::command_v1()),
-                None,
-            ),
+            None => (CodexCompatibilityState::Degraded(command_profile), None),
         },
         HookFeature::Disabled => (CodexCompatibilityState::Incompatible, None),
         HookFeature::Unproven => (CodexCompatibilityState::Unproven, None),
@@ -180,7 +267,11 @@ fn probe_hook_feature(codex_program: Option<&Path>) -> HookFeature {
     if !output.status.success() {
         return HookFeature::Unproven;
     }
-    let Ok(stdout) = String::from_utf8(output.stdout) else {
+    parse_hook_feature(&output.stdout)
+}
+
+fn parse_hook_feature(bytes: &[u8]) -> HookFeature {
+    let Ok(stdout) = std::str::from_utf8(bytes) else {
         return HookFeature::Unproven;
     };
     for line in stdout.lines() {
@@ -208,6 +299,8 @@ fn probe_schema(codex_program: Option<&Path>) -> Option<SchemaEvidence> {
     let status = command(codex_program)
         .args(["app-server", "generate-json-schema", "--out"])
         .arg(&root)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .ok();
     let fingerprint = status

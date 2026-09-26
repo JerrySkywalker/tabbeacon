@@ -13,9 +13,10 @@ use clap_complete::generate;
 use dialoguer::{Confirm, Select};
 use tabbeacon::cli::{
     AgyPreadmissionCommand, AgyQualificationCommand, AgyQualificationWorkspaceArgs, AliasCommand,
-    Cli, Command, ConfigCommand, ConvergenceCommand, DoctorArgs, ExplainCommand, HumanOutputArgs,
-    InterfaceCommand, InterfacePreferenceKey, OutputMode, PreviewArgs, Provider, RepairCommand,
-    SetupCommand, TitlePolicyCommand, UninstallProvider, UpgradePreflightArgs,
+    Cli, Command, ConfigCommand, ConfigProvider, ConfigProviderMode, ConvergenceCommand,
+    CursorCommand, DoctorArgs, ExplainCommand, HumanOutputArgs, InterfaceCommand,
+    InterfacePreferenceKey, OutputMode, PreviewArgs, Provider, ProviderConfigCommand,
+    RepairCommand, SetupCommand, TitlePolicyCommand, UninstallProvider, UpgradePreflightArgs,
 };
 use tabbeacon::diagnostics::{
     collect_operational_diagnostics, collect_operational_diagnostics_with_hook_runtime_probe,
@@ -46,6 +47,8 @@ use tabbeacon::providers::codex::{
     CodexHookRuntime, CodexIntegration, CodexRepairDisposition, CodexRepairReport, SetupOutcome,
     TitleOwnershipOutcome, UninstallOutcome,
 };
+use tabbeacon::providers::cursor::CursorRouteStore;
+use tabbeacon::providers::cursor_integration::{CursorHookIntegration, CursorHookState};
 use tabbeacon::providers::registry::ProviderRegistry;
 use tabbeacon::setup::{
     GuidedSetupApplyResult, GuidedSetupPlan, SetupDecision, SetupDiscovery, WindowsTerminalState,
@@ -65,6 +68,10 @@ use tabbeacon::{
         PresentationPolicy, SemanticPresentationInput, WindowsTerminalCapabilities,
         WindowsTerminalRenderer,
     },
+    presentation_policy::{
+        ApplicationStatus, CliTarget, PresentationCapabilities, PresentationMode,
+        PresentationOverride, resolve_presentation,
+    },
     repo::{
         AliasCandidate, RepositoryAlias, StableAliasRegistry, WorkspaceAliasError,
         WorkspaceAliasInspection, WorkspaceIdentityResolver, WorkspacePreferenceStore,
@@ -75,8 +82,8 @@ use tabbeacon::{
         SpinnerPreset, TabColorMode, TitleMode,
     },
     settings_transfer::{
-        ImportApplyOutcome, ImportPlan, MAX_EXPORT_BYTES, SettingsExportV1, apply_import_plan,
-        write_export_file,
+        ImportApplyOutcome, ImportPlan, MAX_EXPORT_BYTES, SettingsExportV1,
+        apply_import_plan_durable, recover_pending_import, write_export_file,
     },
     title_explanation::TitleExplanation,
     upgrade_preflight::{
@@ -190,6 +197,11 @@ fn dispatch(cli: Cli) -> ExitCode {
             output,
             ..
         }) => setup_agy(output.mode()),
+        Some(Command::Setup {
+            command: Some(SetupCommand::Cursor { workspace }),
+            output,
+            ..
+        }) => manage_cursor_hooks(&workspace, true, output.mode()),
         Some(Command::Repair {
             command:
                 RepairCommand::Codex {
@@ -216,6 +228,14 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Status(output)) => status(output.mode(), output.language.preference()),
         Some(Command::Sessions(output)) => sessions(output.mode(), output.language.preference()),
         Some(Command::Hooks(output)) => hooks(output.mode(), output.language.preference()),
+        Some(Command::Cursor { command }) => match command {
+            CursorCommand::Check { workspace, output } => {
+                check_cursor_hooks(&workspace, output.mode())
+            }
+            CursorCommand::Uninstall { workspace, output } => {
+                manage_cursor_hooks(&workspace, false, output.mode())
+            }
+        },
         Some(Command::Agy { command }) => agy_preadmission(command),
         Some(Command::UpgradePreflight(arguments)) => upgrade_preflight(arguments),
         Some(Command::TitlePolicy { command }) => match command {
@@ -241,6 +261,7 @@ fn dispatch(cli: Cli) -> ExitCode {
         Some(Command::Hook {
             provider: Provider::Codex,
         }) => run_codex_hook(),
+        Some(Command::CursorHook) => run_cursor_hook(),
         Some(Command::McpHookStdio) => {
             let _ = tabbeacon::providers::codex::run_stdio_hook_server();
             ExitCode::SUCCESS
@@ -423,7 +444,299 @@ fn config_command(
         ConfigCommand::Preset { name } => config_preset(&name, output_mode, language),
         ConfigCommand::Reset => config_reset(output_mode, language),
         ConfigCommand::Wizard => config_wizard(output_mode, language),
+        ConfigCommand::Provider { provider, command } => {
+            config_provider(provider, &command, output_mode, language)
+        }
     }
+}
+
+#[allow(clippy::too_many_lines)] // Preview, guarded save, and title reconciliation form one operation.
+fn config_provider(
+    provider: ConfigProvider,
+    command: &ProviderConfigCommand,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
+    let target = match provider {
+        ConfigProvider::Codex => CliTarget::Codex,
+        ConfigProvider::Agy => CliTarget::Agy,
+        ConfigProvider::Cursor => CliTarget::Cursor,
+    };
+    let store = match settings_store() {
+        Ok(store) => store,
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
+    };
+    let snapshot = match store.snapshot_read_only() {
+        Ok(snapshot) => snapshot,
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
+    };
+    let current = match store.load_provider_override_read_only(target) {
+        Ok(current) => current,
+        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
+    };
+    let (draft, apply) = match command {
+        ProviderConfigCommand::Show => (current, false),
+        ProviderConfigCommand::Inherit { apply } => (PresentationOverride::default(), *apply),
+        ProviderConfigCommand::Preview { mode } => {
+            let Some(mode) = admitted_provider_mode(target, *mode) else {
+                return management_error_for_output(
+                    "CONFIG",
+                    &io::Error::other("mode is not admitted for this CLI"),
+                    output_mode,
+                    language,
+                );
+            };
+            (current.with_mode(mode), false)
+        }
+        ProviderConfigCommand::Apply { mode } => {
+            let Some(mode) = admitted_provider_mode(target, *mode) else {
+                return management_error_for_output(
+                    "CONFIG",
+                    &io::Error::other("mode is not admitted for this CLI"),
+                    output_mode,
+                    language,
+                );
+            };
+            (current.with_mode(mode), true)
+        }
+    };
+    let (capabilities, application) = provider_presentation_admission(target);
+    let resolved = resolve_presentation(snapshot.settings(), draft, capabilities, application);
+    if !apply {
+        print_provider_config(target, &resolved, false);
+        return ExitCode::SUCCESS;
+    }
+    let changed = draft != current;
+    if let Err(error) = apply_provider_override(&store, &snapshot, target, current, draft) {
+        return management_error_for_output("CONFIG", &error, output_mode, language);
+    }
+    let (capabilities, application) = provider_presentation_admission(target);
+    let applied = resolve_presentation(snapshot.settings(), draft, capabilities, application);
+    print_provider_config(target, &applied, changed);
+    ExitCode::SUCCESS
+}
+
+fn provider_presentation_admission(
+    target: CliTarget,
+) -> (PresentationCapabilities, ApplicationStatus) {
+    match target {
+        CliTarget::Codex => (PresentationCapabilities::CODEX, ApplicationStatus::Unproven),
+        CliTarget::Cursor => cursor_presentation_admission(),
+        CliTarget::Agy => {
+            let Ok(setup) = AgyProductionSetup::from_environment() else {
+                return (PresentationCapabilities::NONE, ApplicationStatus::Unproven);
+            };
+            agy_presentation_admission(setup.inspect().state)
+        }
+    }
+}
+
+fn cursor_presentation_admission() -> (PresentationCapabilities, ApplicationStatus) {
+    let (Ok(workspace), Ok(executable)) = (std::env::current_dir(), std::env::current_exe()) else {
+        return (PresentationCapabilities::NONE, ApplicationStatus::Unproven);
+    };
+    let Ok(integration) = CursorHookIntegration::new(&workspace, &executable) else {
+        return (PresentationCapabilities::NONE, ApplicationStatus::Unproven);
+    };
+    match integration.check() {
+        // The isolated candidate has a strict color-only output path. A
+        // declaration does not prove live terminal binding or visibility.
+        Ok(CursorHookState::Installed) => (
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        ),
+        Ok(CursorHookState::NotInstalled) => (
+            PresentationCapabilities::NONE,
+            ApplicationStatus::NotInstalled,
+        ),
+        Ok(CursorHookState::Partial | CursorHookState::Drift) => (
+            PresentationCapabilities::NONE,
+            ApplicationStatus::InstalledUntrusted,
+        ),
+        Err(_) => (PresentationCapabilities::NONE, ApplicationStatus::Unproven),
+    }
+}
+
+fn agy_presentation_admission(
+    state: tabbeacon::providers::agy_backend::AgyIntegrationReadiness,
+) -> (PresentationCapabilities, ApplicationStatus) {
+    use tabbeacon::providers::agy_backend::AgyIntegrationReadiness;
+    match state {
+        AgyIntegrationReadiness::SupportedConfigured => (
+            PresentationCapabilities::AGY_TITLE_ONLY,
+            ApplicationStatus::Unproven,
+        ),
+        AgyIntegrationReadiness::SupportedNotConfigured => (
+            PresentationCapabilities::AGY_TITLE_ONLY,
+            ApplicationStatus::NotInstalled,
+        ),
+        AgyIntegrationReadiness::ConfigurationDrift
+        | AgyIntegrationReadiness::KnownUnadmitted
+        | AgyIntegrationReadiness::UnsupportedVersion => {
+            (PresentationCapabilities::NONE, ApplicationStatus::Unproven)
+        }
+    }
+}
+
+fn apply_provider_override(
+    store: &PresentationSettingsStore,
+    snapshot: &PresentationSettingsSnapshot,
+    target: CliTarget,
+    current: PresentationOverride,
+    draft: PresentationOverride,
+) -> io::Result<()> {
+    if draft == current {
+        return store
+            .snapshot_is_current(snapshot)
+            .map_err(io::Error::other)?
+            .then_some(())
+            .ok_or_else(settings_conflict_error);
+    }
+    apply_changed_provider_override(store, snapshot, target, current, draft)
+}
+
+fn apply_changed_provider_override(
+    store: &PresentationSettingsStore,
+    snapshot: &PresentationSettingsSnapshot,
+    target: CliTarget,
+    current: PresentationOverride,
+    draft: PresentationOverride,
+) -> io::Result<()> {
+    let save = || {
+        if target == CliTarget::Cursor {
+            let state_root = store
+                .path()
+                .parent()
+                .ok_or_else(|| io::Error::other("Cursor state root is unavailable"))?;
+            let route = CursorRouteStore::new(state_root);
+            store
+                .save_provider_override_snapshot_if_unchanged_guarded(
+                    snapshot,
+                    target,
+                    draft,
+                    || route.acquire_route_lock().map_err(Into::into),
+                )
+                .map_err(io::Error::other)
+        } else {
+            store
+                .save_provider_override_snapshot_if_unchanged(snapshot, target, draft)
+                .map_err(io::Error::other)
+        }
+    };
+    let receipt = match save() {
+        Ok(SnapshotSaveOutcome::Saved(receipt)) => receipt,
+        Ok(SnapshotSaveOutcome::Conflict) => return Err(settings_conflict_error()),
+        Err(error) => return Err(error),
+    };
+    if !matches!(store.write_receipt_is_current(&receipt), Ok(true)) {
+        return Err(settings_conflict_error());
+    }
+    if target == CliTarget::Agy {
+        let previous = resolve_presentation(
+            snapshot.settings(),
+            current,
+            PresentationCapabilities::AGY_TITLE_ONLY,
+            ApplicationStatus::Unproven,
+        );
+        let next = resolve_presentation(
+            snapshot.settings(),
+            draft,
+            PresentationCapabilities::AGY_TITLE_ONLY,
+            ApplicationStatus::Unproven,
+        );
+        if previous.effective.title().owns_tabbeacon_title()
+            != next.effective.title().owns_tabbeacon_title()
+        {
+            let reconcile = AgyProductionSetup::from_environment().and_then(|setup| {
+                setup.reconcile_title_ownership(next.effective.title().owns_tabbeacon_title())
+            });
+            if let Err(error) = reconcile {
+                let restored = matches!(
+                    store.restore_snapshot_if_unchanged(&receipt, snapshot),
+                    Ok(ConditionalSaveOutcome::Saved)
+                );
+                return Err(io::Error::other(format!(
+                    "{error}; rollback_verified={restored}"
+                )));
+            }
+        }
+    }
+    if target == CliTarget::Codex {
+        let previous = resolve_presentation(
+            snapshot.settings(),
+            current,
+            PresentationCapabilities::CODEX,
+            ApplicationStatus::Unproven,
+        );
+        let next = resolve_presentation(
+            snapshot.settings(),
+            draft,
+            PresentationCapabilities::CODEX,
+            ApplicationStatus::Unproven,
+        );
+        if previous.effective.title().owns_tabbeacon_title()
+            != next.effective.title().owns_tabbeacon_title()
+        {
+            let reconcile = CodexIntegration::from_environment().and_then(|integration| {
+                integration.reconcile_title_ownership(next.effective.title().owns_tabbeacon_title())
+            });
+            if let Err(error) = reconcile {
+                let restored = matches!(
+                    store.restore_snapshot_if_unchanged(&receipt, snapshot),
+                    Ok(ConditionalSaveOutcome::Saved)
+                );
+                return Err(io::Error::other(format!(
+                    "{error}; rollback_verified={restored}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn admitted_provider_mode(target: CliTarget, mode: ConfigProviderMode) -> Option<PresentationMode> {
+    let mode = match mode {
+        ConfigProviderMode::FullTakeover => PresentationMode::FullTakeover,
+        ConfigProviderMode::TitleOnly => PresentationMode::TitleOnly,
+        ConfigProviderMode::ColorOnly => PresentationMode::ColorOnly,
+        ConfigProviderMode::PreserveNative => PresentationMode::PreserveNative,
+    };
+    match (target, mode) {
+        (CliTarget::Cursor, PresentationMode::ColorOnly | PresentationMode::PreserveNative)
+        | (CliTarget::Agy, PresentationMode::TitleOnly | PresentationMode::PreserveNative)
+        | (CliTarget::Codex, _) => Some(mode),
+        _ => None,
+    }
+}
+
+fn print_provider_config(
+    target: CliTarget,
+    resolved: &tabbeacon::presentation_policy::ResolvedPresentation,
+    saved: bool,
+) {
+    println!("PROVIDER={}", target.as_str());
+    println!("CHANGE_APPLIED={saved}");
+    println!("REQUESTED_TITLE={}", resolved.requested.title());
+    println!("REQUESTED_TAB_COLOR={}", resolved.requested.tab_color());
+    println!("REQUESTED_ACTIVITY={}", resolved.requested.activity());
+    println!("EFFECTIVE_TITLE={}", resolved.effective.title());
+    println!("EFFECTIVE_TAB_COLOR={}", resolved.effective.tab_color());
+    println!("EFFECTIVE_ACTIVITY={}", resolved.effective.activity());
+    println!("TITLE_CAPABILITY_LIMITED={}", resolved.title_limited);
+    println!("COLOR_CAPABILITY_LIMITED={}", resolved.color_limited);
+    println!("ACTIVITY_CAPABILITY_LIMITED={}", resolved.activity_limited);
+    let application = match resolved.application {
+        ApplicationStatus::NotInstalled => "NOT_INSTALLED",
+        ApplicationStatus::InstalledUntrusted => "INSTALLED_UNTRUSTED",
+        ApplicationStatus::RestartRequired => "RESTART_REQUIRED",
+        ApplicationStatus::Applied => "APPLIED",
+        ApplicationStatus::Unproven => "UNPROVEN",
+    };
+    println!("LIVE_APPLICATION={application}");
+    // Saved preferences and reconciled callbacks cannot clear output in a
+    // different process's terminal. Cursor Apply has no cross-tab broadcast.
+    println!("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE");
+    println!("RESTART_MAY_BE_REQUIRED=true");
 }
 
 fn interface_command(
@@ -1140,14 +1453,72 @@ fn setup_codex(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> 
 }
 
 fn setup_agy(output_mode: OutputMode) -> ExitCode {
+    let store = match settings_store() {
+        Ok(store) => store,
+        Err(error) => return management_error_for_output("SETUP", &error, output_mode, None),
+    };
+    let resolved = match store.resolve_provider_read_only(
+        CliTarget::Agy,
+        PresentationCapabilities::AGY_TITLE_ONLY,
+        ApplicationStatus::Unproven,
+    ) {
+        Ok(resolved) => resolved,
+        Err(error) => return management_error_for_output("SETUP", &error, output_mode, None),
+    };
     let setup = match AgyProductionSetup::from_environment() {
         Ok(setup) => setup,
         Err(error) => return print_agy_setup_error(error, output_mode),
     };
-    match setup.setup() {
+    let result = setup.reconcile_title_ownership(resolved.effective.title().owns_tabbeacon_title());
+    match result {
         Ok(outcome) => print_agy_setup_outcome(outcome, output_mode),
         Err(error) => print_agy_setup_error(error, output_mode),
     }
+}
+
+fn cursor_hook_integration(workspace: &std::path::Path) -> std::io::Result<CursorHookIntegration> {
+    CursorHookIntegration::new(workspace, &std::env::current_exe()?)
+}
+
+fn check_cursor_hooks(workspace: &std::path::Path, output_mode: OutputMode) -> ExitCode {
+    let result = cursor_hook_integration(workspace).and_then(|integration| integration.check());
+    print_cursor_hook_result(result, output_mode)
+}
+
+fn manage_cursor_hooks(
+    workspace: &std::path::Path,
+    install: bool,
+    output_mode: OutputMode,
+) -> ExitCode {
+    let result = cursor_hook_integration(workspace).and_then(|integration| {
+        if install {
+            integration.install()
+        } else {
+            integration.uninstall()
+        }
+    });
+    print_cursor_hook_result(result, output_mode)
+}
+
+fn print_cursor_hook_result(
+    result: std::io::Result<tabbeacon::providers::cursor_integration::CursorHookState>,
+    output_mode: OutputMode,
+) -> ExitCode {
+    let state = match result {
+        Ok(state) => state,
+        Err(error) => {
+            return management_error_for_output("CURSOR_HOOKS", &error, output_mode, None);
+        }
+    };
+    match output_mode {
+        OutputMode::Json => println!(
+            "{}",
+            serde_json::json!({"provider":"cursor","integration":state.as_str()})
+        ),
+        OutputMode::Plain => println!("CURSOR_INTEGRATION={}", state.as_str()),
+        OutputMode::Human => println!("Cursor Hook integration: {}.", state.as_str()),
+    }
+    ExitCode::SUCCESS
 }
 
 fn print_agy_setup_outcome(
@@ -1160,14 +1531,18 @@ fn print_agy_setup_outcome(
         AgyProductionSetupOutcome::Removed => "removed",
         AgyProductionSetupOutcome::NotInstalled => "not_installed",
     };
+    let provider_enabled = matches!(
+        outcome,
+        AgyProductionSetupOutcome::Installed | AgyProductionSetupOutcome::AlreadyConfigured
+    );
     match output_mode {
         OutputMode::Json => println!(
             "{}",
-            serde_json::json!({"provider":"agy","setup":value,"provider_enabled":true})
+            serde_json::json!({"provider":"agy","setup":value,"provider_enabled":provider_enabled})
         ),
         OutputMode::Plain => {
             println!("AGY_SETUP={}", value.to_ascii_uppercase());
-            println!("AGY_PROVIDER_ENABLED=true");
+            println!("AGY_PROVIDER_ENABLED={provider_enabled}");
         }
         OutputMode::Human => println!("Agy setup: {value}."),
     }
@@ -1906,8 +2281,8 @@ fn agy_preadmission(command: AgyPreadmissionCommand) -> ExitCode {
         }
         AgyPreadmissionCommand::TitleCallback => {
             let input = read_agy_qualification_stdin();
-            let response = AgyTitleRuntime::dispatch_system(&input.payload);
-            println!("{}", response.title);
+            let mut stdout = io::stdout().lock();
+            let _ = AgyTitleRuntime::dispatch_system_to(&input.payload, &mut stdout);
             ExitCode::SUCCESS
         }
     }
@@ -2817,6 +3192,20 @@ fn run_codex_hook() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn run_cursor_hook() -> ExitCode {
+    let mut input = Vec::new();
+    let mut bounded =
+        std::io::stdin().take((tabbeacon::providers::cursor::MAX_CURSOR_HOOK_BYTES + 1) as u64);
+    if bounded.read_to_end(&mut input).is_ok()
+        && input.len() <= tabbeacon::providers::cursor::MAX_CURSOR_HOOK_BYTES
+    {
+        let _ = tabbeacon::providers::cursor_runtime::dispatch_system(&input);
+    }
+    // Cursor's Hook protocol requires JSON; terminal presentation uses CONOUT$.
+    println!("{{}}");
+    ExitCode::SUCCESS
+}
+
 fn config_show(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
     let store = match settings_store() {
         Ok(store) => store,
@@ -2956,6 +3345,17 @@ fn config_wizard(output_mode: OutputMode, language: Option<InterfaceLanguage>) -
             language,
         );
     }
+    let Ok(target) = Select::new()
+        .with_prompt("Configure target / 配置目标")
+        .items(["Global defaults / 全局默认", "Codex", "Agy", "Cursor"])
+        .default(0)
+        .interact()
+    else {
+        return wizard_error("target selection was interrupted", output_mode, language);
+    };
+    if target != 0 {
+        return config_provider_wizard(target, output_mode, language);
+    }
     let store = match settings_store() {
         Ok(store) => store,
         Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
@@ -3017,6 +3417,93 @@ fn config_wizard(output_mode: OutputMode, language: Option<InterfaceLanguage>) -
         output_mode,
         language,
     )
+}
+
+fn config_provider_wizard(
+    target: usize,
+    output_mode: OutputMode,
+    language: Option<InterfaceLanguage>,
+) -> ExitCode {
+    let (provider, choices): (ConfigProvider, &[(&str, Option<ConfigProviderMode>)]) = match target
+    {
+        1 => (
+            ConfigProvider::Codex,
+            &[
+                (
+                    "Full takeover / 完整接管",
+                    Some(ConfigProviderMode::FullTakeover),
+                ),
+                ("Title only / 仅标题", Some(ConfigProviderMode::TitleOnly)),
+                ("Color only / 仅颜色", Some(ConfigProviderMode::ColorOnly)),
+                (
+                    "Preserve native / 保留原生",
+                    Some(ConfigProviderMode::PreserveNative),
+                ),
+                ("Inherit / 继承", None),
+                ("Cancel / 取消", None),
+            ],
+        ),
+        2 => (
+            ConfigProvider::Agy,
+            &[
+                ("Title only / 仅标题", Some(ConfigProviderMode::TitleOnly)),
+                (
+                    "Preserve native / 保留原生",
+                    Some(ConfigProviderMode::PreserveNative),
+                ),
+                ("Inherit / 继承", None),
+                ("Cancel / 取消", None),
+            ],
+        ),
+        3 => (
+            ConfigProvider::Cursor,
+            &[
+                ("Color only / 仅颜色", Some(ConfigProviderMode::ColorOnly)),
+                (
+                    "Preserve native / 保留原生",
+                    Some(ConfigProviderMode::PreserveNative),
+                ),
+                ("Inherit / 继承", None),
+                ("Cancel / 取消", None),
+            ],
+        ),
+        _ => return wizard_error("invalid provider selection", output_mode, language),
+    };
+    let labels: Vec<&str> = choices.iter().map(|(label, _)| *label).collect();
+    let Ok(choice) = Select::new()
+        .with_prompt("Presentation mode / 呈现模式")
+        .items(&labels)
+        .default(0)
+        .interact()
+    else {
+        return wizard_error("mode selection was interrupted", output_mode, language);
+    };
+    if choice == choices.len() - 1 {
+        return ExitCode::SUCCESS;
+    }
+    let preview = match choices[choice].1 {
+        Some(mode) => ProviderConfigCommand::Preview { mode },
+        None => ProviderConfigCommand::Inherit { apply: false },
+    };
+    let result = config_provider(provider, &preview, output_mode, language);
+    if result != ExitCode::SUCCESS {
+        return result;
+    }
+    let Ok(apply) = Confirm::new()
+        .with_prompt("Apply this provider preference? / 应用此 CLI 偏好？")
+        .default(false)
+        .interact()
+    else {
+        return wizard_error("apply confirmation was interrupted", output_mode, language);
+    };
+    if !apply {
+        return ExitCode::SUCCESS;
+    }
+    let command = match choices[choice].1 {
+        Some(mode) => ProviderConfigCommand::Apply { mode },
+        None => ProviderConfigCommand::Inherit { apply: true },
+    };
+    config_provider(provider, &command, output_mode, language)
 }
 
 #[allow(clippy::too_many_lines)] // One grouped document mirrors the visible Setup summary.
@@ -3937,8 +4424,23 @@ fn export_settings(
         Ok(store) => store,
         Err(error) => return transfer_failure("EXPORT", &error, output),
     };
-    let presentation = match presentation_store.snapshot_read_only() {
-        Ok(snapshot) => (!snapshot.is_absent()).then_some(snapshot.settings()),
+    let (presentation, provider_overrides) = match presentation_store.snapshot_read_only() {
+        Ok(snapshot) => {
+            let mut overrides = BTreeMap::new();
+            for provider in [CliTarget::Codex, CliTarget::Agy, CliTarget::Cursor] {
+                let preference = match snapshot.provider_override(provider) {
+                    Ok(preference) => preference,
+                    Err(error) => return transfer_failure("EXPORT", &error, output),
+                };
+                if preference != PresentationOverride::default() {
+                    overrides.insert(provider, preference);
+                }
+            }
+            (
+                (!snapshot.is_absent()).then_some(snapshot.settings()),
+                overrides,
+            )
+        }
         Err(error) => return transfer_failure("EXPORT", &error, output),
     };
     let interface = match interface_store.snapshot_read_only() {
@@ -3949,7 +4451,8 @@ fn export_settings(
         Ok(snapshot) => snapshot.preferences().clone(),
         Err(error) => return transfer_failure("EXPORT", &error, output),
     };
-    let document = SettingsExportV1::new(presentation, interface, &workspace);
+    let document = SettingsExportV1::new(presentation, interface, &workspace)
+        .with_provider_overrides(provider_overrides);
     let bytes = match document.to_canonical_json() {
         Ok(bytes) => bytes,
         Err(error) => return transfer_failure("EXPORT", &error, output),
@@ -4000,6 +4503,34 @@ fn import_settings(path: &std::path::Path, apply: bool, output: HumanOutputArgs)
         Ok(store) => store,
         Err(error) => return transfer_failure("IMPORT", &error, output),
     };
+    if apply
+        && matches!(
+            recover_pending_import(
+                &presentation_store,
+                &interface_store,
+                &workspace_store,
+                |owns_title| {
+                    CodexIntegration::from_environment()
+                        .and_then(|integration| integration.reconcile_title_ownership(owns_title))
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                },
+            ),
+            Some(ImportApplyOutcome::PartialState | ImportApplyOutcome::Conflict)
+        )
+    {
+        if output.mode() == OutputMode::Plain {
+            println!("IMPORT=partial_state");
+            println!("RECOVERY=BLOCKED");
+        } else {
+            eprint_human_text(
+                HumanTone::Failure,
+                &HumanText::message(HumanMessageKey::ImportPartialState),
+                output.language.preference(),
+            );
+        }
+        return ExitCode::from(2);
+    }
     let presentation_snapshot = match presentation_store.snapshot_read_only() {
         Ok(snapshot) => snapshot,
         Err(error) => return transfer_failure("IMPORT", &error, output),
@@ -4065,7 +4596,7 @@ fn import_settings(path: &std::path::Path, apply: bool, output: HumanOutputArgs)
     if !apply {
         return ExitCode::SUCCESS;
     }
-    let outcome = apply_import_plan(
+    let outcome = apply_import_plan_durable(
         &plan,
         &presentation_store,
         &presentation_snapshot,
@@ -4073,6 +4604,12 @@ fn import_settings(path: &std::path::Path, apply: bool, output: HumanOutputArgs)
         &interface_snapshot,
         &workspace_store,
         &workspace_snapshot,
+        |owns_title| {
+            CodexIntegration::from_environment()
+                .and_then(|integration| integration.reconcile_title_ownership(owns_title))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        },
     );
     print_import_summary(&plan, &document, Some(import_outcome_name(outcome)), output);
     match outcome {
@@ -4095,7 +4632,11 @@ fn import_outcome_name(outcome: ImportApplyOutcome) -> &'static str {
 fn print_export_summary(document: &SettingsExportV1, output: HumanOutputArgs) {
     if output.mode() == OutputMode::Plain {
         println!("EXPORT=PASS");
-        println!("EXPORT_SCHEMA=tabbeacon-export-v1");
+        println!("EXPORT_SCHEMA={}", document.schema());
+        println!(
+            "PROVIDER_OVERRIDES_EXPORTED={}",
+            document.provider_override_count()
+        );
         println!("PRESENTATION_EXPORTED={}", document.has_presentation());
         println!("INTERFACE_EXPORTED={}", document.has_interface());
         println!(
@@ -4147,7 +4688,11 @@ fn print_import_summary(
 ) {
     if output.mode() == OutputMode::Plain {
         println!("IMPORT={}", outcome.unwrap_or("PREVIEW"));
-        println!("IMPORT_SCHEMA=tabbeacon-export-v1");
+        println!("IMPORT_SCHEMA={}", document.schema());
+        println!(
+            "PROVIDER_OVERRIDES_IN_DOCUMENT={}",
+            document.provider_override_count()
+        );
         println!("PRESENTATION_CHANGES={}", plan.changes_presentation());
         println!("INTERFACE_CHANGES={}", plan.changes_interface());
         println!(
@@ -4678,6 +5223,16 @@ fn ui() -> ExitCode {
         apply_control_center_workspace_override,
         || collect_control_center_refresh(&store, &interface_store, false),
         apply_control_center_repair,
+        |provider, expected_global, before, after| {
+            let snapshot = store.snapshot_read_only().map_err(io::Error::other)?;
+            let current = snapshot
+                .provider_override(provider)
+                .map_err(io::Error::other)?;
+            if current != before || snapshot.settings() != expected_global {
+                return Err(settings_conflict_error());
+            }
+            apply_provider_override(&store, &snapshot, provider, before, after)
+        },
     ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => management_error("UI", &error),
@@ -4689,10 +5244,27 @@ fn collect_control_center_refresh(
     interface_store: &InterfacePreferencesStore,
     include_workspace: bool,
 ) -> io::Result<tabbeacon::control_center::ControlCenterRefresh> {
-    let presentation = settings_store
+    let settings_snapshot = settings_store
         .snapshot_read_only()
-        .map_err(io::Error::other)?
-        .settings();
+        .map_err(io::Error::other)?;
+    let presentation = settings_snapshot.settings();
+    let provider_admission = [CliTarget::Codex, CliTarget::Agy, CliTarget::Cursor]
+        .into_iter()
+        .map(|provider| (provider, provider_presentation_admission(provider)))
+        .collect::<Vec<_>>();
+    let provider_presentation = provider_admission
+        .iter()
+        .copied()
+        .map(|(provider, (capabilities, application))| {
+            let override_for_cli = settings_snapshot
+                .provider_override(provider)
+                .map_err(io::Error::other)?;
+            Ok((
+                provider,
+                resolve_presentation(presentation, override_for_cli, capabilities, application),
+            ))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
     let interface = interface_store
         .snapshot_read_only()
         .map_err(io::Error::other)?
@@ -4721,6 +5293,11 @@ fn collect_control_center_refresh(
     );
     Ok(tabbeacon::control_center::ControlCenterRefresh {
         presentation,
+        provider_presentation,
+        provider_capabilities: provider_admission
+            .into_iter()
+            .map(|(provider, (capabilities, _))| (provider, capabilities))
+            .collect(),
         interface,
         snapshot: ManagementSnapshot::from_diagnostics(&report),
         overview: tabbeacon::management::ManagementOverview::from_diagnostics(&report),
@@ -4915,6 +5492,78 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn agy_explicit_native_mode_is_admitted_and_releases_its_title_channel() {
+        assert_eq!(
+            admitted_provider_mode(CliTarget::Agy, ConfigProviderMode::PreserveNative),
+            Some(PresentationMode::PreserveNative)
+        );
+        assert_eq!(
+            admitted_provider_mode(CliTarget::Agy, ConfigProviderMode::ColorOnly),
+            None
+        );
+        let native = resolve_presentation(
+            PresentationSettings::default(),
+            PresentationOverride::default().with_mode(PresentationMode::PreserveNative),
+            PresentationCapabilities::AGY_TITLE_ONLY,
+            ApplicationStatus::NotInstalled,
+        );
+        assert!(!native.effective.title().owns_tabbeacon_title());
+        assert_eq!(native.effective.tab_color(), TabColorMode::Native);
+        assert_eq!(native.effective.activity(), ActivityMode::Native);
+    }
+
+    #[test]
+    fn cursor_no_change_apply_refuses_a_stale_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        let store = PresentationSettingsStore::new(root.path().join("config.toml"));
+        let before = store.snapshot_read_only().unwrap();
+        let current = PresentationOverride::default();
+        assert!(matches!(
+            store.save_provider_override_snapshot_if_unchanged(
+                &before,
+                CliTarget::Cursor,
+                current.with_mode(PresentationMode::ColorOnly),
+            ),
+            Ok(SnapshotSaveOutcome::Saved(_))
+        ));
+        assert!(
+            apply_provider_override(&store, &before, CliTarget::Cursor, current, current)
+                .unwrap_err()
+                .to_string()
+                .contains("concurrently")
+        );
+    }
+
+    #[test]
+    fn agy_effective_capability_requires_positive_local_admission() {
+        use tabbeacon::providers::agy_backend::AgyIntegrationReadiness;
+        assert_eq!(
+            agy_presentation_admission(AgyIntegrationReadiness::SupportedConfigured),
+            (
+                PresentationCapabilities::AGY_TITLE_ONLY,
+                ApplicationStatus::Unproven
+            )
+        );
+        assert_eq!(
+            agy_presentation_admission(AgyIntegrationReadiness::SupportedNotConfigured),
+            (
+                PresentationCapabilities::AGY_TITLE_ONLY,
+                ApplicationStatus::NotInstalled
+            )
+        );
+        for state in [
+            AgyIntegrationReadiness::KnownUnadmitted,
+            AgyIntegrationReadiness::UnsupportedVersion,
+            AgyIntegrationReadiness::ConfigurationDrift,
+        ] {
+            assert_eq!(
+                agy_presentation_admission(state),
+                (PresentationCapabilities::NONE, ApplicationStatus::Unproven)
+            );
+        }
+    }
 
     #[test]
     fn guided_setup_revisit_policy_distinguishes_fresh_quick_and_full_paths() {

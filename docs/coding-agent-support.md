@@ -3,6 +3,8 @@
 TabBeacon normalizes provider evidence into a provider-neutral presentation
 model. A provider is production-supported only to the extent its current
 contract is admitted by evidence.
+See the [English/Chinese terminology](terminology.md) for the distinct meanings
+of capability, evidence, installed integration, Hook trust, and effective setting.
 
 ## Current support
 
@@ -15,6 +17,41 @@ contract is admitted by evidence.
 
 Deferred does not mean partially supported. It means no production provider is
 enabled or implied.
+
+Cursor Agent is being investigated for the v0.8.0 train. Its original command
+is `agent` on the observed ZenBook Duo installation. [Current Cursor Hook documentation](https://cursor.com/docs/hooks)
+names a structured `stop.status` outcome, but exact Windows Terminal color
+output and original-command lifecycle have only one isolated product observation.
+The Owner saw working/completed colors and no native-title interference; the
+later session left matching release/end state, while an earlier start-only route
+did not record an end. Per-Hook output results and mixed-session behavior remain
+unproven. Cursor is not
+included in the current production support table until those gates pass.
+The candidate route guard now keeps bounded, process-safe generation history
+and rejects superseded turns after the 32nd round. This deterministic guard
+does not by itself prove a real Hook delivery or terminal binding; its bounded
+history may conservatively refuse a new generation if its membership filter
+reaches capacity.
+
+## v0.8.0 candidate evidence boundary
+
+The candidate's saved per-CLI preferences and deterministic event fixtures do
+not change the production table above. Installed Hook delivery, Hook trust,
+terminal binding, and effective visible output are separate observations.
+`native` leaves a presentation channel to the CLI or terminal; `off` disables
+TabBeacon output on that channel. Neither option suppresses a provider's own
+title. See [Native](terminology.md#tb-t11), [Off](terminology.md#tb-t12), and
+[Ownership](terminology.md#tb-t10).
+
+| Candidate fact | Codex CLI | Cursor Agent |
+| --- | --- | --- |
+| Structured interruption | The exact 0.156.1/0.157.1 source-audited profile, isolated owned declaration and trust gate, public Hook CLI, and runtime dispatch have deterministic proof. Daily installed `Interrupt` delivery and visible output remain unproven. | No admitted live interruption route. |
+| Structured warning or failed main turn | Unproven for the original HTTP 404 class in [Issue #116](https://github.com/JerrySkywalker/tabbeacon/issues/116). | Real structured `stop(completed)` delivery was observed by the earlier isolated collector; warning/failure outcomes remain unproven. |
+| Strict native presentation | Owned-channel release has deterministic tests; final visible transition proof is pending. | One isolated original-command color run preserved the native title by Owner observation; continuous owned Visual and mixed-session transitions remain unproven. |
+
+An event from a child tool or terminal text alone cannot establish a failed
+main turn. The candidate keeps unknown events and unavailable evidence
+unproven; it does not infer health from visible text, ANSI, or responses.
 
 ## Setup paths
 
@@ -80,7 +117,9 @@ failure leaves literal `codex` usable and preserves unowned configuration. Read
 Provider compatibility is not configuration ownership. Codex Hook trust stays
 manual, and setup refuses a TabBeacon-like declaration it cannot prove it owns.
 Agy setup owns only its admitted title callback member and preserves unrelated
-settings. Neither provider is wrapped, PATH-shadowed, or hosted in a PTY.
+settings. An explicit Agy `preserve-native` preference removes that owned
+callback; an unowned title declaration is never removed by TabBeacon. Neither
+provider is wrapped, PATH-shadowed, or hosted in a PTY.
 
 ## Terminal presentation boundary
 

@@ -2,6 +2,7 @@
 
 Configuration changes presentation preferences; it does not grant provider
 compatibility, Hook trust, configuration ownership, or runtime authority.
+The [English/Chinese terminology](terminology.md) keeps these states distinct.
 
 ## Guided setup and Control Center
 
@@ -35,6 +36,65 @@ The typed settings cover title presentation, activity/spinner behavior, tab
 color, theme, and named presets. Use `tabbeacon preview --theme muted-dark`
 for a temporary visual preview; preview does not persist a change.
 
+For the v0.8.0 development train, a partial provider override inherits each
+unspecified field from the existing user-global default. `native` leaves that
+channel to the provider or terminal; `off` disables TabBeacon output on the
+channel. Neither value suppresses a provider's own title. Saving a preference
+does not establish that the integration is installed, trusted, or applied to an
+already running CLI session. The published v0.7.3 commands above remain the
+current user-facing contract until the new CLI and integration are qualified.
+
+The candidate CLI requires a separate preview and explicit apply verb:
+
+```powershell
+tabbeacon config provider cursor preview color-only
+tabbeacon config provider cursor apply color-only
+tabbeacon config provider cursor show
+tabbeacon config provider cursor inherit --apply
+```
+
+`tabbeacon config wizard` now starts with a global/Codex/Agy/Cursor target
+choice. A provider mode is previewed before a separate Apply/Cancel decision;
+cancel leaves the saved preference untouched. The Control Center Integrations
+screen shows requested/effective provider preferences and application status.
+Keys `1`/`2`/`3` select Codex/Agy/Cursor, arrow keys choose an admitted mode,
+`r` chooses inheritance, and `v` previews. Only `a` in that preview requests
+the snapshot-guarded write; Esc cancels without a write. The saved setting still
+does not prove current-session application.
+
+The output separates requested and capability-limited effective channels.
+`LIVE_APPLICATION=NOT_INSTALLED` means the admitted Agy title callback is absent;
+`UNPROVEN` means the saved choice has not been proved active in the current CLI
+session. Agy's explicit `preserve-native` mode removes only an owned Agy title
+callback when applied; `tabbeacon setup agy` also respects that saved mode.
+One isolated original-command Cursor product run showed color and later-session
+release, but it does not qualify general live application or mixed-session
+routing. A saved choice does not install Cursor Hooks or prove color in a new
+terminal; `LIVE_APPLICATION=UNPROVEN` remains the honest general status.
+`CHANGE_APPLIED=true` reports only the saved preference. The public CLI,
+wizard, and Control Center cannot clear a different process's terminal at
+Apply time. An exact owned event can release the channels still recorded for
+that terminal. A normal original-command restart in the same tab may supply
+such an event; if it does not, close the old tab to end its visible output.
+Until then, the tab may retain its previous title or color. The CLI prints
+`VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE`, and the
+Control Center shows the same boundary. No output is claimed as applied merely
+because the preference was saved or a title callback was reconciled.
+The current candidate's Cursor Hook, Codex Hook or MCP event, and Agy title
+callback resolve preferences while holding the same settings lock used by
+direct Apply, global settings, and portable import. Cursor also holds its
+route/output lock through color flush; direct Cursor Apply takes the settings
+lock before attempting that route lock. Codex refreshes preferences on each
+event even when its MCP transport remains open. Agy holds the settings lock
+through the plain-title callback flush. A busy lock or malformed preference
+fails open without reviving an old managed presentation choice. These locks
+order current processes; they do not clear a remote tab at Apply time.
+This ordering applies to Hook processes running the current TabBeacon binary.
+An already running older Hook process may have resolved an earlier preference
+before entering the lock; an upgrade must not treat this source change as proof
+that such a process cannot write later. The public isolated test exercises the
+current binary with a synthetic output sink, not an older in-flight process.
+
 ## Human interface preferences
 
 Language, color, and reduced-motion preferences are user-local interface
@@ -65,8 +125,9 @@ change the repository, terminal, or daily command.
 
 ## Export and import
 
-Portable settings use canonical `tabbeacon-export-v1` JSON. Export creates a
-new file by default; import previews before it can apply:
+Portable preferences use canonical `tabbeacon-export-v1` or
+`tabbeacon-export-v2` JSON. Export creates a new file by default; import
+previews before it can apply:
 
 ```powershell
 tabbeacon export --output tabbeacon-settings.json
@@ -76,6 +137,28 @@ tabbeacon import tabbeacon-settings.json --apply
 
 Review the plan before `--apply`. Non-interactive import never mutates merely
 because a file was supplied.
+Exports without provider overrides retain `tabbeacon-export-v1`; exports with
+partial provider overrides use `tabbeacon-export-v2`. The v0.8.0 candidate
+accepts both. The v2 document contains preferences only, never Hook trust,
+provider authentication, terminal binding, or installed integration state.
+If an import would change Codex terminal-title ownership, preview still shows
+the proposed change without writing. Explicit Apply uses the owned Codex
+reconciliation path after snapshot-guarded preference writes. A changed store
+or an unprovable owned Hook/configuration refuses success. A failed external
+write is reported as `partial_state` even when preference compensation
+succeeds; inspect the owned integration before retrying. Process interruption
+recovery now has an owned local transaction journal. A later explicit
+`--apply` checks the exact three preference paths and original or planned
+bytes before restoring them. It calls the owned Codex title reconciler only
+if the prior process reached the Hook boundary. The title reconciler has a
+separate exact-byte journal for its own `config.toml` and ownership manifest
+write boundary. External drift or uncertain Hook ownership leaves
+`partial_state` and the journal for review. The import journal
+temporarily contains exact local preference bytes so unrelated fields can be
+restored; it is not exported. Isolated process-exit tests cover the write
+boundaries, while real user configuration and Hook trust remain outside the
+test and require independent safety review. Import never copies Hook trust or
+authentication.
 
 ## Separate boundaries
 

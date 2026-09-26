@@ -11,6 +11,15 @@ use super::{ColorSemantic, VisualError, VisualResult};
 
 /// Dedicated real-provider fixture name for the G59 root-anchor acceptance.
 pub const ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME: &str = "root-workspace-anchor";
+/// Owned visual cases that exercise Cursor's color-only product output with a
+/// fixture-owned native title marker. They use synthetic Hook events, not L4.
+pub const CURSOR_COLOR_WORKING_FIXTURE: &str = "cursor-color-working";
+pub const CURSOR_COLOR_COMPLETED_FIXTURE: &str = "cursor-color-completed";
+pub const CURSOR_COLOR_NATIVE_FIXTURE: &str = "cursor-color-native";
+/// Owned Windows Terminal proof of isolated public Codex Apply and Hook output.
+/// The events are synthetic and do not qualify real Codex model delivery.
+pub const CODEX_PUBLIC_COLOR_FIXTURE: &str = "codex-public-color";
+pub const CODEX_PUBLIC_NATIVE_FIXTURE: &str = "codex-public-native";
 
 /// One uniquely identified replay of a presentation fixture case.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +70,67 @@ impl Default for FixtureDriver {
 }
 
 impl FixtureDriver {
+    /// Builds a focused owned-window replay whose color oracle comes from the
+    /// shared semantic fixture while the emitter uses Cursor's product path.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown names or unsafe visual run identities.
+    pub fn cursor_color_replay(&self, name: &str, run_id: &str) -> VisualResult<FixtureReplay> {
+        let source = match name {
+            CURSOR_COLOR_WORKING_FIXTURE => "working",
+            CURSOR_COLOR_COMPLETED_FIXTURE => "result-ready",
+            CURSOR_COLOR_NATIVE_FIXTURE => "reset",
+            _ => {
+                return Err(VisualError::Platform(
+                    "unknown Cursor color fixture".to_owned(),
+                ));
+            }
+        };
+        let fixture = presentation_fixture()
+            .iter()
+            .find(|fixture| fixture.name() == source)
+            .ok_or_else(|| {
+                VisualError::Platform("Cursor color source fixture missing".to_owned())
+            })?;
+        let mut replay = self.replay(fixture, run_id)?;
+        name.clone_into(&mut replay.case.fixture_name);
+        replay.case.expects_animation = false;
+        replay.case.expects_title_animation = false;
+        replay.case.expected_title_frames = vec![replay.case.expected_title.clone()];
+        replay.title_frame_bytes.clear();
+        Ok(replay)
+    }
+
+    /// Builds the expected color/title oracle for the public Codex fixture.
+    /// Its emitter drives real candidate CLI Apply and Hook subprocesses.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unknown fixture names or unsafe visual run identities.
+    pub fn codex_public_replay(&self, name: &str, run_id: &str) -> VisualResult<FixtureReplay> {
+        let source = match name {
+            CODEX_PUBLIC_COLOR_FIXTURE => "working",
+            CODEX_PUBLIC_NATIVE_FIXTURE => "reset",
+            _ => {
+                return Err(VisualError::Platform(
+                    "unknown Codex public fixture".to_owned(),
+                ));
+            }
+        };
+        let fixture = presentation_fixture()
+            .iter()
+            .find(|fixture| fixture.name() == source)
+            .ok_or_else(|| VisualError::Platform("Codex source fixture missing".to_owned()))?;
+        let mut replay = self.replay(fixture, run_id)?;
+        name.clone_into(&mut replay.case.fixture_name);
+        replay.case.expects_animation = false;
+        replay.case.expects_title_animation = false;
+        replay.case.expected_title_frames = vec![replay.case.expected_title.clone()];
+        replay.title_frame_bytes.clear();
+        Ok(replay)
+    }
+
     /// Creates a driver using explicit Windows Terminal capabilities.
     #[must_use]
     pub const fn new(capabilities: WindowsTerminalCapabilities) -> Self {
@@ -259,7 +329,10 @@ fn is_safe_run_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FixtureDriver, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME};
+    use super::{
+        CODEX_PUBLIC_COLOR_FIXTURE, CODEX_PUBLIC_NATIVE_FIXTURE, CURSOR_COLOR_NATIVE_FIXTURE,
+        CURSOR_COLOR_WORKING_FIXTURE, FixtureDriver, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME,
+    };
     use crate::presentation::presentation_fixture;
 
     #[test]
@@ -292,5 +365,36 @@ mod tests {
         assert!(!replay.case.expected_title.contains("TB59-anchor"));
         assert!(!replay.case.expects_title_animation);
         assert!(!replay.case.expects_animation);
+    }
+
+    #[test]
+    fn cursor_color_visual_cases_keep_one_fixture_owned_native_title() {
+        let driver = FixtureDriver::default();
+        for name in [CURSOR_COLOR_WORKING_FIXTURE, CURSOR_COLOR_NATIVE_FIXTURE] {
+            let replay = driver.cursor_color_replay(name, "TB80-cursor").unwrap();
+            assert_eq!(replay.case.fixture_name, name);
+            assert_eq!(replay.case.expected_title_frames.len(), 1);
+            assert_eq!(
+                replay.case.expected_title_frames[0],
+                replay.case.expected_title
+            );
+            assert!(!replay.case.expects_title_animation);
+            assert!(!replay.case.expects_animation);
+        }
+    }
+
+    #[test]
+    fn codex_public_visual_cases_expect_native_title_and_no_animation() {
+        let driver = FixtureDriver::default();
+        for name in [CODEX_PUBLIC_COLOR_FIXTURE, CODEX_PUBLIC_NATIVE_FIXTURE] {
+            let replay = driver.codex_public_replay(name, "TB80-codex").unwrap();
+            assert_eq!(replay.case.fixture_name, name);
+            assert_eq!(
+                replay.case.expected_title_frames,
+                vec![replay.case.expected_title]
+            );
+            assert!(!replay.case.expects_title_animation);
+            assert!(!replay.case.expects_animation);
+        }
     }
 }

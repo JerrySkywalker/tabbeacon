@@ -34,8 +34,8 @@ use sha2::{Digest, Sha256};
 
 use crate::core::{
     AgentEvidence, AgentProvider, AgentSessionKey, Attention, AuthoritySet, BackendCapabilities,
-    EvidenceAuthority, EvidenceConfidence, EvidenceSource, EvidenceTieBreak, FieldUpdate, Phase,
-    StatePatch,
+    EvidenceAuthority, EvidenceConfidence, EvidenceSource, EvidenceTieBreak, FieldUpdate, Health,
+    Phase, StatePatch,
 };
 
 const PROVIDER_ID: &str = "codex";
@@ -195,17 +195,64 @@ impl CodexHookNormalizer {
         )
     }
 
+    /// Health authority is available only from a declared structured
+    /// Interrupt event in the selected profile.
+    #[must_use]
+    pub fn capabilities_for_profile(profile: CodexHookProfile) -> BackendCapabilities {
+        BackendCapabilities::new(
+            AuthoritySet::LIFECYCLE,
+            AuthoritySet::LIFECYCLE,
+            if profile
+                .lifecycle_events()
+                .contains(&CodexHookEvent::Interrupt)
+            {
+                AuthoritySet::LIFECYCLE
+            } else {
+                AuthoritySet::NONE
+            },
+        )
+    }
+
     /// Normalizes a single raw hook object without retaining sensitive fields.
     ///
     /// # Errors
     ///
     /// Returns a content-free classification for malformed input, missing
     /// required fields, or invalid provider-neutral identifiers.
-    #[allow(clippy::too_many_lines)]
     pub fn normalize(
         self,
         raw: &[u8],
         observed_at: SystemTime,
+    ) -> Result<CodexNormalization, CodexHookError> {
+        self.normalize_with_profile(raw, observed_at, Self::profile())
+    }
+
+    /// Normalizes against an explicitly selected, positively established
+    /// Hook contract. A profile cannot infer delivery or trust on its own.
+    ///
+    /// # Errors
+    ///
+    /// Returns a content-free reason for malformed or incomplete input.
+    pub fn normalize_with_profile(
+        self,
+        raw: &[u8],
+        observed_at: SystemTime,
+        profile: CodexHookProfile,
+    ) -> Result<CodexNormalization, CodexHookError> {
+        Self::normalize_internal(
+            raw,
+            observed_at,
+            profile
+                .lifecycle_events()
+                .contains(&CodexHookEvent::Interrupt),
+        )
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn normalize_internal(
+        raw: &[u8],
+        observed_at: SystemTime,
+        interrupt_admitted: bool,
     ) -> Result<CodexNormalization, CodexHookError> {
         let value: Value =
             serde_json::from_slice(raw).map_err(|_| CodexHookError::MalformedJson)?;
@@ -218,6 +265,9 @@ impl CodexHookNormalizer {
         let Some(event) = CodexHookEvent::parse(event_name) else {
             return Ok(CodexNormalization::UnsupportedEvent);
         };
+        if event == CodexHookEvent::Interrupt && !interrupt_admitted {
+            return Ok(CodexNormalization::UnsupportedEvent);
+        }
         let session_id = required_string(object, "session_id")?;
         let cwd = required_string(object, "cwd")?;
         let turn_id = if event.requires_turn_id() {
@@ -268,9 +318,16 @@ impl CodexHookNormalizer {
                 },
                 None => return Ok(CodexNormalization::PreserveCurrentState(context)),
             },
-            CodexHookEvent::UserPromptSubmit
-            | CodexHookEvent::PreToolUse
-            | CodexHookEvent::PostToolUse => StatePatch {
+            CodexHookEvent::UserPromptSubmit => StatePatch {
+                phase: FieldUpdate::set(Phase::Working),
+                attention: FieldUpdate::clear(),
+                health: if interrupt_admitted {
+                    FieldUpdate::clear()
+                } else {
+                    FieldUpdate::unchanged()
+                },
+            },
+            CodexHookEvent::PreToolUse | CodexHookEvent::PostToolUse => StatePatch {
                 phase: FieldUpdate::set(Phase::Working),
                 attention: FieldUpdate::clear(),
                 health: FieldUpdate::unchanged(),
@@ -284,6 +341,11 @@ impl CodexHookNormalizer {
                 phase: FieldUpdate::set(Phase::WaitingUser),
                 attention: FieldUpdate::set(Attention::ResultReady),
                 health: FieldUpdate::unchanged(),
+            },
+            CodexHookEvent::Interrupt => StatePatch {
+                phase: FieldUpdate::set(Phase::WaitingUser),
+                attention: FieldUpdate::clear(),
+                health: FieldUpdate::set(Health::Interrupted),
             },
             CodexHookEvent::SessionEnd => StatePatch {
                 phase: FieldUpdate::set(Phase::Ended),
@@ -355,4 +417,69 @@ fn identity_digest(context: &CodexHookContext) -> String {
         digest.update(value.as_bytes());
     }
     format!("{:x}", digest.finalize())
+}
+
+#[cfg(test)]
+mod abnormal_tests {
+    use std::time::SystemTime;
+
+    use super::{
+        CodexHookEvent, CodexHookNormalizer, CodexHookProfile, CodexNormalization,
+        hook_input_template,
+    };
+    use crate::core::{FieldUpdate, Health, Phase};
+
+    #[test]
+    fn explicit_main_interrupt_sets_typed_health_and_new_prompt_clears_it() {
+        assert!(
+            !CodexHookNormalizer::profile()
+                .lifecycle_events()
+                .contains(&CodexHookEvent::Interrupt),
+            "installed Hook declarations require separate capability admission"
+        );
+        assert_eq!(hook_input_template(CodexHookEvent::Interrupt), None);
+        let interrupt = br#"{"hook_event_name":"Interrupt","session_id":"session-a","turn_id":"turn-a","cwd":"/workspace","last_assistant_message":"private"}"#;
+        assert_eq!(
+            CodexHookNormalizer
+                .normalize(interrupt, SystemTime::UNIX_EPOCH)
+                .unwrap(),
+            CodexNormalization::UnsupportedEvent
+        );
+        let CodexNormalization::Evidence(interrupted) = CodexHookNormalizer
+            .normalize_with_profile(
+                interrupt,
+                SystemTime::UNIX_EPOCH,
+                CodexHookProfile::command_interrupt_v1(),
+            )
+            .unwrap()
+        else {
+            panic!("explicit Interrupt is lifecycle evidence");
+        };
+        assert_eq!(
+            interrupted.evidence().patch.health,
+            FieldUpdate::set(Health::Interrupted)
+        );
+        assert_eq!(
+            interrupted.evidence().patch.phase,
+            FieldUpdate::set(Phase::WaitingUser)
+        );
+        assert!(!format!("{interrupted:?}").contains("private"));
+
+        let next_prompt = br#"{"hook_event_name":"UserPromptSubmit","session_id":"session-a","turn_id":"turn-b","cwd":"/workspace"}"#;
+        let CodexNormalization::Evidence(recovered) = CodexHookNormalizer
+            .normalize_with_profile(
+                next_prompt,
+                SystemTime::UNIX_EPOCH,
+                CodexHookProfile::command_interrupt_v1(),
+            )
+            .unwrap()
+        else {
+            panic!("new prompt is lifecycle evidence");
+        };
+        assert_eq!(recovered.evidence().patch.health, FieldUpdate::clear());
+        assert_eq!(
+            recovered.evidence().patch.phase,
+            FieldUpdate::set(Phase::Working)
+        );
+    }
 }

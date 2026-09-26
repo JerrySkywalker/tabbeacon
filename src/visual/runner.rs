@@ -151,13 +151,16 @@ pub fn run_live(request: &LiveVisualRunRequest) -> VisualResult<LiveVisualRunSum
             )
         })?,
         BoundedWorkerOutput::TimedOut => {
+            let stage = read_worker_stage(&worker_root, &request.run_id);
             return write_worker_failure(
                 request,
                 &checked_out_head,
                 exact_head,
                 &fixture_names,
                 VisualDisposition::Blocked,
-                "isolated visual worker exceeded its 90-second wall-clock budget and was terminated as an owned process tree",
+                &format!(
+                    "isolated visual worker exceeded its 90-second wall-clock budget and was terminated as an owned process tree; last_stage={stage}"
+                ),
             );
         }
         BoundedWorkerOutput::TerminationFailed => {
@@ -206,6 +209,52 @@ fn worker_paths(request: &LiveVisualRunRequest) -> VisualResult<(PathBuf, PathBu
         return Err(VisualError::EvidenceDirectoryExists(worker_directory));
     }
     Ok((worker_root, worker_directory, final_directory))
+}
+
+/// Static phase only; never Hook content, window text, paths, or screenshots.
+fn worker_stage_path(worker_root: &Path, run_id: &str) -> PathBuf {
+    worker_root.join(format!("{run_id}.stage"))
+}
+
+fn write_worker_stage(worker_root: &Path, run_id: &str, stage: &str) -> VisualResult<()> {
+    if !is_safe_run_id(run_id) || !is_known_worker_stage(stage) {
+        return Err(VisualError::InvalidIdentifier(run_id.to_owned()));
+    }
+    fs::write(worker_stage_path(worker_root, run_id), stage).map_err(VisualError::Io)
+}
+
+fn read_worker_stage(worker_root: &Path, run_id: &str) -> &'static str {
+    if !is_safe_run_id(run_id) {
+        return "unknown";
+    }
+    let Ok(bytes) = fs::read(worker_stage_path(worker_root, run_id)) else {
+        return "unknown";
+    };
+    match bytes.as_slice() {
+        b"started" => "started",
+        b"environment" => "environment",
+        b"evidence" => "evidence",
+        b"preflight" => "preflight",
+        b"fixture" => "fixture",
+        b"fixture_done" => "fixture_done",
+        b"finalizing" => "finalizing",
+        b"done" => "done",
+        _ => "unknown",
+    }
+}
+
+fn is_known_worker_stage(stage: &str) -> bool {
+    matches!(
+        stage,
+        "started"
+            | "environment"
+            | "evidence"
+            | "preflight"
+            | "fixture"
+            | "fixture_done"
+            | "finalizing"
+            | "done"
+    )
 }
 
 fn run_authorized_worker(
@@ -262,8 +311,10 @@ fn spawn_authorized_worker(
 /// Returns the classified filesystem, process, UIA, capture, or evidence error
 /// that the worker observed before it could emit its summary.
 pub fn run_live_in_worker(request: &LiveVisualRunRequest) -> VisualResult<LiveVisualRunSummary> {
+    write_worker_stage(&request.evidence_root, &request.run_id, "started")?;
     let checked_out_head = checked_out_head()?;
     let (environment, base_probe) = inspect_environment();
+    write_worker_stage(&request.evidence_root, &request.run_id, "environment")?;
     let driver = FixtureDriver::default();
     let replays = selected_replays(&driver, request)?;
     let fixture_names = replays
@@ -271,12 +322,14 @@ pub fn run_live_in_worker(request: &LiveVisualRunRequest) -> VisualResult<LiveVi
         .map(|replay| replay.case.fixture_name.clone())
         .collect::<Vec<_>>();
     let writer = EvidenceWriter::create(&request.evidence_root, &request.run_id)?;
+    write_worker_stage(&request.evidence_root, &request.run_id, "evidence")?;
 
     let exact_head = is_exact_sha(&request.expected_head)
         && is_exact_sha(&checked_out_head)
         && request.expected_head == checked_out_head;
     let mut observation = Observation::new(DesktopPreflight::assess(base_probe), exact_head);
     observation.record_exact_head(&request.expected_head, &checked_out_head, exact_head);
+    write_worker_stage(&request.evidence_root, &request.run_id, "preflight")?;
 
     if !matches!(
         observation.preflight.disposition,
@@ -285,6 +338,7 @@ pub fn run_live_in_worker(request: &LiveVisualRunRequest) -> VisualResult<LiveVi
     {
         let fixture_executable = env::current_exe().map_err(VisualError::Io)?;
         for replay in &replays {
+            write_worker_stage(&request.evidence_root, &request.run_id, "fixture")?;
             observe_replay(
                 &writer,
                 &fixture_executable,
@@ -292,9 +346,11 @@ pub fn run_live_in_worker(request: &LiveVisualRunRequest) -> VisualResult<LiveVi
                 replay,
                 &mut observation,
             )?;
+            write_worker_stage(&request.evidence_root, &request.run_id, "fixture_done")?;
         }
     }
 
+    write_worker_stage(&request.evidence_root, &request.run_id, "finalizing")?;
     observation.finalize_preflight(base_probe);
     let final_disposition = observation.disposition(exact_head);
     let visual_head =
@@ -325,6 +381,7 @@ pub fn run_live_in_worker(request: &LiveVisualRunRequest) -> VisualResult<LiveVi
     }
     writer.write_bundle(&bundle)?;
     let integrity = writer.write_integrity_manifest()?;
+    write_worker_stage(&request.evidence_root, &request.run_id, "done")?;
     Ok(LiveVisualRunSummary {
         disposition: final_disposition,
         expected_head: request.expected_head.clone(),
@@ -1407,6 +1464,36 @@ fn selected_replays(
 ) -> VisualResult<Vec<super::FixtureReplay>> {
     let all = driver.all_cases(&request.run_id)?;
     match request.fixture_name.as_deref() {
+        Some(super::CODEX_PUBLIC_NATIVE_FIXTURE) => {
+            let ready = all
+                .into_iter()
+                .find(|replay| replay.case.fixture_name == "ready")
+                .ok_or_else(|| VisualError::Platform("native color baseline missing".to_owned()))?;
+            Ok(vec![
+                ready,
+                driver.codex_public_replay(super::CODEX_PUBLIC_COLOR_FIXTURE, &request.run_id)?,
+                driver.codex_public_replay(super::CODEX_PUBLIC_NATIVE_FIXTURE, &request.run_id)?,
+            ])
+        }
+        Some(super::CODEX_PUBLIC_COLOR_FIXTURE) => {
+            Ok(vec![driver.codex_public_replay(
+                super::CODEX_PUBLIC_COLOR_FIXTURE,
+                &request.run_id,
+            )?])
+        }
+        Some(super::CURSOR_COLOR_NATIVE_FIXTURE) => {
+            let ready = all
+                .into_iter()
+                .find(|replay| replay.case.fixture_name == "ready")
+                .ok_or_else(|| VisualError::Platform("native color baseline missing".to_owned()))?;
+            Ok(vec![
+                ready,
+                driver.cursor_color_replay(super::CURSOR_COLOR_NATIVE_FIXTURE, &request.run_id)?,
+            ])
+        }
+        Some(
+            name @ (super::CURSOR_COLOR_WORKING_FIXTURE | super::CURSOR_COLOR_COMPLETED_FIXTURE),
+        ) => Ok(vec![driver.cursor_color_replay(name, &request.run_id)?]),
         Some(ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME) => {
             let ready = all
                 .into_iter()
@@ -1825,8 +1912,29 @@ mod tests {
         BoundedWorkerOutput, LiveVisualRunRequest, RgbaFrame, Roi, ScreenRect, UiaDump,
         authorize_live_worker, clear_worker_authorization, consume_worker_authorization,
         create_worker_authorization, empty_uia_dump, evidence_integrity_matches, progress_roi,
-        relative_roi, selected_replays, target_has_capturable_geometry, wait_for_bounded_worker,
+        read_worker_stage, relative_roi, selected_replays, target_has_capturable_geometry,
+        wait_for_bounded_worker, write_worker_stage,
     };
+
+    #[test]
+    fn worker_stage_reports_only_allowlisted_phase_labels() {
+        let root = std::env::temp_dir().join(format!(
+            "tabbeacon-visual-stage-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let run_id = "TBV080-STAGE-001";
+        assert_eq!(read_worker_stage(&root, run_id), "unknown");
+        write_worker_stage(&root, run_id, "preflight").unwrap();
+        assert_eq!(read_worker_stage(&root, run_id), "preflight");
+        assert!(write_worker_stage(&root, run_id, "private-window-title").is_err());
+        fs::write(root.join(format!("{run_id}.stage")), "private-window-title").unwrap();
+        assert_eq!(read_worker_stage(&root, run_id), "unknown");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn tab_roi_uses_actual_capture_to_uia_window_mapping() {
@@ -1895,6 +2003,45 @@ mod tests {
             .map(|replay| replay.case.fixture_name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, ["ready", ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME]);
+    }
+
+    #[test]
+    fn cursor_native_visual_fixture_captures_default_baseline_first() {
+        let request = LiveVisualRunRequest {
+            expected_head: "a".repeat(40),
+            run_id: "TB80-native-selection".to_owned(),
+            evidence_root: PathBuf::from("target/visual-worker-tests"),
+            fixture_name: Some(super::super::CURSOR_COLOR_NATIVE_FIXTURE.to_owned()),
+        };
+        let names = selected_replays(&FixtureDriver::default(), &request)
+            .unwrap()
+            .into_iter()
+            .map(|replay| replay.case.fixture_name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["ready", super::super::CURSOR_COLOR_NATIVE_FIXTURE]);
+    }
+
+    #[test]
+    fn codex_native_visual_fixture_captures_color_and_default_baselines() {
+        let request = LiveVisualRunRequest {
+            expected_head: "a".repeat(40),
+            run_id: "TB80-codex-selection".to_owned(),
+            evidence_root: PathBuf::from("target/visual-worker-tests"),
+            fixture_name: Some(super::super::CODEX_PUBLIC_NATIVE_FIXTURE.to_owned()),
+        };
+        let names = selected_replays(&FixtureDriver::default(), &request)
+            .unwrap()
+            .into_iter()
+            .map(|replay| replay.case.fixture_name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "ready",
+                super::super::CODEX_PUBLIC_COLOR_FIXTURE,
+                super::super::CODEX_PUBLIC_NATIVE_FIXTURE,
+            ]
+        );
     }
 
     #[test]

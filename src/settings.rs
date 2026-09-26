@@ -9,13 +9,27 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
 };
 
 use atomic_write_file::AtomicWriteFile;
+#[cfg(windows)]
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use toml_edit::{DocumentMut, Item, Table, value};
+#[cfg(windows)]
+use windows::Win32::Storage::FileSystem::{
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+};
+
+use crate::presentation_policy::{
+    ApplicationStatus, CliTarget, PresentationCapabilities, PresentationOverride,
+    ResolvedPresentation, resolve_presentation,
+};
 
 const CONFIG_FILE: &str = "config.toml";
 const LOCK_FILE: &str = "config.lock";
+const SETTINGS_OPERATION_LOCK_BUDGET: Duration = Duration::from_millis(750);
 
 /// Who owns terminal title updates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -329,6 +343,7 @@ pub struct PresentationSettings {
     spinner: SpinnerPreset,
     theme: PresentationTheme,
     provider_badge: ProviderBadgePolicy,
+    strict_channel_policy: bool,
 }
 
 impl PresentationSettings {
@@ -368,6 +383,7 @@ impl PresentationSettings {
             spinner,
             theme,
             provider_badge,
+            strict_channel_policy: false,
         }
     }
 
@@ -405,6 +421,19 @@ impl PresentationSettings {
     #[must_use]
     pub const fn provider_badge(self) -> ProviderBadgePolicy {
         self.provider_badge
+    }
+
+    /// Whether an explicit provider mode forbids writes to unmanaged channels.
+    #[must_use]
+    pub const fn strict_channel_policy(self) -> bool {
+        self.strict_channel_policy
+    }
+
+    /// Marks an effective provider mode without changing legacy stored values.
+    #[must_use]
+    pub const fn with_strict_channel_policy(mut self, strict: bool) -> Self {
+        self.strict_channel_policy = strict;
+        self
     }
 
     /// Returns a copy with one title mode.
@@ -557,6 +586,9 @@ pub struct PresentationSettingsSnapshot {
 }
 
 impl PresentationSettingsSnapshot {
+    pub(crate) fn recovery_contents(&self) -> Option<&[u8]> {
+        self.contents.as_deref()
+    }
     /// Effective typed settings at the time the snapshot was taken.
     #[must_use]
     pub const fn settings(&self) -> PresentationSettings {
@@ -567,6 +599,26 @@ impl PresentationSettingsSnapshot {
     #[must_use]
     pub const fn is_absent(&self) -> bool {
         self.contents.is_none()
+    }
+
+    /// Parses one provider override from the same exact bytes as the global
+    /// settings used by this snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed or unsupported configuration bytes.
+    pub fn provider_override(
+        &self,
+        provider: CliTarget,
+    ) -> Result<PresentationOverride, SettingsError> {
+        let Some(bytes) = self.contents.as_deref() else {
+            return Ok(PresentationOverride::default());
+        };
+        let document = std::str::from_utf8(bytes)
+            .map_err(|_| SettingsError::Malformed)?
+            .parse::<DocumentMut>()
+            .map_err(|_| SettingsError::Malformed)?;
+        provider_override_from_document(&document, provider)
     }
 
     fn matches(&self, other: &Self) -> bool {
@@ -667,6 +719,170 @@ impl PresentationSettingsStore {
         Ok(self.snapshot_read_only()?.settings())
     }
 
+    /// Reads one partial provider override without creating a lock or file.
+    /// Legacy v0.7.3 documents have no overrides and retain their global meaning.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed, unreadable, or unsafe configuration.
+    pub fn load_provider_override_read_only(
+        &self,
+        provider: CliTarget,
+    ) -> Result<PresentationOverride, SettingsError> {
+        self.reject_symbolic_link()?;
+        let Some(bytes) = read_optional_bytes(&self.path)? else {
+            return Ok(PresentationOverride::default());
+        };
+        let document = std::str::from_utf8(&bytes)
+            .map_err(|_| SettingsError::Malformed)?
+            .parse::<DocumentMut>()
+            .map_err(|_| SettingsError::Malformed)?;
+        // A malformed global section must never be hidden by an override read.
+        settings_from_document(&document)?;
+        provider_override_from_document(&document, provider)
+    }
+
+    /// Projects one provider's saved preference through proved capabilities.
+    /// The caller supplies live application status; reading the file alone can
+    /// never establish installation, Hook trust, or live application.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed, unreadable, or unsafe configuration.
+    pub fn resolve_provider_read_only(
+        &self,
+        provider: CliTarget,
+        capabilities: PresentationCapabilities,
+        application: ApplicationStatus,
+    ) -> Result<ResolvedPresentation, SettingsError> {
+        let snapshot = self.snapshot_read_only()?;
+        let override_for_cli = match snapshot.contents.as_deref() {
+            Some(bytes) => {
+                let document = std::str::from_utf8(bytes)
+                    .map_err(|_| SettingsError::Malformed)?
+                    .parse::<DocumentMut>()
+                    .map_err(|_| SettingsError::Malformed)?;
+                provider_override_from_document(&document, provider)?
+            }
+            None => PresentationOverride::default(),
+        };
+        Ok(resolve_presentation(
+            snapshot.settings(),
+            override_for_cli,
+            capabilities,
+            application,
+        ))
+    }
+
+    /// Saves only the selected CLI's override if the exact preview bytes remain
+    /// current. Unknown TOML and other provider tables are preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact-owned configuration cannot be safely
+    /// parsed, locked, or atomically written.
+    pub fn save_provider_override_snapshot_if_unchanged(
+        &self,
+        expected: &PresentationSettingsSnapshot,
+        provider: CliTarget,
+        replacement: PresentationOverride,
+    ) -> Result<SnapshotSaveOutcome, SettingsError> {
+        self.save_provider_override_snapshot_if_unchanged_guarded(
+            expected,
+            provider,
+            replacement,
+            || Ok(()),
+        )
+    }
+
+    /// Saves an exact provider draft while holding the settings lock before
+    /// acquiring a caller-provided output guard. Cursor uses the route guard
+    /// so a stalled settings writer cannot hold up all admitted Hook output.
+    /// The guard is acquired only after the current snapshot has matched and
+    /// the candidate document has rendered, and is held through the write.
+    ///
+    /// # Errors
+    ///
+    /// Rejects drift, an unsafe settings target, or a failed output guard
+    /// before writing the candidate document.
+    pub fn save_provider_override_snapshot_if_unchanged_guarded<G>(
+        &self,
+        expected: &PresentationSettingsSnapshot,
+        provider: CliTarget,
+        replacement: PresentationOverride,
+        acquire_guard: impl FnOnce() -> Result<G, SettingsError>,
+    ) -> Result<SnapshotSaveOutcome, SettingsError> {
+        self.with_lock(|| {
+            let current = self.snapshot_unlocked()?;
+            if !current.matches(expected) {
+                return Ok(SnapshotSaveOutcome::Conflict);
+            }
+            let mut document = match current.contents.as_deref() {
+                Some(bytes) => std::str::from_utf8(bytes)
+                    .map_err(|_| SettingsError::Malformed)?
+                    .parse::<DocumentMut>()
+                    .map_err(|_| SettingsError::Malformed)?,
+                None => DocumentMut::new(),
+            };
+            write_provider_override(&mut document, provider, replacement)?;
+            let contents = document.to_string().into_bytes();
+            let _guard = acquire_guard()?;
+            if current.contents.as_deref() != Some(contents.as_slice()) {
+                atomic_write(&self.path, &contents)?;
+            }
+            Ok(SnapshotSaveOutcome::Saved(
+                PresentationSettingsWriteReceipt { contents },
+            ))
+        })
+    }
+
+    /// Applies a portable global setting and provider overrides as one atomic
+    /// presentation-document write guarded by the preview's exact bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact-owned configuration cannot be safely
+    /// parsed, locked, or atomically written.
+    pub fn save_portable_snapshot_if_unchanged(
+        &self,
+        expected: &PresentationSettingsSnapshot,
+        global: Option<PresentationSettings>,
+        overrides: &[(CliTarget, PresentationOverride)],
+    ) -> Result<SnapshotSaveOutcome, SettingsError> {
+        self.with_lock(|| {
+            let current = self.snapshot_unlocked()?;
+            if !current.matches(expected) {
+                return Ok(SnapshotSaveOutcome::Conflict);
+            }
+            let contents = Self::render_portable_snapshot(&current, global, overrides)?;
+            atomic_write(&self.path, &contents)?;
+            Ok(SnapshotSaveOutcome::Saved(
+                PresentationSettingsWriteReceipt { contents },
+            ))
+        })
+    }
+
+    pub(crate) fn render_portable_snapshot(
+        snapshot: &PresentationSettingsSnapshot,
+        global: Option<PresentationSettings>,
+        overrides: &[(CliTarget, PresentationOverride)],
+    ) -> Result<Vec<u8>, SettingsError> {
+        let mut document = match snapshot.contents.as_deref() {
+            Some(bytes) => std::str::from_utf8(bytes)
+                .map_err(|_| SettingsError::Malformed)?
+                .parse::<DocumentMut>()
+                .map_err(|_| SettingsError::Malformed)?,
+            None => DocumentMut::new(),
+        };
+        if let Some(global) = global {
+            write_settings(&mut document, global)?;
+        }
+        for (provider, override_for_cli) in overrides {
+            write_provider_override(&mut document, *provider, *override_for_cli)?;
+        }
+        Ok(document.to_string().into_bytes())
+    }
+
     /// Captures the current document without creating a state directory or lock.
     ///
     /// Callers can use the opaque snapshot to ensure a later recovery restores
@@ -693,6 +909,32 @@ impl PresentationSettingsStore {
         expected: &PresentationSettingsSnapshot,
     ) -> Result<bool, SettingsError> {
         Ok(self.snapshot_read_only()?.matches(expected))
+    }
+
+    /// Restores a transaction's exact prior bytes only if this store still
+    /// contains its exact planned write. Repeated recovery is idempotent.
+    pub(crate) fn recover_import_bytes_if_unchanged(
+        &self,
+        planned: &[u8],
+        original: Option<&[u8]>,
+    ) -> Result<bool, SettingsError> {
+        if let Some(bytes) = original {
+            parse_settings_bytes(bytes)?;
+        }
+        self.with_lock(|| {
+            let current = self.snapshot_unlocked()?;
+            if current.contents.as_deref() == original {
+                return Ok(true);
+            }
+            if current.contents.as_deref() != Some(planned) {
+                return Ok(false);
+            }
+            match original {
+                Some(bytes) => atomic_write(&self.path, bytes)?,
+                None => fs::remove_file(&self.path)?,
+            }
+            Ok(self.snapshot_unlocked()?.contents.as_deref() == original)
+        })
     }
 
     /// Returns whether a guided write receipt is still byte-exactly current.
@@ -817,16 +1059,33 @@ impl PresentationSettingsStore {
             .path
             .parent()
             .ok_or(SettingsError::StateRootUnavailable)?;
-        fs::create_dir_all(parent)?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(parent.join(LOCK_FILE))?;
-        lock.lock()?;
+        let lock = open_settings_lock(parent)?;
+        try_lock_with_budget(&lock.file, SETTINGS_OPERATION_LOCK_BUDGET)?;
         let result = operation();
-        File::unlock(&lock)?;
+        File::unlock(&lock.file)?;
+        result
+    }
+
+    /// Holds the existing settings lock across one Hook's route and output
+    /// decision. `TabBeacon`'s presentation-document writers use this lock, so an older
+    /// Hook cannot finish writing after a newer global/import configuration
+    /// commit. A busy writer makes the Hook skip decoration within its budget.
+    pub(crate) fn with_runtime_lock_bounded<T>(
+        &self,
+        budget: Duration,
+        operation: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| io::Error::other("settings state root unavailable"))?;
+        let lock = open_settings_lock(parent)?;
+        try_lock_with_budget(&lock.file, budget)?;
+        let result = operation();
+        // The Hook reports the output result itself. Closing this owned lock
+        // releases it without turning a successful flush into an apparent
+        // failure solely because a separate unlock call failed.
+        drop(lock);
         result
     }
 
@@ -892,12 +1151,220 @@ impl PresentationSettingsStore {
     }
 }
 
+fn try_lock_with_budget(lock: &File, budget: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match lock.try_lock() {
+            Ok(()) => return Ok(()),
+            Err(fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5));
+            }
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "TabBeacon settings lock remained busy",
+                ));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+struct SettingsLockHandle {
+    file: File,
+    // Keep every ancestor open without share-delete until the lock is released.
+    // This also anchors directory creation below each verified parent.
+    #[cfg(windows)]
+    _ancestors: Vec<File>,
+}
+
+fn open_settings_lock(parent: &Path) -> io::Result<SettingsLockHandle> {
+    #[cfg(windows)]
+    let ancestors = {
+        let mut handles = Vec::new();
+        for directory in parent.ancestors().collect::<Vec<_>>().into_iter().rev() {
+            match fs::symlink_metadata(directory) {
+                Ok(metadata) if metadata_is_reparse(&metadata) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "settings directory is a reparse point",
+                    ));
+                }
+                Ok(metadata) if !metadata.is_dir() => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotADirectory,
+                        "settings ancestor is not a directory",
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    if let Err(error) = fs::create_dir(directory)
+                        && error.kind() != io::ErrorKind::AlreadyExists
+                    {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+            let handle = open_settings_directory(directory)?;
+            handles.push(handle);
+        }
+        handles
+    };
+    #[cfg(not(windows))]
+    for directory in parent.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        reject_settings_reparse(directory)?;
+        if let Err(error) = fs::create_dir(directory)
+            && error.kind() != io::ErrorKind::AlreadyExists
+        {
+            return Err(error);
+        }
+        reject_settings_reparse(directory)?;
+    }
+    let path = parent.join(LOCK_FILE);
+    reject_settings_reparse(&path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(windows)]
+    {
+        options.share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0);
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0);
+    }
+    let file = options.open(&path)?;
+    if metadata_is_reparse(&file.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "settings lock file is a reparse point",
+        ));
+    }
+    reject_settings_reparse(&path)?;
+    Ok(SettingsLockHandle {
+        file,
+        #[cfg(windows)]
+        _ancestors: ancestors,
+    })
+}
+
+#[cfg(windows)]
+fn open_settings_directory(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0);
+    options.custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0);
+    let handle = options.open(path)?;
+    if metadata_is_reparse(&handle.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "settings directory is a reparse point",
+        ));
+    }
+    Ok(handle)
+}
+
+fn reject_settings_reparse(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata_is_reparse(&metadata) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "settings lock path is a reparse point",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn metadata_is_reparse(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        metadata.file_type().is_symlink() || metadata.file_attributes() & 0x0400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
+    }
+}
+
 fn parse_settings_bytes(bytes: &[u8]) -> Result<PresentationSettings, SettingsError> {
     let document = std::str::from_utf8(bytes)
         .map_err(|_| SettingsError::Malformed)?
         .parse::<DocumentMut>()
         .map_err(|_| SettingsError::Malformed)?;
     settings_from_document(&document)
+}
+
+fn provider_override_from_document(
+    document: &DocumentMut,
+    provider: CliTarget,
+) -> Result<PresentationOverride, SettingsError> {
+    let Some(root) = document.get("provider_presentation") else {
+        return Ok(PresentationOverride::default());
+    };
+    let root = root.as_table_like().ok_or(SettingsError::Malformed)?;
+    let Some(entry) = root.get(provider.as_str()) else {
+        return Ok(PresentationOverride::default());
+    };
+    let entry = entry.as_table_like().ok_or(SettingsError::Malformed)?;
+    Ok(PresentationOverride {
+        title: parse_optional_value(entry.get("title"), TitleMode::parse)?,
+        tab_color: parse_optional_value(entry.get("tab_color"), TabColorMode::parse)?,
+        activity: parse_optional_value(entry.get("activity"), ActivityMode::parse)?,
+    })
+}
+
+fn parse_optional_value<T>(
+    item: Option<&Item>,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Result<Option<T>, SettingsError> {
+    item.map(|value| {
+        value
+            .as_str()
+            .and_then(parse)
+            .ok_or(SettingsError::Malformed)
+    })
+    .transpose()
+}
+
+fn write_provider_override(
+    document: &mut DocumentMut,
+    provider: CliTarget,
+    replacement: PresentationOverride,
+) -> Result<(), SettingsError> {
+    if replacement == PresentationOverride::default() {
+        if let Some(root) = document.get_mut("provider_presentation") {
+            let root = root.as_table_like_mut().ok_or(SettingsError::Malformed)?;
+            root.remove(provider.as_str());
+            if root.is_empty() {
+                document.as_table_mut().remove("provider_presentation");
+            }
+        }
+        return Ok(());
+    }
+    if !document.as_table().contains_key("provider_presentation") {
+        document["provider_presentation"] = Item::Table(Table::new());
+    }
+    let root = document["provider_presentation"]
+        .as_table_like_mut()
+        .ok_or(SettingsError::Malformed)?;
+    if root.get(provider.as_str()).is_none() {
+        root.insert(provider.as_str(), Item::Table(Table::new()));
+    }
+    let entry = root
+        .get_mut(provider.as_str())
+        .and_then(Item::as_table_like_mut)
+        .ok_or(SettingsError::Malformed)?;
+    for (key, selected) in [
+        ("title", replacement.title.map(TitleMode::as_str)),
+        ("tab_color", replacement.tab_color.map(TabColorMode::as_str)),
+        ("activity", replacement.activity.map(ActivityMode::as_str)),
+    ] {
+        if let Some(selected) = selected {
+            entry.insert(key, value(selected));
+        } else {
+            entry.remove(key);
+        }
+    }
+    Ok(())
 }
 
 fn settings_from_document(document: &DocumentMut) -> Result<PresentationSettings, SettingsError> {
@@ -999,7 +1466,7 @@ mod tests {
         fs,
         sync::{Arc, Barrier},
         thread,
-        time::{SystemTime, UNIX_EPOCH},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
@@ -1007,15 +1474,128 @@ mod tests {
         PresentationTheme, ProviderBadgePolicy, SpinnerPreset, TabColorMode, TitleMode,
     };
 
-    fn temporary_config(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "tabbeacon-settings-{name}-{}-{}.toml",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock is after Unix epoch")
-                .as_nanos()
-        ))
+    use crate::presentation_policy::{CliTarget, PresentationMode, PresentationOverride};
+
+    #[test]
+    fn busy_settings_lock_refuses_a_writer_without_an_unbounded_wait_or_write() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let store = PresentationSettingsStore::new(&path);
+        store.load().unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.path().join("config.lock"))
+            .unwrap();
+        lock.lock().unwrap();
+        let started = Instant::now();
+        let refused = store.save(PresentationSettings::default());
+        assert!(matches!(
+            refused,
+            Err(super::SettingsError::Io(ref error)) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(!path.exists());
+        fs::File::unlock(&lock).unwrap();
+        store.save(PresentationSettings::default()).unwrap();
+        assert!(path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn held_settings_lock_cannot_be_replaced_with_a_second_file_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let lock_path = root.path().join("config.lock");
+        let guard = super::open_settings_lock(root.path()).unwrap();
+        super::try_lock_with_budget(&guard.file, Duration::from_millis(20)).unwrap();
+        assert!(fs::rename(&lock_path, root.path().join("moved.lock")).is_err());
+        assert!(fs::rename(root.path(), root.path().with_extension("moved")).is_err());
+        fs::File::unlock(&guard.file).unwrap();
+        drop(guard);
+        assert!(lock_path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn settings_lock_refuses_junction_before_creating_missing_child() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        let junction = root.path().join("junction");
+        fs::create_dir(&target).unwrap();
+        let created = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(created.status.success(), "test junction creation failed");
+        let store = PresentationSettingsStore::new(junction.join("missing").join("config.toml"));
+        assert!(matches!(
+            store.save(PresentationSettings::default()),
+            Err(super::SettingsError::Io(ref error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+        assert!(!target.join("missing").exists());
+        fs::remove_dir(&junction).unwrap();
+    }
+
+    #[test]
+    fn guarded_provider_save_refuses_output_lock_failure_before_any_write() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        fs::write(&path, "[foreign]\nkey = \"preserved\"\n").unwrap();
+        let store = PresentationSettingsStore::new(&path);
+        let before = store.snapshot_read_only().unwrap();
+        let original = fs::read(&path).unwrap();
+        let draft = PresentationOverride::default().with_mode(PresentationMode::PreserveNative);
+        let failed = store.save_provider_override_snapshot_if_unchanged_guarded::<()>(
+            &before,
+            CliTarget::Cursor,
+            draft,
+            || {
+                Err(super::SettingsError::Io(std::io::Error::other(
+                    "route lock failed",
+                )))
+            },
+        );
+        assert!(failed.is_err());
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(matches!(
+            store.save_provider_override_snapshot_if_unchanged_guarded(
+                &before,
+                CliTarget::Cursor,
+                draft,
+                || Ok(()),
+            ),
+            Ok(super::SnapshotSaveOutcome::Saved(_))
+        ));
+        let after_saved = fs::read(&path).unwrap();
+        assert!(matches!(
+            store.save_provider_override_snapshot_if_unchanged_guarded::<()>(
+                &before,
+                CliTarget::Cursor,
+                PresentationOverride::default(),
+                || panic!("drift must reject before the route lock is acquired"),
+            ),
+            Ok(super::SnapshotSaveOutcome::Conflict)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), after_saved);
+        assert!(
+            fs::read_to_string(path)
+                .unwrap()
+                .contains("key = \"preserved\"")
+        );
+    }
+
+    fn temporary_config(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        // config.lock is scoped to the parent directory. Keep every fixture's
+        // parent distinct so parallel tests cannot collide on the same lock.
+        let root = tempfile::Builder::new()
+            .prefix(&format!("tabbeacon-settings-{name}-"))
+            .tempdir()
+            .expect("isolated settings root creates");
+        let path = root.path().join("config.toml");
+        (root, path)
     }
 
     fn temporary_root(name: &str) -> std::path::PathBuf {
@@ -1031,7 +1611,7 @@ mod tests {
 
     #[test]
     fn missing_settings_use_the_v03_balanced_defaults_without_creating_a_file() {
-        let path = temporary_config("defaults");
+        let (_root, path) = temporary_config("defaults");
         let store = PresentationSettingsStore::new(&path);
         assert_eq!(
             store.load().expect("missing config defaults"),
@@ -1082,7 +1662,7 @@ mod tests {
 
     #[test]
     fn save_preserves_unknown_future_keys_and_round_trips_typed_values() {
-        let path = temporary_config("preserve");
+        let (_root, path) = temporary_config("preserve");
         fs::write(
             &path,
             "[presentation]\nfuture_flag = true\ntitle = \"native\"\n\n[future]\nkey = \"kept\"\n",
@@ -1107,7 +1687,7 @@ mod tests {
 
     #[test]
     fn provider_badge_migrates_absent_settings_without_rewrite_and_round_trips_explicit_choice() {
-        let path = temporary_config("provider-badge");
+        let (_root, path) = temporary_config("provider-badge");
         let legacy = "[presentation]\ntitle = \"tabbeacon\"\n";
         fs::write(&path, legacy).expect("legacy fixture writes");
         let store = PresentationSettingsStore::new(&path);
@@ -1144,7 +1724,7 @@ mod tests {
 
     #[test]
     fn malformed_user_configuration_falls_back_without_breaking_hook_callers() {
-        let path = temporary_config("malformed");
+        let (_root, path) = temporary_config("malformed");
         let malformed = "[presentation\ntitle = \"tabbeacon\"";
         fs::write(&path, malformed).expect("malformed fixture writes");
         let store = PresentationSettingsStore::new(&path);
@@ -1161,7 +1741,7 @@ mod tests {
 
     #[test]
     fn existing_v02_static_and_custom_settings_are_never_silently_rewritten() {
-        let path = temporary_config("existing-users");
+        let (_root, path) = temporary_config("existing-users");
         let v02_static = concat!(
             "[presentation]\n",
             "title = \"tabbeacon\"\n",
@@ -1215,7 +1795,7 @@ mod tests {
 
     #[test]
     fn legacy_both_token_stays_readable_and_byte_exact_until_explicit_apply() {
-        let path = temporary_config("legacy-both");
+        let (_root, path) = temporary_config("legacy-both");
         let legacy_both = concat!(
             "[presentation]\n",
             "title = \"tabbeacon\"\n",
@@ -1281,7 +1861,7 @@ mod tests {
 
     #[test]
     fn concurrent_saves_publish_only_complete_parseable_documents() {
-        let path = temporary_config("concurrent");
+        let (_root, path) = temporary_config("concurrent");
         let store = Arc::new(PresentationSettingsStore::new(&path));
         let count = 6_usize;
         let barrier = Arc::new(Barrier::new(count));

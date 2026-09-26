@@ -621,8 +621,17 @@ impl WindowsTerminalRenderer {
                 if let Some(title) = self.title_for(state) {
                     append_title(&mut bytes, &title);
                 }
-                append_progress(&mut bytes, configured_progress(state, self.settings));
+                if !self.settings.strict_channel_policy()
+                    || self.settings.activity().uses_windows_terminal_ring()
+                {
+                    append_progress(&mut bytes, configured_progress(state, self.settings));
+                }
                 if self.capabilities.frame_color_supported() {
+                    if self.settings.strict_channel_policy()
+                        && self.settings.tab_color() != TabColorMode::TabBeacon
+                    {
+                        return bytes;
+                    }
                     let color = if self.settings.tab_color() == TabColorMode::TabBeacon {
                         state.tab_color()
                     } else {
@@ -646,8 +655,17 @@ impl WindowsTerminalRenderer {
         let mut bytes = Vec::new();
         match action {
             PresentationAction::Apply(state) | PresentationAction::Reset(state) => {
-                append_progress(&mut bytes, configured_progress(state, self.settings));
+                if !self.settings.strict_channel_policy()
+                    || self.settings.activity().uses_windows_terminal_ring()
+                {
+                    append_progress(&mut bytes, configured_progress(state, self.settings));
+                }
                 if self.capabilities.frame_color_supported() {
+                    if self.settings.strict_channel_policy()
+                        && self.settings.tab_color() != TabColorMode::TabBeacon
+                    {
+                        return bytes;
+                    }
                     let color = if self.settings.tab_color() == TabColorMode::TabBeacon {
                         state.tab_color()
                     } else {
@@ -808,6 +826,12 @@ impl TitleMarkBackend {
         self.renderer.settings()
     }
 
+    /// Whether this terminal can receive the owned frame-color channel.
+    #[must_use]
+    pub const fn frame_color_supported(self) -> bool {
+        self.renderer.capabilities().frame_color_supported()
+    }
+
     /// Renders title, progress, and palette using the stable OSC fallback.
     #[must_use]
     pub fn render(&self, action: &PresentationAction) -> Vec<u8> {
@@ -847,6 +871,28 @@ impl TitleMarkBackend {
     pub const fn uses_progress_animation(self) -> bool {
         self.renderer.uses_progress_animation()
     }
+}
+
+/// Emits only the resets for channels positively recorded as TabBeacon-owned.
+/// The native title is intentionally never restored from cached text.
+pub(crate) fn owned_channel_release_bytes(color: bool, progress: bool) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if progress {
+        append_progress(&mut bytes, Progress::Clear);
+    }
+    if color {
+        append_frame_color(&mut bytes, TabColor::Default, PresentationTheme::MutedDark);
+    }
+    bytes
+}
+
+/// Encodes exactly one semantic frame-color operation for a strict color-only
+/// provider. It cannot emit a title or progress sequence.
+#[must_use]
+pub fn strict_color_only_bytes(color: TabColor, theme: PresentationTheme) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    append_frame_color(&mut bytes, color, theme);
+    bytes
 }
 
 impl TerminalVisualBackend for TitleMarkBackend {
