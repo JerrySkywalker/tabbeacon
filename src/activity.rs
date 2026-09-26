@@ -4299,6 +4299,71 @@ mod tests {
                 .is_ok()
         );
         worker.join().unwrap();
+
+        // Reconciliation can succeed before another Hook takes this lock.
+        // Final output still has to fail closed without writing a stale frame.
+        let key = key(1, 'a', 'c');
+        store.publish_stopped(&key, 2, &digest('d'), 1_000).unwrap();
+        held.lock().unwrap();
+        let mut final_output = Vec::new();
+        let refusal = coordinator.write_rendered(
+            &digest('a'),
+            Some(&digest('b')),
+            1,
+            2,
+            ActivityRender::Full,
+            b"stale-final-frame",
+            OwnedTerminalChannels {
+                color: true,
+                progress: false,
+            },
+            true,
+            &mut final_output,
+        );
+        assert_eq!(refusal.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert!(final_output.is_empty());
+        fs::File::unlock(&held).unwrap();
+        assert_eq!(
+            store.load(key.digest()).unwrap().unwrap().owned_channels,
+            OwnedTerminalChannels::default()
+        );
+    }
+
+    #[test]
+    fn cleanup_of_an_active_worker_waits_for_lease_contention() {
+        let root = TestRoot::new("cleanup-lock-wait");
+        let store = ActivityLeaseStore::new(&root.0);
+        let key = key(1, 'a', 'c');
+        let LeaseTransition::Published { lease, .. } = store
+            .publish_active(&key, 1, &digest('d'), &presentation(), 1_000)
+            .unwrap()
+        else {
+            panic!("active fixture did not publish");
+        };
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.directory.join("activity-worker.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let cleanup_store = store.clone();
+        let cleanup = std::thread::spawn(move || {
+            done_tx
+                .send(cleanup_store.deactivate_observed_worker(&lease, 1_100))
+                .unwrap();
+        });
+        assert!(done_rx.recv_timeout(Duration::from_millis(150)).is_err());
+        assert!(store.load(key.digest()).unwrap().unwrap().active);
+        fs::File::unlock(&held).unwrap();
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap()
+        );
+        cleanup.join().unwrap();
+        assert!(!store.load(key.digest()).unwrap().unwrap().active);
     }
 
     #[test]
