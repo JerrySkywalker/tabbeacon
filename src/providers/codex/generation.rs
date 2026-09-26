@@ -4,11 +4,14 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::lock_budget::try_lock_file_with_budget;
 
 use super::{CodexHookContext, CodexHookEvent};
 
@@ -16,6 +19,7 @@ const STATE_SCHEMA: &str = "tabbeacon-codex-turn-state-v1";
 const STATE_DIRECTORY: &str = "codex-turn-state-v1";
 const LOCK_FILE: &str = "turn-state.lock";
 const RETIRED_TURN_LIMIT: usize = 64;
+const STATE_LOCK_BUDGET: Duration = Duration::from_millis(100);
 
 /// Semantic handling requested after a Hook payload has been normalized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +97,7 @@ impl CodexGenerationStore {
             .read(true)
             .write(true)
             .open(self.directory.join(LOCK_FILE))?;
-        lock.lock()?;
+        try_lock_file_with_budget(&lock, STATE_LOCK_BUDGET)?;
         let result = self.admit_locked(context, requested);
         File::unlock(&lock)?;
         result

@@ -16,6 +16,7 @@ pub mod human_diagnostics;
 pub mod human_output;
 pub mod human_presentation;
 pub mod interface_preferences;
+pub(crate) mod lock_budget;
 pub mod management;
 pub(crate) mod mcp_runtime_lease;
 pub mod presentation;

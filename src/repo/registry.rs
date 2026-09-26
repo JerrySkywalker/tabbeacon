@@ -5,10 +5,13 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::lock_budget::try_lock_file_with_budget;
 
 use super::{
     ADAPTIVE_NAMING_POLICY_ID, AdaptiveNamingPolicy, CanonicalRepositoryIdentity, RepositoryAlias,
@@ -329,7 +332,7 @@ impl StableAliasRegistry {
         fs::create_dir_all(&self.root)?;
         self.reject_root_symlink()?;
         let lock = self.open_lock()?;
-        lock.lock()?;
+        try_lock_file_with_budget(&lock, Duration::from_millis(100))?;
         let result = operation(self);
         File::unlock(&lock)?;
         result

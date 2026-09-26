@@ -13,7 +13,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use atomic_write_file::AtomicWriteFile;
@@ -28,6 +28,7 @@ use crate::{
         EvidenceAuthority, EvidenceConfidence, EvidenceSource, EvidenceTieBreak, FieldUpdate,
         Phase, SessionReconciler, StatePatch,
     },
+    lock_budget::try_lock_file_with_budget,
     presentation::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleMarkBackend,
         WindowsTerminalCapabilities,
@@ -465,7 +466,7 @@ impl AgyRootAnchorStore {
             .read(true)
             .write(true)
             .open(lock_path)?;
-        lock.lock()?;
+        try_lock_file_with_budget(&lock, Duration::from_millis(100))?;
         let path = self
             .directory
             .join(format!("session-{session_sha256}.json"));

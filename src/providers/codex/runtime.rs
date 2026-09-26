@@ -1316,6 +1316,52 @@ mod tests {
     }
 
     #[test]
+    fn busy_generation_lock_degrades_hook_and_releases_config_writer_lock() {
+        let root = test_root("runtime-busy-generation");
+        let repository = root.join("repository");
+        fs::create_dir_all(&repository).unwrap();
+        initialize_repository(&repository);
+        let state = root.join("state");
+        let store = PresentationSettingsStore::new(state.join("config.toml"));
+        let mut runtime = CodexHookRuntime::new(&state, true);
+        runtime.system_settings = Some(store);
+        let generation_dir = state.join("codex-turn-state-v1");
+        fs::create_dir_all(&generation_dir).unwrap();
+        let held = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(generation_dir.join("turn-state.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        let event = json!({
+            "hook_event_name": "SessionStart", "session_id": "busy-generation",
+            "cwd": repository, "source": "startup",
+        });
+        let (result_tx, result_rx) = mpsc::channel();
+        let hook = thread::spawn(move || {
+            let mut output = Vec::new();
+            let outcome =
+                runtime.dispatch_to(event.to_string().as_bytes(), UNIX_EPOCH, &mut output);
+            result_tx.send((outcome, output)).unwrap();
+        });
+        let (outcome, output) = result_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(outcome, HookDispatchOutcome::DegradedGenerationState);
+        assert!(output.is_empty());
+        let config_lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(state.join("config.lock"))
+            .unwrap();
+        config_lock.try_lock().unwrap();
+        fs::File::unlock(&config_lock).unwrap();
+        hook.join().unwrap();
+        fs::File::unlock(&held).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn ordinary_subagent_tool_events_avoid_system_runtime_initialization() {
         for event in ["PreToolUse", "PostToolUse"] {
             let raw = json!({

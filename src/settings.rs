@@ -1587,15 +1587,15 @@ mod tests {
         );
     }
 
-    fn temporary_config(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "tabbeacon-settings-{name}-{}-{}.toml",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .expect("clock is after Unix epoch")
-                .as_nanos()
-        ))
+    fn temporary_config(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        // config.lock is scoped to the parent directory. Keep every fixture's
+        // parent distinct so parallel tests cannot collide on the same lock.
+        let root = tempfile::Builder::new()
+            .prefix(&format!("tabbeacon-settings-{name}-"))
+            .tempdir()
+            .expect("isolated settings root creates");
+        let path = root.path().join("config.toml");
+        (root, path)
     }
 
     fn temporary_root(name: &str) -> std::path::PathBuf {
@@ -1611,7 +1611,7 @@ mod tests {
 
     #[test]
     fn missing_settings_use_the_v03_balanced_defaults_without_creating_a_file() {
-        let path = temporary_config("defaults");
+        let (_root, path) = temporary_config("defaults");
         let store = PresentationSettingsStore::new(&path);
         assert_eq!(
             store.load().expect("missing config defaults"),
@@ -1662,7 +1662,7 @@ mod tests {
 
     #[test]
     fn save_preserves_unknown_future_keys_and_round_trips_typed_values() {
-        let path = temporary_config("preserve");
+        let (_root, path) = temporary_config("preserve");
         fs::write(
             &path,
             "[presentation]\nfuture_flag = true\ntitle = \"native\"\n\n[future]\nkey = \"kept\"\n",
@@ -1687,7 +1687,7 @@ mod tests {
 
     #[test]
     fn provider_badge_migrates_absent_settings_without_rewrite_and_round_trips_explicit_choice() {
-        let path = temporary_config("provider-badge");
+        let (_root, path) = temporary_config("provider-badge");
         let legacy = "[presentation]\ntitle = \"tabbeacon\"\n";
         fs::write(&path, legacy).expect("legacy fixture writes");
         let store = PresentationSettingsStore::new(&path);
@@ -1724,7 +1724,7 @@ mod tests {
 
     #[test]
     fn malformed_user_configuration_falls_back_without_breaking_hook_callers() {
-        let path = temporary_config("malformed");
+        let (_root, path) = temporary_config("malformed");
         let malformed = "[presentation\ntitle = \"tabbeacon\"";
         fs::write(&path, malformed).expect("malformed fixture writes");
         let store = PresentationSettingsStore::new(&path);
@@ -1741,7 +1741,7 @@ mod tests {
 
     #[test]
     fn existing_v02_static_and_custom_settings_are_never_silently_rewritten() {
-        let path = temporary_config("existing-users");
+        let (_root, path) = temporary_config("existing-users");
         let v02_static = concat!(
             "[presentation]\n",
             "title = \"tabbeacon\"\n",
@@ -1795,7 +1795,7 @@ mod tests {
 
     #[test]
     fn legacy_both_token_stays_readable_and_byte_exact_until_explicit_apply() {
-        let path = temporary_config("legacy-both");
+        let (_root, path) = temporary_config("legacy-both");
         let legacy_both = concat!(
             "[presentation]\n",
             "title = \"tabbeacon\"\n",
@@ -1861,7 +1861,7 @@ mod tests {
 
     #[test]
     fn concurrent_saves_publish_only_complete_parseable_documents() {
-        let path = temporary_config("concurrent");
+        let (_root, path) = temporary_config("concurrent");
         let store = Arc::new(PresentationSettingsStore::new(&path));
         let count = 6_usize;
         let barrier = Arc::new(Barrier::new(count));

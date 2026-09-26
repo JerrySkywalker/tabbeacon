@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     core::{Attention, Health, Phase},
+    lock_budget::try_lock_file_with_budget,
     presentation::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleStatus,
         WindowsTerminalCapabilities, WindowsTerminalRenderer, owned_channel_release_bytes,
@@ -328,7 +329,7 @@ pub(crate) fn record_provider_session_observation(
         .read(true)
         .write(true)
         .open(lock_path)?;
-    lock.lock()?;
+    try_lock_file_with_budget(&lock, Duration::from_millis(100))?;
     let path = directory.join(format!("session-{session_sha256}.json"));
     reject_symbolic_link(&path)?;
     let newer_exists = fs::read(&path)
@@ -1965,7 +1966,7 @@ impl ActivityLeaseStore {
             .read(true)
             .write(true)
             .open(lock_path)?;
-        lock.lock()?;
+        try_lock_file_with_budget(&lock, Duration::from_millis(100))?;
         let result = operation();
         File::unlock(&lock)?;
         result

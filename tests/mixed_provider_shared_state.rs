@@ -20,7 +20,7 @@ use tabbeacon::{
 
 #[test]
 #[allow(clippy::too_many_lines)] // One interleaving keeps all providers on the same persisted state root.
-fn cursor_codex_and_agy_share_one_state_root_without_cross_provider_output() {
+fn synthetic_provider_interleaving_uses_one_state_root_without_cross_state_suppression() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
     let state = root.path().join("shared-tabbeacon-state");
@@ -99,10 +99,9 @@ fn cursor_codex_and_agy_share_one_state_root_without_cross_provider_output() {
         codex_event("SessionStart", None).0,
         HookDispatchOutcome::Applied
     );
-    assert_eq!(
-        agy_event("working").outcome,
-        AgyTitleDispatchOutcome::Applied
-    );
+    let agy_working = agy_event("working");
+    assert_eq!(agy_working.outcome, AgyTitleDispatchOutcome::Applied);
+    assert!(agy_working.title.starts_with("Agy "));
     let (cursor_working, cursor_bytes) =
         cursor_event("beforeSubmitPrompt", "cursor-a", Some("g1"), "wt-a");
     assert_eq!(cursor_working, CursorDispatchOutcome::OutputFlushed);
@@ -111,7 +110,9 @@ fn cursor_codex_and_agy_share_one_state_root_without_cross_provider_output() {
     let (codex_working, codex_bytes) = codex_event("UserPromptSubmit", Some("turn-1"));
     assert_eq!(codex_working, HookDispatchOutcome::Applied);
     assert!(!codex_bytes.is_empty());
-    assert_eq!(agy_event("idle").outcome, AgyTitleDispatchOutcome::Applied);
+    let agy_ready = agy_event("idle");
+    assert_eq!(agy_ready.outcome, AgyTitleDispatchOutcome::Applied);
+    assert!(agy_ready.title.starts_with("Agy "));
     assert_eq!(
         cursor_event("sessionEnd", "cursor-a", None, "wt-a"),
         (
@@ -129,8 +130,7 @@ fn cursor_codex_and_agy_share_one_state_root_without_cross_provider_output() {
         cursor_event("beforeSubmitPrompt", "cursor-a", Some("g2"), "wt-a"),
         (CursorDispatchOutcome::Ignored, Vec::new())
     );
-    assert_eq!(
-        agy_event("working").outcome,
-        AgyTitleDispatchOutcome::Applied
-    );
+    let agy_later = agy_event("working");
+    assert_eq!(agy_later.outcome, AgyTitleDispatchOutcome::Applied);
+    assert!(agy_later.title.starts_with("Agy "));
 }

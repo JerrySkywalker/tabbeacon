@@ -9,7 +9,7 @@ use std::{
         OnceLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use tabbeacon::{
@@ -191,6 +191,42 @@ fn command_with_stdin(mut command: Command, input: &[u8]) -> std::process::Outpu
     child
         .wait_with_output()
         .expect("qualification command exits")
+}
+
+fn command_with_stdin_bounded(
+    mut command: Command,
+    input: &[u8],
+    timeout: Duration,
+) -> std::process::Output {
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("bounded callback starts");
+    child
+        .stdin
+        .take()
+        .expect("bounded callback stdin is available")
+        .write_all(input)
+        .expect("bounded callback input writes");
+    let deadline = Instant::now() + timeout;
+    loop {
+        if child
+            .try_wait()
+            .expect("bounded callback status reads")
+            .is_some()
+        {
+            return child
+                .wait_with_output()
+                .expect("bounded callback output reads");
+        }
+        if Instant::now() >= deadline {
+            child.kill().expect("only this owned callback is stopped");
+            child.wait().expect("owned callback is reaped");
+            panic!("isolated callback exceeded its bounded test budget");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
@@ -1317,13 +1353,14 @@ fn agy_public_provider_switch_releases_only_its_owned_title_callback() {
             "conversation_id": "synthetic-p08-session",
             "workspace": {"current_dir": workspace, "project_dir": workspace},
         });
-        let output = command_with_stdin(
+        let output = command_with_stdin_bounded(
             {
                 let mut command = isolated_command_with_agy(&root, &agy_directory);
                 command.args(["agy", "__title-callback-v1"]);
                 command
             },
             payload.to_string().as_bytes(),
+            Duration::from_secs(10),
         );
         assert!(output.status.success());
         assert!(output.stderr.is_empty());
@@ -1381,6 +1418,30 @@ fn agy_public_provider_switch_releases_only_its_owned_title_callback() {
     config_lock.lock().unwrap();
     assert_eq!(callback(), "Agy\n", "busy settings lock fails open");
     fs::File::unlock(&config_lock).unwrap();
+    let anchor_dir =
+        root.child("local-appdata/TabBeacon/repository-identity/agy-root-workspace-anchor-v1");
+    fs::create_dir_all(&anchor_dir).unwrap();
+    let anchor_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(anchor_dir.join("root-workspace-anchor.lock"))
+        .unwrap();
+    anchor_lock.lock().unwrap();
+    assert_eq!(
+        callback(),
+        "Agy\n",
+        "busy nested state lock must fail open without holding config.lock indefinitely"
+    );
+    let config_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.child("local-appdata/TabBeacon/config.lock"))
+        .unwrap();
+    config_lock.try_lock().unwrap();
+    fs::File::unlock(&config_lock).unwrap();
+    fs::File::unlock(&anchor_lock).unwrap();
     let native = invoke(&[
         "config",
         "--plain",
