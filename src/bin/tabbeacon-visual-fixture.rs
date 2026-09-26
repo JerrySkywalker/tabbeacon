@@ -5,7 +5,7 @@ use std::{
     fs::OpenOptions,
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
-    process::{self, Child, Command},
+    process::{self, Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -33,12 +33,13 @@ use tabbeacon::{
     repo::WorkspaceIdentityResolver,
     settings::{PresentationSettings, PresentationSettingsStore},
     visual::{
-        CURSOR_COLOR_COMPLETED_FIXTURE, CURSOR_COLOR_NATIVE_FIXTURE, CURSOR_COLOR_WORKING_FIXTURE,
-        CaptureBackend, ExactOwnedWindowBackend, FixtureDriver, LiveVisualRunRequest,
-        PrintWindowCaptureBackend, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME,
-        TemporaryWindowProductDisposition, TemporaryWindowsTerminalOwnership, TerminalTestSession,
-        TerminalTestSessionLauncher, VisualDisposition, VisualError, VisualResult,
-        WindowsUiaLocator, root_workspace_anchor_fixture_alias,
+        CODEX_PUBLIC_COLOR_FIXTURE, CODEX_PUBLIC_NATIVE_FIXTURE, CURSOR_COLOR_COMPLETED_FIXTURE,
+        CURSOR_COLOR_NATIVE_FIXTURE, CURSOR_COLOR_WORKING_FIXTURE, CaptureBackend,
+        ExactOwnedWindowBackend, FixtureDriver, LiveVisualRunRequest, PrintWindowCaptureBackend,
+        ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME, TemporaryWindowProductDisposition,
+        TemporaryWindowsTerminalOwnership, TerminalTestSession, TerminalTestSessionLauncher,
+        VisualDisposition, VisualError, VisualResult, WindowsUiaLocator,
+        root_workspace_anchor_fixture_alias,
         runner::{authorize_live_worker, run_live, run_live_in_worker},
     },
 };
@@ -75,6 +76,12 @@ fn emit(arguments: &[String]) -> VisualResult<()> {
         .map_err(|error| VisualError::Platform(format!("invalid --hold-ms: {error}")))?;
     if fixture_name == ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME {
         return emit_root_workspace_anchor(&run_id, hold_millis);
+    }
+    if matches!(
+        fixture_name.as_str(),
+        CODEX_PUBLIC_COLOR_FIXTURE | CODEX_PUBLIC_NATIVE_FIXTURE
+    ) {
+        return emit_codex_public_fixture(&fixture_name, &run_id, hold_millis);
     }
     if matches!(
         fixture_name.as_str(),
@@ -284,6 +291,222 @@ fn run_isolated_cursor_apply(
     {
         return Err(VisualError::Platform(
             "isolated public Cursor preference Apply was not admitted".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Drives candidate CLI Apply and the silent public Codex Hook subprocess in
+/// one fixture-owned terminal. Structured events and the version-only Codex
+/// capability fixture are synthetic; the terminal bytes come from the product.
+#[allow(clippy::too_many_lines)]
+fn emit_codex_public_fixture(name: &str, run_id: &str, hold_millis: u64) -> VisualResult<()> {
+    let replay = FixtureDriver::default().codex_public_replay(name, run_id)?;
+    let temp = env::temp_dir().canonicalize()?;
+    let root = temp.join(format!("tabbeacon-codex-public-{run_id}-{}", process::id()));
+    if root.exists() {
+        return Err(VisualError::Platform(
+            "owned Codex visual fixture state already exists".to_owned(),
+        ));
+    }
+    fs::create_dir(&root)?;
+    let result = (|| -> VisualResult<()> {
+        let workspace = root.join("workspace");
+        let local_appdata = root.join("local-appdata");
+        let codex_home = root.join("codex-home");
+        let fake_codex = root.join("fake-codex");
+        for path in [&workspace, &local_appdata, &codex_home, &fake_codex] {
+            fs::create_dir(path)?;
+        }
+        fs::write(
+            codex_home.join("config.toml"),
+            b"[tui]\nterminal_title = [\"activity\", \"project\"]\n",
+        )?;
+        fs::write(
+            fake_codex.join("codex.cmd"),
+            b"@echo off\r\nif \"%1\"==\"--version\" (echo codex-cli 0.156.1 & exit /b 0)\r\nif \"%1\"==\"features\" if \"%2\"==\"list\" (echo hooks stable true & exit /b 0)\r\nif \"%1\"==\"app-server\" if \"%2\"==\"generate-json-schema\" (mkdir \"%4\" 2>nul & echo {\"hooks\":\"command\"}>\"%4\\schema.json\" & exit /b 0)\r\nexit /b 2\r\n",
+        )?;
+        let inherited_path = env::var_os("PATH")
+            .ok_or_else(|| VisualError::Platform("visual fixture PATH is absent".to_owned()))?;
+        let path = env::join_paths(
+            std::iter::once(fake_codex.clone()).chain(env::split_paths(&inherited_path)),
+        )
+        .map_err(|_| VisualError::Platform("visual fixture PATH is invalid".to_owned()))?;
+        let executable = env::current_exe()?.with_file_name("tabbeacon.exe");
+        if !executable.is_file() {
+            return Err(VisualError::Platform(
+                "owned Codex visual fixture product binary is unavailable".to_owned(),
+            ));
+        }
+        let run = |args: &[&str], expected: Option<&str>| {
+            run_isolated_codex_product(
+                &executable,
+                &workspace,
+                &local_appdata,
+                &codex_home,
+                &root,
+                &path,
+                args,
+                expected,
+            )
+        };
+        run(&["setup", "codex", "--plain"], None)?;
+        run(
+            &[
+                "config",
+                "--plain",
+                "provider",
+                "codex",
+                "apply",
+                "full-takeover",
+            ],
+            Some("CHANGE_APPLIED=true"),
+        )?;
+        let session = format!("visual-{run_id}");
+        let hook = |event: &str, turn: Option<&str>| {
+            let mut payload = json!({
+                "hook_event_name": event,
+                "session_id": session,
+                "cwd": workspace,
+            });
+            if let Some(turn) = turn {
+                payload["turn_id"] = turn.into();
+            }
+            if event == "SessionStart" {
+                payload["source"] = "startup".into();
+            }
+            run_isolated_codex_hook(
+                &executable,
+                &workspace,
+                &local_appdata,
+                &codex_home,
+                &root,
+                &path,
+                &payload,
+            )
+        };
+        hook("SessionStart", None)?;
+        run(
+            &[
+                "config",
+                "--plain",
+                "provider",
+                "codex",
+                "apply",
+                "color-only",
+            ],
+            Some("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE"),
+        )?;
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(format!("\x1b]0;{}\x1b\\", replay.case.expected_title).as_bytes())?;
+        stdout.flush()?;
+        hook("UserPromptSubmit", Some("turn-1"))?;
+        if name == CODEX_PUBLIC_NATIVE_FIXTURE {
+            run(
+                &[
+                    "config",
+                    "--plain",
+                    "provider",
+                    "codex",
+                    "apply",
+                    "preserve-native",
+                ],
+                Some("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE"),
+            )?;
+            hook("Stop", Some("turn-1"))?;
+            // A new native turn after the release must leave this marker and
+            // the terminal's default tab color under native control.
+            stdout.write_all(format!("\x1b]0;{}\x1b\\", replay.case.expected_title).as_bytes())?;
+            stdout.flush()?;
+            hook("UserPromptSubmit", Some("turn-2"))?;
+        }
+        thread::sleep(Duration::from_millis(hold_millis));
+        hook("SessionEnd", None)?;
+        Ok(())
+    })();
+    let owned = root.canonicalize()?;
+    if owned.parent() != Some(temp.as_path()) {
+        return Err(VisualError::Platform(
+            "Codex visual fixture cleanup root drifted".to_owned(),
+        ));
+    }
+    fs::remove_dir_all(&owned)?;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_isolated_codex_product(
+    executable: &Path,
+    workspace: &Path,
+    local_appdata: &Path,
+    codex_home: &Path,
+    user_profile: &Path,
+    path: &std::ffi::OsStr,
+    args: &[&str],
+    expected: Option<&str>,
+) -> VisualResult<()> {
+    let output = Command::new(executable)
+        .args(args)
+        .current_dir(workspace)
+        .env("LOCALAPPDATA", local_appdata)
+        .env("CODEX_HOME", codex_home)
+        .env("USERPROFILE", user_profile)
+        .env("PATH", path)
+        .output()?;
+    if !output.status.success()
+        || expected.is_some_and(|value| !String::from_utf8_lossy(&output.stdout).contains(value))
+    {
+        return Err(VisualError::Platform(
+            "isolated Codex product setup or public Apply was not admitted".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_isolated_codex_hook(
+    executable: &Path,
+    workspace: &Path,
+    local_appdata: &Path,
+    codex_home: &Path,
+    user_profile: &Path,
+    path: &std::ffi::OsStr,
+    payload: &serde_json::Value,
+) -> VisualResult<()> {
+    let mut child = Command::new(executable)
+        .args(["hook", "codex"])
+        .current_dir(workspace)
+        .env("LOCALAPPDATA", local_appdata)
+        .env("CODEX_HOME", codex_home)
+        .env("USERPROFILE", user_profile)
+        .env("PATH", path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let input = serde_json::to_vec(payload).map_err(VisualError::Json)?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| VisualError::Platform("Codex Hook stdin is absent".to_owned()))?
+        .write_all(&input)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            // This exact child was created by the fixture. Leave any other
+            // process alone, including unknown provider or terminal processes.
+            child.kill()?;
+            let _ = child.wait();
+            return Err(VisualError::Platform(
+                "isolated Codex Hook exceeded the visual fixture budget".to_owned(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty() {
+        return Err(VisualError::Platform(
+            "isolated Codex Hook protocol or process failed".to_owned(),
         ));
     }
     Ok(())

@@ -1464,6 +1464,23 @@ fn selected_replays(
 ) -> VisualResult<Vec<super::FixtureReplay>> {
     let all = driver.all_cases(&request.run_id)?;
     match request.fixture_name.as_deref() {
+        Some(super::CODEX_PUBLIC_NATIVE_FIXTURE) => {
+            let ready = all
+                .into_iter()
+                .find(|replay| replay.case.fixture_name == "ready")
+                .ok_or_else(|| VisualError::Platform("native color baseline missing".to_owned()))?;
+            Ok(vec![
+                ready,
+                driver.codex_public_replay(super::CODEX_PUBLIC_COLOR_FIXTURE, &request.run_id)?,
+                driver.codex_public_replay(super::CODEX_PUBLIC_NATIVE_FIXTURE, &request.run_id)?,
+            ])
+        }
+        Some(super::CODEX_PUBLIC_COLOR_FIXTURE) => {
+            Ok(vec![driver.codex_public_replay(
+                super::CODEX_PUBLIC_COLOR_FIXTURE,
+                &request.run_id,
+            )?])
+        }
         Some(super::CURSOR_COLOR_NATIVE_FIXTURE) => {
             let ready = all
                 .into_iter()
@@ -2002,6 +2019,29 @@ mod tests {
             .map(|replay| replay.case.fixture_name)
             .collect::<Vec<_>>();
         assert_eq!(names, ["ready", super::super::CURSOR_COLOR_NATIVE_FIXTURE]);
+    }
+
+    #[test]
+    fn codex_native_visual_fixture_captures_color_and_default_baselines() {
+        let request = LiveVisualRunRequest {
+            expected_head: "a".repeat(40),
+            run_id: "TB80-codex-selection".to_owned(),
+            evidence_root: PathBuf::from("target/visual-worker-tests"),
+            fixture_name: Some(super::super::CODEX_PUBLIC_NATIVE_FIXTURE.to_owned()),
+        };
+        let names = selected_replays(&FixtureDriver::default(), &request)
+            .unwrap()
+            .into_iter()
+            .map(|replay| replay.case.fixture_name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "ready",
+                super::super::CODEX_PUBLIC_COLOR_FIXTURE,
+                super::super::CODEX_PUBLIC_NATIVE_FIXTURE,
+            ]
+        );
     }
 
     #[test]

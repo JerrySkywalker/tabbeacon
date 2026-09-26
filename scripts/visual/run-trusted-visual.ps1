@@ -13,7 +13,7 @@ param(
 
     [string]$EvidenceRoot = 'artifacts/visual',
 
-    [ValidateSet('cursor-color-working', 'cursor-color-completed', 'cursor-color-native')]
+    [ValidateSet('cursor-color-working', 'cursor-color-completed', 'cursor-color-native', 'codex-public-color', 'codex-public-native')]
     [string]$Fixture
 )
 
@@ -31,7 +31,7 @@ if ($actualHead -ne $ExpectedHead) {
 
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
 
-if ($Fixture -eq 'cursor-color-native') {
+if ($Fixture -in @('cursor-color-native', 'codex-public-color', 'codex-public-native')) {
     & cargo build --locked --bin tabbeacon
     if ($LASTEXITCODE -ne 0) {
         throw "Owned Cursor public-Apply fixture product binary build failed: exit=$LASTEXITCODE"
