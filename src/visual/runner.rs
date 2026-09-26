@@ -128,28 +128,39 @@ pub fn run_live(request: &LiveVisualRunRequest) -> VisualResult<LiveVisualRunSum
     };
 
     let mut summary = match completion {
-        BoundedWorkerOutput::Completed => worker_evidence_summary(
-            &worker_directory,
-            request,
-            &checked_out_head,
-            &fixture_names,
-        )
-        .ok_or_else(|| {
-            VisualError::Platform(
-                "isolated visual worker did not produce a valid finalized evidence bundle"
-                    .to_owned(),
-            )
-        })
-        .or_else(|_| {
-            write_worker_failure(
+        BoundedWorkerOutput::Completed(status) => {
+            if !status.success() {
+                let stage = read_worker_stage(&worker_root, &request.run_id);
+                return write_worker_failure(
+                    request,
+                    &checked_out_head,
+                    exact_head,
+                    &fixture_names,
+                    VisualDisposition::Unproven,
+                    &format!(
+                        "isolated visual worker exited before final evidence; last_stage={stage}; exit_code={}",
+                        status.code().unwrap_or(-1)
+                    ),
+                );
+            }
+            let Some(summary) = worker_evidence_summary(
+                &worker_directory,
                 request,
                 &checked_out_head,
-                exact_head,
                 &fixture_names,
-                VisualDisposition::Unproven,
-                "isolated visual worker exited without a valid finalized evidence bundle",
-            )
-        })?,
+            ) else {
+                let stage = read_worker_stage(&worker_root, &request.run_id);
+                return write_worker_failure(
+                    request,
+                    &checked_out_head,
+                    exact_head,
+                    &fixture_names,
+                    VisualDisposition::Unproven,
+                    &format!("isolated visual worker evidence was invalid; last_stage={stage}"),
+                );
+            };
+            summary
+        }
         BoundedWorkerOutput::TimedOut => {
             let stage = read_worker_stage(&worker_root, &request.run_id);
             return write_worker_failure(
@@ -399,7 +410,7 @@ pub fn run_live_in_worker(request: &LiveVisualRunRequest) -> VisualResult<LiveVi
 }
 
 enum BoundedWorkerOutput {
-    Completed,
+    Completed(std::process::ExitStatus),
     TimedOut,
     TerminationFailed,
 }
@@ -421,8 +432,8 @@ fn wait_for_bounded_worker(
     mut worker: Child,
     budget: Duration,
 ) -> VisualResult<BoundedWorkerOutput> {
-    if wait_for_child_exit(&mut worker, budget)?.is_some() {
-        return Ok(BoundedWorkerOutput::Completed);
+    if let Some(status) = wait_for_child_exit(&mut worker, budget)? {
+        return Ok(BoundedWorkerOutput::Completed(status));
     }
     if terminate_owned_worker_tree(&mut worker)? {
         Ok(BoundedWorkerOutput::TimedOut)

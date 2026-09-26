@@ -1214,7 +1214,36 @@ fn run_live_worker(arguments: &[String]) -> VisualResult<()> {
     let nonce = env::var("TABBEACON_VISUAL_WORKER_NONCE").map_err(|_| {
         VisualError::Platform("visual worker requires supervisor authorization".to_owned())
     })?;
-    authorize_live_worker(&request, &authorization_path, &nonce)?;
+    if let Err(error) = authorize_live_worker(&request, &authorization_path, &nonce) {
+        // The parent records only this fixed stage code. The raw error can
+        // include local paths and must never become a public evidence field.
+        let code = match error {
+            VisualError::Platform(message)
+                if message.contains("parent process query timed out") =>
+            {
+                83
+            }
+            VisualError::Platform(message)
+                if message.contains("parent process query did not complete")
+                    || message.contains("parent process was unavailable") =>
+            {
+                84
+            }
+            VisualError::Platform(message)
+                if message.contains("not launched by the active fixture supervisor") =>
+            {
+                85
+            }
+            VisualError::Platform(message)
+                if message.contains("authorization path did not match")
+                    || message.contains("authorization did not match") =>
+            {
+                82
+            }
+            _ => 81,
+        };
+        process::exit(code);
+    }
     run_live_in_worker(&request)?;
     Ok(())
 }
