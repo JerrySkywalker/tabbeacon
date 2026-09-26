@@ -43,11 +43,9 @@ working/completed color changes without visible native-title interference, and
 the later session left a matching end tombstone and unowned color lease. An
 earlier start-only route on another terminal remained without an end event.
 That run did not retain per-Hook flush results or completed-session generation
-counts. A newer candidate writes a separate, bounded, best-effort receipt with
-lower bounds for prompt/stop output attempts and confirmed color/release flushes,
-plus start/end observations. The receipt never gates presentation or cleanup;
-missing receipts and old sessions have unknown history. The v1 color lease stays
-unchanged for rollback compatibility. These counts do not prove visible rendering.
+counts. The candidate therefore leaves those results unproven; a final unowned
+lease cannot reconstruct them. The v1 color lease and its release rules stay
+unchanged for rollback compatibility.
 Two concurrent Cursor sessions and mixed-provider Visual/L4 acceptance remain
 unproven.
 The read-only integration list therefore shows Cursor as an unadmitted
