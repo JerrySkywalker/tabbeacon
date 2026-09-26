@@ -3,9 +3,14 @@
 use std::{
     cell::RefCell,
     fs,
-    io::Write,
+    io::{self, Write},
     path::Path,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
@@ -38,6 +43,84 @@ fn run_plain(binary: &Path, arguments: &[&str]) -> String {
     assert!(output.status.success(), "{:?}", output.status);
     assert!(output.stderr.is_empty());
     String::from_utf8(output.stdout).unwrap()
+}
+
+struct OwnedApplyChild(Child);
+
+impl Drop for OwnedApplyChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+        }
+        let _ = self.0.wait();
+    }
+}
+
+struct SettingsLockObserver {
+    seen: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    worker: Option<JoinHandle<io::Result<()>>>,
+}
+
+impl SettingsLockObserver {
+    fn start(lock_path: &Path) -> io::Result<Self> {
+        let probe = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(lock_path)?;
+        let ready = Arc::new(AtomicBool::new(false));
+        let seen = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker = {
+            let ready = Arc::clone(&ready);
+            let seen = Arc::clone(&seen);
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || -> io::Result<()> {
+                let deadline = Instant::now() + Duration::from_secs(2);
+                ready.store(true, Ordering::Release);
+                while !stop.load(Ordering::Acquire) && Instant::now() < deadline {
+                    match probe.try_lock() {
+                        Ok(()) => fs::File::unlock(&probe)?,
+                        Err(fs::TryLockError::WouldBlock) => {
+                            seen.store(true, Ordering::Release);
+                            break;
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                    std::thread::sleep(Duration::from_micros(100));
+                }
+                Ok(())
+            })
+        };
+        while !ready.load(Ordering::Acquire) {
+            std::thread::yield_now();
+        }
+        Ok(Self {
+            seen,
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    fn saw_lock(&self) -> bool {
+        self.seen.load(Ordering::Acquire)
+    }
+
+    fn finish(&mut self) -> io::Result<()> {
+        self.stop.store(true, Ordering::Release);
+        if let Some(worker) = self.worker.take() {
+            worker
+                .join()
+                .map_err(|_| io::Error::other("settings lock observer panicked"))??;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for SettingsLockObserver {
+    fn drop(&mut self) {
+        let _ = self.finish();
+    }
 }
 
 #[test]
@@ -303,49 +386,45 @@ fn public_cursor_apply_waits_for_the_existing_route_output_lock() {
     assert!(initial.status.success());
     let before = fs::read(&settings_path).unwrap();
     let state_root = settings_path.parent().unwrap();
-    let settings_lock_probe = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(state_root.join("config.lock"))
-        .unwrap();
     let mut child = CursorRouteStore::new(state_root)
         .with_route_lock(|| {
-            let mut child = Command::new(binary)
-                .args([
-                    "config",
-                    "--plain",
-                    "provider",
-                    "cursor",
-                    "apply",
-                    "preserve-native",
-                ])
-                .current_dir(root.path())
-                .env("LOCALAPPDATA", &local_appdata)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
-            // Observe the child holding the settings lock while it waits for
-            // this route lock. A sleep alone cannot establish that ordering.
+            let mut lock_observer = SettingsLockObserver::start(&state_root.join("config.lock"))?;
+            let mut child = OwnedApplyChild(
+                Command::new(binary)
+                    .args([
+                        "config",
+                        "--plain",
+                        "provider",
+                        "cursor",
+                        "apply",
+                        "preserve-native",
+                    ])
+                    .current_dir(root.path())
+                    .env("LOCALAPPDATA", &local_appdata)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()?,
+            );
+            // The observer is already running before the child starts. It
+            // catches the settings lock while the child waits for this route
+            // lock, whose Hook budget is intentionally short.
             let deadline = Instant::now() + Duration::from_secs(2);
-            loop {
-                match settings_lock_probe.try_lock() {
-                    Ok(()) => {
-                        fs::File::unlock(&settings_lock_probe)?;
-                        assert!(
-                            child.try_wait()?.is_none() && Instant::now() < deadline,
-                            "Apply never reached the settings lock"
-                        );
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    Err(fs::TryLockError::WouldBlock) => break,
-                    Err(error) => return Err(error.into()),
-                }
+            while !lock_observer.saw_lock()
+                && child.0.try_wait()?.is_none()
+                && Instant::now() < deadline
+            {
+                std::thread::yield_now();
             }
-            assert!(child.try_wait()?.is_none());
+            lock_observer.finish()?;
+            assert!(
+                lock_observer.saw_lock(),
+                "Apply never reached the settings lock"
+            );
+            assert!(child.0.try_wait()?.is_none());
             assert_eq!(fs::read(&settings_path)?, before);
             Ok(child)
         })
         .unwrap();
-    assert!(child.wait().unwrap().success());
+    assert!(child.0.wait().unwrap().success());
     assert_ne!(fs::read(settings_path).unwrap(), before);
 }
