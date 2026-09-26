@@ -8,6 +8,7 @@ use std::{
 };
 
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::os::windows::process::CommandExt;
 
 fn run(binary: &Path, arguments: &[&str]) -> Value {
@@ -82,16 +83,18 @@ fn public_cursor_management_preserves_foreign_project_hooks() {
     assert!(config.status.success());
     let config_text = String::from_utf8(config.stdout).unwrap();
     assert!(config_text.contains("LIVE_APPLICATION=UNPROVEN"));
-    assert!(config_text.contains("EFFECTIVE_TAB_COLOR=tabbeacon"));
+    assert!(config_text.contains("EFFECTIVE_TAB_COLOR=native"));
     let data_root = root.path().join("isolated-cursor-data");
     fs::create_dir(&data_root).unwrap();
     let registered_command = value["hooks"]["stop"][1]["command"].as_str().unwrap();
+    let expected_terminal = format!("{:x}", Sha256::digest(b"synthetic-wt-session"));
     let mut hook = Command::new("cmd")
         .args(["/D", "/C"])
         .raw_arg(registered_command)
         .current_dir(root.path())
         .env("CURSOR_DATA_DIR", &data_root)
         .env("WT_SESSION", "synthetic-wt-session")
+        .env("TABBEACON_CURSOR_EXPECTED_WT_SHA256", expected_terminal)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

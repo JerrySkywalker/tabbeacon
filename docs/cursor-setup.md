@@ -21,7 +21,10 @@ should be changed by unattended qualification.
 
 The hidden `__cursor-hook-v1` command reads bounded structured Hook JSON,
 normalizes only event, session, generation and supported outcome, and checks
-the exact project installation and inherited terminal context. Its stdout is
+the exact project installation and inherited terminal context against a
+separately captured expected Windows Terminal digest. The latter is presently
+available only in the Owner's isolated qualification tab; without it, route
+admission is refused. Its stdout is
 only the Hook protocol object `{}`. It never reads prompt, response, tool
 output or transcript text for state. Unknown, malformed and unbound events are
 decoration-only failures.

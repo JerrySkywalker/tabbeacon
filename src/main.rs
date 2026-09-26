@@ -538,10 +538,10 @@ fn cursor_presentation_admission() -> (PresentationCapabilities, ApplicationStat
         return (PresentationCapabilities::NONE, ApplicationStatus::Unproven);
     };
     match integration.check() {
-        Ok(CursorHookState::Installed) => (
-            PresentationCapabilities::CURSOR_COLOR_ONLY,
-            ApplicationStatus::Unproven,
-        ),
+        // An installed Hook proves ingress, not safe color presentation.
+        Ok(CursorHookState::Installed) => {
+            (PresentationCapabilities::NONE, ApplicationStatus::Unproven)
+        }
         Ok(CursorHookState::NotInstalled) => (
             PresentationCapabilities::NONE,
             ApplicationStatus::NotInstalled,

@@ -261,20 +261,65 @@ impl CursorHookIntegration {
                 array.retain(|entry| entry["command"] != command);
             }
         }
-        // A foreign writer need not honor our lock. Refuse observed drift before
-        // the atomic replacement rather than knowingly overwriting newer bytes.
-        if self.read()?.0 != before {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "Cursor Hook config changed",
-            ));
-        }
         let bytes = serde_json::to_vec_pretty(&value).map_err(io::Error::other)?;
-        let mut file = AtomicWriteFile::options().open(self.path())?;
-        file.write_all(&bytes)?;
-        file.flush()?;
-        file.commit()?;
+        self.commit_if_unchanged(before.as_deref(), &bytes)?;
         self.check()
+    }
+
+    fn commit_if_unchanged(&self, before: Option<&[u8]>, replacement: &[u8]) -> io::Result<()> {
+        let path = self.path();
+        reject_link(&path)?;
+        if let Some(expected) = before {
+            // The target-file lock joins our project lock. It blocks ordinary
+            // in-place foreign writes while the final comparison and atomic
+            // replacement occur, matching the Codex integration's safety
+            // boundary. A foreign atomic replacement remains an external race.
+            let mut target = OpenOptions::new().read(true).write(true).open(&path)?;
+            target.lock()?;
+            let result = (|| {
+                let mut actual = Vec::new();
+                std::io::Read::by_ref(&mut target)
+                    .take((MAX_CONFIG_BYTES + 1) as u64)
+                    .read_to_end(&mut actual)?;
+                if actual != expected {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "Cursor Hook config changed",
+                    ));
+                }
+                let mut file = AtomicWriteFile::options().open(&path)?;
+                file.write_all(replacement)?;
+                file.flush()?;
+                file.commit()
+            })();
+            File::unlock(&target)?;
+            result
+        } else {
+            // Link a complete same-directory file into a previously absent
+            // destination. `hard_link` refuses an intervening foreign create;
+            // an atomic replace of a newly created foreign Hook is forbidden.
+            let staging = self.directory().join(format!(
+                "tabbeacon-hook-{}-{}.tmp",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(io::Error::other)?
+                    .as_nanos()
+            ));
+            let mut temporary = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&staging)?;
+            let result = (|| {
+                temporary.write_all(replacement)?;
+                temporary.sync_all()?;
+                fs::hard_link(&staging, &path)
+            })();
+            drop(temporary);
+            let cleanup = fs::remove_file(&staging);
+            result?;
+            cleanup
+        }
     }
 }
 
@@ -372,5 +417,43 @@ mod tests {
         let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(value["hooks"]["sessionStart"].as_array().unwrap().len(), 1);
         assert_eq!(value["hooks"]["sessionEnd"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn commit_refuses_an_external_change_after_initial_read() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("tabbeacon.exe");
+        fs::write(&exe, b"synthetic executable").unwrap();
+        let integration = CursorHookIntegration::new(root.path(), &exe).unwrap();
+        integration.install().unwrap();
+        let path = integration.path();
+        let expected = fs::read(&path).unwrap();
+        let foreign = br#"{"version":1,"hooks":{"stop":[{"command":"foreign"}]}}"#;
+        fs::write(&path, foreign).unwrap();
+        assert_eq!(
+            integration
+                .commit_if_unchanged(Some(&expected), b"replacement")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(fs::read(&path).unwrap(), foreign);
+    }
+
+    #[test]
+    fn absent_target_commit_never_replaces_an_intervening_foreign_create() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("tabbeacon.exe");
+        fs::write(&exe, b"synthetic executable").unwrap();
+        let integration = CursorHookIntegration::new(root.path(), &exe).unwrap();
+        fs::create_dir(integration.directory()).unwrap();
+        let foreign = br#"{"version":1,"hooks":{"stop":[{"command":"foreign"}]}}"#;
+        fs::write(integration.path(), foreign).unwrap();
+        assert!(
+            integration
+                .commit_if_unchanged(None, b"replacement")
+                .is_err()
+        );
+        assert_eq!(fs::read(integration.path()).unwrap(), foreign);
     }
 }

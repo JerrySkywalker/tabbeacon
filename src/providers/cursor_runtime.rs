@@ -27,6 +27,7 @@ pub fn dispatch_bounded(
     workspace: &Path,
     executable: &Path,
     state_root: &Path,
+    expected_terminal_sha256: &str,
     terminal_identity: &str,
     console_openable: bool,
 ) -> io::Result<CursorDispatchOutcome> {
@@ -34,6 +35,10 @@ pub fn dispatch_bounded(
         || terminal_identity.len() > 256
         || terminal_identity.chars().any(char::is_control)
         || !state_root.is_absolute()
+        || expected_terminal_sha256.len() != 64
+        || !expected_terminal_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         || !console_openable
     {
         return Ok(CursorDispatchOutcome::Ignored);
@@ -48,11 +53,15 @@ pub fn dispatch_bounded(
         return Ok(CursorDispatchOutcome::Ignored);
     };
     let mut hasher = Sha256::new();
-    hasher.update(b"cursor-terminal-v1:");
     hasher.update(terminal_identity.as_bytes());
     let terminal_sha256 = format!("{:x}", hasher.finalize());
     let store = CursorRouteStore::new(state_root);
-    if store.admit(&event, &terminal_sha256, &terminal_sha256, console_openable)? {
+    if store.admit(
+        &event,
+        expected_terminal_sha256,
+        &terminal_sha256,
+        console_openable,
+    )? {
         Ok(CursorDispatchOutcome::RouteAdmitted)
     } else {
         Ok(CursorDispatchOutcome::Ignored)
@@ -77,12 +86,19 @@ pub fn dispatch_system(raw: &[u8]) -> CursorDispatchOutcome {
     let Ok(terminal_identity) = env::var("WT_SESSION") else {
         return CursorDispatchOutcome::Ignored;
     };
+    // This independently captured parent-tab digest is currently provided
+    // only by the Owner's isolated qualification entry. Ambient WT_SESSION
+    // alone cannot prove which terminal the Hook inherited.
+    let Ok(expected_terminal_sha256) = env::var("TABBEACON_CURSOR_EXPECTED_WT_SHA256") else {
+        return CursorDispatchOutcome::Ignored;
+    };
     let console_openable = crate::console_output::open_owned_console().is_ok();
     dispatch_bounded(
         raw,
         &workspace,
         &executable,
         &state_root,
+        &expected_terminal_sha256,
         &terminal_identity,
         console_openable,
     )
@@ -109,12 +125,18 @@ mod tests {
         let stop_two = br#"{"hook_event_name":"stop","conversation_id":"session-1","session_id":"session-1","generation_id":"g2","status":"completed"}"#;
         let end = br#"{"hook_event_name":"sessionEnd","conversation_id":"session-1","session_id":"session-1"}"#;
         let prior_end = br#"{"hook_event_name":"sessionEnd","conversation_id":"prior-session","session_id":"prior-session"}"#;
+        let expected = {
+            let mut hasher = Sha256::new();
+            hasher.update(b"wt-1");
+            format!("{:x}", hasher.finalize())
+        };
         assert_eq!(
             dispatch_bounded(
                 start,
                 workspace.path(),
                 &executable,
                 state.path(),
+                &expected,
                 "wt-1",
                 true
             )
@@ -128,12 +150,14 @@ mod tests {
                 workspace.path(),
                 &executable,
                 state.path(),
+                &expected,
                 terminal,
                 true,
             )
             .unwrap()
         };
         assert_eq!(dispatch(prior_end, "wt-1"), CursorDispatchOutcome::Ignored);
+        assert_eq!(dispatch(start, "wt-2"), CursorDispatchOutcome::Ignored);
         assert_eq!(
             dispatch(start, "wt-1"),
             CursorDispatchOutcome::RouteAdmitted
