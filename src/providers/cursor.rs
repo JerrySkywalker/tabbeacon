@@ -27,6 +27,96 @@ pub struct CursorLifecycle {
     pub patch: StatePatch,
 }
 
+/// A bounded, in-memory route for one positively supplied terminal/session
+/// binding. The caller must independently prove the console binding before
+/// constructing or using this guard; this type does not grant Hook trust.
+#[derive(Debug, Clone)]
+pub struct CursorSessionRoute {
+    terminal_binding_sha256: String,
+    session_id: String,
+    active_generation_id: Option<String>,
+    seen_generations: Vec<String>,
+    ended: bool,
+}
+
+impl CursorSessionRoute {
+    /// Begins one route only from a sessionStart event on the expected console.
+    #[must_use]
+    pub fn from_session_start(
+        event: &CursorLifecycle,
+        expected_terminal_binding_sha256: &str,
+        observed_terminal_binding_sha256: &str,
+        console_openable: bool,
+    ) -> Option<Self> {
+        (event.event == CursorEvent::SessionStart
+            && console_openable
+            && is_sha256(expected_terminal_binding_sha256)
+            && expected_terminal_binding_sha256 == observed_terminal_binding_sha256)
+            .then(|| Self {
+                terminal_binding_sha256: expected_terminal_binding_sha256.to_owned(),
+                session_id: event.session_id.clone(),
+                active_generation_id: None,
+                seen_generations: Vec::new(),
+                ended: false,
+            })
+    }
+
+    /// Admits only events from the exact bound terminal and current generation.
+    /// A seen superseded generation cannot reopen a newer one.
+    pub fn admit(
+        &mut self,
+        event: &CursorLifecycle,
+        observed_terminal_binding_sha256: &str,
+        console_openable: bool,
+    ) -> bool {
+        if self.ended
+            || !console_openable
+            || observed_terminal_binding_sha256 != self.terminal_binding_sha256
+            || event.session_id != self.session_id
+        {
+            return false;
+        }
+        match event.event {
+            CursorEvent::SessionStart => false,
+            CursorEvent::BeforeSubmitPrompt => {
+                let Some(generation) = event.generation_id.as_ref() else {
+                    return false;
+                };
+                if self.active_generation_id.as_ref() == Some(generation) {
+                    return true;
+                }
+                if self.seen_generations.contains(generation) {
+                    return false;
+                }
+                if self.seen_generations.len() == 32 {
+                    // A bounded guard cannot safely forget an older generation
+                    // and then treat its late event as new.
+                    return false;
+                }
+                self.seen_generations.push(generation.clone());
+                self.active_generation_id = Some(generation.clone());
+                true
+            }
+            CursorEvent::Stop => {
+                if self.active_generation_id.as_ref() != event.generation_id.as_ref() {
+                    return false;
+                }
+                self.active_generation_id = None;
+                true
+            }
+            CursorEvent::SessionEnd => {
+                self.active_generation_id = None;
+                self.ended = true;
+                true
+            }
+        }
+    }
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// Content-free parsing disposition. Unsupported events remain fail-open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CursorParseError {
@@ -188,5 +278,52 @@ mod tests {
     fn oversize_payload_is_rejected_before_json_parse() {
         let oversized = vec![b'x'; MAX_CURSOR_HOOK_BYTES + 1];
         assert_eq!(normalize_hook(&oversized), Err(CursorParseError::Oversize));
+    }
+
+    #[test]
+    fn route_rejects_foreign_terminal_session_and_superseded_generation() {
+        fn event(name: &str, session: &str, generation: Option<&str>) -> CursorLifecycle {
+            let mut input = serde_json::json!({
+                "hook_event_name": name,
+                "conversation_id": session,
+            });
+            if let Some(generation) = generation {
+                input["generation_id"] = generation.into();
+            }
+            if name == "stop" {
+                input["status"] = "completed".into();
+            }
+            normalize_hook(input.to_string().as_bytes())
+                .unwrap()
+                .unwrap()
+        }
+        let terminal = "a".repeat(64);
+        let foreign_terminal = "b".repeat(64);
+        let start = event("sessionStart", "session-a", None);
+        assert!(
+            CursorSessionRoute::from_session_start(&start, &terminal, &foreign_terminal, true)
+                .is_none()
+        );
+        assert!(
+            CursorSessionRoute::from_session_start(&start, &terminal, &terminal, false).is_none()
+        );
+        let mut route =
+            CursorSessionRoute::from_session_start(&start, &terminal, &terminal, true).unwrap();
+        let first = event("beforeSubmitPrompt", "session-a", Some("g1"));
+        let second = event("beforeSubmitPrompt", "session-a", Some("g2"));
+        assert!(route.admit(&first, &terminal, true));
+        assert!(!route.admit(&second, &foreign_terminal, true));
+        assert!(!route.admit(&event("stop", "session-b", Some("g1")), &terminal, true));
+        assert!(route.admit(&second, &terminal, true));
+        assert!(!route.admit(&event("stop", "session-a", Some("g1")), &terminal, true));
+        assert!(!route.admit(&first, &terminal, true));
+        assert!(route.admit(&event("stop", "session-a", Some("g2")), &terminal, true));
+        assert!(!route.admit(&second, &terminal, true));
+        assert!(route.admit(&event("sessionEnd", "session-a", None), &terminal, true));
+        assert!(!route.admit(
+            &event("beforeSubmitPrompt", "session-a", Some("g3")),
+            &terminal,
+            true
+        ));
     }
 }
