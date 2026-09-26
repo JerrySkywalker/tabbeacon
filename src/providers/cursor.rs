@@ -397,6 +397,9 @@ pub fn normalize_hook(raw: &[u8]) -> Result<Option<CursorLifecycle>, CursorParse
     if raw.len() > MAX_CURSOR_HOOK_BYTES {
         return Err(CursorParseError::Oversize);
     }
+    // Windows Cursor Hook processes may receive a UTF-8 BOM on stdin. Accept
+    // that transport prefix only; the content still has to be one JSON value.
+    let raw = raw.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(raw);
     let value: Value = serde_json::from_slice(raw).map_err(|_| CursorParseError::Malformed)?;
     let object = value.as_object().ok_or(CursorParseError::Malformed)?;
     let Some(event) = object.get("hook_event_name").and_then(Value::as_str) else {
@@ -546,6 +549,19 @@ mod tests {
     fn oversize_payload_is_rejected_before_json_parse() {
         let oversized = vec![b'x'; MAX_CURSOR_HOOK_BYTES + 1];
         assert_eq!(normalize_hook(&oversized), Err(CursorParseError::Oversize));
+    }
+
+    #[test]
+    fn windows_stdin_bom_does_not_hide_structured_lifecycle() {
+        let mut raw = vec![0xef, 0xbb, 0xbf];
+        raw.extend_from_slice(br#"{"hook_event_name":"sessionStart","session_id":"session-a"}"#);
+        let event = normalize_hook(&raw).unwrap().unwrap();
+        assert_eq!(event.event, CursorEvent::SessionStart);
+
+        let mut malformed = vec![0xef, 0xbb, 0xbf, 0xef, 0xbb, 0xbf];
+        malformed
+            .extend_from_slice(br#"{"hook_event_name":"sessionStart","session_id":"session-a"}"#);
+        assert_eq!(normalize_hook(&malformed), Err(CursorParseError::Malformed));
     }
 
     #[test]
