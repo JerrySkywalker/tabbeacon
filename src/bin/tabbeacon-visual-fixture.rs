@@ -429,16 +429,25 @@ fn emit_codex_public_fixture(
             // both this release and a later native turn without being set
             // again by the fixture. UIA checks only its final retention.
             hook("UserPromptSubmit", Some("turn-2"))?;
+            hook("SessionEnd", None)?;
         }
-        // The runner may inspect UIA only after the final public Hook in this
-        // fixture has returned. The marker itself was set before the switch.
+        // The runner may inspect UIA only after the public Hook sequence for
+        // this case has returned. The native case includes SessionEnd; the
+        // working-color case defers SessionEnd until after its color capture.
+        let phase = if name == CODEX_PUBLIC_NATIVE_FIXTURE {
+            b"post-native-session-end".as_slice()
+        } else {
+            b"post-working-hook".as_slice()
+        };
         OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(phase_signal)?
-            .write_all(b"post-public-hook")?;
+            .write_all(phase)?;
         thread::sleep(Duration::from_millis(hold_millis));
-        hook("SessionEnd", None)?;
+        if name == CODEX_PUBLIC_COLOR_FIXTURE {
+            hook("SessionEnd", None)?;
+        }
         Ok(())
     })();
     let owned = root.canonicalize()?;

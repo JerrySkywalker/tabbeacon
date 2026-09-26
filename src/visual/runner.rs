@@ -30,7 +30,9 @@ const LIVE_VISUAL_WORKER_BUDGET_MILLIS: u64 = 90_000;
 const LIVE_VISUAL_WORKER_STAGING_DIRECTORY: &str = ".tabbeacon-visual-worker";
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const WORKER_TERMINATION_BUDGET: Duration = Duration::from_secs(5);
-const WORKER_PROCESS_QUERY_BUDGET: Duration = Duration::from_secs(3);
+// The exact parent/identity CIM query took 6.6 seconds on this admitted host.
+// Preserve both identity checks while bounding each query within the 90s worker.
+const WORKER_PROCESS_QUERY_BUDGET: Duration = Duration::from_secs(12);
 const PUBLIC_HOOK_PHASE_BUDGET: Duration = Duration::from_secs(5);
 const WORKER_BUDGET_ENVIRONMENT_VARIABLE: &str = "TABBEACON_VISUAL_WORKER_BUDGET_MILLIS";
 const WORKER_NONCE_ENVIRONMENT_VARIABLE: &str = "TABBEACON_VISUAL_WORKER_NONCE";
@@ -973,7 +975,15 @@ fn observe_replay(
     };
     let body_result = (|| -> VisualResult<()> {
         if let Some(path) = phase_signal.as_ref()
-            && !wait_for_public_hook_phase(path, PUBLIC_HOOK_PHASE_BUDGET)?
+            && !wait_for_public_hook_phase(
+                path,
+                if replay.case.fixture_name == super::CODEX_PUBLIC_NATIVE_FIXTURE {
+                    b"post-native-session-end"
+                } else {
+                    b"post-working-hook"
+                },
+                PUBLIC_HOOK_PHASE_BUDGET,
+            )?
         {
             observation.record_uia_blocked(
                 &replay.case.fixture_name,
@@ -1081,11 +1091,15 @@ fn observe_replay(
     body_result
 }
 
-fn wait_for_public_hook_phase(path: &Path, budget: Duration) -> VisualResult<bool> {
+fn wait_for_public_hook_phase(
+    path: &Path,
+    expected: &[u8],
+    budget: Duration,
+) -> VisualResult<bool> {
     let deadline = Instant::now() + budget;
     loop {
         match fs::read(path) {
-            Ok(bytes) if bytes == b"post-public-hook" => return Ok(true),
+            Ok(bytes) if bytes == expected => return Ok(true),
             Ok(bytes) if bytes.is_empty() => {}
             Ok(_) => return Ok(false),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2017,16 +2031,24 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        assert!(!wait_for_public_hook_phase(&path, Duration::ZERO).unwrap());
+        assert!(
+            !wait_for_public_hook_phase(&path, b"post-native-session-end", Duration::ZERO).unwrap()
+        );
         let delayed = path.clone();
         let writer = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(30));
-            fs::write(delayed, b"post-public-hook").unwrap();
+            fs::write(delayed, b"post-native-session-end").unwrap();
         });
-        assert!(wait_for_public_hook_phase(&path, Duration::from_secs(1)).unwrap());
+        assert!(
+            wait_for_public_hook_phase(&path, b"post-native-session-end", Duration::from_secs(1))
+                .unwrap()
+        );
         writer.join().unwrap();
+        assert!(!wait_for_public_hook_phase(&path, b"post-working-hook", Duration::ZERO).unwrap());
         fs::write(&path, b"wrong-phase").unwrap();
-        assert!(!wait_for_public_hook_phase(&path, Duration::ZERO).unwrap());
+        assert!(
+            !wait_for_public_hook_phase(&path, b"post-native-session-end", Duration::ZERO).unwrap()
+        );
         fs::remove_file(path).unwrap();
     }
 
