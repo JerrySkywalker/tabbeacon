@@ -37,9 +37,17 @@ records confirmed writes; preserve-native and exact-session end release only
 confirmed owned color. Interrupted or partial writes remain unknown and grant
 no later reset authority. This path does not emit title or progress bytes.
 Terminal identity inheritance observed in the isolated real Cursor probe is
-distinct from product output and visibility proof. Real color-only display,
-native-title preservation, current-session exit cleanup, two concurrent Cursor
-sessions, and mixed-provider Visual/L4 acceptance remain unproven.
+distinct from product output and visibility proof. One isolated original-command
+product run at candidate `cfbd484` delivered admitted Hook state: the Owner saw
+working/completed color changes without visible native-title interference, and
+the later session left a matching end tombstone and unowned color lease. An
+earlier start-only route on another terminal remained without an end event.
+That run did not retain per-Hook flush results or completed-session generation
+counts. New candidate leases record only bounded prompt/stop attempts, confirmed
+color/release flush counts, and whether the end callback was seen; old leases
+explicitly have unknown history. These counters do not prove visible rendering.
+Two concurrent Cursor sessions and mixed-provider Visual/L4 acceptance remain
+unproven.
 The read-only integration list therefore shows Cursor as an unadmitted
 candidate. An exact project declaration can show `installed_unproven` while
 terminal presentation remains unavailable.
