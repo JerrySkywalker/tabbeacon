@@ -1549,12 +1549,19 @@ fn public_hook_cli_admits_interrupt_only_after_isolated_declaration_and_trust() 
     let codex_home = root.child("codex-home");
     let local_app_data = root.child("local-app-data");
     let fixture = compile_codex_probe_fixture(&root, "codex_interrupt_probe.rs");
+    fs::write(root.child("version-0157"), b"").expect("exact audited fixture version");
     let integration = CodexIntegration::new(
         &codex_home,
         local_app_data.join("TabBeacon/codex-integration"),
         &binary,
     )
     .with_codex_program(&fixture);
+    let capability = integration.doctor();
+    assert_eq!(capability.codex_version(), Some("0.157.1"));
+    assert_eq!(
+        capability.hook_profile(),
+        Some(CodexHookProfile::command_interrupt_v1())
+    );
     assert_eq!(
         integration.setup().expect("isolated hook setup"),
         SetupOutcome::InstalledTrustReviewRequired
@@ -1566,6 +1573,8 @@ fn public_hook_cli_admits_interrupt_only_after_isolated_declaration_and_trust() 
         runtime_bin.join(if cfg!(windows) { "codex.exe" } else { "codex" }),
     )
     .expect("isolated Codex probe becomes the runtime command");
+    fs::write(runtime_bin.join("version-0157"), b"")
+        .expect("public runtime uses the same exact audited version");
     let runtime_path = env::join_paths(
         std::iter::once(runtime_bin.clone())
             .chain(env::split_paths(&env::var_os("PATH").unwrap_or_default())),

@@ -3,7 +3,13 @@ use std::{env, fs, thread, time::Duration};
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
     match args.as_slice() {
-        [flag] if flag == "--version" => println!("codex-cli 0.156.1"),
+        [flag] if flag == "--version" => {
+            let newer = env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(|parent| parent.join("version-0157")))
+                .is_some_and(|marker| marker.exists());
+            println!("codex-cli {}", if newer { "0.157.1" } else { "0.156.1" });
+        }
         [features, list] if features == "features" && list == "list" => {
             let stalled = env::current_exe()
                 .ok()

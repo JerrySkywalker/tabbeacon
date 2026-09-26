@@ -1,9 +1,9 @@
 //! Local, bounded Codex capability discovery.
 //!
-//! Codex release numbers are useful diagnostics, but they are deliberately not
-//! an input to compatibility or mutation authority. The probe uses only local
-//! noninteractive commands and stores no configuration, Hook payload, prompt,
-//! or credential data.
+//! Codex release numbers do not grant baseline compatibility by ordering.
+//! Explicit main-turn Interrupt authority also needs an exact source-audited
+//! release contract. The probe uses only local noninteractive commands and
+//! stores no Hook payload, prompt, or credential data.
 
 use std::{
     fs,
@@ -22,6 +22,13 @@ use super::{CodexCompatibilityState, CodexHookProfile};
 const CACHE_SCHEMA: &str = "tabbeacon-codex-capability-v3";
 const CACHE_FILE: &str = "capability-v1.json";
 const RUNTIME_IDENTITY_DEADLINE: Duration = Duration::from_millis(250);
+
+fn interrupt_source_audited(version: Option<&str>) -> bool {
+    // These exact source tags share the Hook event list, command input
+    // schema, Interrupt dispatcher and trust/declaration contract. The
+    // 0.157.1 core Hook runtime diff changes tool-Hook cwd selection only.
+    matches!(version, Some("0.156.1" | "0.157.1"))
+}
 
 /// Runtime Hook admission uses the capability proven during owned setup,
 /// bound to the current executable bytes. Hook delivery and the separately
@@ -181,7 +188,7 @@ pub(crate) fn probe(
         && record.schema == CACHE_SCHEMA
         && record.executable_identity == identity
         && hook_feature == HookFeature::Enabled
-        && (version.as_deref() == Some("0.156.1"))
+        && interrupt_source_audited(version.as_deref())
             == matches!(
                 record.state,
                 CachedCapabilityState::FullInterrupt | CachedCapabilityState::DegradedInterrupt
@@ -198,10 +205,10 @@ pub(crate) fn probe(
         };
     }
 
-    // This exact installed release was audited against its matching upstream
-    // source tag. Other release numbers retain command-v1; ordering grants no
-    // event authority.
-    let command_profile = if version.as_deref() == Some("0.156.1") {
+    // These exact installed releases were audited against matching upstream
+    // source tags. Other release numbers retain command-v1; ordering grants
+    // no event authority.
+    let command_profile = if interrupt_source_audited(version.as_deref()) {
         CodexHookProfile::command_interrupt_v1()
     } else {
         CodexHookProfile::command_v1()

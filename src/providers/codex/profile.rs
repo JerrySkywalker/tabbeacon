@@ -350,7 +350,7 @@ const RUST_V0_147_0_EVENTS: [CodexHookEvent; 11] = [
     CodexHookEvent::Stop,
 ];
 
-// Exact source-audited 0.156.1 command surface. This is a capability profile,
+// Exact source-audited 0.156.1/0.157.1 command surface. This is a capability profile,
 // not a version-order rule: unknown releases retain the conservative profile
 // until their local protocol evidence is positively established.
 const RUST_V0_156_1_EVENTS: [CodexHookEvent; 12] = [
@@ -448,7 +448,7 @@ impl CodexHookProfile {
         COMMAND_HOOKS_V1_PROFILE
     }
 
-    /// Exact 0.156.1 command profile with an explicit main-turn Interrupt.
+    /// Exact 0.156.1/0.157.1 command profile with an explicit main-turn Interrupt.
     /// Hook trust and real delivery remain separate runtime requirements.
     #[must_use]
     pub const fn command_interrupt_v1() -> Self {
