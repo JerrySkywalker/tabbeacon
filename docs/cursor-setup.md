@@ -21,19 +21,25 @@ should be changed by unattended qualification.
 
 The hidden `__cursor-hook-v1` command reads bounded structured Hook JSON,
 normalizes only event, session, generation and supported outcome, and checks
-the exact project installation and inherited terminal context against a
-separately captured expected Windows Terminal digest. The latter is presently
-available only in the Owner's isolated qualification tab; without it, route
-admission is refused. Its stdout is
+the exact project installation. The product Hook uses TabBeacon's own
+`LOCALAPPDATA` state root; it does not require the temporary probe's
+`CURSOR_DATA_DIR` or `TABBEACON_CURSOR_EXPECTED_WT_SHA256` variables. On
+Windows it requires the Hook child and its operating-system parent to appear
+on the same console process list, then binds the inherited `WT_SESSION` hash
+to the persisted session route. Failure suppresses decoration. Its stdout is
 only the Hook protocol object `{}`. It never reads prompt, response, tool
-output or transcript text for state. Unknown, malformed and unbound events are
-decoration-only failures.
+output or transcript text for state.
 
-The current candidate persists generation-safe session routing but has no
-production color write. Terminal identity inheritance observed in the isolated
-real Cursor probe is distinct from a verified safe output channel. Real
-color-only display, native-title preservation, release on exit, two concurrent
-Cursor sessions, and mixed-provider Visual/L4 acceptance remain unproven.
+The current candidate can write strict color-only OSC through the owned
+`CONOUT$` handle after the route and configuration checks. Its cross-process
+lock orders the final write with generation admission. A per-terminal lease
+records confirmed writes; preserve-native and exact-session end release only
+confirmed owned color. Interrupted or partial writes remain unknown and grant
+no later reset authority. This path does not emit title or progress bytes.
+Terminal identity inheritance observed in the isolated real Cursor probe is
+distinct from product output and visibility proof. Real color-only display,
+native-title preservation, current-session exit cleanup, two concurrent Cursor
+sessions, and mixed-provider Visual/L4 acceptance remain unproven.
 The read-only integration list therefore shows Cursor as an unadmitted
 candidate. An exact project declaration can show `installed_unproven` while
 terminal presentation remains unavailable.

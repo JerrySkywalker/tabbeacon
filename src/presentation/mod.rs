@@ -886,6 +886,15 @@ pub(crate) fn owned_channel_release_bytes(color: bool, progress: bool) -> Vec<u8
     bytes
 }
 
+/// Encodes exactly one semantic frame-color operation for a strict color-only
+/// provider. It cannot emit a title or progress sequence.
+#[must_use]
+pub fn strict_color_only_bytes(color: TabColor, theme: PresentationTheme) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    append_frame_color(&mut bytes, color, theme);
+    bytes
+}
+
 impl TerminalVisualBackend for TitleMarkBackend {
     fn visual_capabilities(&self) -> TerminalVisualCapabilities {
         TerminalVisualCapabilities::new(

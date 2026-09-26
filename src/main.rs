@@ -538,10 +538,12 @@ fn cursor_presentation_admission() -> (PresentationCapabilities, ApplicationStat
         return (PresentationCapabilities::NONE, ApplicationStatus::Unproven);
     };
     match integration.check() {
-        // An installed Hook proves ingress, not safe color presentation.
-        Ok(CursorHookState::Installed) => {
-            (PresentationCapabilities::NONE, ApplicationStatus::Unproven)
-        }
+        // The isolated candidate has a strict color-only output path. A
+        // declaration does not prove live terminal binding or visibility.
+        Ok(CursorHookState::Installed) => (
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        ),
         Ok(CursorHookState::NotInstalled) => (
             PresentationCapabilities::NONE,
             ApplicationStatus::NotInstalled,

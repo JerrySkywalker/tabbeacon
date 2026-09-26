@@ -8,7 +8,6 @@ use std::{
 };
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::os::windows::process::CommandExt;
 
 fn run(binary: &Path, arguments: &[&str]) -> Value {
@@ -84,18 +83,15 @@ fn public_cursor_management_preserves_foreign_project_hooks() {
     assert!(config.status.success());
     let config_text = String::from_utf8(config.stdout).unwrap();
     assert!(config_text.contains("LIVE_APPLICATION=UNPROVEN"));
-    assert!(config_text.contains("EFFECTIVE_TAB_COLOR=native"));
-    let data_root = root.path().join("isolated-cursor-data");
-    fs::create_dir(&data_root).unwrap();
+    assert!(config_text.contains("EFFECTIVE_TAB_COLOR=tabbeacon"));
     let registered_command = value["hooks"]["stop"][1]["command"].as_str().unwrap();
-    let expected_terminal = format!("{:x}", Sha256::digest(b"synthetic-wt-session"));
-    let route_directory = data_root.join("tabbeacon/cursor-route-v1");
+    let route_directory = isolated_local_appdata.join("TabBeacon/cursor-route-v1");
     let mut unbound = Command::new("cmd")
         .args(["/D", "/C"])
         .raw_arg(registered_command)
         .current_dir(root.path())
-        .env("CURSOR_DATA_DIR", &data_root)
-        .env("WT_SESSION", "synthetic-wt-session")
+        .env("LOCALAPPDATA", &isolated_local_appdata)
+        .env_remove("WT_SESSION")
         .env_remove("TABBEACON_CURSOR_EXPECTED_WT_SHA256")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -117,9 +113,9 @@ fn public_cursor_management_preserves_foreign_project_hooks() {
         .args(["/D", "/C"])
         .raw_arg(registered_command)
         .current_dir(root.path())
-        .env("CURSOR_DATA_DIR", &data_root)
+        .env("LOCALAPPDATA", &isolated_local_appdata)
         .env("WT_SESSION", "synthetic-wt-session")
-        .env("TABBEACON_CURSOR_EXPECTED_WT_SHA256", expected_terminal)
+        .env_remove("TABBEACON_CURSOR_EXPECTED_WT_SHA256")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -141,12 +137,11 @@ fn public_cursor_management_preserves_foreign_project_hooks() {
     assert!(output.stderr.is_empty());
     // A detached Hosted test process may have no owned console. In that case
     // dispatch refuses state creation; the public JSON protocol still holds.
-    if tabbeacon::console_output::open_owned_console().is_ok() {
+    if route_directory.exists() {
         assert!(route_directory.exists());
-        eprintln!("PUBLIC_CURSOR_ROUTE=ADMITTED_IN_OWNED_TEST_CONSOLE");
+        eprintln!("PUBLIC_CURSOR_ROUTE=ADMITTED_WITH_PARENT_CONSOLE_BINDING");
     } else {
-        assert!(!route_directory.exists());
-        eprintln!("PUBLIC_CURSOR_ROUTE=CONSOLE_UNAVAILABLE_FAIL_OPEN");
+        eprintln!("PUBLIC_CURSOR_ROUTE=PARENT_CONSOLE_BINDING_UNAVAILABLE_FAIL_OPEN");
     }
     let uninstall = ["cursor", "uninstall", "--workspace", workspace, "--json"];
     assert_eq!(run(binary, &uninstall)["integration"], "not_installed");

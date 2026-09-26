@@ -5,6 +5,8 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
 };
 
 use atomic_write_file::AtomicWriteFile;
@@ -24,6 +26,7 @@ const CURSOR_ROUTE_DIRECTORY: &str = "cursor-route-v1";
 const CURSOR_ROUTE_LOCK: &str = "route.lock";
 const CURSOR_ENDED_SESSIONS: &str = "ended-sessions.json";
 const MAX_CURSOR_SESSION_FILES: usize = 1_024;
+const CURSOR_ROUTE_LOCK_BUDGET: Duration = Duration::from_millis(250);
 
 /// The small lifecycle subset needed for presentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,11 +396,36 @@ impl CursorRouteStore {
         observed_terminal_binding_sha256: &str,
         console_openable: bool,
     ) -> io::Result<bool> {
+        self.admit_with(
+            event,
+            expected_terminal_binding_sha256,
+            observed_terminal_binding_sha256,
+            console_openable,
+            || Ok(false),
+        )
+        .map(|(admitted, _)| admitted)
+    }
+
+    /// Admits an event and applies its final presentation action before the
+    /// cross-process route lock is released. A delayed Hook cannot write after
+    /// a newer Hook has advanced the same route.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on route, lock, checkpoint, or presentation I/O errors.
+    pub fn admit_with(
+        &self,
+        event: &CursorLifecycle,
+        expected_terminal_binding_sha256: &str,
+        observed_terminal_binding_sha256: &str,
+        console_openable: bool,
+        apply: impl FnOnce() -> io::Result<bool>,
+    ) -> io::Result<(bool, bool)> {
         if !is_sha256(&event.session_sha256)
             || !is_sha256(expected_terminal_binding_sha256)
             || !is_sha256(observed_terminal_binding_sha256)
         {
-            return Ok(false);
+            return Ok((false, false));
         }
         for ancestor in self.directory.ancestors() {
             reject_route_symlink(ancestor)?;
@@ -411,14 +439,38 @@ impl CursorRouteStore {
             .read(true)
             .write(true)
             .open(lock_path)?;
-        lock.lock()?;
-        let result = self.admit_locked(
-            event,
-            expected_terminal_binding_sha256,
-            observed_terminal_binding_sha256,
-            console_openable,
-        );
-        File::unlock(&lock)?;
+        let deadline = Instant::now() + CURSOR_ROUTE_LOCK_BUDGET;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(fs::TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "Cursor route lock busy",
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let result = self
+            .admit_locked(
+                event,
+                expected_terminal_binding_sha256,
+                observed_terminal_binding_sha256,
+                console_openable,
+            )
+            .and_then(|admitted| {
+                if admitted {
+                    return apply().map(|written| (true, written));
+                }
+                Ok((false, false))
+            });
+        // The handle drop releases the lock even if an explicit unlock reports
+        // an error. Preserve the actual output disposition from the callback.
+        let _ = File::unlock(&lock);
         result
     }
 
@@ -639,6 +691,68 @@ fn bounded_identity(object: &Map<String, Value>, name: &str, domain: &[u8]) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex, mpsc};
+
+    #[test]
+    fn route_lock_orders_a_delayed_output_before_newer_generation_output() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CursorRouteStore::new(root.path());
+        let terminal = "a".repeat(64);
+        let event = |name: &str, generation: Option<&str>| {
+            let mut input =
+                serde_json::json!({"hook_event_name":name,"session_id":"barrier-session"});
+            if let Some(generation) = generation {
+                input["generation_id"] = generation.into();
+            }
+            normalize_hook(input.to_string().as_bytes())
+                .unwrap()
+                .unwrap()
+        };
+        assert!(
+            store
+                .admit(&event("sessionStart", None), &terminal, &terminal, true)
+                .unwrap()
+        );
+        let first = event("beforeSubmitPrompt", Some("g1"));
+        let second = event("beforeSubmitPrompt", Some("g2"));
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let store_a = store.clone();
+        let terminal_a = terminal.clone();
+        let writes_a = Arc::clone(&writes);
+        let a = thread::spawn(move || {
+            store_a
+                .admit_with(&first, &terminal_a, &terminal_a, true, || {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    writes_a.lock().unwrap().push("g1");
+                    Ok(true)
+                })
+                .unwrap()
+        });
+        entered_rx.recv().unwrap();
+        let store_b = store;
+        let terminal_b = terminal;
+        let writes_b = Arc::clone(&writes);
+        let (attempt_tx, attempt_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let b = thread::spawn(move || {
+            attempt_tx.send(()).unwrap();
+            let result = store_b.admit_with(&second, &terminal_b, &terminal_b, true, || {
+                writes_b.lock().unwrap().push("g2");
+                Ok(true)
+            });
+            done_tx.send(result).unwrap();
+        });
+        attempt_rx.recv().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        release_tx.send(()).unwrap();
+        assert_eq!(a.join().unwrap(), (true, true));
+        assert_eq!(done_rx.recv().unwrap().unwrap(), (true, true));
+        b.join().unwrap();
+        assert_eq!(*writes.lock().unwrap(), ["g1", "g2"]);
+    }
 
     #[test]
     fn stop_status_is_typed_and_private_content_is_discarded() {
