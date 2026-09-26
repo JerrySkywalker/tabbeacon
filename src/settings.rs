@@ -14,7 +14,13 @@ use std::{
 };
 
 use atomic_write_file::AtomicWriteFile;
+#[cfg(windows)]
+use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use toml_edit::{DocumentMut, Item, Table, value};
+#[cfg(windows)]
+use windows::Win32::Storage::FileSystem::{
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ, FILE_SHARE_WRITE,
+};
 
 use crate::presentation_policy::{
     ApplicationStatus, CliTarget, PresentationCapabilities, PresentationOverride,
@@ -1054,20 +1060,15 @@ impl PresentationSettingsStore {
             .parent()
             .ok_or(SettingsError::StateRootUnavailable)?;
         fs::create_dir_all(parent)?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(parent.join(LOCK_FILE))?;
-        try_lock_with_budget(&lock, SETTINGS_OPERATION_LOCK_BUDGET)?;
+        let lock = open_settings_lock(parent)?;
+        try_lock_with_budget(&lock.file, SETTINGS_OPERATION_LOCK_BUDGET)?;
         let result = operation();
-        File::unlock(&lock)?;
+        File::unlock(&lock.file)?;
         result
     }
 
     /// Holds the existing settings lock across one Hook's route and output
-    /// decision. TabBeacon's presentation-document writers use this lock, so an older
+    /// decision. `TabBeacon`'s presentation-document writers use this lock, so an older
     /// Hook cannot finish writing after a newer global/import configuration
     /// commit. A busy writer makes the Hook skip decoration within its budget.
     pub(crate) fn with_runtime_lock_bounded<T>(
@@ -1080,13 +1081,8 @@ impl PresentationSettingsStore {
             .parent()
             .ok_or_else(|| io::Error::other("settings state root unavailable"))?;
         fs::create_dir_all(parent)?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(parent.join(LOCK_FILE))?;
-        try_lock_with_budget(&lock, budget)?;
+        let lock = open_settings_lock(parent)?;
+        try_lock_with_budget(&lock.file, budget)?;
         let result = operation();
         // The Hook reports the output result itself. Closing this owned lock
         // releases it without turning a successful flush into an apparent
@@ -1173,6 +1169,81 @@ fn try_lock_with_budget(lock: &File, budget: Duration) -> io::Result<()> {
             }
             Err(error) => return Err(error.into()),
         }
+    }
+}
+
+struct SettingsLockHandle {
+    file: File,
+    // Keeping the directory open without share-delete prevents replacing the
+    // lock's parent while this process holds the file lock on Windows.
+    #[cfg(windows)]
+    _parent: File,
+}
+
+fn open_settings_lock(parent: &Path) -> io::Result<SettingsLockHandle> {
+    for ancestor in parent.ancestors() {
+        reject_settings_reparse(ancestor)?;
+    }
+    #[cfg(windows)]
+    let parent_handle = {
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0);
+        options.custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0);
+        let handle = options.open(parent)?;
+        if metadata_is_reparse(&handle.metadata()?) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "settings lock parent is a reparse point",
+            ));
+        }
+        handle
+    };
+    let path = parent.join(LOCK_FILE);
+    reject_settings_reparse(&path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).truncate(false).read(true).write(true);
+    #[cfg(windows)]
+    {
+        options.share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0);
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT.0);
+    }
+    let file = options.open(&path)?;
+    if metadata_is_reparse(&file.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "settings lock file is a reparse point",
+        ));
+    }
+    reject_settings_reparse(&path)?;
+    Ok(SettingsLockHandle {
+        file,
+        #[cfg(windows)]
+        _parent: parent_handle,
+    })
+}
+
+fn reject_settings_reparse(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata_is_reparse(&metadata) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "settings lock path is a reparse point",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn metadata_is_reparse(metadata: &fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        metadata.file_type().is_symlink() || metadata.file_attributes() & 0x0400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        metadata.file_type().is_symlink()
     }
 }
 
@@ -1390,6 +1461,20 @@ mod tests {
         fs::File::unlock(&lock).unwrap();
         store.save(PresentationSettings::default()).unwrap();
         assert!(path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn held_settings_lock_cannot_be_replaced_with_a_second_file_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let lock_path = root.path().join("config.lock");
+        let guard = super::open_settings_lock(root.path()).unwrap();
+        super::try_lock_with_budget(&guard.file, Duration::from_millis(20)).unwrap();
+        assert!(fs::rename(&lock_path, root.path().join("moved.lock")).is_err());
+        assert!(fs::rename(root.path(), root.path().with_extension("moved")).is_err());
+        fs::File::unlock(&guard.file).unwrap();
+        drop(guard);
+        assert!(lock_path.exists());
     }
 
     #[test]

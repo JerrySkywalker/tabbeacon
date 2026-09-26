@@ -178,7 +178,9 @@ fn emit_cursor_color_fixture(name: &str, run_id: &str, hold_millis: u64) -> Visu
             )?;
             if matches!(
                 outcome,
-                CursorDispatchOutcome::Ignored | CursorDispatchOutcome::OutputFailed
+                CursorDispatchOutcome::Ignored
+                    | CursorDispatchOutcome::OutputFailed
+                    | CursorDispatchOutcome::OutputFlushedStateUnconfirmed
             ) {
                 return Err(VisualError::Platform(
                     "owned Cursor color fixture dispatch refused".to_owned(),

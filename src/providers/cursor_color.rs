@@ -165,6 +165,34 @@ pub fn apply_admitted(
     resolved: &ResolvedPresentation,
     sink: &mut impl Write,
 ) -> io::Result<bool> {
+    apply_admitted_with(state_root, terminal, event, resolved, sink, &mut save)
+}
+
+#[derive(Debug)]
+pub(crate) struct FlushedStateUnconfirmed;
+
+impl std::fmt::Display for FlushedStateUnconfirmed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Cursor output flushed but ownership checkpoint is unconfirmed")
+    }
+}
+
+impl std::error::Error for FlushedStateUnconfirmed {}
+
+pub(crate) fn flushed_before_error(error: &io::Error) -> bool {
+    error
+        .get_ref()
+        .is_some_and(|source| source.downcast_ref::<FlushedStateUnconfirmed>().is_some())
+}
+
+fn apply_admitted_with(
+    state_root: &Path,
+    terminal: &str,
+    event: &CursorLifecycle,
+    resolved: &ResolvedPresentation,
+    sink: &mut impl Write,
+    persist: &mut impl FnMut(&Path, &ColorLease) -> io::Result<()>,
+) -> io::Result<bool> {
     let path = lease_path(state_root, terminal);
     let mut lease =
         load(&path, terminal)?.unwrap_or_else(|| ColorLease::new(terminal, &event.session_sha256));
@@ -175,12 +203,18 @@ pub fn apply_admitted(
             // Revoke release authority before touching the terminal. An old
             // sessionEnd can never reset a color acquired by this new session.
             lease.state = LeaseState::Unowned;
-            save(&path, &lease)?;
+            persist(&path, &lease)?;
             let bytes = owned_channel_release_bytes(true, false);
             sink.write_all(&bytes)?;
             sink.flush()?;
         }
-        save(&path, &ColorLease::new(terminal, &event.session_sha256))?;
+        if let Err(error) = persist(&path, &ColorLease::new(terminal, &event.session_sha256)) {
+            return Err(if old_owned {
+                io::Error::other(FlushedStateUnconfirmed)
+            } else {
+                error
+            });
+        }
         return Ok(old_owned);
     }
     if lease.session_sha256 != event.session_sha256 {
@@ -193,7 +227,7 @@ pub fn apply_admitted(
         lease.state = LeaseState::Unowned;
         lease.generation_sha256 = None;
         lease.color = None;
-        save(&path, &lease)?;
+        persist(&path, &lease)?;
         let bytes = owned_channel_release_bytes(true, false);
         sink.write_all(&bytes)?;
         sink.flush()?;
@@ -211,12 +245,12 @@ pub fn apply_admitted(
     lease.state = LeaseState::Unknown;
     lease.generation_sha256.clone_from(&event.generation_sha256);
     lease.color = Some(name.to_owned());
-    save(&path, &lease)?;
+    persist(&path, &lease)?;
     let bytes = strict_color_only_bytes(color, resolved.effective.theme());
     sink.write_all(&bytes)?;
     sink.flush()?;
     lease.state = LeaseState::Owned;
-    save(&path, &lease)?;
+    persist(&path, &lease).map_err(|_| io::Error::other(FlushedStateUnconfirmed))?;
     Ok(true)
 }
 
@@ -295,6 +329,60 @@ mod tests {
         assert!(
             bytes.is_empty(),
             "new native session does not reset unknown output"
+        );
+    }
+
+    #[test]
+    fn flushed_color_with_failed_ownership_checkpoint_remains_unknown() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("cursor-route-v1")).unwrap();
+        let terminal = "c".repeat(64);
+        let resolved = resolve_presentation(
+            PresentationSettings::default(),
+            PresentationOverride::default().with_mode(PresentationMode::ColorOnly),
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        );
+        let prompt = normalize_hook(
+            br#"{"hook_event_name":"beforeSubmitPrompt","session_id":"one","generation_id":"g1"}"#,
+        )
+        .unwrap()
+        .unwrap();
+        let end = normalize_hook(br#"{"hook_event_name":"sessionEnd","session_id":"one"}"#)
+            .unwrap()
+            .unwrap();
+        let mut writes = 0;
+        let mut output = Vec::new();
+        let error = apply_admitted_with(
+            root.path(),
+            &terminal,
+            &prompt,
+            &resolved,
+            &mut output,
+            &mut |path, lease| {
+                writes += 1;
+                if writes == 2 {
+                    Err(io::Error::other("injected checkpoint failure"))
+                } else {
+                    save(path, lease)
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(flushed_before_error(&error));
+        assert!(output.starts_with(b"\x1b]4;264;rgb:"));
+        assert_eq!(
+            load(&lease_path(root.path(), &terminal), &terminal)
+                .unwrap()
+                .unwrap()
+                .state,
+            LeaseState::Unknown
+        );
+        output.clear();
+        assert!(!apply_admitted(root.path(), &terminal, &end, &resolved, &mut output).unwrap());
+        assert!(
+            output.is_empty(),
+            "uncertain ownership cannot grant reset authority"
         );
     }
 

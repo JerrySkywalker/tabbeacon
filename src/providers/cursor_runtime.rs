@@ -28,6 +28,9 @@ pub enum CursorDispatchOutcome {
     Ignored,
     RouteAdmitted,
     OutputFlushed,
+    /// Terminal flush completed, but a later lease or route checkpoint failed.
+    /// The bytes may be visible; this event grants no new cleanup authority.
+    OutputFlushedStateUnconfirmed,
     OutputFailed,
 }
 
@@ -175,21 +178,32 @@ fn dispatch_with(
     let terminal_sha256 = format!("{:x}", hasher.finalize());
     let store = CursorRouteStore::new(state_root);
     let output_failed = std::cell::Cell::new(false);
+    let output_flushed = std::cell::Cell::new(false);
     let result = store.admit_with(
         &event,
         expected_terminal_sha256,
         &terminal_sha256,
         console_openable,
         || match apply(&event, &terminal_sha256) {
-            Ok(written) => Ok(written),
+            Ok(written) => {
+                output_flushed.set(written);
+                Ok(written)
+            }
             Err(error) => {
-                output_failed.set(true);
+                if cursor_color::flushed_before_error(&error) {
+                    output_flushed.set(true);
+                } else {
+                    output_failed.set(true);
+                }
                 Err(error)
             }
         },
     );
     let (admitted, written) = match result {
         Ok(result) => result,
+        Err(_) if output_flushed.get() => {
+            return Ok(CursorDispatchOutcome::OutputFlushedStateUnconfirmed);
+        }
         Err(_) if output_failed.get() => return Ok(CursorDispatchOutcome::OutputFailed),
         Err(error) => return Err(error),
     };
@@ -306,6 +320,50 @@ mod tests {
         PresentationMode, PresentationOverride, resolve_presentation,
     };
     use crate::settings::{ConditionalSaveOutcome, PresentationSettings, TabColorMode};
+
+    #[test]
+    fn postflush_checkpoint_failure_is_not_reported_as_output_failure() {
+        let workspace = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let executable = workspace.path().join("tabbeacon.exe");
+        fs::write(&executable, b"synthetic binary").unwrap();
+        CursorHookIntegration::new(workspace.path(), &executable)
+            .unwrap()
+            .install()
+            .unwrap();
+        let terminal = "owned-test-terminal";
+        let digest = format!("{:x}", Sha256::digest(terminal.as_bytes()));
+        let start = br#"{"hook_event_name":"sessionStart","session_id":"owned"}"#;
+        let prompt = br#"{"hook_event_name":"beforeSubmitPrompt","session_id":"owned","generation_id":"g1"}"#;
+        assert_eq!(
+            dispatch_with(
+                start,
+                workspace.path(),
+                &executable,
+                state.path(),
+                &digest,
+                terminal,
+                true,
+                |_, _| Ok(false),
+            )
+            .unwrap(),
+            CursorDispatchOutcome::RouteAdmitted
+        );
+        assert_eq!(
+            dispatch_with(
+                prompt,
+                workspace.path(),
+                &executable,
+                state.path(),
+                &digest,
+                terminal,
+                true,
+                |_, _| Err(io::Error::other(cursor_color::FlushedStateUnconfirmed)),
+            )
+            .unwrap(),
+            CursorDispatchOutcome::OutputFlushedStateUnconfirmed
+        );
+    }
 
     #[test]
     #[allow(clippy::too_many_lines)] // One barrier proves settings commit order across an in-flight Hook write.
