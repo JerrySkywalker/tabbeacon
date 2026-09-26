@@ -2,7 +2,7 @@
 
 use std::{
     env, fs,
-    io::Write,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{self, Child, Command, Stdio},
     thread,
@@ -497,19 +497,54 @@ fn terminate_direct_worker(worker: &mut Child) -> VisualResult<bool> {
 fn bounded_powershell_output(
     script: &str,
     budget: Duration,
+    output_path: &Path,
 ) -> VisualResult<Option<std::process::Output>> {
+    // A finished PowerShell process can leave an inherited stdout pipe open in
+    // a descendant. `wait_with_output` would then hang beyond this budget.
+    // Redirect only this content-minimal identity result to an exact-owned
+    // file, read it through the original handle, and remove that one file.
+    let mut output_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(output_path)
+        .map_err(VisualError::Io)?;
     let mut command = Command::new("powershell.exe");
     command
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .stdout(Stdio::piped())
+        .stdout(Stdio::from(
+            output_file.try_clone().map_err(VisualError::Io)?,
+        ))
         .stderr(Stdio::null());
-    let mut child = command.spawn().map_err(VisualError::Io)?;
-    if wait_for_child_exit(&mut child, budget)?.is_none() {
-        let _ = child.kill();
-        let _ = wait_for_child_exit(&mut child, WORKER_TERMINATION_BUDGET);
-        return Ok(None);
-    }
-    child.wait_with_output().map(Some).map_err(VisualError::Io)
+    let result = (|| -> VisualResult<Option<std::process::Output>> {
+        let mut child = command.spawn().map_err(VisualError::Io)?;
+        let Some(status) = wait_for_child_exit(&mut child, budget)? else {
+            let _ = child.kill();
+            let _ = wait_for_child_exit(&mut child, WORKER_TERMINATION_BUDGET);
+            return Ok(None);
+        };
+        output_file
+            .seek(SeekFrom::Start(0))
+            .map_err(VisualError::Io)?;
+        let mut stdout = Vec::new();
+        (&mut output_file)
+            .take(4_097)
+            .read_to_end(&mut stdout)
+            .map_err(VisualError::Io)?;
+        if stdout.len() > 4_096 {
+            return Err(VisualError::Platform(
+                "visual worker identity query output exceeded its bound".to_owned(),
+            ));
+        }
+        Ok(Some(std::process::Output {
+            status,
+            stdout,
+            stderr: Vec::new(),
+        }))
+    })();
+    drop(output_file);
+    fs::remove_file(output_path).map_err(VisualError::Io)?;
+    result
 }
 
 fn create_worker_authorization(
@@ -578,9 +613,13 @@ pub fn authorize_live_worker(
         ));
     }
     let authorization = consume_worker_authorization(authorization_path, request, nonce)?;
-    let parent_process_id = worker_parent_process_id()?;
+    let parent_process_id = worker_parent_process_id(&request.evidence_root, &request.run_id)?;
     if authorization.supervisor_process_id != parent_process_id
-        || !parent_is_fixture_executable(parent_process_id)?
+        || !parent_is_fixture_executable(
+            parent_process_id,
+            &request.evidence_root,
+            &request.run_id,
+        )?
     {
         return Err(VisualError::Platform(
             "visual worker was not launched by the active fixture supervisor".to_owned(),
@@ -613,15 +652,19 @@ fn consume_worker_authorization(
     result
 }
 
-fn worker_parent_process_id() -> VisualResult<u32> {
+fn worker_parent_process_id(worker_root: &Path, run_id: &str) -> VisualResult<u32> {
     let process_id = process::id().to_string();
     let script = format!(
         "(Get-CimInstance Win32_Process -Filter 'ProcessId = {process_id}').ParentProcessId"
     );
-    let output =
-        bounded_powershell_output(&script, WORKER_PROCESS_QUERY_BUDGET)?.ok_or_else(|| {
-            VisualError::Platform("visual worker parent process query timed out".to_owned())
-        })?;
+    let output = bounded_powershell_output(
+        &script,
+        WORKER_PROCESS_QUERY_BUDGET,
+        &worker_root.join(format!("{run_id}.parent-query.stdout")),
+    )?
+    .ok_or_else(|| {
+        VisualError::Platform("visual worker parent process query timed out".to_owned())
+    })?;
     if !output.status.success() {
         return Err(VisualError::Platform(
             "visual worker parent process query did not complete".to_owned(),
@@ -635,14 +678,22 @@ fn worker_parent_process_id() -> VisualResult<u32> {
         })
 }
 
-fn parent_is_fixture_executable(parent_process_id: u32) -> VisualResult<bool> {
+fn parent_is_fixture_executable(
+    parent_process_id: u32,
+    worker_root: &Path,
+    run_id: &str,
+) -> VisualResult<bool> {
     let script = format!(
         "(Get-CimInstance Win32_Process -Filter 'ProcessId = {parent_process_id}').ExecutablePath"
     );
-    let output =
-        bounded_powershell_output(&script, WORKER_PROCESS_QUERY_BUDGET)?.ok_or_else(|| {
-            VisualError::Platform("visual worker parent identity query timed out".to_owned())
-        })?;
+    let output = bounded_powershell_output(
+        &script,
+        WORKER_PROCESS_QUERY_BUDGET,
+        &worker_root.join(format!("{run_id}.parent-image-query.stdout")),
+    )?
+    .ok_or_else(|| {
+        VisualError::Platform("visual worker parent identity query timed out".to_owned())
+    })?;
     if !output.status.success() {
         return Err(VisualError::Platform(
             "visual worker parent identity query did not complete".to_owned(),
@@ -1995,10 +2046,11 @@ mod tests {
 
     use super::{
         BoundedWorkerOutput, LiveVisualRunRequest, RgbaFrame, Roi, ScreenRect, UiaDump,
-        authorize_live_worker, clear_worker_authorization, consume_worker_authorization,
-        create_worker_authorization, empty_uia_dump, evidence_integrity_matches, progress_roi,
-        read_worker_stage, relative_roi, selected_replays, target_has_capturable_geometry,
-        wait_for_bounded_worker, wait_for_public_hook_phase, write_worker_stage,
+        authorize_live_worker, bounded_powershell_output, clear_worker_authorization,
+        consume_worker_authorization, create_worker_authorization, empty_uia_dump,
+        evidence_integrity_matches, progress_roi, read_worker_stage, relative_roi,
+        selected_replays, target_has_capturable_geometry, wait_for_bounded_worker,
+        wait_for_public_hook_phase, write_worker_stage,
     };
 
     #[test]
@@ -2050,6 +2102,36 @@ mod tests {
             !wait_for_public_hook_phase(&path, b"post-native-session-end", Duration::ZERO).unwrap()
         );
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn bounded_identity_query_reads_owned_file_and_removes_it() {
+        let path = std::env::temp_dir().join(format!(
+            "tabbeacon-visual-query-{}-{}.stdout",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let result = bounded_powershell_output("Write-Output 7", Duration::from_secs(30), &path)
+            .unwrap()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "7");
+        assert!(!path.exists());
+
+        let timed_path = path.with_extension("timed.stdout");
+        assert!(
+            bounded_powershell_output(
+                "Start-Sleep -Seconds 30",
+                Duration::from_millis(20),
+                &timed_path,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(!timed_path.exists());
     }
 
     #[test]
