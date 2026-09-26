@@ -1059,7 +1059,6 @@ impl PresentationSettingsStore {
             .path
             .parent()
             .ok_or(SettingsError::StateRootUnavailable)?;
-        fs::create_dir_all(parent)?;
         let lock = open_settings_lock(parent)?;
         try_lock_with_budget(&lock.file, SETTINGS_OPERATION_LOCK_BUDGET)?;
         let result = operation();
@@ -1080,7 +1079,6 @@ impl PresentationSettingsStore {
             .path
             .parent()
             .ok_or_else(|| io::Error::other("settings state root unavailable"))?;
-        fs::create_dir_all(parent)?;
         let lock = open_settings_lock(parent)?;
         try_lock_with_budget(&lock.file, budget)?;
         let result = operation();
@@ -1174,32 +1172,55 @@ fn try_lock_with_budget(lock: &File, budget: Duration) -> io::Result<()> {
 
 struct SettingsLockHandle {
     file: File,
-    // Keeping the directory open without share-delete prevents replacing the
-    // lock's parent while this process holds the file lock on Windows.
+    // Keep every ancestor open without share-delete until the lock is released.
+    // This also anchors directory creation below each verified parent.
     #[cfg(windows)]
-    _parent: File,
+    _ancestors: Vec<File>,
 }
 
 fn open_settings_lock(parent: &Path) -> io::Result<SettingsLockHandle> {
-    for ancestor in parent.ancestors() {
-        reject_settings_reparse(ancestor)?;
-    }
     #[cfg(windows)]
-    let parent_handle = {
-        let mut options = OpenOptions::new();
-        options
-            .read(true)
-            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0);
-        options.custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0);
-        let handle = options.open(parent)?;
-        if metadata_is_reparse(&handle.metadata()?) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "settings lock parent is a reparse point",
-            ));
+    let ancestors = {
+        let mut handles = Vec::new();
+        for directory in parent.ancestors().collect::<Vec<_>>().into_iter().rev() {
+            match fs::symlink_metadata(directory) {
+                Ok(metadata) if metadata_is_reparse(&metadata) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "settings directory is a reparse point",
+                    ));
+                }
+                Ok(metadata) if !metadata.is_dir() => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotADirectory,
+                        "settings ancestor is not a directory",
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    if let Err(error) = fs::create_dir(directory)
+                        && error.kind() != io::ErrorKind::AlreadyExists
+                    {
+                        return Err(error);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+            let handle = open_settings_directory(directory)?;
+            handles.push(handle);
         }
-        handle
+        handles
     };
+    #[cfg(not(windows))]
+    for directory in parent.ancestors().collect::<Vec<_>>().into_iter().rev() {
+        reject_settings_reparse(directory)?;
+        if let Err(error) = fs::create_dir(directory)
+            && error.kind() != io::ErrorKind::AlreadyExists
+        {
+            return Err(error);
+        }
+        reject_settings_reparse(directory)?;
+    }
     let path = parent.join(LOCK_FILE);
     reject_settings_reparse(&path)?;
     let mut options = OpenOptions::new();
@@ -1220,8 +1241,25 @@ fn open_settings_lock(parent: &Path) -> io::Result<SettingsLockHandle> {
     Ok(SettingsLockHandle {
         file,
         #[cfg(windows)]
-        _parent: parent_handle,
+        _ancestors: ancestors,
     })
+}
+
+#[cfg(windows)]
+fn open_settings_directory(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0);
+    options.custom_flags((FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT).0);
+    let handle = options.open(path)?;
+    if metadata_is_reparse(&handle.metadata()?) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "settings directory is a reparse point",
+        ));
+    }
+    Ok(handle)
 }
 
 fn reject_settings_reparse(path: &Path) -> io::Result<()> {
@@ -1475,6 +1513,30 @@ mod tests {
         fs::File::unlock(&guard.file).unwrap();
         drop(guard);
         assert!(lock_path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn settings_lock_refuses_junction_before_creating_missing_child() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        let junction = root.path().join("junction");
+        fs::create_dir(&target).unwrap();
+        let created = std::process::Command::new("cmd.exe")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(created.status.success(), "test junction creation failed");
+        let store = PresentationSettingsStore::new(junction.join("missing").join("config.toml"));
+        assert!(matches!(
+            store.save(PresentationSettings::default()),
+            Err(super::SettingsError::Io(ref error))
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+        assert!(!target.join("missing").exists());
+        fs::remove_dir(&junction).unwrap();
     }
 
     #[test]
