@@ -126,10 +126,17 @@ fn reject_link(path: &Path) -> io::Result<()> {
 }
 
 fn strict_color_enabled(resolved: &ResolvedPresentation) -> bool {
-    resolved.effective.strict_channel_policy()
-        && resolved.effective.title() == TitleMode::Native
-        && resolved.effective.tab_color() == TabColorMode::TabBeacon
-        && resolved.effective.activity() == ActivityMode::Off
+    // The shared resolver can produce the same safe channel combination from
+    // global defaults or a partial override. Output must agree with its
+    // effective color, regardless of where that preference originated.
+    matches!(
+        resolved.effective.title(),
+        TitleMode::Native | TitleMode::Off
+    ) && resolved.effective.tab_color() == TabColorMode::TabBeacon
+        && matches!(
+            resolved.effective.activity(),
+            ActivityMode::Off | ActivityMode::Native
+        )
 }
 
 fn event_color(event: &CursorLifecycle) -> Option<(TabColor, &'static str)> {
@@ -288,6 +295,31 @@ mod tests {
         assert!(
             bytes.is_empty(),
             "new native session does not reset unknown output"
+        );
+    }
+
+    #[test]
+    fn inherited_effective_cursor_color_is_not_silently_suppressed() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("cursor-route-v1")).unwrap();
+        let terminal = "b".repeat(64);
+        let resolved = resolve_presentation(
+            PresentationSettings::default(),
+            PresentationOverride::default(),
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        );
+        assert_eq!(resolved.effective.tab_color(), TabColorMode::TabBeacon);
+        let prompt = normalize_hook(
+            br#"{"hook_event_name":"beforeSubmitPrompt","session_id":"inherited","generation_id":"g1"}"#
+        ).unwrap().unwrap();
+        let mut bytes = Vec::new();
+        assert!(apply_admitted(root.path(), &terminal, &prompt, &resolved, &mut bytes).unwrap());
+        assert!(bytes.starts_with(b"\x1b]4;264;rgb:"));
+        assert!(
+            !bytes
+                .windows(4)
+                .any(|part| part == b"]0;" || part == b"]9;4")
         );
     }
 }

@@ -123,20 +123,24 @@ fn dispatch_with(
     let terminal_sha256 = format!("{:x}", hasher.finalize());
     let store = CursorRouteStore::new(state_root);
     let output_failed = std::cell::Cell::new(false);
-    let (admitted, written) = store.admit_with(
+    let result = store.admit_with(
         &event,
         expected_terminal_sha256,
         &terminal_sha256,
         console_openable,
-        || {
-            if let Ok(written) = apply(&event, &terminal_sha256) {
-                Ok(written)
-            } else {
+        || match apply(&event, &terminal_sha256) {
+            Ok(written) => Ok(written),
+            Err(error) => {
                 output_failed.set(true);
-                Ok(false)
+                Err(error)
             }
         },
-    )?;
+    );
+    let (admitted, written) = match result {
+        Ok(result) => result,
+        Err(_) if output_failed.get() => return Ok(CursorDispatchOutcome::OutputFailed),
+        Err(error) => return Err(error),
+    };
     if !admitted {
         Ok(CursorDispatchOutcome::Ignored)
     } else if output_failed.get() {

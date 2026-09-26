@@ -455,19 +455,13 @@ impl CursorRouteStore {
                 Err(error) => return Err(error.into()),
             }
         }
-        let result = self
-            .admit_locked(
-                event,
-                expected_terminal_binding_sha256,
-                observed_terminal_binding_sha256,
-                console_openable,
-            )
-            .and_then(|admitted| {
-                if admitted {
-                    return apply().map(|written| (true, written));
-                }
-                Ok((false, false))
-            });
+        let result = self.admit_locked(
+            event,
+            expected_terminal_binding_sha256,
+            observed_terminal_binding_sha256,
+            console_openable,
+            apply,
+        );
         // The handle drop releases the lock even if an explicit unlock reports
         // an error. Preserve the actual output disposition from the callback.
         let _ = File::unlock(&lock);
@@ -480,7 +474,8 @@ impl CursorRouteStore {
         expected_terminal_binding_sha256: &str,
         observed_terminal_binding_sha256: &str,
         console_openable: bool,
-    ) -> io::Result<bool> {
+        apply: impl FnOnce() -> io::Result<bool>,
+    ) -> io::Result<(bool, bool)> {
         let mut ended = self.load_ended()?;
         let active_count = if event.event == CursorEvent::SessionStart {
             self.prune_ended(&mut ended)?
@@ -488,7 +483,7 @@ impl CursorRouteStore {
             0
         };
         if event.event == CursorEvent::SessionStart && ended.contains(&event.session_sha256) {
-            return Ok(false);
+            return Ok((false, false));
         }
         let path = self
             .directory
@@ -511,7 +506,7 @@ impl CursorRouteStore {
         };
         let mut route = if event.event == CursorEvent::SessionStart {
             if current.is_some() {
-                return Ok(false);
+                return Ok((false, false));
             }
             if active_count >= MAX_CURSOR_SESSION_FILES {
                 return Err(io::Error::other("Cursor route session capacity reached"));
@@ -522,25 +517,34 @@ impl CursorRouteStore {
                 observed_terminal_binding_sha256,
                 console_openable,
             ) else {
-                return Ok(false);
+                return Ok((false, false));
             };
             route
         } else {
             let Some(route) = current else {
-                return Ok(false);
+                return Ok((false, false));
             };
             route
         };
         if route.session_sha256 != event.session_sha256
             || route.terminal_binding_sha256 != expected_terminal_binding_sha256
         {
-            return Ok(false);
+            return Ok((false, false));
         }
         if event.event != CursorEvent::SessionStart
             && !route.admit(event, observed_terminal_binding_sha256, console_openable)
         {
-            return Ok(false);
+            return Ok((false, false));
         }
+        // An end must retain its route until release has either completed or
+        // safely revoked ownership. If the pre-output lease write fails, a
+        // later exact sessionEnd can retry; no other session can use its key.
+        let mut apply = Some(apply);
+        let mut written = if route.ended {
+            apply.take().unwrap()()?
+        } else {
+            false
+        };
         let bytes = route
             .checkpoint()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -557,8 +561,10 @@ impl CursorRouteStore {
             }
             self.save_ended(&ended)?;
             Self::remove_exact_ended_checkpoint(&path, &bytes)?;
+        } else {
+            written = apply.take().unwrap()()?;
         }
-        Ok(true)
+        Ok((true, written))
     }
 }
 
@@ -752,6 +758,39 @@ mod tests {
         assert_eq!(done_rx.recv().unwrap().unwrap(), (true, true));
         b.join().unwrap();
         assert_eq!(*writes.lock().unwrap(), ["g1", "g2"]);
+    }
+
+    #[test]
+    fn failed_end_release_keeps_exact_route_retryable() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CursorRouteStore::new(root.path());
+        let terminal = "a".repeat(64);
+        let event = |name: &str| {
+            normalize_hook(
+                serde_json::json!({"hook_event_name":name,"session_id":"retry-end"})
+                    .to_string()
+                    .as_bytes(),
+            )
+            .unwrap()
+            .unwrap()
+        };
+        let start = event("sessionStart");
+        let end = event("sessionEnd");
+        assert!(store.admit(&start, &terminal, &terminal, true).unwrap());
+        assert!(
+            store
+                .admit_with(&end, &terminal, &terminal, true, || Err(io::Error::other(
+                    "injected pre-release lease failure"
+                )))
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .admit_with(&end, &terminal, &terminal, true, || Ok(true))
+                .unwrap(),
+            (true, true)
+        );
+        assert!(!store.admit(&end, &terminal, &terminal, true).unwrap());
     }
 
     #[test]
