@@ -19,10 +19,30 @@ Deferred does not mean partially supported. It means no production provider is
 enabled or implied.
 
 Cursor Agent is being investigated for the v0.8.0 train. Its original command
-is `agent` on the observed ZenBook Duo installation. [Current Cursor Hook documentation](https://prod.cursor.com/docs/hooks)
+is `agent` on the observed ZenBook Duo installation. [Current Cursor Hook documentation](https://cursor.com/docs/hooks)
 names a structured `stop.status` outcome, but exact Windows Terminal color
 routing and the original-command live lifecycle remain unproven. Cursor is not
 included in the current production support table until those gates pass.
+
+## v0.8.0 candidate evidence boundary
+
+The candidate's saved per-CLI preferences and deterministic event fixtures do
+not change the production table above. Installed Hook delivery, Hook trust,
+terminal binding, and effective visible output are separate observations.
+`native` leaves a presentation channel to the CLI or terminal; `off` disables
+TabBeacon output on that channel. Neither option suppresses a provider's own
+title. See [Native](terminology.md#tb-t11), [Off](terminology.md#tb-t12), and
+[Ownership](terminology.md#tb-t10).
+
+| Candidate fact | Codex CLI | Cursor Agent |
+| --- | --- | --- |
+| Structured interruption | Internal fixture mapping exists; installed `Interrupt` delivery is unproven. | No admitted live interruption route. |
+| Structured warning or failed main turn | Unproven for the original HTTP 404 class in [Issue #116](https://github.com/JerrySkywalker/tabbeacon/issues/116). | `stop.status` is documented; live delivery and session binding remain unproven. |
+| Strict native presentation | Owned-channel release has deterministic tests; final visible transition proof is pending. | Native title and progress preservation with color-only output needs original-command terminal proof. |
+
+An event from a child tool or terminal text alone cannot establish a failed
+main turn. The candidate keeps unknown events and unavailable evidence
+unproven; it does not infer health from visible text, ANSI, or responses.
 
 ## Setup paths
 
