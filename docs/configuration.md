@@ -123,8 +123,18 @@ reconciliation path after snapshot-guarded preference writes. A changed store
 or an unprovable owned Hook/configuration refuses success. A failed external
 write is reported as `partial_state` even when preference compensation
 succeeds; inspect the owned integration before retrying. Process interruption
-recovery across preference and Hook files remains unqualified in this
-development candidate. Import never copies Hook trust or authentication.
+recovery now has an owned local transaction journal. A later explicit
+`--apply` checks the exact three preference paths and original or planned
+bytes before restoring them. It calls the owned Codex title reconciler only
+if the prior process reached the Hook boundary. The title reconciler has a
+separate exact-byte journal for its own `config.toml` and ownership manifest
+write boundary. External drift or uncertain Hook ownership leaves
+`partial_state` and the journal for review. The import journal
+temporarily contains exact local preference bytes so unrelated fields can be
+restored; it is not exported. Isolated process-exit tests cover the write
+boundaries, while real user configuration and Hook trust remain outside the
+test and require independent safety review. Import never copies Hook trust or
+authentication.
 
 ## Separate boundaries
 

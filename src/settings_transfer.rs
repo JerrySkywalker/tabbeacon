@@ -8,11 +8,12 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -45,6 +46,50 @@ pub const EXPORT_SCHEMA_V2: &str = "tabbeacon-export-v2";
 pub const MAX_EXPORT_BYTES: usize = 1024 * 1024;
 
 static EXPORT_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+fn interrupt_import_test_at(stage: &str) {
+    if std::env::var("TABBEACON_TEST_IMPORT_ABORT_STAGE")
+        .ok()
+        .as_deref()
+        == Some(stage)
+    {
+        std::process::exit(77);
+    }
+}
+const IMPORT_JOURNAL_SCHEMA: &str = "tabbeacon-import-journal-v1";
+const IMPORT_JOURNAL_FILE: &str = "import-transaction-v1.json";
+const IMPORT_JOURNAL_LOCK: &str = "import-transaction-v1.lock";
+const MAX_IMPORT_JOURNAL_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ImportFileDelta {
+    before: Option<Vec<u8>>,
+    after: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ImportJournalPhase {
+    Prepared,
+    HookMayHaveChanged,
+    Applied,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ImportJournal {
+    schema: String,
+    presentation_path: PathBuf,
+    interface_path: PathBuf,
+    workspace_path: PathBuf,
+    presentation: Option<ImportFileDelta>,
+    interface: Option<ImportFileDelta>,
+    workspace: Option<ImportFileDelta>,
+    codex_title_before: Option<bool>,
+    phase: ImportJournalPhase,
+}
 
 /// Safe pure-document failure. Store and CLI layers map their own I/O errors.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -818,6 +863,354 @@ pub fn apply_import_plan_with_reconciliation(
     )
 }
 
+fn import_journal_path(store: &PresentationSettingsStore) -> Option<PathBuf> {
+    Some(store.path().parent()?.join(IMPORT_JOURNAL_FILE))
+}
+
+fn import_transaction_lock(store: &PresentationSettingsStore) -> Option<File> {
+    let directory = store.path().parent()?;
+    reject_import_reparse(directory).ok()?;
+    fs::create_dir_all(directory).ok()?;
+    let path = directory.join(IMPORT_JOURNAL_LOCK);
+    reject_import_reparse(&path).ok()?;
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .ok()?;
+    file.lock().ok()?;
+    Some(file)
+}
+
+fn reject_import_reparse(path: &Path) -> Result<(), ()> {
+    for candidate in path.ancestors() {
+        match fs::symlink_metadata(candidate) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(());
+                }
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    if metadata.file_attributes() & 0x400 != 0 {
+                        return Err(());
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(()),
+        }
+    }
+    Ok(())
+}
+
+fn load_import_journal(path: &Path) -> Result<Option<ImportJournal>, ()> {
+    reject_import_reparse(path)?;
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(()),
+    };
+    let mut bytes = Vec::new();
+    file.take((MAX_IMPORT_JOURNAL_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ())?;
+    if bytes.len() > MAX_IMPORT_JOURNAL_BYTES {
+        return Err(());
+    }
+    let journal: ImportJournal = serde_json::from_slice(&bytes).map_err(|_| ())?;
+    if journal.schema != IMPORT_JOURNAL_SCHEMA {
+        return Err(());
+    }
+    Ok(Some(journal))
+}
+
+fn write_import_journal(path: &Path, journal: &ImportJournal, new: bool) -> Result<(), ()> {
+    reject_import_reparse(path)?;
+    let bytes = serde_json::to_vec(journal).map_err(|_| ())?;
+    if bytes.len() > MAX_IMPORT_JOURNAL_BYTES {
+        return Err(());
+    }
+    if new {
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .map_err(|_| ())?;
+        file.write_all(&bytes).map_err(|_| ())?;
+        file.sync_all().map_err(|_| ())?;
+    } else {
+        let mut file = AtomicWriteFile::options().open(path).map_err(|_| ())?;
+        file.write_all(&bytes).map_err(|_| ())?;
+        file.flush().map_err(|_| ())?;
+        file.commit().map_err(|_| ())?;
+    }
+    Ok(())
+}
+
+fn remove_exact_import_journal(path: &Path, journal: &ImportJournal) -> Result<(), ()> {
+    let current = load_import_journal(path)?.ok_or(())?;
+    if serde_json::to_vec(&current).map_err(|_| ())?
+        != serde_json::to_vec(journal).map_err(|_| ())?
+    {
+        return Err(());
+    }
+    fs::remove_file(path).map_err(|_| ())
+}
+
+fn import_delta_current(current: Option<&[u8]>, delta: &ImportFileDelta) -> bool {
+    current == delta.before.as_deref() || current == Some(delta.after.as_slice())
+}
+
+fn import_journal_paths_match(
+    journal: &ImportJournal,
+    presentation: &PresentationSettingsStore,
+    interface: &InterfacePreferencesStore,
+    workspace: &WorkspacePreferenceStore,
+) -> bool {
+    journal.presentation_path == presentation.path()
+        && journal.interface_path == interface.path()
+        && journal.workspace_path == workspace.path()
+}
+
+/// Resumes an interrupted CLI import by restoring exact owned preference
+/// bytes and reconciling the prior Codex title owner. External drift stops
+/// recovery before any write; uncertain Hook ownership leaves the journal.
+#[must_use]
+pub fn recover_pending_import(
+    presentation: &PresentationSettingsStore,
+    interface: &InterfacePreferencesStore,
+    workspace: &WorkspacePreferenceStore,
+    mut reconcile: impl FnMut(bool) -> Result<(), String>,
+) -> Option<ImportApplyOutcome> {
+    let path = import_journal_path(presentation)?;
+    match load_import_journal(&path) {
+        Ok(None) => return None,
+        Err(()) => return Some(ImportApplyOutcome::PartialState),
+        Ok(Some(_)) => {}
+    }
+    let Some(_lock) = import_transaction_lock(presentation) else {
+        return Some(ImportApplyOutcome::PartialState);
+    };
+    let journal = match load_import_journal(&path) {
+        Ok(Some(journal)) => journal,
+        Ok(None) => return None,
+        Err(()) => return Some(ImportApplyOutcome::PartialState),
+    };
+    if !import_journal_paths_match(&journal, presentation, interface, workspace) {
+        return Some(ImportApplyOutcome::PartialState);
+    }
+    let (Ok(p), Ok(i), Ok(w)) = (
+        presentation.snapshot_read_only(),
+        interface.snapshot_read_only(),
+        workspace.snapshot_read_only(),
+    ) else {
+        return Some(ImportApplyOutcome::PartialState);
+    };
+    if journal
+        .presentation
+        .as_ref()
+        .is_some_and(|delta| !import_delta_current(p.recovery_contents(), delta))
+        || journal
+            .interface
+            .as_ref()
+            .is_some_and(|delta| !import_delta_current(i.recovery_contents(), delta))
+        || journal
+            .workspace
+            .as_ref()
+            .is_some_and(|delta| !import_delta_current(w.recovery_contents(), delta))
+    {
+        return Some(ImportApplyOutcome::PartialState);
+    }
+    if journal.phase == ImportJournalPhase::Applied {
+        let all_applied = journal
+            .presentation
+            .as_ref()
+            .is_none_or(|delta| p.recovery_contents() == Some(delta.after.as_slice()))
+            && journal
+                .interface
+                .as_ref()
+                .is_none_or(|delta| i.recovery_contents() == Some(delta.after.as_slice()))
+            && journal
+                .workspace
+                .as_ref()
+                .is_none_or(|delta| w.recovery_contents() == Some(delta.after.as_slice()));
+        return Some(
+            if all_applied && remove_exact_import_journal(&path, &journal).is_ok() {
+                ImportApplyOutcome::Applied
+            } else {
+                ImportApplyOutcome::PartialState
+            },
+        );
+    }
+    if journal.phase == ImportJournalPhase::HookMayHaveChanged
+        && let Some(before) = journal.codex_title_before
+        && reconcile(before).is_err()
+    {
+        return Some(ImportApplyOutcome::PartialState);
+    }
+    let restored = journal.workspace.as_ref().is_none_or(|delta| {
+        workspace
+            .recover_import_bytes_if_unchanged(&delta.after, delta.before.as_deref())
+            .is_ok_and(|restored| restored)
+    }) && journal.interface.as_ref().is_none_or(|delta| {
+        interface
+            .recover_import_bytes_if_unchanged(&delta.after, delta.before.as_deref())
+            .is_ok_and(|restored| restored)
+    }) && journal.presentation.as_ref().is_none_or(|delta| {
+        presentation
+            .recover_import_bytes_if_unchanged(&delta.after, delta.before.as_deref())
+            .is_ok_and(|restored| restored)
+    });
+    Some(
+        if restored && remove_exact_import_journal(&path, &journal).is_ok() {
+            ImportApplyOutcome::RolledBack
+        } else {
+            ImportApplyOutcome::PartialState
+        },
+    )
+}
+
+/// Writes a bounded recovery journal before touching any store, then applies
+/// the existing snapshot-guarded import and closes the journal only after all
+/// three stores and the external title callback have settled.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)] // The journal's ordered write boundary must stay inspectable.
+#[must_use]
+pub fn apply_import_plan_durable(
+    plan: &ImportPlan,
+    presentation: &PresentationSettingsStore,
+    presentation_snapshot: &PresentationSettingsSnapshot,
+    interface: &InterfacePreferencesStore,
+    interface_snapshot: &InterfacePreferencesSnapshot,
+    workspace: &WorkspacePreferenceStore,
+    workspace_snapshot: &WorkspacePreferencesSnapshot,
+    mut reconcile: impl FnMut(bool) -> Result<(), String>,
+) -> ImportApplyOutcome {
+    if !plan.is_applicable() {
+        return ImportApplyOutcome::Conflict;
+    }
+    let Some(_lock) = import_transaction_lock(presentation) else {
+        return ImportApplyOutcome::PartialState;
+    };
+    let Some(path) = import_journal_path(presentation) else {
+        return ImportApplyOutcome::PartialState;
+    };
+    if !matches!(load_import_journal(&path), Ok(None)) {
+        return ImportApplyOutcome::PartialState;
+    }
+    let presentation_delta = if plan.presentation.is_some() || !plan.provider_overrides.is_empty() {
+        let Ok(after) = PresentationSettingsStore::render_portable_snapshot(
+            presentation_snapshot,
+            plan.presentation,
+            &plan.provider_overrides,
+        ) else {
+            return ImportApplyOutcome::Conflict;
+        };
+        Some(ImportFileDelta {
+            before: presentation_snapshot
+                .recovery_contents()
+                .map(ToOwned::to_owned),
+            after,
+        })
+    } else {
+        None
+    };
+    let interface_delta = if let Some(replacement) = plan.interface {
+        let Ok(after) =
+            InterfacePreferencesStore::render_replacement_bytes(interface_snapshot, replacement)
+        else {
+            return ImportApplyOutcome::Conflict;
+        };
+        Some(ImportFileDelta {
+            before: interface_snapshot
+                .recovery_contents()
+                .map(ToOwned::to_owned),
+            after,
+        })
+    } else {
+        None
+    };
+    let workspace_delta = if let Some(replacement) = plan.workspace_preferences.clone() {
+        let Ok(after) = WorkspacePreferenceStore::render_replacement_bytes(replacement) else {
+            return ImportApplyOutcome::Conflict;
+        };
+        Some(ImportFileDelta {
+            before: workspace_snapshot
+                .recovery_contents()
+                .map(ToOwned::to_owned),
+            after,
+        })
+    } else {
+        None
+    };
+    let title_changes = plan.changes_codex_title_ownership(presentation_snapshot);
+    let mut journal = ImportJournal {
+        schema: IMPORT_JOURNAL_SCHEMA.to_owned(),
+        presentation_path: presentation.path().to_owned(),
+        interface_path: interface.path().to_owned(),
+        workspace_path: workspace.path().to_owned(),
+        presentation: presentation_delta,
+        interface: interface_delta,
+        workspace: workspace_delta,
+        codex_title_before: title_changes
+            .then(|| !plan.codex_title_ownership_after(presentation_snapshot)),
+        phase: ImportJournalPhase::Prepared,
+    };
+    if write_import_journal(&path, &journal, true).is_err() {
+        return ImportApplyOutcome::PartialState;
+    }
+    #[cfg(test)]
+    interrupt_import_test_at("journal_prepared");
+    let outcome = {
+        let mut journaled_reconcile = |owns_title| {
+            if journal.phase == ImportJournalPhase::Prepared {
+                let mut pending = journal.clone();
+                pending.phase = ImportJournalPhase::HookMayHaveChanged;
+                write_import_journal(&path, &pending, false)
+                    .map_err(|()| "import recovery journal cannot mark Hook boundary".to_owned())?;
+                journal = pending;
+            }
+            reconcile(owns_title)
+        };
+        apply_import_plan_inner(
+            plan,
+            presentation,
+            presentation_snapshot,
+            interface,
+            interface_snapshot,
+            workspace,
+            workspace_snapshot,
+            Some(&mut journaled_reconcile),
+        )
+    };
+    match outcome {
+        ImportApplyOutcome::Applied => {
+            journal.phase = ImportJournalPhase::Applied;
+            if write_import_journal(&path, &journal, false).is_err() {
+                return ImportApplyOutcome::PartialState;
+            }
+            #[cfg(test)]
+            interrupt_import_test_at("phase_applied");
+            if remove_exact_import_journal(&path, &journal).is_ok() {
+                ImportApplyOutcome::Applied
+            } else {
+                ImportApplyOutcome::PartialState
+            }
+        }
+        ImportApplyOutcome::Conflict | ImportApplyOutcome::RolledBack => {
+            if remove_exact_import_journal(&path, &journal).is_ok() {
+                outcome
+            } else {
+                ImportApplyOutcome::PartialState
+            }
+        }
+        ImportApplyOutcome::PartialState => ImportApplyOutcome::PartialState,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 fn apply_import_plan_inner(
@@ -887,6 +1280,8 @@ fn apply_import_plan_inner(
                 false,
             );
         }
+        #[cfg(test)]
+        interrupt_import_test_at("presentation");
     }
 
     if let Some(replacement) = plan.interface {
@@ -940,6 +1335,8 @@ fn apply_import_plan_inner(
                 false,
             );
         }
+        #[cfg(test)]
+        interrupt_import_test_at("interface");
     }
 
     if let Some(replacement) = plan.workspace_preferences.as_ref() {
@@ -993,6 +1390,8 @@ fn apply_import_plan_inner(
                 false,
             );
         }
+        #[cfg(test)]
+        interrupt_import_test_at("workspace");
     }
 
     // The individual immediate checks only prove each write at its own point
@@ -1030,6 +1429,8 @@ fn apply_import_plan_inner(
         let coordinator = reconcile
             .as_mut()
             .expect("title change requires coordinator");
+        #[cfg(test)]
+        interrupt_import_test_at("hook_before");
         if coordinator(next_owner).is_err() {
             // A failed external write might already have reached one owned
             // Codex file. Attempt an ownership-checked compensation, but do
@@ -1050,6 +1451,8 @@ fn apply_import_plan_inner(
             );
             return ImportApplyOutcome::PartialState;
         }
+        #[cfg(test)]
+        interrupt_import_test_at("hook_after");
         // A callback can take long enough for another writer to change one
         // of the three preference stores. Never report Applied on stale bytes.
         let receipts_still_current = presentation_receipt.as_ref().is_none_or(|receipt| {
@@ -1181,7 +1584,8 @@ pub fn portable_workspace_key(canonical_identity: &str) -> String {
 mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
-        fs,
+        env, fs,
+        process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -1201,9 +1605,10 @@ mod tests {
     };
 
     use super::{
-        EXPORT_SCHEMA_V1, EXPORT_SCHEMA_V2, ImportApplyOutcome, ImportPlanConflict,
+        EXPORT_SCHEMA_V1, EXPORT_SCHEMA_V2, ImportApplyOutcome, ImportPlan, ImportPlanConflict,
         MAX_EXPORT_BYTES, SettingsExportV1, SettingsTransferError, apply_import_plan,
-        apply_import_plan_with_reconciliation, portable_workspace_key,
+        apply_import_plan_durable, apply_import_plan_with_reconciliation, portable_workspace_key,
+        recover_pending_import,
     };
 
     fn temporary_root(name: &str) -> std::path::PathBuf {
@@ -1212,6 +1617,267 @@ mod tests {
             .expect("clock is after epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("tabbeacon-settings-transfer-{name}-{unique}"))
+    }
+
+    fn durable_import_fixture(
+        root: &std::path::Path,
+    ) -> (
+        PresentationSettingsStore,
+        InterfacePreferencesStore,
+        WorkspacePreferenceStore,
+        ImportPlan,
+    ) {
+        let presentation = PresentationSettingsStore::new(root.join("config.toml"));
+        let interface = InterfacePreferencesStore::new(root.join("interface.toml"));
+        let workspace = WorkspacePreferenceStore::new(root.join("preferences.json"));
+        let identity = CanonicalRepositoryIdentity::new("remote:example/durable-import").unwrap();
+        let plan = ImportPlan {
+            presentation: Some(
+                PresentationSettings::default().with_theme(PresentationTheme::Classic),
+            ),
+            provider_overrides: vec![(
+                CliTarget::Codex,
+                PresentationOverride::default().with_mode(PresentationMode::PreserveNative),
+            )],
+            interface: Some(InterfacePreferences::new(
+                InterfaceLanguage::ZhCn,
+                HumanColor::Never,
+                true,
+            )),
+            workspace_preferences: Some(
+                WorkspacePreferences::default()
+                    .with_override(identity, RepositoryAlias::new("DURABLE").unwrap()),
+            ),
+            portable_matches: 1,
+            unmatched_entries: 0,
+            conflicts: Vec::new(),
+        };
+        (presentation, interface, workspace, plan)
+    }
+
+    #[test]
+    fn interrupted_import_child_fixture() {
+        let Ok(root) = env::var("TABBEACON_TEST_IMPORT_CHILD_ROOT") else {
+            return;
+        };
+        let (presentation, interface, workspace, plan) = durable_import_fixture(root.as_ref());
+        let p = presentation.snapshot_read_only().unwrap();
+        let i = interface.snapshot_read_only().unwrap();
+        let w = workspace.snapshot_read_only().unwrap();
+        let _ = apply_import_plan_durable(
+            &plan,
+            &presentation,
+            &p,
+            &interface,
+            &i,
+            &workspace,
+            &w,
+            |_| Ok(()),
+        );
+        panic!("injected process interruption did not occur");
+    }
+
+    #[test]
+    fn durable_import_recovers_after_each_process_write_boundary() {
+        for stage in [
+            "journal_prepared",
+            "presentation",
+            "interface",
+            "workspace",
+            "hook_before",
+            "hook_after",
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let output = Command::new(env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "settings_transfer::tests::interrupted_import_child_fixture",
+                ])
+                .env("TABBEACON_TEST_IMPORT_CHILD_ROOT", root.path())
+                .env("TABBEACON_TEST_IMPORT_ABORT_STAGE", stage)
+                .output()
+                .unwrap();
+            assert_eq!(output.status.code(), Some(77), "stage={stage}");
+            let (presentation, interface, workspace, _) = durable_import_fixture(root.path());
+            let mut reconciled = Vec::new();
+            assert_eq!(
+                recover_pending_import(&presentation, &interface, &workspace, |owner| {
+                    reconciled.push(owner);
+                    Ok(())
+                }),
+                Some(ImportApplyOutcome::RolledBack),
+                "stage={stage}"
+            );
+            if stage == "hook_after" {
+                assert_eq!(reconciled, [true], "stage={stage}");
+            } else {
+                assert!(reconciled.is_empty(), "stage={stage}");
+            }
+            assert!(!presentation.path().exists(), "stage={stage}");
+            assert!(!interface.path().exists(), "stage={stage}");
+            assert!(!workspace.path().exists(), "stage={stage}");
+            assert_eq!(
+                recover_pending_import(&presentation, &interface, &workspace, |_| Ok(())),
+                None,
+                "recovery is idempotent at {stage}"
+            );
+        }
+    }
+
+    #[test]
+    fn durable_import_recognizes_committed_journal_after_process_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "settings_transfer::tests::interrupted_import_child_fixture",
+            ])
+            .env("TABBEACON_TEST_IMPORT_CHILD_ROOT", root.path())
+            .env("TABBEACON_TEST_IMPORT_ABORT_STAGE", "phase_applied")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(77));
+        let (presentation, interface, workspace, _) = durable_import_fixture(root.path());
+        let mut called = false;
+        assert_eq!(
+            recover_pending_import(&presentation, &interface, &workspace, |_| {
+                called = true;
+                Ok(())
+            }),
+            Some(ImportApplyOutcome::Applied)
+        );
+        assert!(!called, "committed recovery never reverts Hook ownership");
+        assert!(presentation.path().exists());
+        assert!(interface.path().exists());
+        assert!(workspace.path().exists());
+        assert_eq!(
+            recover_pending_import(&presentation, &interface, &workspace, |_| Ok(())),
+            None
+        );
+    }
+
+    #[test]
+    fn durable_import_refuses_external_drift_after_process_interruption() {
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "settings_transfer::tests::interrupted_import_child_fixture",
+            ])
+            .env("TABBEACON_TEST_IMPORT_CHILD_ROOT", root.path())
+            .env("TABBEACON_TEST_IMPORT_ABORT_STAGE", "workspace")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(77));
+        let (presentation, interface, workspace, _) = durable_import_fixture(root.path());
+        fs::write(interface.path(), "[foreign]\nkeep = true\n").unwrap();
+        let before_presentation = fs::read(presentation.path()).unwrap();
+        let before_workspace = fs::read(workspace.path()).unwrap();
+        let mut called = false;
+        assert_eq!(
+            recover_pending_import(&presentation, &interface, &workspace, |_| {
+                called = true;
+                Ok(())
+            }),
+            Some(ImportApplyOutcome::PartialState)
+        );
+        assert!(!called);
+        assert_eq!(fs::read(presentation.path()).unwrap(), before_presentation);
+        assert_eq!(fs::read(workspace.path()).unwrap(), before_workspace);
+        assert_eq!(
+            fs::read_to_string(interface.path()).unwrap(),
+            "[foreign]\nkeep = true\n"
+        );
+    }
+
+    #[test]
+    fn durable_import_commits_and_removes_owned_journal() {
+        let root = tempfile::tempdir().unwrap();
+        let (presentation, interface, workspace, plan) = durable_import_fixture(root.path());
+        let p = presentation.snapshot_read_only().unwrap();
+        let i = interface.snapshot_read_only().unwrap();
+        let w = workspace.snapshot_read_only().unwrap();
+        let mut calls = Vec::new();
+        assert_eq!(
+            apply_import_plan_durable(
+                &plan,
+                &presentation,
+                &p,
+                &interface,
+                &i,
+                &workspace,
+                &w,
+                |owner| {
+                    calls.push(owner);
+                    Ok(())
+                },
+            ),
+            ImportApplyOutcome::Applied
+        );
+        assert_eq!(calls, [false]);
+        assert!(presentation.path().exists());
+        assert!(interface.path().exists());
+        assert!(workspace.path().exists());
+        assert_eq!(
+            recover_pending_import(&presentation, &interface, &workspace, |_| Ok(())),
+            None
+        );
+        assert!(!root.path().join("import-transaction-v1.json").exists());
+    }
+
+    #[test]
+    fn absent_recovery_journal_is_read_only() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("fresh");
+        let (presentation, interface, workspace, _) = durable_import_fixture(&directory);
+        assert_eq!(
+            recover_pending_import(&presentation, &interface, &workspace, |_| Ok(())),
+            None
+        );
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn durable_import_retries_uncertain_hook_boundary_only_with_owned_callback() {
+        let root = tempfile::tempdir().unwrap();
+        let (presentation, interface, workspace, plan) = durable_import_fixture(root.path());
+        let p = presentation.snapshot_read_only().unwrap();
+        let i = interface.snapshot_read_only().unwrap();
+        let w = workspace.snapshot_read_only().unwrap();
+        let mut attempts = Vec::new();
+        assert_eq!(
+            apply_import_plan_durable(
+                &plan,
+                &presentation,
+                &p,
+                &interface,
+                &i,
+                &workspace,
+                &w,
+                |owner| {
+                    attempts.push(owner);
+                    if owner {
+                        Ok(())
+                    } else {
+                        Err("isolated Hook uncertainty".into())
+                    }
+                },
+            ),
+            ImportApplyOutcome::PartialState
+        );
+        assert_eq!(attempts, [false, true]);
+        let mut recovery = Vec::new();
+        assert_eq!(
+            recover_pending_import(&presentation, &interface, &workspace, |owner| {
+                recovery.push(owner);
+                Ok(())
+            }),
+            Some(ImportApplyOutcome::RolledBack)
+        );
+        assert_eq!(recovery, [true]);
+        assert!(!presentation.path().exists());
+        assert!(!interface.path().exists());
+        assert!(!workspace.path().exists());
     }
 
     #[test]

@@ -80,8 +80,8 @@ use tabbeacon::{
         SpinnerPreset, TabColorMode, TitleMode,
     },
     settings_transfer::{
-        ImportApplyOutcome, ImportPlan, MAX_EXPORT_BYTES, SettingsExportV1, apply_import_plan,
-        apply_import_plan_with_reconciliation, write_export_file,
+        ImportApplyOutcome, ImportPlan, MAX_EXPORT_BYTES, SettingsExportV1,
+        apply_import_plan_durable, recover_pending_import, write_export_file,
     },
     title_explanation::TitleExplanation,
     upgrade_preflight::{
@@ -4365,6 +4365,34 @@ fn import_settings(path: &std::path::Path, apply: bool, output: HumanOutputArgs)
         Ok(store) => store,
         Err(error) => return transfer_failure("IMPORT", &error, output),
     };
+    if apply
+        && matches!(
+            recover_pending_import(
+                &presentation_store,
+                &interface_store,
+                &workspace_store,
+                |owns_title| {
+                    CodexIntegration::from_environment()
+                        .and_then(|integration| integration.reconcile_title_ownership(owns_title))
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                },
+            ),
+            Some(ImportApplyOutcome::PartialState | ImportApplyOutcome::Conflict)
+        )
+    {
+        if output.mode() == OutputMode::Plain {
+            println!("IMPORT=partial_state");
+            println!("RECOVERY=BLOCKED");
+        } else {
+            eprint_human_text(
+                HumanTone::Failure,
+                &HumanText::message(HumanMessageKey::ImportPartialState),
+                output.language.preference(),
+            );
+        }
+        return ExitCode::from(2);
+    }
     let presentation_snapshot = match presentation_store.snapshot_read_only() {
         Ok(snapshot) => snapshot,
         Err(error) => return transfer_failure("IMPORT", &error, output),
@@ -4430,33 +4458,21 @@ fn import_settings(path: &std::path::Path, apply: bool, output: HumanOutputArgs)
     if !apply {
         return ExitCode::SUCCESS;
     }
-    let outcome = if plan.changes_codex_title_ownership(&presentation_snapshot) {
-        apply_import_plan_with_reconciliation(
-            &plan,
-            &presentation_store,
-            &presentation_snapshot,
-            &interface_store,
-            &interface_snapshot,
-            &workspace_store,
-            &workspace_snapshot,
-            |owns_title| {
-                CodexIntegration::from_environment()
-                    .and_then(|integration| integration.reconcile_title_ownership(owns_title))
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
-            },
-        )
-    } else {
-        apply_import_plan(
-            &plan,
-            &presentation_store,
-            &presentation_snapshot,
-            &interface_store,
-            &interface_snapshot,
-            &workspace_store,
-            &workspace_snapshot,
-        )
-    };
+    let outcome = apply_import_plan_durable(
+        &plan,
+        &presentation_store,
+        &presentation_snapshot,
+        &interface_store,
+        &interface_snapshot,
+        &workspace_store,
+        &workspace_snapshot,
+        |owns_title| {
+            CodexIntegration::from_environment()
+                .and_then(|integration| integration.reconcile_title_ownership(owns_title))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        },
+    );
     print_import_summary(&plan, &document, Some(import_outcome_name(outcome)), output);
     match outcome {
         ImportApplyOutcome::Applied => ExitCode::SUCCESS,

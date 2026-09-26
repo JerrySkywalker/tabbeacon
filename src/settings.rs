@@ -577,6 +577,9 @@ pub struct PresentationSettingsSnapshot {
 }
 
 impl PresentationSettingsSnapshot {
+    pub(crate) fn recovery_contents(&self) -> Option<&[u8]> {
+        self.contents.as_deref()
+    }
     /// Effective typed settings at the time the snapshot was taken.
     #[must_use]
     pub const fn settings(&self) -> PresentationSettings {
@@ -816,25 +819,33 @@ impl PresentationSettingsStore {
             if !current.matches(expected) {
                 return Ok(SnapshotSaveOutcome::Conflict);
             }
-            let mut document = match current.contents.as_deref() {
-                Some(bytes) => std::str::from_utf8(bytes)
-                    .map_err(|_| SettingsError::Malformed)?
-                    .parse::<DocumentMut>()
-                    .map_err(|_| SettingsError::Malformed)?,
-                None => DocumentMut::new(),
-            };
-            if let Some(global) = global {
-                write_settings(&mut document, global)?;
-            }
-            for (provider, override_for_cli) in overrides {
-                write_provider_override(&mut document, *provider, *override_for_cli)?;
-            }
-            let contents = document.to_string().into_bytes();
+            let contents = Self::render_portable_snapshot(&current, global, overrides)?;
             atomic_write(&self.path, &contents)?;
             Ok(SnapshotSaveOutcome::Saved(
                 PresentationSettingsWriteReceipt { contents },
             ))
         })
+    }
+
+    pub(crate) fn render_portable_snapshot(
+        snapshot: &PresentationSettingsSnapshot,
+        global: Option<PresentationSettings>,
+        overrides: &[(CliTarget, PresentationOverride)],
+    ) -> Result<Vec<u8>, SettingsError> {
+        let mut document = match snapshot.contents.as_deref() {
+            Some(bytes) => std::str::from_utf8(bytes)
+                .map_err(|_| SettingsError::Malformed)?
+                .parse::<DocumentMut>()
+                .map_err(|_| SettingsError::Malformed)?,
+            None => DocumentMut::new(),
+        };
+        if let Some(global) = global {
+            write_settings(&mut document, global)?;
+        }
+        for (provider, override_for_cli) in overrides {
+            write_provider_override(&mut document, *provider, *override_for_cli)?;
+        }
+        Ok(document.to_string().into_bytes())
     }
 
     /// Captures the current document without creating a state directory or lock.
@@ -863,6 +874,32 @@ impl PresentationSettingsStore {
         expected: &PresentationSettingsSnapshot,
     ) -> Result<bool, SettingsError> {
         Ok(self.snapshot_read_only()?.matches(expected))
+    }
+
+    /// Restores a transaction's exact prior bytes only if this store still
+    /// contains its exact planned write. Repeated recovery is idempotent.
+    pub(crate) fn recover_import_bytes_if_unchanged(
+        &self,
+        planned: &[u8],
+        original: Option<&[u8]>,
+    ) -> Result<bool, SettingsError> {
+        if let Some(bytes) = original {
+            parse_settings_bytes(bytes)?;
+        }
+        self.with_lock(|| {
+            let current = self.snapshot_unlocked()?;
+            if current.contents.as_deref() == original {
+                return Ok(true);
+            }
+            if current.contents.as_deref() != Some(planned) {
+                return Ok(false);
+            }
+            match original {
+                Some(bytes) => atomic_write(&self.path, bytes)?,
+                None => fs::remove_file(&self.path)?,
+            }
+            Ok(self.snapshot_unlocked()?.contents.as_deref() == original)
+        })
     }
 
     /// Returns whether a guided write receipt is still byte-exactly current.

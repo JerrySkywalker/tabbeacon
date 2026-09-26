@@ -48,6 +48,9 @@ const LOCK_FILE: &str = "integration.lock";
 const MCP_MIGRATION_JOURNAL_SCHEMA: &str = "tabbeacon-codex-mcp-to-command-migration-v1";
 const MCP_MIGRATION_JOURNAL_FILE: &str = "mcp-to-command-migration-v1.json";
 const MCP_MIGRATION_RECOVERY_DIR: &str = "mcp-to-command-recovery-v1";
+const TITLE_TRANSITION_JOURNAL_SCHEMA: &str = "tabbeacon-codex-title-transition-v1";
+const TITLE_TRANSITION_JOURNAL_FILE: &str = "title-transition-v1.json";
+const MAX_TITLE_TRANSITION_JOURNAL_BYTES: usize = 4 * 1024 * 1024;
 
 #[cfg(test)]
 static MCP_MIGRATION_TEST_FAULT_AFTER: AtomicU8 = AtomicU8::new(0);
@@ -436,6 +439,8 @@ pub enum CodexIntegrationError {
     /// An interrupted legacy MCP migration cannot be recovered without
     /// overwriting state that is no longer exactly admitted.
     MigrationRecoveryBlocked,
+    /// An interrupted owned title transition cannot be safely resolved.
+    TitleRecoveryBlocked,
 }
 
 impl fmt::Display for CodexIntegrationError {
@@ -481,6 +486,9 @@ impl fmt::Display for CodexIntegrationError {
             Self::MigrationRecoveryBlocked => {
                 "an interrupted legacy MCP migration requires ownership-safe recovery"
             }
+            Self::TitleRecoveryBlocked => {
+                "an interrupted Codex title transition requires ownership-safe recovery"
+            }
         })
     }
 }
@@ -504,6 +512,7 @@ impl CodexIntegrationError {
             Self::SymbolicLinkTarget => "UNSAFE_TARGET_PATH_BLOCKED",
             Self::UnsafeExecutablePath => "UNSAFE_EXECUTABLE_PATH_BLOCKED",
             Self::MigrationRecoveryBlocked => "MIGRATION_RECOVERY_BLOCKED",
+            Self::TitleRecoveryBlocked => "TITLE_RECOVERY_BLOCKED",
             Self::StateRootUnavailable | Self::ConfigShape | Self::Io(_) => "REPAIR_BLOCKED",
         }
     }
@@ -643,6 +652,7 @@ impl CodexIntegration {
         self.require_supported_profile(false)?;
         self.with_lock(|| {
             self.recover_incomplete_mcp_migration()?;
+            self.recover_incomplete_title_transition()?;
             let profile = self.require_supported_profile(true)?;
             self.setup_locked(tabbeacon_owns_title, profile)
         })
@@ -671,6 +681,7 @@ impl CodexIntegration {
             self.require_supported_profile(false)?;
             self.with_lock(|| {
                 self.recover_incomplete_mcp_migration()?;
+                self.recover_incomplete_title_transition()?;
                 let profile = self.require_supported_profile(true)?;
                 self.repair_locked(profile, true, expected_target_digest)
             })
@@ -690,6 +701,7 @@ impl CodexIntegration {
     pub fn uninstall(&self) -> Result<UninstallOutcome, CodexIntegrationError> {
         self.with_lock(|| {
             self.recover_incomplete_mcp_migration()?;
+            self.recover_incomplete_title_transition()?;
             self.uninstall_locked()
         })
     }
@@ -710,6 +722,7 @@ impl CodexIntegration {
     ) -> Result<TitleOwnershipOutcome, CodexIntegrationError> {
         self.with_lock(|| {
             self.recover_incomplete_mcp_migration()?;
+            self.recover_incomplete_title_transition()?;
             self.require_supported_profile(true)?;
             self.reconcile_title_ownership_locked(tabbeacon_owns_title)
         })
@@ -720,6 +733,9 @@ impl CodexIntegration {
     /// read-only check performs no provider command, trust decision, or write.
     #[must_use]
     pub fn interrupt_runtime_admitted_read_only(&self) -> bool {
+        if !matches!(self.load_title_transition_journal(), Ok(None)) {
+            return false;
+        }
         let Ok(Some(manifest)) = self.load_manifest() else {
             return false;
         };
@@ -1004,6 +1020,15 @@ impl CodexIntegration {
         };
         let title_exact = title_check.status() == DoctorStatus::Pass;
         checks.push(title_check);
+        let title_transition_clear = matches!(self.load_title_transition_journal(), Ok(None));
+        checks.push(if title_transition_clear {
+            pass("title.transition", "TITLE_TRANSITION_CLEAR: no owned title recovery is pending")
+        } else {
+            warning(
+                "title.transition",
+                "TITLE_TRANSITION_PENDING: exact owned config and manifest recovery requires a mutation path",
+            )
+        });
 
         checks.push(match mutation_authority {
             CodexMutationAuthority::Admitted => pass(
@@ -1023,7 +1048,8 @@ impl CodexIntegration {
             && mcp_server_exact
             && mcp_terminal_binding_exact
             && trust_exact
-            && title_exact;
+            && title_exact
+            && title_transition_clear;
         let runtime_continuity = match (installed_runtime_proven, compatibility_state) {
             (true, CodexCompatibilityState::Full(_) | CodexCompatibilityState::Degraded(_)) => {
                 CodexRuntimeContinuity::Admitted
@@ -2148,19 +2174,191 @@ impl CodexIntegration {
         let Some(mut manifest) = self.load_manifest()? else {
             return Ok(TitleOwnershipOutcome::NotInstalled);
         };
+        let manifest_before = read_required_safe_bytes(&self.manifest_path())?;
+        if serde_json::from_slice::<IntegrationManifest>(&manifest_before)
+            .map_err(|_| CodexIntegrationError::OwnershipManifest)?
+            != manifest
+        {
+            return Err(CodexIntegrationError::ConcurrentTargetDrift);
+        }
         self.validate_manifest_scope(&manifest)?;
         let hooks = read_hooks_document(&self.hooks_path())?;
         locate_owned_hooks(&hooks, &manifest.hooks)
             .map_err(|_| CodexIntegrationError::ModifiedOwnedHook)?;
+        let config_before = read_optional_safe_bytes(&self.config_path())?;
         let mut config = read_config_document(&self.config_path())?;
         Self::validate_title_ownership(&manifest, &config)?;
         Self::validate_mcp_server_ownership(&manifest, &config)?;
         if !Self::apply_title_ownership(&mut manifest, &mut config, tabbeacon_owns_title)? {
             return Ok(TitleOwnershipOutcome::AlreadyConfigured);
         }
-        self.write_owned_config(&manifest, &config)?;
-        self.write_manifest(&manifest)?;
+        let rendered = config.to_string();
+        let config_after = if !manifest.config_backup.existed && rendered.trim().is_empty() {
+            None
+        } else {
+            Some(rendered.into_bytes())
+        };
+        let mut journal = TitleTransitionJournal {
+            schema: TITLE_TRANSITION_JOURNAL_SCHEMA.to_owned(),
+            phase: TitleTransitionPhase::Prepared,
+            config_before,
+            config_after,
+            manifest_before,
+            manifest_after: serialize_manifest(&manifest)?,
+        };
+        self.write_title_transition_journal(&journal, true)?;
+        write_optional_owned_if_unchanged(
+            &self.config_path(),
+            journal.config_before.as_deref(),
+            journal.config_after.as_deref(),
+        )?;
+        #[cfg(test)]
+        interrupt_title_transition_test_at("config");
+        write_if_unchanged(
+            &self.manifest_path(),
+            &journal.manifest_before,
+            &journal.manifest_after,
+        )?;
+        #[cfg(test)]
+        interrupt_title_transition_test_at("manifest");
+        journal.phase = TitleTransitionPhase::Applied;
+        self.write_title_transition_journal(&journal, false)?;
+        #[cfg(test)]
+        interrupt_title_transition_test_at("applied");
+        self.clear_title_transition_journal(&journal)?;
         Ok(TitleOwnershipOutcome::Updated)
+    }
+
+    fn title_transition_journal_path(&self) -> PathBuf {
+        self.state_root.join(TITLE_TRANSITION_JOURNAL_FILE)
+    }
+
+    fn load_title_transition_journal(
+        &self,
+    ) -> Result<Option<TitleTransitionJournal>, CodexIntegrationError> {
+        let path = self.title_transition_journal_path();
+        reject_symbolic_link(&path)?;
+        let Some(bytes) = read_optional_bytes(&path)? else {
+            return Ok(None);
+        };
+        if bytes.len() > MAX_TITLE_TRANSITION_JOURNAL_BYTES {
+            return Err(CodexIntegrationError::TitleRecoveryBlocked);
+        }
+        let journal: TitleTransitionJournal = serde_json::from_slice(&bytes)
+            .map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?;
+        if journal.schema != TITLE_TRANSITION_JOURNAL_SCHEMA {
+            return Err(CodexIntegrationError::TitleRecoveryBlocked);
+        }
+        Ok(Some(journal))
+    }
+
+    fn write_title_transition_journal(
+        &self,
+        journal: &TitleTransitionJournal,
+        new: bool,
+    ) -> Result<(), CodexIntegrationError> {
+        let path = self.title_transition_journal_path();
+        reject_symbolic_link(&path)?;
+        if new && path.exists() {
+            return Err(CodexIntegrationError::TitleRecoveryBlocked);
+        }
+        let bytes =
+            serde_json::to_vec(journal).map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?;
+        if bytes.len() > MAX_TITLE_TRANSITION_JOURNAL_BYTES {
+            return Err(CodexIntegrationError::TitleRecoveryBlocked);
+        }
+        atomic_write(&path, &bytes)?;
+        Ok(())
+    }
+
+    fn clear_title_transition_journal(
+        &self,
+        journal: &TitleTransitionJournal,
+    ) -> Result<(), CodexIntegrationError> {
+        if self.load_title_transition_journal()?.as_ref() != Some(journal) {
+            return Err(CodexIntegrationError::TitleRecoveryBlocked);
+        }
+        let (config, manifest) = match journal.phase {
+            TitleTransitionPhase::Prepared => (
+                journal.config_before.as_deref(),
+                journal.manifest_before.as_slice(),
+            ),
+            TitleTransitionPhase::Applied => (
+                journal.config_after.as_deref(),
+                journal.manifest_after.as_slice(),
+            ),
+        };
+        if read_optional_safe_bytes(&self.config_path())?.as_deref() != config
+            || read_required_safe_bytes(&self.manifest_path())? != manifest
+        {
+            return Err(CodexIntegrationError::TitleRecoveryBlocked);
+        }
+        fs::remove_file(self.title_transition_journal_path())?;
+        Ok(())
+    }
+
+    fn recover_incomplete_title_transition(&self) -> Result<(), CodexIntegrationError> {
+        let Some(journal) = self.load_title_transition_journal()? else {
+            return Ok(());
+        };
+        let before: IntegrationManifest = serde_json::from_slice(&journal.manifest_before)
+            .map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?;
+        self.validate_manifest_scope(&before)
+            .map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?;
+        let hooks = read_hooks_document(&self.hooks_path())?;
+        locate_owned_hooks(&hooks, &before.hooks)
+            .map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?;
+        let mut expected_manifest = before.clone();
+        let mut expected_config = match journal.config_before.as_deref() {
+            Some(bytes) => std::str::from_utf8(bytes)
+                .map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?
+                .parse::<DocumentMut>()
+                .map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?,
+            None => DocumentMut::new(),
+        };
+        if !Self::apply_title_ownership(
+            &mut expected_manifest,
+            &mut expected_config,
+            !before.title_owned,
+        )
+        .map_err(|_| CodexIntegrationError::TitleRecoveryBlocked)?
+        {
+            return Err(CodexIntegrationError::TitleRecoveryBlocked);
+        }
+        let rendered = expected_config.to_string();
+        let expected_after =
+            if !expected_manifest.config_backup.existed && rendered.trim().is_empty() {
+                None
+            } else {
+                Some(rendered.into_bytes())
+            };
+        if journal.config_after != expected_after
+            || journal.manifest_after != serialize_manifest(&expected_manifest)?
+        {
+            return Err(CodexIntegrationError::TitleRecoveryBlocked);
+        }
+        let config = read_optional_safe_bytes(&self.config_path())?;
+        let manifest = read_required_safe_bytes(&self.manifest_path())?;
+        if (config != journal.config_before && config != journal.config_after)
+            || (manifest != journal.manifest_before && manifest != journal.manifest_after)
+        {
+            return Err(CodexIntegrationError::TitleRecoveryBlocked);
+        }
+        if journal.phase == TitleTransitionPhase::Applied {
+            if config != journal.config_after || manifest != journal.manifest_after {
+                return Err(CodexIntegrationError::TitleRecoveryBlocked);
+            }
+            return self.clear_title_transition_journal(&journal);
+        }
+        write_optional_owned_if_unchanged(
+            &self.config_path(),
+            config.as_deref(),
+            journal.config_before.as_deref(),
+        )?;
+        if manifest != journal.manifest_before {
+            write_if_unchanged(&self.manifest_path(), &manifest, &journal.manifest_before)?;
+        }
+        self.clear_title_transition_journal(&journal)
     }
 
     fn validate_title_ownership(
@@ -2660,6 +2858,24 @@ struct IntegrationManifest {
     #[serde(default)]
     mcp_server: Option<OwnedMcpServer>,
     hooks: Vec<OwnedHook>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TitleTransitionJournal {
+    schema: String,
+    phase: TitleTransitionPhase,
+    config_before: Option<Vec<u8>>,
+    config_after: Option<Vec<u8>>,
+    manifest_before: Vec<u8>,
+    manifest_after: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TitleTransitionPhase {
+    Prepared,
+    Applied,
 }
 
 /// Private, short-lived recovery record for one exact legacy MCP migration.
@@ -4908,6 +5124,48 @@ fn read_optional_bytes(path: &Path) -> Result<Option<Vec<u8>>, io::Error> {
     }
 }
 
+fn read_optional_safe_bytes(path: &Path) -> Result<Option<Vec<u8>>, CodexIntegrationError> {
+    reject_symbolic_link(path)?;
+    Ok(read_optional_bytes(path)?)
+}
+
+fn write_optional_owned_if_unchanged(
+    path: &Path,
+    expected: Option<&[u8]>,
+    replacement: Option<&[u8]>,
+) -> Result<(), CodexIntegrationError> {
+    if expected == replacement {
+        return Ok(());
+    }
+    reject_symbolic_link(path)?;
+    if read_optional_safe_bytes(path)?.as_deref() != expected {
+        return Err(CodexIntegrationError::ConcurrentTargetDrift);
+    }
+    match (expected, replacement) {
+        (Some(before), Some(after)) => write_if_unchanged(path, before, after),
+        (None, Some(after)) => {
+            atomic_write(path, after)?;
+            Ok(())
+        }
+        (Some(_), None) => {
+            fs::remove_file(path)?;
+            Ok(())
+        }
+        (None, None) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+fn interrupt_title_transition_test_at(stage: &str) {
+    if std::env::var("TABBEACON_TEST_TITLE_INTERRUPT_STAGE")
+        .ok()
+        .as_deref()
+        == Some(stage)
+    {
+        std::process::exit(78);
+    }
+}
+
 fn read_required_safe_bytes(path: &Path) -> Result<Vec<u8>, CodexIntegrationError> {
     reject_symbolic_link(path)?;
     Ok(fs::read(path)?)
@@ -5011,7 +5269,9 @@ fn fail(id: &'static str, summary: impl Into<String>) -> DoctorCheck {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs,
+        env, fs,
+        path::Path,
+        process::Command,
         sync::atomic::Ordering,
         time::{SystemTime, UNIX_EPOCH},
     };
@@ -5019,13 +5279,253 @@ mod tests {
     use super::{
         BackupRecord, CodexHookProfile, CodexIntegration, CodexIntegrationError, DoctorStatus,
         IntegrationManifest, MCP_MIGRATION_TEST_FAULT_AFTER, ManifestPhase, McpMigrationPlan,
-        OwnedHook, ProbeClaim, UninstallOutcome, append_owned_hooks, desired_hooks,
-        desired_mcp_server, ensure_not_symbolic_link, hybrid_runtime_probe_checks,
-        mcp_transport_profile, normalized_hook_hash, serialize_hooks,
-        windows_hook_command_for_default_comspec, write_if_unchanged,
+        OwnedHook, ProbeClaim, TitleOwnershipOutcome, UninstallOutcome, append_owned_hooks,
+        desired_hooks, desired_mcp_server, disable_terminal_title, ensure_not_symbolic_link,
+        hybrid_runtime_probe_checks, mcp_transport_profile, normalized_hook_hash, serialize_hooks,
+        serialize_manifest, windows_hook_command_for_default_comspec, write_if_unchanged,
+    };
+    use crate::{
+        interface_preferences::InterfacePreferencesStore,
+        presentation_policy::{CliTarget, PresentationMode, PresentationOverride},
+        repo::{WorkspacePreferenceStore, WorkspacePreferences},
+        settings::PresentationSettingsStore,
+        settings_transfer::{
+            ImportApplyOutcome, SettingsExportV1, apply_import_plan_durable, recover_pending_import,
+        },
     };
     use serde_json::json;
+    use std::collections::{BTreeMap, BTreeSet};
     use toml_edit::DocumentMut;
+
+    fn title_transition_handle(root: &Path) -> CodexIntegration {
+        CodexIntegration::new(
+            root.join("codex-home"),
+            root.join("state"),
+            root.join("bin/tabbeacon.exe"),
+        )
+    }
+
+    fn install_title_transition_fixture(root: &Path) -> CodexIntegration {
+        let integration = title_transition_handle(root);
+        fs::create_dir_all(root.join("codex-home")).unwrap();
+        fs::create_dir_all(root.join("state")).unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        fs::write(root.join("bin/tabbeacon.exe"), b"isolated placeholder").unwrap();
+        let owned = desired_hooks(
+            &root.join("bin/tabbeacon.exe"),
+            CodexHookProfile::command_v1(),
+        )
+        .unwrap();
+        let mut hooks = json!({"hooks": {}});
+        append_owned_hooks(&mut hooks, &owned).unwrap();
+        fs::write(
+            root.join("codex-home/hooks.json"),
+            serde_json::to_vec(&hooks).unwrap(),
+        )
+        .unwrap();
+        let mut config = "[foreign]\nkeep = true\n".parse::<DocumentMut>().unwrap();
+        disable_terminal_title(&mut config).unwrap();
+        fs::write(root.join("codex-home/config.toml"), config.to_string()).unwrap();
+        let empty_backup = BackupRecord {
+            existed: false,
+            digest: None,
+            path: None,
+        };
+        let manifest = IntegrationManifest {
+            schema: super::MANIFEST_SCHEMA.to_owned(),
+            phase: ManifestPhase::Active,
+            codex_home: root.join("codex-home"),
+            hooks_path: root.join("codex-home/hooks.json"),
+            config_path: root.join("codex-home/config.toml"),
+            executable: root.join("bin/tabbeacon.exe"),
+            created_hooks_file: true,
+            hooks_backup: empty_backup.clone(),
+            config_backup: empty_backup,
+            title_owned: true,
+            prior_title: None,
+            mcp_server: None,
+            hooks: owned,
+        };
+        fs::write(
+            root.join("state/integration-v1.json"),
+            serialize_manifest(&manifest).unwrap(),
+        )
+        .unwrap();
+        integration
+    }
+
+    #[test]
+    fn title_transition_child_fixture() {
+        let Ok(root) = env::var("TABBEACON_TEST_TITLE_CHILD_ROOT") else {
+            return;
+        };
+        let integration = install_title_transition_fixture(Path::new(&root));
+        let result = integration.with_lock(|| integration.reconcile_title_ownership_locked(false));
+        panic!("injected title transition exit did not occur: {result:?}");
+    }
+
+    #[test]
+    fn title_transition_recovers_after_process_exit_at_each_owned_write() {
+        for stage in ["config", "manifest", "applied"] {
+            let root = tempfile::tempdir().unwrap();
+            let output = Command::new(env::current_exe().unwrap())
+                .arg("title_transition_child_fixture")
+                .env("TABBEACON_TEST_TITLE_CHILD_ROOT", root.path())
+                .env("TABBEACON_TEST_TITLE_INTERRUPT_STAGE", stage)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(78),
+                "stage={stage}; stdout={}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            let integration = title_transition_handle(root.path());
+            let expected = stage != "applied";
+            let outcome = integration
+                .with_lock(|| {
+                    integration.recover_incomplete_title_transition()?;
+                    integration.reconcile_title_ownership_locked(expected)
+                })
+                .unwrap();
+            assert_eq!(outcome, TitleOwnershipOutcome::AlreadyConfigured);
+            assert!(!root.path().join("state/title-transition-v1.json").exists());
+            let manifest = integration.load_manifest().unwrap().unwrap();
+            assert_eq!(manifest.title_owned, expected);
+            assert!(
+                fs::read_to_string(root.path().join("codex-home/config.toml"))
+                    .unwrap()
+                    .contains("keep = true"),
+                "unrelated configuration survives stage={stage}"
+            );
+        }
+    }
+
+    #[test]
+    fn title_transition_refuses_external_config_drift_after_process_exit() {
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(env::current_exe().unwrap())
+            .arg("title_transition_child_fixture")
+            .env("TABBEACON_TEST_TITLE_CHILD_ROOT", root.path())
+            .env("TABBEACON_TEST_TITLE_INTERRUPT_STAGE", "config")
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(78));
+        let config_path = root.path().join("codex-home/config.toml");
+        let manifest_path = root.path().join("state/integration-v1.json");
+        fs::write(&config_path, "[foreign]\nkeep = false\n").unwrap();
+        let manifest_before = fs::read(&manifest_path).unwrap();
+        let integration = title_transition_handle(root.path());
+        assert!(matches!(
+            integration.with_lock(|| integration.recover_incomplete_title_transition()),
+            Err(CodexIntegrationError::TitleRecoveryBlocked)
+        ));
+        assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+        assert_eq!(
+            fs::read_to_string(&config_path).unwrap(),
+            "[foreign]\nkeep = false\n"
+        );
+        assert!(root.path().join("state/title-transition-v1.json").exists());
+    }
+
+    fn combined_import_stores(
+        root: &Path,
+    ) -> (
+        PresentationSettingsStore,
+        InterfacePreferencesStore,
+        WorkspacePreferenceStore,
+    ) {
+        (
+            PresentationSettingsStore::new(root.join("import/config.toml")),
+            InterfacePreferencesStore::new(root.join("import/interface.toml")),
+            WorkspacePreferenceStore::new(root.join("import/preferences.json")),
+        )
+    }
+
+    #[test]
+    fn combined_import_title_child_fixture() {
+        let Ok(root) = env::var("TABBEACON_TEST_COMBINED_IMPORT_ROOT") else {
+            return;
+        };
+        let root = Path::new(&root);
+        let integration = install_title_transition_fixture(root);
+        let (presentation, interface, workspace) = combined_import_stores(root);
+        let p = presentation.snapshot_read_only().unwrap();
+        let i = interface.snapshot_read_only().unwrap();
+        let w = workspace.snapshot_read_only().unwrap();
+        let document = SettingsExportV1::new(None, None, &WorkspacePreferences::default())
+            .with_provider_overrides(BTreeMap::from([(
+                CliTarget::Codex,
+                PresentationOverride::default().with_mode(PresentationMode::PreserveNative),
+            )]));
+        let plan = document
+            .import_plan(&p, &i, &w, &BTreeSet::new(), &BTreeMap::new())
+            .unwrap();
+        let result = apply_import_plan_durable(
+            &plan,
+            &presentation,
+            &p,
+            &interface,
+            &i,
+            &workspace,
+            &w,
+            |owns| {
+                integration
+                    .with_lock(|| integration.reconcile_title_ownership_locked(owns))
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            },
+        );
+        panic!("injected combined import exit did not occur: {result:?}");
+    }
+
+    #[test]
+    fn combined_import_and_codex_title_recover_after_process_exit() {
+        for stage in ["config", "manifest", "applied"] {
+            let root = tempfile::tempdir().unwrap();
+            let output = Command::new(env::current_exe().unwrap())
+                .arg("combined_import_title_child_fixture")
+                .env("TABBEACON_TEST_COMBINED_IMPORT_ROOT", root.path())
+                .env("TABBEACON_TEST_TITLE_INTERRUPT_STAGE", stage)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(78),
+                "stage={stage}; stdout={}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            let integration = title_transition_handle(root.path());
+            let (presentation, interface, workspace) = combined_import_stores(root.path());
+            assert_eq!(
+                recover_pending_import(&presentation, &interface, &workspace, |owns| {
+                    integration
+                        .with_lock(|| {
+                            integration.recover_incomplete_title_transition()?;
+                            integration.reconcile_title_ownership_locked(owns)
+                        })
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                }),
+                Some(ImportApplyOutcome::RolledBack),
+                "stage={stage}"
+            );
+            assert!(!presentation.path().exists());
+            assert!(
+                !root
+                    .path()
+                    .join("import/import-transaction-v1.json")
+                    .exists()
+            );
+            assert!(!root.path().join("state/title-transition-v1.json").exists());
+            assert!(integration.load_manifest().unwrap().unwrap().title_owned);
+            assert!(
+                fs::read_to_string(root.path().join("codex-home/config.toml"))
+                    .unwrap()
+                    .contains("keep = true")
+            );
+        }
+    }
 
     #[test]
     fn normalized_hash_matches_codex_0_147_0_hooks_list() {
