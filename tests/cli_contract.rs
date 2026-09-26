@@ -1264,6 +1264,124 @@ fn ownership_changing_provider_import_previews_and_applies_without_installing_ho
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One isolated CLI lifecycle spans setup, drift, apply, and idempotence.
+fn title_changing_import_reconciles_installed_codex_without_touching_other_hooks() {
+    let source = TestRoot::new("installed-import-source");
+    let target = TestRoot::new("installed-import-target");
+    let export_path = source.child("settings.json");
+    let source_store =
+        PresentationSettingsStore::new(source.child("local-appdata/TabBeacon/config.toml"));
+    let source_snapshot = source_store.snapshot_read_only().unwrap();
+    source_store
+        .save_provider_override_snapshot_if_unchanged(
+            &source_snapshot,
+            CliTarget::Codex,
+            PresentationOverride::default().with_mode(PresentationMode::PreserveNative),
+        )
+        .unwrap();
+    assert!(
+        isolated_command(&source)
+            .args([
+                "export",
+                "--output",
+                export_path.to_str().unwrap(),
+                "--plain"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+
+    let codex = fake_codex_directory(&target, "0.156.1");
+    let codex_home = target.child("codex-home");
+    fs::create_dir_all(&codex_home).unwrap();
+    let config_path = codex_home.join("config.toml");
+    fs::write(
+        &config_path,
+        "[tui]\nterminal_title = [\"activity\", \"project\"]\n[custom]\nforeign_marker = \"preserve\"\n",
+    )
+    .unwrap();
+    let setup = isolated_command_with_codex(&target, &codex)
+        .args(["setup", "codex", "--plain"])
+        .output()
+        .unwrap();
+    assert!(
+        setup.status.success(),
+        "{}",
+        String::from_utf8_lossy(&setup.stderr)
+    );
+    let hooks_path = codex_home.join("hooks.json");
+    let hooks_after_setup = fs::read(&hooks_path).unwrap();
+    let settings_path = target.child("local-appdata/TabBeacon/config.toml");
+    let owned_config = fs::read(&config_path).unwrap();
+    let preview = isolated_command_with_codex(&target, &codex)
+        .args(["import", export_path.to_str().unwrap(), "--plain"])
+        .output()
+        .unwrap();
+    assert!(preview.status.success());
+    assert!(String::from_utf8_lossy(&preview.stdout).contains("IMPORT=PREVIEW"));
+    assert_eq!(fs::read(&hooks_path).unwrap(), hooks_after_setup);
+    assert_eq!(fs::read(&config_path).unwrap(), owned_config);
+    assert!(!settings_path.exists());
+
+    let drifted_config = String::from_utf8(owned_config.clone())
+        .unwrap()
+        .replace("terminal_title = []", "terminal_title = [\"foreign\"]");
+    assert_ne!(drifted_config.as_bytes(), owned_config);
+    fs::write(&config_path, &drifted_config).unwrap();
+    let refused = isolated_command_with_codex(&target, &codex)
+        .args([
+            "import",
+            export_path.to_str().unwrap(),
+            "--apply",
+            "--plain",
+        ])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stdout).contains("IMPORT=partial_state"));
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), drifted_config);
+    assert_eq!(fs::read(&hooks_path).unwrap(), hooks_after_setup);
+    assert!(!settings_path.exists());
+    fs::write(&config_path, &owned_config).unwrap();
+
+    let apply = isolated_command_with_codex(&target, &codex)
+        .args([
+            "import",
+            export_path.to_str().unwrap(),
+            "--apply",
+            "--plain",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        apply.status.success(),
+        "{}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    assert!(String::from_utf8_lossy(&apply.stdout).contains("IMPORT=applied"));
+    assert_eq!(fs::read(&hooks_path).unwrap(), hooks_after_setup);
+    let config_after = fs::read_to_string(&config_path).unwrap();
+    assert!(config_after.contains("terminal_title = [\"activity\", \"project\"]"));
+    assert!(config_after.contains("foreign_marker = \"preserve\""));
+    assert!(settings_path.exists());
+
+    let repeat = isolated_command_with_codex(&target, &codex)
+        .args([
+            "import",
+            export_path.to_str().unwrap(),
+            "--apply",
+            "--plain",
+        ])
+        .output()
+        .unwrap();
+    assert!(repeat.status.success());
+    assert_eq!(fs::read(&hooks_path).unwrap(), hooks_after_setup);
+    assert_eq!(fs::read_to_string(&config_path).unwrap(), config_after);
+}
+
+#[test]
 fn human_locale_and_interface_state_stay_user_local() {
     let root = TestRoot::new("localized-human-interface");
 
