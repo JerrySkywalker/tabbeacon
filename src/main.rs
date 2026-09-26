@@ -47,6 +47,7 @@ use tabbeacon::providers::codex::{
     CodexHookRuntime, CodexIntegration, CodexRepairDisposition, CodexRepairReport, SetupOutcome,
     TitleOwnershipOutcome, UninstallOutcome,
 };
+use tabbeacon::providers::cursor::CursorRouteStore;
 use tabbeacon::providers::cursor_integration::{CursorHookIntegration, CursorHookState};
 use tabbeacon::providers::registry::ProviderRegistry;
 use tabbeacon::setup::{
@@ -587,6 +588,25 @@ fn apply_provider_override(
     if draft == current {
         return Ok(());
     }
+    if target == CliTarget::Cursor {
+        let state_root = store
+            .path()
+            .parent()
+            .ok_or_else(|| io::Error::other("Cursor state root is unavailable"))?;
+        return CursorRouteStore::new(state_root).with_route_lock(|| {
+            apply_provider_override_after_route_lock(store, snapshot, target, current, draft)
+        });
+    }
+    apply_provider_override_after_route_lock(store, snapshot, target, current, draft)
+}
+
+fn apply_provider_override_after_route_lock(
+    store: &PresentationSettingsStore,
+    snapshot: &PresentationSettingsSnapshot,
+    target: CliTarget,
+    current: PresentationOverride,
+    draft: PresentationOverride,
+) -> io::Result<()> {
     let receipt = match store.save_provider_override_snapshot_if_unchanged(snapshot, target, draft)
     {
         Ok(SnapshotSaveOutcome::Saved(receipt)) => receipt,

@@ -80,6 +80,12 @@ Until then, the tab may retain its previous title or color. The CLI prints
 `VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE`, and the
 Control Center shows the same boundary. No output is claimed as applied merely
 because the preference was saved or a title callback was reconciled.
+For the direct Cursor provider Apply command, TabBeacon orders the settings
+write with the installed Hook's exact route/output lock. The Hook resolves the
+saved preference inside that lock before writing color. A busy lock rejects
+the Apply before the preference write; no remote terminal is reset. Global
+settings and portable import have separate transaction paths and are not
+covered by this direct-Apply ordering claim.
 
 ## Human interface preferences
 

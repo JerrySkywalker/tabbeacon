@@ -6,16 +6,17 @@ use std::{
     io::Write,
     path::Path,
     process::{Command, Stdio},
+    time::Duration,
 };
 
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::os::windows::process::CommandExt;
 use tabbeacon::{
-    presentation_policy::{ApplicationStatus, CliTarget, PresentationCapabilities},
     providers::{
+        cursor::CursorRouteStore,
         cursor_integration::CursorHookIntegration,
-        cursor_runtime::{CursorDispatchOutcome, dispatch_with_output_bounded},
+        cursor_runtime::{CursorDispatchOutcome, dispatch_with_settings_bounded},
     },
     settings::PresentationSettingsStore,
 };
@@ -191,9 +192,11 @@ fn public_cursor_preference_apply_reports_deferred_visible_settlement() {
     assert!(color.contains("REQUESTED_TAB_COLOR=tabbeacon"));
     assert!(color.contains("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE"));
     assert!(settings_path.exists());
-    assert!(
-        !route_path.exists(),
-        "Apply must not claim a terminal route"
+    assert!(route_path.exists(), "Apply participates in the route lock");
+    assert_eq!(
+        fs::read_dir(&route_path).unwrap().count(),
+        1,
+        "Apply creates only the bounded lock, not a session or color lease"
     );
 
     CursorHookIntegration::new(root.path(), binary)
@@ -205,15 +208,8 @@ fn public_cursor_preference_apply_reports_deferred_visible_settlement() {
     let digest = format!("{:x}", Sha256::digest(terminal.as_bytes()));
     let sink = RefCell::new(Vec::new());
     let dispatch = |event: &[u8]| {
-        let resolved = store
-            .resolve_provider_read_only(
-                CliTarget::Cursor,
-                PresentationCapabilities::CURSOR_COLOR_ONLY,
-                ApplicationStatus::Unproven,
-            )
-            .unwrap();
         let mut output = sink.borrow_mut();
-        dispatch_with_output_bounded(
+        dispatch_with_settings_bounded(
             event,
             root.path(),
             binary,
@@ -221,7 +217,7 @@ fn public_cursor_preference_apply_reports_deferred_visible_settlement() {
             &digest,
             terminal,
             true,
-            &resolved,
+            &store,
             &mut *output,
         )
         .unwrap()
@@ -282,4 +278,53 @@ fn public_cursor_preference_apply_reports_deferred_visible_settlement() {
         CursorDispatchOutcome::OutputFlushed
     );
     assert_eq!(&sink.borrow()[result_ready_bytes..], b"\x1b]104;264\x1b\\");
+}
+
+#[test]
+fn public_cursor_apply_waits_for_the_existing_route_output_lock() {
+    let root = tempfile::tempdir().unwrap();
+    let local_appdata = root.path().join("local-appdata");
+    fs::create_dir(&local_appdata).unwrap();
+    let binary = Path::new(env!("CARGO_BIN_EXE_tabbeacon"));
+    let settings_path = local_appdata.join("TabBeacon/config.toml");
+    let initial = Command::new(binary)
+        .args([
+            "config",
+            "--plain",
+            "provider",
+            "cursor",
+            "apply",
+            "color-only",
+        ])
+        .current_dir(root.path())
+        .env("LOCALAPPDATA", &local_appdata)
+        .output()
+        .unwrap();
+    assert!(initial.status.success());
+    let before = fs::read(&settings_path).unwrap();
+    let state_root = settings_path.parent().unwrap();
+    let mut child = CursorRouteStore::new(state_root)
+        .with_route_lock(|| {
+            let mut child = Command::new(binary)
+                .args([
+                    "config",
+                    "--plain",
+                    "provider",
+                    "cursor",
+                    "apply",
+                    "preserve-native",
+                ])
+                .current_dir(root.path())
+                .env("LOCALAPPDATA", &local_appdata)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()?;
+            std::thread::sleep(Duration::from_millis(40));
+            assert!(child.try_wait()?.is_none());
+            assert_eq!(fs::read(&settings_path)?, before);
+            Ok(child)
+        })
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    assert_ne!(fs::read(settings_path).unwrap(), before);
 }

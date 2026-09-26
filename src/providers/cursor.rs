@@ -441,6 +441,26 @@ impl CursorRouteStore {
         {
             return Ok((false, false));
         }
+        self.with_route_lock(|| {
+            self.admit_locked(
+                event,
+                expected_terminal_binding_sha256,
+                observed_terminal_binding_sha256,
+                console_openable,
+                apply,
+            )
+        })
+    }
+
+    /// Serializes a preference change with admitted Hook output. The caller
+    /// must keep the critical section bounded and must not touch a terminal
+    /// it cannot independently bind.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unsafe paths and a route lock that stays busy beyond the Hook
+    /// budget; no preference write is attempted in that case.
+    pub fn with_route_lock<T>(&self, action: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
         for ancestor in self.directory.ancestors() {
             reject_route_symlink(ancestor)?;
         }
@@ -469,13 +489,7 @@ impl CursorRouteStore {
                 Err(error) => return Err(error.into()),
             }
         }
-        let result = self.admit_locked(
-            event,
-            expected_terminal_binding_sha256,
-            observed_terminal_binding_sha256,
-            console_openable,
-            apply,
-        );
+        let result = action();
         // The handle drop releases the lock even if an explicit unlock reports
         // an error. Preserve the actual output disposition from the callback.
         let _ = File::unlock(&lock);

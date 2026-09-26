@@ -86,6 +86,50 @@ pub fn dispatch_with_output_bounded(
     )
 }
 
+/// Resolves the current saved Cursor preference inside the route/output
+/// critical section. The normal Hook path uses this so a preference changed
+/// while this process waited for the lock cannot be overwritten by a stale
+/// pre-lock resolution.
+///
+/// # Errors
+///
+/// Returns a bounded configuration or dispatch error; the caller fails open.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_with_settings_bounded(
+    raw: &[u8],
+    workspace: &Path,
+    executable: &Path,
+    state_root: &Path,
+    expected_terminal_sha256: &str,
+    terminal_identity: &str,
+    console_openable: bool,
+    settings: &PresentationSettingsStore,
+    sink: &mut impl Write,
+) -> io::Result<CursorDispatchOutcome> {
+    if settings.path().parent() != Some(state_root) {
+        return Ok(CursorDispatchOutcome::Ignored);
+    }
+    dispatch_with(
+        raw,
+        workspace,
+        executable,
+        state_root,
+        expected_terminal_sha256,
+        terminal_identity,
+        console_openable,
+        |event, terminal| {
+            let resolved = settings
+                .resolve_provider_read_only(
+                    CliTarget::Cursor,
+                    PresentationCapabilities::CURSOR_COLOR_ONLY,
+                    ApplicationStatus::Unproven,
+                )
+                .map_err(io::Error::other)?;
+            cursor_color::apply_admitted(state_root, terminal, event, &resolved, sink)
+        },
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch_with(
     raw: &[u8],
@@ -161,13 +205,6 @@ pub fn dispatch_system(raw: &[u8]) -> CursorDispatchOutcome {
     let Some(state_root) = settings.path().parent() else {
         return CursorDispatchOutcome::Ignored;
     };
-    let Ok(resolved) = settings.resolve_provider_read_only(
-        CliTarget::Cursor,
-        PresentationCapabilities::CURSOR_COLOR_ONLY,
-        ApplicationStatus::Unproven,
-    ) else {
-        return CursorDispatchOutcome::Ignored;
-    };
     let Ok(workspace) = env::current_dir() else {
         return CursorDispatchOutcome::Ignored;
     };
@@ -187,7 +224,7 @@ pub fn dispatch_system(raw: &[u8]) -> CursorDispatchOutcome {
     let Ok(mut sink) = crate::console_output::open_owned_console() else {
         return CursorDispatchOutcome::Ignored;
     };
-    dispatch_with_output_bounded(
+    dispatch_with_settings_bounded(
         raw,
         &workspace,
         &executable,
@@ -195,7 +232,7 @@ pub fn dispatch_system(raw: &[u8]) -> CursorDispatchOutcome {
         &expected_terminal_sha256,
         &terminal_identity,
         true,
-        &resolved,
+        &settings,
         &mut sink,
     )
     .unwrap_or(CursorDispatchOutcome::Ignored)
