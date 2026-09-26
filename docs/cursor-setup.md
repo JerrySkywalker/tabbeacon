@@ -34,4 +34,7 @@ production color write. Terminal identity inheritance observed in the isolated
 real Cursor probe is distinct from a verified safe output channel. Real
 color-only display, native-title preservation, release on exit, two concurrent
 Cursor sessions, and mixed-provider Visual/L4 acceptance remain unproven.
+The read-only integration list therefore shows Cursor as an unadmitted
+candidate. An exact project declaration can show `installed_unproven` while
+terminal presentation remains unavailable.
 Do not interpret a successful install or synthetic test as production support.

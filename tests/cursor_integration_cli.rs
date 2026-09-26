@@ -31,6 +31,7 @@ fn run_plain(binary: &Path, arguments: &[&str]) -> String {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One isolated public workflow covers install, Hook dispatch and exact removal.
 fn public_cursor_management_preserves_foreign_project_hooks() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().to_str().unwrap();
