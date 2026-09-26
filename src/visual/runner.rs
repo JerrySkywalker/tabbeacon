@@ -1464,10 +1464,18 @@ fn selected_replays(
 ) -> VisualResult<Vec<super::FixtureReplay>> {
     let all = driver.all_cases(&request.run_id)?;
     match request.fixture_name.as_deref() {
+        Some(super::CURSOR_COLOR_NATIVE_FIXTURE) => {
+            let ready = all
+                .into_iter()
+                .find(|replay| replay.case.fixture_name == "ready")
+                .ok_or_else(|| VisualError::Platform("native color baseline missing".to_owned()))?;
+            Ok(vec![
+                ready,
+                driver.cursor_color_replay(super::CURSOR_COLOR_NATIVE_FIXTURE, &request.run_id)?,
+            ])
+        }
         Some(
-            name @ (super::CURSOR_COLOR_WORKING_FIXTURE
-            | super::CURSOR_COLOR_COMPLETED_FIXTURE
-            | super::CURSOR_COLOR_NATIVE_FIXTURE),
+            name @ (super::CURSOR_COLOR_WORKING_FIXTURE | super::CURSOR_COLOR_COMPLETED_FIXTURE),
         ) => Ok(vec![driver.cursor_color_replay(name, &request.run_id)?]),
         Some(ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME) => {
             let ready = all
@@ -1978,6 +1986,22 @@ mod tests {
             .map(|replay| replay.case.fixture_name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, ["ready", ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME]);
+    }
+
+    #[test]
+    fn cursor_native_visual_fixture_captures_default_baseline_first() {
+        let request = LiveVisualRunRequest {
+            expected_head: "a".repeat(40),
+            run_id: "TB80-native-selection".to_owned(),
+            evidence_root: PathBuf::from("target/visual-worker-tests"),
+            fixture_name: Some(super::super::CURSOR_COLOR_NATIVE_FIXTURE.to_owned()),
+        };
+        let names = selected_replays(&FixtureDriver::default(), &request)
+            .unwrap()
+            .into_iter()
+            .map(|replay| replay.case.fixture_name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["ready", super::super::CURSOR_COLOR_NATIVE_FIXTURE]);
     }
 
     #[test]
