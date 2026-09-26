@@ -59,6 +59,7 @@ pub struct CursorSessionRoute {
     // rejection of every previously admitted generation. False positives
     // fail closed; no old generation is ever forgotten to make room.
     seen_generation_bits: Vec<u8>,
+    ending: bool,
     ended: bool,
 }
 
@@ -70,6 +71,8 @@ struct CursorRouteCheckpoint {
     session_sha256: String,
     active_generation_sha256: Option<String>,
     seen_generation_bits: Vec<u8>,
+    #[serde(default)]
+    ending: bool,
     ended: bool,
 }
 
@@ -132,6 +135,7 @@ impl CursorSessionRoute {
                 session_sha256: event.session_sha256.clone(),
                 active_generation_sha256: None,
                 seen_generation_bits: vec![0; CURSOR_GENERATION_BITS_BYTES],
+                ending: false,
                 ended: false,
             })
     }
@@ -148,6 +152,7 @@ impl CursorSessionRoute {
             session_sha256: self.session_sha256.clone(),
             active_generation_sha256: self.active_generation_sha256.clone(),
             seen_generation_bits: self.seen_generation_bits.clone(),
+            ending: self.ending,
             ended: self.ended,
         })
     }
@@ -165,6 +170,8 @@ impl CursorSessionRoute {
             || (!checkpoint.ended
                 && checkpoint.seen_generation_bits.len() != CURSOR_GENERATION_BITS_BYTES)
             || (checkpoint.ended && !checkpoint.seen_generation_bits.is_empty())
+            || (checkpoint.ended && checkpoint.ending)
+            || (checkpoint.ending && checkpoint.active_generation_sha256.is_some())
             || checkpoint
                 .active_generation_sha256
                 .as_deref()
@@ -178,6 +185,7 @@ impl CursorSessionRoute {
             session_sha256: checkpoint.session_sha256,
             active_generation_sha256: checkpoint.active_generation_sha256,
             seen_generation_bits: checkpoint.seen_generation_bits,
+            ending: checkpoint.ending,
             ended: checkpoint.ended,
         };
         if route
@@ -230,6 +238,7 @@ impl CursorSessionRoute {
         console_openable: bool,
     ) -> bool {
         if self.ended
+            || (self.ending && event.event != CursorEvent::SessionEnd)
             || !console_openable
             || observed_terminal_binding_sha256 != self.terminal_binding_sha256
             || event.session_sha256 != self.session_sha256
@@ -263,11 +272,16 @@ impl CursorSessionRoute {
             }
             CursorEvent::SessionEnd => {
                 self.active_generation_sha256 = None;
-                self.seen_generation_bits.clear();
-                self.ended = true;
+                self.ending = true;
                 true
             }
         }
+    }
+
+    fn finish_end(&mut self) {
+        self.ending = false;
+        self.ended = true;
+        self.seen_generation_bits.clear();
     }
 }
 
@@ -536,15 +550,9 @@ impl CursorRouteStore {
         {
             return Ok((false, false));
         }
-        // An end must retain its route until release has either completed or
-        // safely revoked ownership. If the pre-output lease write fails, a
-        // later exact sessionEnd can retry; no other session can use its key.
-        let mut apply = Some(apply);
-        let mut written = if route.ended {
-            apply.take().unwrap()()?
-        } else {
-            false
-        };
+        // Persist the ending barrier before touching color. A crash after
+        // release cannot revive a prompt; a failed release can retry only the
+        // exact end while the route remains in this state.
         let bytes = route
             .checkpoint()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -552,7 +560,16 @@ impl CursorRouteStore {
         file.write_all(&bytes)?;
         file.flush()?;
         file.commit()?;
-        if route.ended {
+        let written = apply()?;
+        if route.ending {
+            route.finish_end();
+            let finished = route
+                .checkpoint()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let mut file = AtomicWriteFile::options().open(&path)?;
+            file.write_all(&finished)?;
+            file.flush()?;
+            file.commit()?;
             if !ended.insert(&route.session_sha256) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -560,9 +577,7 @@ impl CursorRouteStore {
                 ));
             }
             self.save_ended(&ended)?;
-            Self::remove_exact_ended_checkpoint(&path, &bytes)?;
-        } else {
-            written = apply.take().unwrap()()?;
+            Self::remove_exact_ended_checkpoint(&path, &finished)?;
         }
         Ok((true, written))
     }
@@ -791,6 +806,51 @@ mod tests {
             (true, true)
         );
         assert!(!store.admit(&end, &terminal, &terminal, true).unwrap());
+    }
+
+    #[test]
+    fn persisted_ending_barrier_survives_post_release_interruption() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CursorRouteStore::new(root.path());
+        let terminal = "a".repeat(64);
+        let event = |name: &str, generation: Option<&str>| {
+            let mut input =
+                serde_json::json!({"hook_event_name":name,"session_id":"interrupted-end"});
+            if let Some(generation) = generation {
+                input["generation_id"] = generation.into();
+            }
+            normalize_hook(input.to_string().as_bytes())
+                .unwrap()
+                .unwrap()
+        };
+        let start = event("sessionStart", None);
+        let end = event("sessionEnd", None);
+        let late_prompt = event("beforeSubmitPrompt", Some("late"));
+        assert!(store.admit(&start, &terminal, &terminal, true).unwrap());
+        let path = store
+            .directory
+            .join(format!("{}.json", start.session_sha256));
+        let mut route = CursorSessionRoute::from_checkpoint(&fs::read(&path).unwrap()).unwrap();
+        assert!(route.admit(&end, &terminal, true));
+        // This is the exact durable boundary after the release has flushed but
+        // before final tombstone commit. A restarted Hook sees `ending`.
+        fs::write(&path, route.checkpoint().unwrap()).unwrap();
+        assert!(
+            !store
+                .admit(&late_prompt, &terminal, &terminal, true)
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .admit_with(&end, &terminal, &terminal, true, || Ok(false))
+                .unwrap(),
+            (true, false)
+        );
+        assert!(
+            !store
+                .admit(&late_prompt, &terminal, &terminal, true)
+                .unwrap()
+        );
     }
 
     #[test]

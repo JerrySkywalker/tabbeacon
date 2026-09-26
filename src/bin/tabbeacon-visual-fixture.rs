@@ -12,16 +12,26 @@ use std::{
 
 use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tabbeacon::{
     activity::next_animation_frame_deadline,
     presentation::{
         PresentationAction, TitleStatus, WindowsTerminalCapabilities, WindowsTerminalRenderer,
         presentation_fixture,
     },
-    providers::codex::{CodexHookRuntime, HookDispatchOutcome},
+    presentation_policy::{
+        ApplicationStatus, PresentationCapabilities, PresentationMode, PresentationOverride,
+        ResolvedPresentation, resolve_presentation,
+    },
+    providers::{
+        codex::{CodexHookRuntime, HookDispatchOutcome},
+        cursor_integration::CursorHookIntegration,
+        cursor_runtime::{CursorDispatchOutcome, dispatch_with_output_bounded},
+    },
     repo::WorkspaceIdentityResolver,
     settings::PresentationSettings,
     visual::{
+        CURSOR_COLOR_COMPLETED_FIXTURE, CURSOR_COLOR_NATIVE_FIXTURE, CURSOR_COLOR_WORKING_FIXTURE,
         CaptureBackend, ExactOwnedWindowBackend, FixtureDriver, LiveVisualRunRequest,
         PrintWindowCaptureBackend, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME,
         TemporaryWindowProductDisposition, TemporaryWindowsTerminalOwnership, TerminalTestSession,
@@ -64,6 +74,12 @@ fn emit(arguments: &[String]) -> VisualResult<()> {
     if fixture_name == ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME {
         return emit_root_workspace_anchor(&run_id, hold_millis);
     }
+    if matches!(
+        fixture_name.as_str(),
+        CURSOR_COLOR_WORKING_FIXTURE | CURSOR_COLOR_COMPLETED_FIXTURE | CURSOR_COLOR_NATIVE_FIXTURE
+    ) {
+        return emit_cursor_color_fixture(&fixture_name, &run_id, hold_millis);
+    }
     let fixture = presentation_fixture()
         .iter()
         .find(|fixture| fixture.name() == fixture_name)
@@ -97,6 +113,101 @@ fn emit(arguments: &[String]) -> VisualResult<()> {
     stdout.write_all(&reset.vt_bytes)?;
     stdout.flush()?;
     Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // One owned fixture exercises the product color and release sequence.
+fn emit_cursor_color_fixture(name: &str, run_id: &str, hold_millis: u64) -> VisualResult<()> {
+    let replay = FixtureDriver::default().cursor_color_replay(name, run_id)?;
+    let temp = env::temp_dir().canonicalize()?;
+    let root = temp.join(format!(
+        "tabbeacon-cursor-visual-{run_id}-{}",
+        process::id()
+    ));
+    fs::create_dir(&root)?;
+    let workspace = root.join("workspace");
+    let state_root = root.join("state");
+    let result = (|| -> VisualResult<()> {
+        fs::create_dir(&workspace)?;
+        fs::create_dir(&state_root)?;
+        let executable = env::current_exe()?;
+        CursorHookIntegration::new(&workspace, &executable)?.install()?;
+        let terminal = env::var("WT_SESSION").map_err(|_| {
+            VisualError::Platform("owned Cursor visual tab has no WT_SESSION".to_owned())
+        })?;
+        let digest = format!("{:x}", Sha256::digest(terminal.as_bytes()));
+        let color = resolve_presentation(
+            PresentationSettings::default(),
+            PresentationOverride::default().with_mode(PresentationMode::ColorOnly),
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        );
+        let native = resolve_presentation(
+            PresentationSettings::default(),
+            PresentationOverride::default().with_mode(PresentationMode::PreserveNative),
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        );
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(format!("\x1b]0;{}\x1b\\", replay.case.expected_title).as_bytes())?;
+        stdout.flush()?;
+        let mut console = tabbeacon::console_output::open_owned_console()?;
+        let session = format!("visual-{run_id}");
+        let call = |event: &str,
+                    generation: Option<&str>,
+                    status: Option<&str>,
+                    mode: &ResolvedPresentation,
+                    sink: &mut tabbeacon::console_output::OwnedConsole|
+         -> VisualResult<CursorDispatchOutcome> {
+            let mut payload = json!({"hook_event_name":event,"session_id":session});
+            if let Some(generation) = generation {
+                payload["generation_id"] = generation.into();
+            }
+            if let Some(status) = status {
+                payload["status"] = status.into();
+            }
+            let outcome = dispatch_with_output_bounded(
+                payload.to_string().as_bytes(),
+                &workspace,
+                &executable,
+                &state_root,
+                &digest,
+                &terminal,
+                true,
+                mode,
+                sink,
+            )?;
+            if matches!(
+                outcome,
+                CursorDispatchOutcome::Ignored | CursorDispatchOutcome::OutputFailed
+            ) {
+                return Err(VisualError::Platform(
+                    "owned Cursor color fixture dispatch refused".to_owned(),
+                ));
+            }
+            Ok(outcome)
+        };
+        call("sessionStart", None, None, &color, &mut console)?;
+        call("beforeSubmitPrompt", Some("g1"), None, &color, &mut console)?;
+        if name != CURSOR_COLOR_WORKING_FIXTURE {
+            let mode = if name == CURSOR_COLOR_NATIVE_FIXTURE {
+                &native
+            } else {
+                &color
+            };
+            call("stop", Some("g1"), Some("completed"), mode, &mut console)?;
+        }
+        thread::sleep(Duration::from_millis(hold_millis));
+        call("sessionEnd", None, None, &color, &mut console)?;
+        Ok(())
+    })();
+    let owned = root.canonicalize()?;
+    if owned.parent() != Some(temp.as_path()) {
+        return Err(VisualError::Platform(
+            "Cursor visual fixture cleanup root drifted".to_owned(),
+        ));
+    }
+    fs::remove_dir_all(&owned)?;
+    result
 }
 
 const PROMO_FPS: u32 = 10;

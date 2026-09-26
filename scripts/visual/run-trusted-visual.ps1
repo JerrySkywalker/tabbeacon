@@ -11,7 +11,10 @@ param(
     [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9-]{0,63}$')]
     [string]$RunId,
 
-    [string]$EvidenceRoot = 'artifacts/visual'
+    [string]$EvidenceRoot = 'artifacts/visual',
+
+    [ValidateSet('cursor-color-working', 'cursor-color-completed', 'cursor-color-native')]
+    [string]$Fixture
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,10 +31,9 @@ if ($actualHead -ne $ExpectedHead) {
 
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
 
-& cargo run --locked --features visual-fixture --bin tabbeacon-visual-fixture -- run `
-    --expected-head $ExpectedHead `
-    --run-id $RunId `
-    --evidence-root $EvidenceRoot
+$visualArguments = @('run', '--expected-head', $ExpectedHead, '--run-id', $RunId, '--evidence-root', $EvidenceRoot)
+if ($Fixture) { $visualArguments += @('--fixture', $Fixture) }
+& cargo run --locked --features visual-fixture --bin tabbeacon-visual-fixture -- @visualArguments
 $visualExit = $LASTEXITCODE
 
 if ($visualExit -eq 0) {

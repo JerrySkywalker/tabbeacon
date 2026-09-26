@@ -1464,6 +1464,11 @@ fn selected_replays(
 ) -> VisualResult<Vec<super::FixtureReplay>> {
     let all = driver.all_cases(&request.run_id)?;
     match request.fixture_name.as_deref() {
+        Some(
+            name @ (super::CURSOR_COLOR_WORKING_FIXTURE
+            | super::CURSOR_COLOR_COMPLETED_FIXTURE
+            | super::CURSOR_COLOR_NATIVE_FIXTURE),
+        ) => Ok(vec![driver.cursor_color_replay(name, &request.run_id)?]),
         Some(ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME) => {
             let ready = all
                 .into_iter()
