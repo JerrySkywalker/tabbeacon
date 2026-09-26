@@ -1291,6 +1291,8 @@ fn ownership_changing_provider_import_previews_and_applies_without_installing_ho
 #[allow(clippy::too_many_lines)] // The public Agy chain spans owned setup, switch, and exact release.
 fn agy_public_provider_switch_releases_only_its_owned_title_callback() {
     let root = TestRoot::new("agy-public-p08");
+    let workspace = root.child("workspace");
+    fs::create_dir_all(&workspace).unwrap();
     let agy_directory = fake_admitted_agy_directory(&root);
     let settings_path = root.child("user-profile/.gemini/antigravity-cli/settings.json");
     fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
@@ -1306,6 +1308,25 @@ fn agy_public_provider_switch_releases_only_its_owned_title_callback() {
             "{args:?}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let callback = || {
+        let payload = serde_json::json!({
+            "version": "1.1.19",
+            "agent_state": "working",
+            "conversation_id": "synthetic-p08-session",
+            "workspace": {"current_dir": workspace, "project_dir": workspace},
+        });
+        let output = command_with_stdin(
+            {
+                let mut command = isolated_command_with_agy(&root, &agy_directory);
+                command.args(["agy", "__title-callback-v1"]);
+                command
+            },
+            payload.to_string().as_bytes(),
+        );
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
         String::from_utf8(output.stdout).unwrap()
     };
     invoke(&["setup", "agy", "--plain"]);
@@ -1340,6 +1361,26 @@ fn agy_public_provider_switch_releases_only_its_owned_title_callback() {
     assert!(title.contains("REQUESTED_TAB_COLOR=off"));
     assert!(title.contains("REQUESTED_ACTIVITY=title-indicator"));
     assert!(title.contains("EFFECTIVE_ACTIVITY=title-indicator"));
+    let managed_title = callback();
+    assert!(managed_title.starts_with("Agy "));
+    assert!(!managed_title.contains('\u{1b}'));
+    let config_path = root.child("local-appdata/TabBeacon/config.toml");
+    let valid_config = fs::read(&config_path).unwrap();
+    fs::write(&config_path, "[presentation]\ntitle = [malformed\n").unwrap();
+    assert_eq!(
+        callback(),
+        "Agy\n",
+        "malformed config cannot revive a managed title"
+    );
+    fs::write(&config_path, &valid_config).unwrap();
+    let config_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.child("local-appdata/TabBeacon/config.lock"))
+        .unwrap();
+    config_lock.lock().unwrap();
+    assert_eq!(callback(), "Agy\n", "busy settings lock fails open");
+    fs::File::unlock(&config_lock).unwrap();
     let native = invoke(&[
         "config",
         "--plain",
@@ -1352,6 +1393,11 @@ fn agy_public_provider_switch_releases_only_its_owned_title_callback() {
     assert!(native.contains("REQUESTED_TITLE=native"));
     assert!(native.contains("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE"));
     assert_eq!(fs::read(&settings_path).unwrap(), original);
+    assert_eq!(
+        callback(),
+        "Agy\n",
+        "native mode stops the owned callback title"
+    );
     let repeat = invoke(&[
         "config",
         "--plain",
@@ -1375,6 +1421,7 @@ fn agy_public_provider_switch_releases_only_its_owned_title_callback() {
         serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
     assert_eq!(reinstalled["foreign"], "preserve");
     assert!(reinstalled["title"].is_object());
+    assert!(callback().starts_with("Agy "));
     let native_again = invoke(&[
         "config",
         "--plain",
@@ -1385,12 +1432,14 @@ fn agy_public_provider_switch_releases_only_its_owned_title_callback() {
     ]);
     assert!(native_again.contains("CHANGE_APPLIED=true"));
     assert_eq!(fs::read(&settings_path).unwrap(), original);
+    assert_eq!(callback(), "Agy\n");
     let inherited = invoke(&["config", "--plain", "provider", "agy", "inherit", "--apply"]);
     assert!(inherited.contains("CHANGE_APPLIED=true"));
     let inherited_config: serde_json::Value =
         serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
     assert_eq!(inherited_config["foreign"], "preserve");
     assert!(inherited_config["title"].is_object());
+    assert!(callback().starts_with("Agy "));
 }
 
 #[test]

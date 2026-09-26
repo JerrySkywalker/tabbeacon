@@ -350,7 +350,10 @@ pub enum AgyTitleDispatchOutcome {
     DegradedWorkspaceIdentity,
     DegradedRootWorkspaceAnchor,
     DegradedStateRoot,
+    DegradedSettings,
 }
+
+const AGY_SETTINGS_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
 
 const AGY_ROOT_ANCHOR_SCHEMA: &str = "tabbeacon-agy-root-workspace-anchor-v1";
 const AGY_ROOT_ANCHOR_DIRECTORY: &str = "agy-root-workspace-anchor-v1";
@@ -574,20 +577,64 @@ impl AgyTitleRuntime {
         let Ok(state_root) = StableAliasRegistry::default_state_root() else {
             return fallback_title(AgyTitleDispatchOutcome::DegradedStateRoot);
         };
-        let settings = PresentationSettingsStore::from_environment()
-            .ok()
-            .and_then(|store| {
-                store
-                    .resolve_provider_read_only(
-                        CliTarget::Agy,
-                        PresentationCapabilities::AGY_TITLE_ONLY,
-                        ApplicationStatus::Unproven,
-                    )
-                    .ok()
-            })
-            .map_or_else(PresentationSettings::default, |resolved| resolved.effective);
+        let Ok(store) = PresentationSettingsStore::from_environment() else {
+            return fallback_title(AgyTitleDispatchOutcome::DegradedSettings);
+        };
+        let Ok(resolved) = store.resolve_provider_read_only(
+            CliTarget::Agy,
+            PresentationCapabilities::AGY_TITLE_ONLY,
+            ApplicationStatus::Unproven,
+        ) else {
+            return fallback_title(AgyTitleDispatchOutcome::DegradedSettings);
+        };
+        let settings = resolved.effective;
         let runtime = Self::new(&state_root, settings);
         runtime.dispatch_to(raw, SystemTime::now())
+    }
+
+    /// Handles the installed title callback while holding the presentation
+    /// writer lock through the final protocol flush. A preference committed
+    /// after this callback starts cannot be overtaken by its old title.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error only if the callback output sink fails. Settings
+    /// and state failures return the provider-native fallback title.
+    pub fn dispatch_system_to(
+        raw: &[u8],
+        sink: &mut impl Write,
+    ) -> io::Result<AgyTitleDispatchOutcome> {
+        let Ok(state_root) = StableAliasRegistry::default_state_root() else {
+            write_callback_title(sink, "Agy")?;
+            return Ok(AgyTitleDispatchOutcome::DegradedStateRoot);
+        };
+        let Ok(store) = PresentationSettingsStore::from_environment() else {
+            write_callback_title(sink, "Agy")?;
+            return Ok(AgyTitleDispatchOutcome::DegradedSettings);
+        };
+        let mut output_started = false;
+        let result = store.with_runtime_lock_bounded(AGY_SETTINGS_LOCK_BUDGET, || {
+            let resolved = store
+                .resolve_provider_read_only(
+                    CliTarget::Agy,
+                    PresentationCapabilities::AGY_TITLE_ONLY,
+                    ApplicationStatus::Unproven,
+                )
+                .map_err(io::Error::other)?;
+            let response =
+                Self::new(&state_root, resolved.effective).dispatch_to(raw, SystemTime::now());
+            output_started = true;
+            write_callback_title(sink, &response.title)?;
+            Ok(response.outcome)
+        });
+        match result {
+            Ok(outcome) => Ok(outcome),
+            Err(error) if output_started => Err(error),
+            Err(_) => {
+                write_callback_title(sink, "Agy")?;
+                Ok(AgyTitleDispatchOutcome::DegradedSettings)
+            }
+        }
     }
 
     /// Handles a callback with deterministic runtime dependencies.
@@ -691,6 +738,12 @@ fn fallback_title(outcome: AgyTitleDispatchOutcome) -> AgyProductionTitleRespons
         title: "Agy".to_owned(),
         outcome,
     }
+}
+
+fn write_callback_title(sink: &mut impl Write, title: &str) -> io::Result<()> {
+    sink.write_all(title.as_bytes())?;
+    sink.write_all(b"\n")?;
+    sink.flush()
 }
 
 const fn frozen_profile() -> AgyAdmittedProfile {

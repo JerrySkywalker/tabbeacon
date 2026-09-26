@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use sha2::{Digest, Sha256};
@@ -76,7 +76,13 @@ pub struct CodexHookRuntime {
     root_workspace_anchors: RootWorkspaceAnchorStore,
     renderer: TitleMarkBackend,
     activity: ActivityCoordinator,
+    // Production Hook and MCP deliveries re-read preferences under the same
+    // writer lock that protects public Apply/import. Injected runtimes keep
+    // their explicit fixed settings and never touch the owner's config.
+    system_settings: Option<PresentationSettingsStore>,
 }
+
+const CODEX_SETTINGS_LOCK_BUDGET: Duration = Duration::from_millis(100);
 
 impl CodexHookRuntime {
     /// Creates a runtime using an injected state root and explicit renderer
@@ -114,6 +120,7 @@ impl CodexHookRuntime {
                 settings,
             ),
             activity: ActivityCoordinator::disabled(&state_root),
+            system_settings: None,
         }
     }
 
@@ -129,8 +136,8 @@ impl CodexHookRuntime {
     ///
     /// Unlike [`Self::with_settings`], this enables the same bounded activity
     /// coordination used by the command Hook runtime. The MCP server keeps
-    /// this runtime for its Codex-owned stdio lifetime, avoiding repeat
-    /// settings and state-root discovery on every Hook event.
+    /// this runtime for its Codex-owned stdio lifetime, but resolves current
+    /// preferences under the writer lock for every delivered Hook event.
     ///
     /// # Errors
     ///
@@ -141,20 +148,15 @@ impl CodexHookRuntime {
             .map_err(|_| HookDispatchOutcome::DegradedStateRoot)?;
         let frame_color_supported = std::env::var_os("WT_SESSION").is_some();
         let settings = PresentationSettingsStore::from_environment()
-            .ok()
-            .and_then(|store| {
-                store
-                    .resolve_provider_read_only(
-                        CliTarget::Codex,
-                        PresentationCapabilities::CODEX,
-                        ApplicationStatus::Unproven,
-                    )
-                    .ok()
-            })
-            .map_or_else(PresentationSettings::default, |resolved| resolved.effective);
-        let mut runtime = Self::with_settings(&state_root, frame_color_supported, settings);
+            .map_err(|_| HookDispatchOutcome::DegradedStateRoot)?;
+        let mut runtime = Self::with_settings(
+            &state_root,
+            frame_color_supported,
+            PresentationSettings::default(),
+        );
         runtime.activity = ActivityCoordinator::system(&state_root)
             .unwrap_or_else(|_| ActivityCoordinator::disabled(&state_root));
+        runtime.system_settings = Some(settings);
         Ok(runtime)
     }
 
@@ -219,22 +221,18 @@ impl CodexHookRuntime {
 
         let started = Instant::now();
         let frame_color_supported = std::env::var_os("WT_SESSION").is_some();
-        let settings = PresentationSettingsStore::from_environment()
-            .ok()
-            .and_then(|store| {
-                store
-                    .resolve_provider_read_only(
-                        CliTarget::Codex,
-                        PresentationCapabilities::CODEX,
-                        ApplicationStatus::Unproven,
-                    )
-                    .ok()
-            })
-            .map_or_else(PresentationSettings::default, |resolved| resolved.effective);
-        let mut runtime = Self::with_settings(&state_root, frame_color_supported, settings)
-            .with_hook_profile(profile);
+        let Ok(settings) = PresentationSettingsStore::from_environment() else {
+            return HookDispatchOutcome::DegradedStateRoot;
+        };
+        let mut runtime = Self::with_settings(
+            &state_root,
+            frame_color_supported,
+            PresentationSettings::default(),
+        )
+        .with_hook_profile(profile);
         runtime.activity = ActivityCoordinator::system(&state_root)
             .unwrap_or_else(|_| ActivityCoordinator::disabled(&state_root));
+        runtime.system_settings = Some(settings);
         timing.record("runtime_initialization", started);
 
         let started = Instant::now();
@@ -320,6 +318,53 @@ impl CodexHookRuntime {
 
     #[allow(clippy::too_many_lines)]
     fn dispatch_normalized_with_timing(
+        &self,
+        normalized: CodexNormalization,
+        observed_at: SystemTime,
+        sink: &mut impl Write,
+        timing: &mut HookTimingCapture,
+        session_end_probe: &mut Option<SessionEndProbeCapture>,
+    ) -> HookDispatchOutcome {
+        let Some(store) = self.system_settings.as_ref() else {
+            return self.dispatch_normalized_unlocked_with_timing(
+                normalized,
+                observed_at,
+                sink,
+                timing,
+                session_end_probe,
+            );
+        };
+        // Resolve after acquiring config.lock and retain it through final
+        // output. A stale MCP event or one-shot Hook cannot write decoration
+        // after a newer public preference commit.
+        store
+            .with_runtime_lock_bounded(CODEX_SETTINGS_LOCK_BUDGET, || {
+                let resolved = store
+                    .resolve_provider_read_only(
+                        CliTarget::Codex,
+                        PresentationCapabilities::CODEX,
+                        ApplicationStatus::Unproven,
+                    )
+                    .map_err(io::Error::other)?;
+                let mut current = self.clone();
+                current.system_settings = None;
+                current.renderer = TitleMarkBackend::with_settings(
+                    WindowsTerminalCapabilities::new(self.renderer.frame_color_supported()),
+                    resolved.effective,
+                );
+                Ok(current.dispatch_normalized_unlocked_with_timing(
+                    normalized,
+                    observed_at,
+                    sink,
+                    timing,
+                    session_end_probe,
+                ))
+            })
+            .unwrap_or(HookDispatchOutcome::DegradedPresentationOutput)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn dispatch_normalized_unlocked_with_timing(
         &self,
         normalized: CodexNormalization,
         observed_at: SystemTime,
@@ -909,8 +954,12 @@ const fn hook_event_name(event: super::CodexHookEvent) -> &'static str {
 mod tests {
     use std::{
         env, fs,
+        io::{self, Write},
         path::Path,
         process::Command,
+        sync::mpsc,
+        thread,
+        time::Duration,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -919,7 +968,9 @@ mod tests {
     use crate::{
         activity::ActivityReconciliationTiming,
         core::{Attention, Phase, SessionReconciler},
+        presentation_policy::{CliTarget, PresentationMode, PresentationOverride},
         repo::WorkspaceIdentityResolver,
+        settings::{PresentationSettingsStore, SnapshotSaveOutcome},
     };
 
     use super::{
@@ -1089,6 +1140,179 @@ mod tests {
             "new turn clears interrupted health"
         );
         fs::remove_dir_all(root).expect("owned test root removes");
+    }
+
+    #[test]
+    fn long_lived_codex_runtime_reloads_public_provider_preference_for_each_event() {
+        let root = test_root("runtime-preference-switch");
+        let repository = root.join("repository");
+        fs::create_dir_all(&repository).unwrap();
+        initialize_repository(&repository);
+        let store = PresentationSettingsStore::new(root.join("state/config.toml"));
+        let save_mode = |mode| {
+            let snapshot = store.snapshot_read_only().unwrap();
+            assert!(matches!(
+                store
+                    .save_provider_override_snapshot_if_unchanged(
+                        &snapshot,
+                        CliTarget::Codex,
+                        PresentationOverride::default().with_mode(mode),
+                    )
+                    .unwrap(),
+                SnapshotSaveOutcome::Saved(_)
+            ));
+        };
+        save_mode(PresentationMode::FullTakeover);
+        let mut runtime = CodexHookRuntime::new(root.join("state"), true);
+        runtime.system_settings = Some(store.clone());
+        let event = |name: &str, turn: Option<&str>| {
+            let mut payload = json!({
+                "hook_event_name": name,
+                "session_id": "one-mcp-lifetime",
+                "cwd": repository,
+            });
+            if let Some(turn) = turn {
+                payload["turn_id"] = turn.into();
+            }
+            if name == "SessionStart" {
+                payload["source"] = "startup".into();
+            }
+            serde_json::to_vec(&payload).unwrap()
+        };
+        let mut full = Vec::new();
+        assert_eq!(
+            runtime.dispatch_to(&event("SessionStart", None), UNIX_EPOCH, &mut full),
+            HookDispatchOutcome::Applied
+        );
+        assert_eq!(
+            runtime.dispatch_to(
+                &event("UserPromptSubmit", Some("turn-1")),
+                UNIX_EPOCH,
+                &mut full,
+            ),
+            HookDispatchOutcome::Applied
+        );
+        assert!(!full.is_empty(), "managed mode emits a rendered frame");
+        save_mode(PresentationMode::PreserveNative);
+        let mut native = Vec::new();
+        assert_eq!(
+            runtime.dispatch_to(&event("Stop", Some("turn-1")), UNIX_EPOCH, &mut native),
+            HookDispatchOutcome::Applied
+        );
+        assert!(
+            native.is_empty(),
+            "old full-takeover bytes must not escape after Apply"
+        );
+        fs::write(store.path(), "[presentation]\ntitle = [malformed\n").unwrap();
+        let mut malformed = Vec::new();
+        assert_eq!(
+            runtime.dispatch_to(
+                &event("UserPromptSubmit", Some("turn-2")),
+                UNIX_EPOCH,
+                &mut malformed,
+            ),
+            HookDispatchOutcome::DegradedPresentationOutput
+        );
+        assert!(
+            malformed.is_empty(),
+            "invalid settings cannot revive default output"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn public_codex_preference_commit_waits_for_inflight_hook_output() {
+        struct BlockingSink {
+            entered: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+        }
+        impl Write for BlockingSink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.entered.send(()).unwrap();
+                self.release.recv().unwrap();
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let root = test_root("runtime-config-order");
+        let repository = root.join("repository");
+        fs::create_dir_all(&repository).unwrap();
+        initialize_repository(&repository);
+        let store = PresentationSettingsStore::new(root.join("state/config.toml"));
+        let before = store.snapshot_read_only().unwrap();
+        assert!(matches!(
+            store
+                .save_provider_override_snapshot_if_unchanged(
+                    &before,
+                    CliTarget::Codex,
+                    PresentationOverride::default().with_mode(PresentationMode::FullTakeover),
+                )
+                .unwrap(),
+            SnapshotSaveOutcome::Saved(_)
+        ));
+        let mut runtime = CodexHookRuntime::new(root.join("state"), true);
+        runtime.system_settings = Some(store.clone());
+        let start = json!({
+            "hook_event_name": "SessionStart", "session_id": "locked-session",
+            "cwd": repository, "source": "startup",
+        });
+        assert_eq!(
+            runtime.dispatch_to(&start.to_string().into_bytes(), UNIX_EPOCH, &mut Vec::new()),
+            HookDispatchOutcome::Applied
+        );
+        let prompt = json!({
+            "hook_event_name": "UserPromptSubmit", "session_id": "locked-session",
+            "turn_id": "turn-1", "cwd": repository,
+        })
+        .to_string()
+        .into_bytes();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let hook = thread::spawn(move || {
+            runtime.dispatch_to(
+                &prompt,
+                UNIX_EPOCH,
+                &mut BlockingSink {
+                    entered: entered_tx,
+                    release: release_rx,
+                },
+            )
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let config_lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join("state/config.lock"))
+            .unwrap();
+        assert!(matches!(
+            config_lock.try_lock(),
+            Err(fs::TryLockError::WouldBlock)
+        ));
+        let snapshot = store.snapshot_read_only().unwrap();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (saved_tx, saved_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            saved_tx
+                .send(store.save_provider_override_snapshot_if_unchanged(
+                    &snapshot,
+                    CliTarget::Codex,
+                    PresentationOverride::default().with_mode(PresentationMode::PreserveNative),
+                ))
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(saved_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        release_tx.send(()).unwrap();
+        assert_eq!(hook.join().unwrap(), HookDispatchOutcome::Applied);
+        assert!(matches!(
+            saved_rx.recv().unwrap().unwrap(),
+            SnapshotSaveOutcome::Saved(_)
+        ));
+        writer.join().unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

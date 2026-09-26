@@ -481,6 +481,7 @@ The hook backend represents only evidence Codex emits directly:
 | `PreCompact` / `PostCompact` | preserve current state |
 | `SubagentStart` / `SubagentStop` | ignore for root presentation |
 | `Stop` | result ready |
+| `Interrupt` (positively admitted 0.156.1/0.157.1 profile) | interrupted; real installed delivery still unproven for this candidate |
 | `SessionEnd` | reset |
 
 Turn-scoped root events must match the current bounded-contract `turn_id`.

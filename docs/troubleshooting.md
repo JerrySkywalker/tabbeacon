@@ -24,13 +24,13 @@ ownership boundaries.
 
 For [Issue #116](https://github.com/JerrySkywalker/tabbeacon/issues/116), the
 original visible HTTP 404 symptom is not itself a structured Codex failure
-signal. The [current Codex Hook contract](https://learn.chatgpt.com/docs/hooks)
+signal. The [audited 0.157.1 Codex Hook input](https://github.com/openai/codex/blob/rust-v0.157.1/codex-rs/hooks/src/schema.rs)
 shows that `Stop` input exposes a turn ID but no failure category;
 `Interrupt` identifies an interrupted main turn. A warning or failed-turn color
 must be based on proved structured evidence. If that evidence is unavailable,
 TabBeacon remains fail-open and the original 404 class stays unresolved.
 The v0.8.0 candidate has a separately admitted profile for the exact audited
-Codex 0.156.1 Hook contract. Isolated tests cover the owned `Interrupt`
+Codex 0.156.1 and 0.157.1 Hook contracts. Isolated tests cover the owned `Interrupt`
 declaration, fresh trust, public Hook command, generation reconciliation, and
 terminal dispatch. The runtime refuses `Interrupt` when the declaration or
 trust is absent or drifted. Daily installed Hook delivery and visible output

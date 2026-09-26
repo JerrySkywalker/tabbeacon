@@ -2281,8 +2281,8 @@ fn agy_preadmission(command: AgyPreadmissionCommand) -> ExitCode {
         }
         AgyPreadmissionCommand::TitleCallback => {
             let input = read_agy_qualification_stdin();
-            let response = AgyTitleRuntime::dispatch_system(&input.payload);
-            println!("{}", response.title);
+            let mut stdout = io::stdout().lock();
+            let _ = AgyTitleRuntime::dispatch_system_to(&input.payload, &mut stdout);
             ExitCode::SUCCESS
         }
     }

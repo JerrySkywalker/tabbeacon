@@ -977,6 +977,118 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One shared state root covers two active terminals and a same-tab successor.
+    fn two_cursor_terminals_keep_color_ownership_during_interleaved_exit_and_switch() {
+        let workspace = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let executable = workspace.path().join("tabbeacon.exe");
+        fs::write(&executable, b"synthetic binary").unwrap();
+        CursorHookIntegration::new(workspace.path(), &executable)
+            .unwrap()
+            .install()
+            .unwrap();
+        let resolved = |mode| {
+            resolve_presentation(
+                PresentationSettings::default(),
+                PresentationOverride::default().with_mode(mode),
+                PresentationCapabilities::CURSOR_COLOR_ONLY,
+                ApplicationStatus::Unproven,
+            )
+        };
+        let color = resolved(PresentationMode::ColorOnly);
+        let native = resolved(PresentationMode::PreserveNative);
+        let send = |event: &str,
+                    session: &str,
+                    generation: Option<&str>,
+                    terminal: &str,
+                    mode: &ResolvedPresentation| {
+            let mut payload = serde_json::json!({"hook_event_name": event, "session_id": session});
+            if let Some(generation) = generation {
+                payload["generation_id"] = generation.into();
+            }
+            if event == "stop" {
+                payload["status"] = "completed".into();
+            }
+            let digest = format!("{:x}", Sha256::digest(terminal.as_bytes()));
+            let mut bytes = Vec::new();
+            let outcome = dispatch_with_output_bounded(
+                payload.to_string().as_bytes(),
+                workspace.path(),
+                &executable,
+                state.path(),
+                &digest,
+                terminal,
+                true,
+                mode,
+                &mut bytes,
+            )
+            .unwrap();
+            (outcome, bytes)
+        };
+        let no_output = (CursorDispatchOutcome::RouteAdmitted, Vec::new());
+        assert_eq!(send("sessionStart", "a", None, "wt-a", &color), no_output);
+        assert_eq!(send("sessionStart", "b", None, "wt-b", &color), no_output);
+        for (session, generation, terminal) in [("a", "a1", "wt-a"), ("b", "b1", "wt-b")] {
+            let (outcome, bytes) = send(
+                "beforeSubmitPrompt",
+                session,
+                Some(generation),
+                terminal,
+                &color,
+            );
+            assert_eq!(outcome, CursorDispatchOutcome::OutputFlushed);
+            assert!(bytes.starts_with(b"\x1b]4;264;rgb:"));
+            assert!(!bytes.windows(4).any(|part| part == b"]0;"));
+            assert!(!bytes.windows(4).any(|part| part == b"]9;4"));
+        }
+        assert_eq!(
+            send("beforeSubmitPrompt", "a", Some("a2"), "wt-a", &color).0,
+            CursorDispatchOutcome::OutputFlushed
+        );
+        assert_eq!(
+            send("stop", "a", Some("a1"), "wt-a", &color),
+            (CursorDispatchOutcome::Ignored, Vec::new())
+        );
+        assert_eq!(
+            send("sessionEnd", "a", None, "wt-b", &color),
+            (CursorDispatchOutcome::Ignored, Vec::new())
+        );
+        assert_eq!(
+            send("sessionEnd", "a", None, "wt-a", &color),
+            (
+                CursorDispatchOutcome::OutputFlushed,
+                b"\x1b]104;264\x1b\\".to_vec()
+            )
+        );
+        assert_eq!(
+            send("stop", "a", Some("a2"), "wt-a", &color),
+            (CursorDispatchOutcome::Ignored, Vec::new())
+        );
+        let (b_stop, b_bytes) = send("stop", "b", Some("b1"), "wt-b", &color);
+        assert_eq!(b_stop, CursorDispatchOutcome::OutputFlushed);
+        assert!(b_bytes.starts_with(b"\x1b]4;264;rgb:"));
+        assert_eq!(send("sessionStart", "c", None, "wt-a", &color), no_output);
+        assert_eq!(
+            send("beforeSubmitPrompt", "c", Some("c1"), "wt-a", &color).0,
+            CursorDispatchOutcome::OutputFlushed
+        );
+        assert_eq!(
+            send("sessionEnd", "a", None, "wt-a", &color),
+            (CursorDispatchOutcome::Ignored, Vec::new())
+        );
+        assert_eq!(
+            send("stop", "c", Some("c1"), "wt-a", &native),
+            (
+                CursorDispatchOutcome::OutputFlushed,
+                b"\x1b]104;264\x1b\\".to_vec()
+            )
+        );
+        let (b_end, b_release) = send("sessionEnd", "b", None, "wt-b", &color);
+        assert_eq!(b_end, CursorDispatchOutcome::OutputFlushed);
+        assert_eq!(b_release, b"\x1b]104;264\x1b\\");
+    }
+
+    #[test]
     fn start_only_terminal_cannot_change_a_second_terminals_color_or_end() {
         let workspace = tempfile::tempdir().unwrap();
         let state = tempfile::tempdir().unwrap();
