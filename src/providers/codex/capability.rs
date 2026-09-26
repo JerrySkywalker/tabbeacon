@@ -26,7 +26,8 @@ const RUNTIME_IDENTITY_DEADLINE: Duration = Duration::from_millis(250);
 fn interrupt_source_audited(version: Option<&str>) -> bool {
     // These exact source tags share the Hook event list, command input
     // schema, Interrupt dispatcher and trust/declaration contract. The
-    // 0.157.1 core Hook runtime diff changes tool-Hook cwd selection only.
+    // The 0.157.1 core Hook runtime diff changes tool-Hook cwd selection and
+    // passes None as Hook analytics turn metadata, not Interrupt input.
     matches!(version, Some("0.156.1" | "0.157.1"))
 }
 

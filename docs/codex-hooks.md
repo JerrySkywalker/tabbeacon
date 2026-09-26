@@ -408,8 +408,9 @@ TabBeacon reconciles only its exact owned server and Hook groups, and preserves
 external MCP servers and groups unchanged. The v0.8.0 candidate also recognizes
 the exact audited 0.156.1 and 0.157.1 command Hook surfaces with `Interrupt`.
 The 0.157.1 upstream event list, input schema, interrupt handler, declarations,
-and dispatcher match 0.156.1; its core Hook runtime change affects tool-Hook
-working-directory selection, not the Interrupt contract. Its owned
+and dispatcher match 0.156.1; its core Hook runtime changes tool-Hook
+working-directory selection and supplies `None` for Hook analytics turn
+metadata, without changing the Interrupt command contract. Its owned
 declaration and fresh trust must both be present before the public runtime
 accepts that event; isolated proof does not establish daily installed delivery.
 A newer version never inherits a profile merely because its number is higher.
