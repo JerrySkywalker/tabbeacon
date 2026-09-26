@@ -79,6 +79,30 @@ fn fake_agy_directory(root: &TestRoot) -> PathBuf {
     directory
 }
 
+fn fake_admitted_agy_directory(root: &TestRoot) -> PathBuf {
+    let directory = root.child("fake-admitted-agy");
+    fs::create_dir_all(&directory).expect("isolated Agy fixture directory creates");
+    let source = directory.join("version.rs");
+    fs::write(
+        &source,
+        "fn main() { if std::env::args().nth(1).as_deref() == Some(\"--version\") { println!(\"1.1.19\"); } else { std::process::exit(2); } }\n",
+    )
+    .expect("isolated Agy fixture source writes");
+    let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let output = Command::new(rustc)
+        .args(["--edition=2024", "-o"])
+        .arg(directory.join("agy.exe"))
+        .arg(&source)
+        .output()
+        .expect("Rust compiler starts for isolated Agy version fixture");
+    assert!(
+        output.status.success(),
+        "isolated Agy fixture compile failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    directory
+}
+
 fn isolated_command(root: &TestRoot) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tabbeacon"));
     command
@@ -1261,6 +1285,221 @@ fn ownership_changing_provider_import_previews_and_applies_without_installing_ho
     );
     assert!(!target.child("codex-home/hooks.json").exists());
     assert!(!target.child("codex-home/config.toml").exists());
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // The public Agy chain spans owned setup, switch, and exact release.
+fn agy_public_provider_switch_releases_only_its_owned_title_callback() {
+    let root = TestRoot::new("agy-public-p08");
+    let agy_directory = fake_admitted_agy_directory(&root);
+    let settings_path = root.child("user-profile/.gemini/antigravity-cli/settings.json");
+    fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    let original = b"{\"foreign\":\"preserve\"}\n";
+    fs::write(&settings_path, original).unwrap();
+    let invoke = |args: &[&str]| {
+        let output = isolated_command_with_agy(&root, &agy_directory)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    invoke(&["setup", "agy", "--plain"]);
+    let owned: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+    assert_eq!(owned["foreign"], "preserve");
+    assert!(owned["title"].is_object());
+    let provider_path = root.child("local-appdata/TabBeacon/config.toml");
+    let preview = invoke(&[
+        "config",
+        "--plain",
+        "provider",
+        "agy",
+        "preview",
+        "preserve-native",
+    ]);
+    assert!(preview.contains("CHANGE_APPLIED=false"));
+    assert!(!provider_path.exists());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&fs::read(&settings_path).unwrap()).unwrap(),
+        owned
+    );
+    let title = invoke(&[
+        "config",
+        "--plain",
+        "provider",
+        "agy",
+        "apply",
+        "title-only",
+    ]);
+    assert!(title.contains("REQUESTED_TITLE=tabbeacon"));
+    assert!(title.contains("REQUESTED_TAB_COLOR=off"));
+    assert!(title.contains("REQUESTED_ACTIVITY=title-indicator"));
+    assert!(title.contains("EFFECTIVE_ACTIVITY=title-indicator"));
+    let native = invoke(&[
+        "config",
+        "--plain",
+        "provider",
+        "agy",
+        "apply",
+        "preserve-native",
+    ]);
+    assert!(native.contains("CHANGE_APPLIED=true"));
+    assert!(native.contains("REQUESTED_TITLE=native"));
+    assert!(native.contains("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE"));
+    assert_eq!(fs::read(&settings_path).unwrap(), original);
+    let repeat = invoke(&[
+        "config",
+        "--plain",
+        "provider",
+        "agy",
+        "apply",
+        "preserve-native",
+    ]);
+    assert!(repeat.contains("CHANGE_APPLIED=false"));
+    assert_eq!(fs::read(&settings_path).unwrap(), original);
+    let title_again = invoke(&[
+        "config",
+        "--plain",
+        "provider",
+        "agy",
+        "apply",
+        "title-only",
+    ]);
+    assert!(title_again.contains("CHANGE_APPLIED=true"));
+    let reinstalled: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+    assert_eq!(reinstalled["foreign"], "preserve");
+    assert!(reinstalled["title"].is_object());
+    let native_again = invoke(&[
+        "config",
+        "--plain",
+        "provider",
+        "agy",
+        "apply",
+        "preserve-native",
+    ]);
+    assert!(native_again.contains("CHANGE_APPLIED=true"));
+    assert_eq!(fs::read(&settings_path).unwrap(), original);
+    let inherited = invoke(&["config", "--plain", "provider", "agy", "inherit", "--apply"]);
+    assert!(inherited.contains("CHANGE_APPLIED=true"));
+    let inherited_config: serde_json::Value =
+        serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+    assert_eq!(inherited_config["foreign"], "preserve");
+    assert!(inherited_config["title"].is_object());
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One public Apply chain checks all three Codex ownership transitions.
+fn codex_public_provider_switch_preserves_hooks_and_reports_deferred_output() {
+    let root = TestRoot::new("codex-public-p08");
+    let codex_directory = fake_codex_directory(&root, "0.156.1");
+    let codex_home = root.child("codex-home");
+    fs::create_dir_all(&codex_home).unwrap();
+    let config_path = codex_home.join("config.toml");
+    let original = "[tui]\nterminal_title = [\"activity\", \"project\"]\n[custom]\nforeign_marker = \"preserve\"\n";
+    fs::write(&config_path, original).unwrap();
+    let invoke = |args: &[&str]| {
+        let output = isolated_command_with_codex(&root, &codex_directory)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    invoke(&["setup", "codex", "--plain"]);
+    let hooks_path = codex_home.join("hooks.json");
+    let owned_hooks = fs::read(&hooks_path).unwrap();
+    let settings_path = root.child("local-appdata/TabBeacon/config.toml");
+    let before_preview = fs::read(&config_path).unwrap();
+    let preview = invoke(&[
+        "config",
+        "--plain",
+        "provider",
+        "codex",
+        "preview",
+        "full-takeover",
+    ]);
+    assert!(preview.contains("CHANGE_APPLIED=false"));
+    assert!(!settings_path.exists());
+    assert_eq!(fs::read(&config_path).unwrap(), before_preview);
+    let full = invoke(&[
+        "config",
+        "--plain",
+        "provider",
+        "codex",
+        "apply",
+        "full-takeover",
+    ]);
+    assert!(full.contains("REQUESTED_TITLE=tabbeacon"));
+    assert!(full.contains("CHANGE_APPLIED=true"));
+    assert_eq!(fs::read(&hooks_path).unwrap(), owned_hooks);
+    let color = invoke(&[
+        "config",
+        "--plain",
+        "provider",
+        "codex",
+        "apply",
+        "color-only",
+    ]);
+    assert!(color.contains("REQUESTED_TITLE=native"));
+    assert!(color.contains("REQUESTED_TAB_COLOR=tabbeacon"));
+    assert!(color.contains("REQUESTED_ACTIVITY=off"));
+    assert!(color.contains("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE"));
+    assert!(
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("terminal_title = [\"activity\", \"project\"]")
+    );
+    assert_eq!(fs::read(&hooks_path).unwrap(), owned_hooks);
+    let before_native_preview = fs::read(&settings_path).unwrap();
+    let native_preview = invoke(&[
+        "config",
+        "--plain",
+        "provider",
+        "codex",
+        "preview",
+        "preserve-native",
+    ]);
+    assert!(native_preview.contains("CHANGE_APPLIED=false"));
+    assert_eq!(fs::read(&settings_path).unwrap(), before_native_preview);
+    let native = invoke(&[
+        "config",
+        "--plain",
+        "provider",
+        "codex",
+        "apply",
+        "preserve-native",
+    ]);
+    assert!(native.contains("REQUESTED_TITLE=native"));
+    assert!(native.contains("REQUESTED_TAB_COLOR=native"));
+    assert!(native.contains("REQUESTED_ACTIVITY=native"));
+    assert!(native.contains("LIVE_APPLICATION=UNPROVEN"));
+    assert!(native.contains("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE"));
+    assert_eq!(fs::read(&hooks_path).unwrap(), owned_hooks);
+    assert!(
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("foreign_marker = \"preserve\"")
+    );
+    let inherited = invoke(&[
+        "config", "--plain", "provider", "codex", "inherit", "--apply",
+    ]);
+    assert!(inherited.contains("CHANGE_APPLIED=true"));
+    assert_eq!(fs::read(&hooks_path).unwrap(), owned_hooks);
+    assert!(
+        fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("terminal_title = []")
+    );
 }
 
 #[test]
