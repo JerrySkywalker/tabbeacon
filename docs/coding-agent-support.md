@@ -23,6 +23,11 @@ is `agent` on the observed ZenBook Duo installation. [Current Cursor Hook docume
 names a structured `stop.status` outcome, but exact Windows Terminal color
 routing and the original-command live lifecycle remain unproven. Cursor is not
 included in the current production support table until those gates pass.
+The candidate route guard now keeps bounded, process-safe generation history
+and rejects superseded turns after the 32nd round. This deterministic guard
+does not itself prove a real Hook delivery or terminal binding; its bounded
+history may conservatively refuse a new generation if its membership filter
+reaches capacity.
 
 ## v0.8.0 candidate evidence boundary
 
@@ -108,7 +113,9 @@ failure leaves literal `codex` usable and preserves unowned configuration. Read
 Provider compatibility is not configuration ownership. Codex Hook trust stays
 manual, and setup refuses a TabBeacon-like declaration it cannot prove it owns.
 Agy setup owns only its admitted title callback member and preserves unrelated
-settings. Neither provider is wrapped, PATH-shadowed, or hosted in a PTY.
+settings. An explicit Agy `preserve-native` preference removes that owned
+callback; an unowned title declaration is never removed by TabBeacon. Neither
+provider is wrapped, PATH-shadowed, or hosted in a PTY.
 
 ## Terminal presentation boundary
 

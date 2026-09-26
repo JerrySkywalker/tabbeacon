@@ -980,6 +980,23 @@ impl AgyProductionSetup {
         }
     }
 
+    /// Reconciles only `TabBeacon`'s owned title callback with the selected
+    /// presentation mode. Native mode never installs a callback.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an unproved owner or any configuration drift.
+    pub fn reconcile_title_ownership(
+        &self,
+        own_title: bool,
+    ) -> Result<AgyProductionSetupOutcome, AgyProductionSetupError> {
+        if own_title {
+            self.setup()
+        } else {
+            self.uninstall()
+        }
+    }
+
     /// Installs the smallest supported user-global title callback mutation.
     ///
     /// # Errors
@@ -2214,6 +2231,47 @@ mod tests {
         assert_eq!(fs::read(&config).expect("restored"), original);
         assert_eq!(
             setup.uninstall(),
+            Ok(AgyProductionSetupOutcome::NotInstalled)
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_reconciliation_never_installs_and_releases_only_owned_callback() {
+        let root = temp_root("native-reconcile");
+        let config = root.join("home/.gemini/antigravity-cli/settings.json");
+        let state = root.join("state");
+        let executable = root.join("tabbeacon.exe");
+        fs::create_dir_all(config.parent().expect("parent")).expect("config parent");
+        fs::write(&executable, b"fixture executable").expect("executable");
+        fs::write(&config, br#"{"foreign":1}"#).expect("original");
+        let setup =
+            AgyProductionSetup::new(&config, &state, &executable, "agy").with_admitted_version();
+        assert_eq!(
+            setup.reconcile_title_ownership(false),
+            Ok(AgyProductionSetupOutcome::NotInstalled)
+        );
+        assert_eq!(fs::read(&config).expect("untouched"), br#"{"foreign":1}"#);
+        assert_eq!(
+            setup.reconcile_title_ownership(true),
+            Ok(AgyProductionSetupOutcome::Installed)
+        );
+        let mut changed: Value =
+            serde_json::from_slice(&fs::read(&config).expect("owned")).expect("owned json");
+        changed["other"] = json!("preserved");
+        fs::write(&config, serde_json::to_vec(&changed).expect("changed"))
+            .expect("write unrelated change");
+        assert_eq!(
+            setup.reconcile_title_ownership(false),
+            Ok(AgyProductionSetupOutcome::Removed)
+        );
+        let released: Value =
+            serde_json::from_slice(&fs::read(&config).expect("released")).expect("released json");
+        assert!(released.get("title").is_none());
+        assert_eq!(released["foreign"], 1);
+        assert_eq!(released["other"], "preserved");
+        assert_eq!(
+            setup.reconcile_title_ownership(false),
             Ok(AgyProductionSetupOutcome::NotInstalled)
         );
         fs::remove_dir_all(root).expect("cleanup");

@@ -1,6 +1,14 @@
 //! Content-minimal Cursor Hook normalization. This module does not install a
 //! Hook or claim a terminal route; runtime admission must bind both first.
 
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Write},
+    path::{Path, PathBuf},
+};
+
+use atomic_write_file::AtomicWriteFile;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -8,6 +16,13 @@ use crate::core::{Attention, FieldUpdate, Health, Phase, StatePatch};
 
 /// Upper bound for one structured Hook request before JSON parsing.
 pub const MAX_CURSOR_HOOK_BYTES: usize = 64 * 1024;
+const CURSOR_GENERATION_BITS_BYTES: usize = 16 * 1024;
+const CURSOR_GENERATION_HASHES: usize = 7;
+const MAX_CURSOR_ROUTE_CHECKPOINT_BYTES: usize = 80 * 1024;
+const CURSOR_ROUTE_SCHEMA: &str = "tabbeacon-cursor-route-v1";
+const CURSOR_ROUTE_DIRECTORY: &str = "cursor-route-v1";
+const CURSOR_ROUTE_LOCK: &str = "route.lock";
+const MAX_CURSOR_SESSION_FILES: usize = 1_024;
 
 /// The small lifecycle subset needed for presentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +51,21 @@ pub struct CursorSessionRoute {
     terminal_binding_sha256: String,
     session_sha256: String,
     active_generation_sha256: Option<String>,
-    seen_generations: Vec<String>,
+    // An append-only Bloom filter bounds per-session state while preserving
+    // rejection of every previously admitted generation. False positives
+    // fail closed; no old generation is ever forgotten to make room.
+    seen_generation_bits: Vec<u8>,
+    ended: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CursorRouteCheckpoint {
+    schema: String,
+    terminal_binding_sha256: String,
+    session_sha256: String,
+    active_generation_sha256: Option<String>,
+    seen_generation_bits: Vec<u8>,
     ended: bool,
 }
 
@@ -57,9 +86,94 @@ impl CursorSessionRoute {
                 terminal_binding_sha256: expected_terminal_binding_sha256.to_owned(),
                 session_sha256: event.session_sha256.clone(),
                 active_generation_sha256: None,
-                seen_generations: Vec::new(),
+                seen_generation_bits: vec![0; CURSOR_GENERATION_BITS_BYTES],
                 ended: false,
             })
+    }
+
+    /// Serializes only bounded hashed route state for the next Hook process.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the checkpoint cannot be serialized.
+    pub fn checkpoint(&self) -> Result<Vec<u8>, serde_json::Error> {
+        serde_json::to_vec(&CursorRouteCheckpoint {
+            schema: CURSOR_ROUTE_SCHEMA.to_owned(),
+            terminal_binding_sha256: self.terminal_binding_sha256.clone(),
+            session_sha256: self.session_sha256.clone(),
+            active_generation_sha256: self.active_generation_sha256.clone(),
+            seen_generation_bits: self.seen_generation_bits.clone(),
+            ended: self.ended,
+        })
+    }
+
+    /// Restores a checkpoint only when all hashes, size and invariants match.
+    #[must_use]
+    pub fn from_checkpoint(raw: &[u8]) -> Option<Self> {
+        if raw.len() > MAX_CURSOR_ROUTE_CHECKPOINT_BYTES {
+            return None;
+        }
+        let checkpoint: CursorRouteCheckpoint = serde_json::from_slice(raw).ok()?;
+        if checkpoint.schema != CURSOR_ROUTE_SCHEMA
+            || !is_sha256(&checkpoint.terminal_binding_sha256)
+            || !is_sha256(&checkpoint.session_sha256)
+            || (!checkpoint.ended
+                && checkpoint.seen_generation_bits.len() != CURSOR_GENERATION_BITS_BYTES)
+            || (checkpoint.ended && !checkpoint.seen_generation_bits.is_empty())
+            || checkpoint
+                .active_generation_sha256
+                .as_deref()
+                .is_some_and(|generation| !is_sha256(generation))
+            || (checkpoint.ended && checkpoint.active_generation_sha256.is_some())
+        {
+            return None;
+        }
+        let route = Self {
+            terminal_binding_sha256: checkpoint.terminal_binding_sha256,
+            session_sha256: checkpoint.session_sha256,
+            active_generation_sha256: checkpoint.active_generation_sha256,
+            seen_generation_bits: checkpoint.seen_generation_bits,
+            ended: checkpoint.ended,
+        };
+        if route
+            .active_generation_sha256
+            .as_deref()
+            .is_some_and(|generation| !route.seen_contains(generation))
+        {
+            return None;
+        }
+        Some(route)
+    }
+
+    fn generation_positions(generation: &str) -> Option<[usize; CURSOR_GENERATION_HASHES]> {
+        if !is_sha256(generation) {
+            return None;
+        }
+        let mut positions = [0; CURSOR_GENERATION_HASHES];
+        for (index, position) in positions.iter_mut().enumerate() {
+            let start = index * 8;
+            let chunk = u32::from_str_radix(&generation[start..start + 8], 16).ok()?;
+            *position = (chunk as usize) % (CURSOR_GENERATION_BITS_BYTES * 8);
+        }
+        Some(positions)
+    }
+
+    fn seen_contains(&self, generation: &str) -> bool {
+        Self::generation_positions(generation).is_some_and(|positions| {
+            positions.iter().all(|position| {
+                self.seen_generation_bits[position / 8] & (1 << (position % 8)) != 0
+            })
+        })
+    }
+
+    fn seen_insert(&mut self, generation: &str) -> bool {
+        let Some(positions) = Self::generation_positions(generation) else {
+            return false;
+        };
+        for position in positions {
+            self.seen_generation_bits[position / 8] |= 1 << (position % 8);
+        }
+        true
     }
 
     /// Admits only events from the exact bound terminal and current generation.
@@ -86,15 +200,12 @@ impl CursorSessionRoute {
                 if self.active_generation_sha256.as_ref() == Some(generation) {
                     return true;
                 }
-                if self.seen_generations.contains(generation) {
+                if self.seen_contains(generation) {
                     return false;
                 }
-                if self.seen_generations.len() == 32 {
-                    // A bounded guard cannot safely forget an older generation
-                    // and then treat its late event as new.
+                if !self.seen_insert(generation) {
                     return false;
                 }
-                self.seen_generations.push(generation.clone());
                 self.active_generation_sha256 = Some(generation.clone());
                 true
             }
@@ -107,10 +218,157 @@ impl CursorSessionRoute {
             }
             CursorEvent::SessionEnd => {
                 self.active_generation_sha256 = None;
+                self.seen_generation_bits.clear();
                 self.ended = true;
                 true
             }
         }
+    }
+}
+
+/// Process-safe, bounded route checkpoints for separate one-shot Hook runs.
+/// This store supplies no terminal proof: its caller must establish the exact
+/// owned terminal before presenting an event for admission.
+#[derive(Debug, Clone)]
+pub struct CursorRouteStore {
+    directory: PathBuf,
+}
+
+impl CursorRouteStore {
+    /// Places route state under a caller-owned local state root.
+    #[must_use]
+    pub fn new(state_root: impl Into<PathBuf>) -> Self {
+        Self {
+            directory: state_root.into().join(CURSOR_ROUTE_DIRECTORY),
+        }
+    }
+
+    /// Admits and persists an event under a cross-process lock.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on unsafe paths, malformed state, storage errors or full
+    /// session capacity. It never reconstructs a missing start from a later event.
+    pub fn admit(
+        &self,
+        event: &CursorLifecycle,
+        expected_terminal_binding_sha256: &str,
+        observed_terminal_binding_sha256: &str,
+        console_openable: bool,
+    ) -> io::Result<bool> {
+        if !is_sha256(&event.session_sha256)
+            || !is_sha256(expected_terminal_binding_sha256)
+            || !is_sha256(observed_terminal_binding_sha256)
+        {
+            return Ok(false);
+        }
+        for ancestor in self.directory.ancestors() {
+            reject_route_symlink(ancestor)?;
+        }
+        fs::create_dir_all(&self.directory)?;
+        let lock_path = self.directory.join(CURSOR_ROUTE_LOCK);
+        reject_route_symlink(&lock_path)?;
+        let lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)?;
+        lock.lock()?;
+        let result = self.admit_locked(
+            event,
+            expected_terminal_binding_sha256,
+            observed_terminal_binding_sha256,
+            console_openable,
+        );
+        File::unlock(&lock)?;
+        result
+    }
+
+    fn admit_locked(
+        &self,
+        event: &CursorLifecycle,
+        expected_terminal_binding_sha256: &str,
+        observed_terminal_binding_sha256: &str,
+        console_openable: bool,
+    ) -> io::Result<bool> {
+        let path = self
+            .directory
+            .join(format!("{}.json", event.session_sha256));
+        reject_route_symlink(&path)?;
+        let current = match File::open(&path) {
+            Ok(file) => {
+                let mut bytes = Vec::new();
+                file.take((MAX_CURSOR_ROUTE_CHECKPOINT_BYTES + 1) as u64)
+                    .read_to_end(&mut bytes)?;
+                Some(CursorSessionRoute::from_checkpoint(&bytes).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid Cursor route checkpoint",
+                    )
+                })?)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let mut route = if event.event == CursorEvent::SessionStart {
+            if current.is_some() {
+                return Ok(false);
+            }
+            let mut session_files = 0;
+            for entry in fs::read_dir(&self.directory)? {
+                if entry?.path().extension().is_some_and(|ext| ext == "json") {
+                    session_files += 1;
+                }
+            }
+            if session_files >= MAX_CURSOR_SESSION_FILES {
+                return Err(io::Error::other("Cursor route session capacity reached"));
+            }
+            let Some(route) = CursorSessionRoute::from_session_start(
+                event,
+                expected_terminal_binding_sha256,
+                observed_terminal_binding_sha256,
+                console_openable,
+            ) else {
+                return Ok(false);
+            };
+            route
+        } else {
+            let Some(route) = current else {
+                return Ok(false);
+            };
+            route
+        };
+        if route.session_sha256 != event.session_sha256
+            || route.terminal_binding_sha256 != expected_terminal_binding_sha256
+        {
+            return Ok(false);
+        }
+        if event.event != CursorEvent::SessionStart
+            && !route.admit(event, observed_terminal_binding_sha256, console_openable)
+        {
+            return Ok(false);
+        }
+        let bytes = route
+            .checkpoint()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let mut file = AtomicWriteFile::options().open(&path)?;
+        file.write_all(&bytes)?;
+        file.flush()?;
+        file.commit()?;
+        Ok(true)
+    }
+}
+
+fn reject_route_symlink(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "Cursor route state cannot use a symbolic link",
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -335,5 +593,145 @@ mod tests {
             &terminal,
             true
         ));
+    }
+
+    #[test]
+    fn bounded_route_accepts_long_session_across_hook_process_rebuilds() {
+        let terminal = "a".repeat(64);
+        let start = normalize_hook(
+            br#"{"hook_event_name":"sessionStart","conversation_id":"long-session"}"#,
+        )
+        .unwrap()
+        .unwrap();
+        let mut route = CursorSessionRoute::from_session_start(&start, &terminal, &terminal, true)
+            .expect("bound start");
+        let mut first_prompt = None;
+        let mut first_stop = None;
+        for round in 1..=1_000 {
+            let prompt = normalize_hook(
+                format!("{{\"hook_event_name\":\"beforeSubmitPrompt\",\"conversation_id\":\"long-session\",\"generation_id\":\"round-{round}\"}}").as_bytes(),
+            )
+            .unwrap()
+            .unwrap();
+            let stop = normalize_hook(
+                format!("{{\"hook_event_name\":\"stop\",\"conversation_id\":\"long-session\",\"generation_id\":\"round-{round}\",\"status\":\"completed\"}}").as_bytes(),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(route.admit(&prompt, &terminal, true), "prompt {round}");
+            if round == 1 {
+                first_prompt = Some(prompt.clone());
+                first_stop = Some(stop.clone());
+            }
+            assert!(route.admit(&stop, &terminal, true), "stop {round}");
+            // Every Hook invocation may be a new process. Persist only the
+            // bounded opaque checkpoint, then rebuild before the next event.
+            route = CursorSessionRoute::from_checkpoint(&route.checkpoint().unwrap())
+                .expect("checkpoint accepted");
+            if round >= 33 {
+                assert!(!route.admit(first_prompt.as_ref().unwrap(), &terminal, true));
+                assert!(!route.admit(first_stop.as_ref().unwrap(), &terminal, true));
+            }
+        }
+        assert!(!route.admit(first_prompt.as_ref().unwrap(), &terminal, true));
+        let end =
+            normalize_hook(br#"{"hook_event_name":"sessionEnd","conversation_id":"long-session"}"#)
+                .unwrap()
+                .unwrap();
+        assert!(route.admit(&end, &terminal, true));
+        let mut ended = CursorSessionRoute::from_checkpoint(&route.checkpoint().unwrap()).unwrap();
+        assert!(!ended.admit(first_prompt.as_ref().unwrap(), &terminal, true));
+        assert!(
+            CursorSessionRoute::from_checkpoint(&vec![b'x'; MAX_CURSOR_ROUTE_CHECKPOINT_BYTES + 1])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn separate_hook_processes_reuse_only_the_exact_persisted_session_route() {
+        let root = std::env::temp_dir().join(format!(
+            "tabbeacon-cursor-route-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let terminal = "a".repeat(64);
+        let foreign = "b".repeat(64);
+        let event = |name: &str, generation: Option<&str>| {
+            let mut input = serde_json::json!({
+                "hook_event_name": name,
+                "conversation_id": "stored-session",
+            });
+            if let Some(generation) = generation {
+                input["generation_id"] = generation.into();
+            }
+            if name == "stop" {
+                input["status"] = "completed".into();
+            }
+            normalize_hook(input.to_string().as_bytes())
+                .unwrap()
+                .unwrap()
+        };
+        let start = event("sessionStart", None);
+        let first = event("beforeSubmitPrompt", Some("round-1"));
+        assert!(
+            !CursorRouteStore::new(&root)
+                .admit(&first, &terminal, &terminal, true)
+                .unwrap()
+        );
+        assert!(
+            !CursorRouteStore::new(&root)
+                .admit(&start, &terminal, &foreign, true)
+                .unwrap()
+        );
+        assert!(
+            CursorRouteStore::new(&root)
+                .admit(&start, &terminal, &terminal, true)
+                .unwrap()
+        );
+        assert!(
+            !CursorRouteStore::new(&root)
+                .admit(&start, &terminal, &terminal, true)
+                .unwrap()
+        );
+        for round in 1..=34 {
+            let generation = format!("round-{round}");
+            let prompt = event("beforeSubmitPrompt", Some(&generation));
+            let stop = event("stop", Some(&generation));
+            assert!(
+                CursorRouteStore::new(&root)
+                    .admit(&prompt, &terminal, &terminal, true)
+                    .unwrap()
+            );
+            assert!(
+                !CursorRouteStore::new(&root)
+                    .admit(&stop, &terminal, &foreign, true)
+                    .unwrap()
+            );
+            assert!(
+                CursorRouteStore::new(&root)
+                    .admit(&stop, &terminal, &terminal, true)
+                    .unwrap()
+            );
+        }
+        assert!(
+            !CursorRouteStore::new(&root)
+                .admit(&first, &terminal, &terminal, true)
+                .unwrap()
+        );
+        let end = event("sessionEnd", None);
+        assert!(
+            CursorRouteStore::new(&root)
+                .admit(&end, &terminal, &terminal, true)
+                .unwrap()
+        );
+        assert!(
+            !CursorRouteStore::new(&root)
+                .admit(&first, &terminal, &terminal, true)
+                .unwrap()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

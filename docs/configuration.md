@@ -63,8 +63,11 @@ the snapshot-guarded write; Esc cancels without a write. The saved setting still
 does not prove current-session application.
 
 The output separates requested and capability-limited effective channels.
-`LIVE_APPLICATION=UNPROVEN` means the stored choice has not been proved active
-in the current CLI session. Current Cursor terminal routing is unqualified, so
+`LIVE_APPLICATION=NOT_INSTALLED` means the admitted Agy title callback is absent;
+`UNPROVEN` means the saved choice has not been proved active in the current CLI
+session. Agy's explicit `preserve-native` mode removes only an owned Agy title
+callback when applied; `tabbeacon setup agy` also respects that saved mode.
+Current Cursor terminal routing is unqualified, so
 its requested color remains capability-limited; this command does not install
 Cursor Hooks or claim the color appeared.
 

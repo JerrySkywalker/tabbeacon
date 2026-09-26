@@ -46,7 +46,7 @@ use crate::{
         WindowsTerminalCapabilities, WindowsTerminalRenderer,
     },
     presentation_policy::{
-        ApplicationStatus, CliTarget, PreferenceOrigin, PresentationCapabilities, PresentationMode,
+        CliTarget, PreferenceOrigin, PresentationCapabilities, PresentationMode,
         PresentationOverride, ResolvedPresentation, resolve_presentation,
     },
     providers::registry::ProviderRegistry,
@@ -198,6 +198,8 @@ pub struct ControlCenterRefresh {
     pub presentation: PresentationSettings,
     /// Capability-limited provider preferences observed without mutation.
     pub provider_presentation: Vec<(CliTarget, ResolvedPresentation)>,
+    /// Read-only capability proof used by provider previews.
+    pub provider_capabilities: Vec<(CliTarget, PresentationCapabilities)>,
     /// Latest read-only Interface baseline.
     pub interface: InterfacePreferences,
     /// Shared bounded management projection.
@@ -295,6 +297,7 @@ pub struct ControlCenterApp {
     overview: ManagementOverview,
     current: PresentationSettings,
     provider_presentation: Vec<(CliTarget, ResolvedPresentation)>,
+    provider_capabilities: Vec<(CliTarget, PresentationCapabilities)>,
     selected_provider: CliTarget,
     selected_provider_mode: Option<PresentationMode>,
     draft: PresentationSettings,
@@ -337,6 +340,7 @@ impl ControlCenterApp {
             overview,
             current,
             provider_presentation: Vec::new(),
+            provider_capabilities: Vec::new(),
             selected_provider: CliTarget::Codex,
             selected_provider_mode: None,
             draft: current,
@@ -493,6 +497,7 @@ impl ControlCenterApp {
         self.snapshot = refresh.snapshot;
         self.overview = refresh.overview;
         self.provider_presentation = refresh.provider_presentation;
+        self.provider_capabilities = refresh.provider_capabilities;
         self.hooks = refresh.hooks;
         self.integrations = refresh.integrations;
         self.title_explanation = refresh.title_explanation;
@@ -660,18 +665,19 @@ impl ControlCenterApp {
         let after = self
             .selected_provider_mode
             .map_or_else(PresentationOverride::default, |mode| before.with_mode(mode));
-        let capabilities = provider_presentation_capabilities(self.selected_provider);
+        let capabilities = self
+            .provider_capabilities
+            .iter()
+            .find(|(provider, _)| *provider == self.selected_provider)
+            .map_or(PresentationCapabilities::NONE, |(_, capabilities)| {
+                *capabilities
+            });
         self.overlay = ControlCenterOverlay::ProviderPreview {
             provider: self.selected_provider,
             expected_global: self.current,
             before,
             after,
-            resolved: resolve_presentation(
-                self.current,
-                after,
-                capabilities,
-                ApplicationStatus::Unproven,
-            ),
+            resolved: resolve_presentation(self.current, after, capabilities, current.application),
         };
     }
 
@@ -1004,7 +1010,11 @@ fn provider_modes(provider: CliTarget) -> &'static [Option<PresentationMode>] {
         Some(PresentationMode::ColorOnly),
         Some(PresentationMode::PreserveNative),
     ];
-    const AGY: &[Option<PresentationMode>] = &[None, Some(PresentationMode::TitleOnly)];
+    const AGY: &[Option<PresentationMode>] = &[
+        None,
+        Some(PresentationMode::TitleOnly),
+        Some(PresentationMode::PreserveNative),
+    ];
     const CURSOR: &[Option<PresentationMode>] = &[
         None,
         Some(PresentationMode::ColorOnly),
@@ -1014,13 +1024,6 @@ fn provider_modes(provider: CliTarget) -> &'static [Option<PresentationMode>] {
         CliTarget::Codex => CODEX,
         CliTarget::Agy => AGY,
         CliTarget::Cursor => CURSOR,
-    }
-}
-
-const fn provider_presentation_capabilities(provider: CliTarget) -> PresentationCapabilities {
-    match provider {
-        CliTarget::Codex => PresentationCapabilities::CODEX,
-        CliTarget::Agy | CliTarget::Cursor => PresentationCapabilities::NONE,
     }
 }
 
@@ -1288,6 +1291,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
     let refresh = ControlCenterRefresh {
         presentation: original,
         provider_presentation: app.provider_presentation.clone(),
+        provider_capabilities: app.provider_capabilities.clone(),
         interface: original_interface,
         snapshot: app.snapshot.clone(),
         overview: app.overview.clone(),
@@ -2664,6 +2668,40 @@ mod tests {
     }
 
     #[test]
+    fn agy_native_mode_is_selectable_without_a_managed_title_preview() {
+        use crate::presentation_policy::{
+            ApplicationStatus, PresentationCapabilities, PresentationOverride, resolve_presentation,
+        };
+        let mut app = app();
+        app.screen = Screen::Integration;
+        app.provider_presentation.push((
+            CliTarget::Agy,
+            resolve_presentation(
+                app.current,
+                PresentationOverride::default(),
+                PresentationCapabilities::AGY_TITLE_ONLY,
+                ApplicationStatus::Unproven,
+            ),
+        ));
+        app.provider_capabilities
+            .push((CliTarget::Agy, PresentationCapabilities::AGY_TITLE_ONLY));
+        app.select_provider(CliTarget::Agy);
+        app.cycle_provider_mode(1);
+        app.cycle_provider_mode(1);
+        assert_eq!(
+            app.selected_provider_mode,
+            Some(PresentationMode::PreserveNative)
+        );
+        app.open_provider_preview();
+        let ControlCenterOverlay::ProviderPreview { resolved, .. } = app.overlay else {
+            panic!("expected preview");
+        };
+        assert!(!resolved.effective.title().owns_tabbeacon_title());
+        assert_eq!(resolved.effective.tab_color(), TabColorMode::Native);
+        assert_eq!(resolved.effective.activity(), ActivityMode::Native);
+    }
+
+    #[test]
     fn provider_preview_cancel_and_apply_remain_explicit_requests() {
         use crate::presentation_policy::{
             ApplicationStatus, PresentationCapabilities, PresentationMode, PresentationOverride,
@@ -2740,6 +2778,7 @@ mod tests {
         ControlCenterRefresh {
             presentation,
             provider_presentation: Vec::new(),
+            provider_capabilities: Vec::new(),
             interface,
             snapshot: ManagementSnapshot {
                 health: ManagementHealth::Healthy,
@@ -2828,6 +2867,7 @@ mod tests {
         app.merge_refresh(ControlCenterRefresh {
             presentation: app.current(),
             provider_presentation: Vec::new(),
+            provider_capabilities: Vec::new(),
             interface: app.current_interface(),
             snapshot: ManagementSnapshot {
                 health: ManagementHealth::Healthy,

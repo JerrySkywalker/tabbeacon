@@ -484,18 +484,8 @@ fn config_provider(
             (current.with_mode(mode), true)
         }
     };
-    let capabilities = match target {
-        CliTarget::Codex => PresentationCapabilities::CODEX,
-        // The current Agy profile and Cursor terminal route need positive
-        // local admission before CLI can claim these settings effective.
-        CliTarget::Agy | CliTarget::Cursor => PresentationCapabilities::NONE,
-    };
-    let resolved = resolve_presentation(
-        snapshot.settings(),
-        draft,
-        capabilities,
-        ApplicationStatus::Unproven,
-    );
+    let (capabilities, application) = provider_presentation_admission(target);
+    let resolved = resolve_presentation(snapshot.settings(), draft, capabilities, application);
     if !apply {
         print_provider_config(target, &resolved, false);
         return ExitCode::SUCCESS;
@@ -504,8 +494,46 @@ fn config_provider(
     if let Err(error) = apply_provider_override(&store, &snapshot, target, current, draft) {
         return management_error_for_output("CONFIG", &error, output_mode, language);
     }
-    print_provider_config(target, &resolved, changed);
+    let (capabilities, application) = provider_presentation_admission(target);
+    let applied = resolve_presentation(snapshot.settings(), draft, capabilities, application);
+    print_provider_config(target, &applied, changed);
     ExitCode::SUCCESS
+}
+
+fn provider_presentation_admission(
+    target: CliTarget,
+) -> (PresentationCapabilities, ApplicationStatus) {
+    match target {
+        CliTarget::Codex => (PresentationCapabilities::CODEX, ApplicationStatus::Unproven),
+        CliTarget::Cursor => (PresentationCapabilities::NONE, ApplicationStatus::Unproven),
+        CliTarget::Agy => {
+            let Ok(setup) = AgyProductionSetup::from_environment() else {
+                return (PresentationCapabilities::NONE, ApplicationStatus::Unproven);
+            };
+            agy_presentation_admission(setup.inspect().state)
+        }
+    }
+}
+
+fn agy_presentation_admission(
+    state: tabbeacon::providers::agy_backend::AgyIntegrationReadiness,
+) -> (PresentationCapabilities, ApplicationStatus) {
+    use tabbeacon::providers::agy_backend::AgyIntegrationReadiness;
+    match state {
+        AgyIntegrationReadiness::SupportedConfigured => (
+            PresentationCapabilities::AGY_TITLE_ONLY,
+            ApplicationStatus::Unproven,
+        ),
+        AgyIntegrationReadiness::SupportedNotConfigured => (
+            PresentationCapabilities::AGY_TITLE_ONLY,
+            ApplicationStatus::NotInstalled,
+        ),
+        AgyIntegrationReadiness::ConfigurationDrift
+        | AgyIntegrationReadiness::KnownUnadmitted
+        | AgyIntegrationReadiness::UnsupportedVersion => {
+            (PresentationCapabilities::NONE, ApplicationStatus::Unproven)
+        }
+    }
 }
 
 fn apply_provider_override(
@@ -526,6 +554,36 @@ fn apply_provider_override(
     };
     if !matches!(store.write_receipt_is_current(&receipt), Ok(true)) {
         return Err(settings_conflict_error());
+    }
+    if target == CliTarget::Agy {
+        let previous = resolve_presentation(
+            snapshot.settings(),
+            current,
+            PresentationCapabilities::AGY_TITLE_ONLY,
+            ApplicationStatus::Unproven,
+        );
+        let next = resolve_presentation(
+            snapshot.settings(),
+            draft,
+            PresentationCapabilities::AGY_TITLE_ONLY,
+            ApplicationStatus::Unproven,
+        );
+        if previous.effective.title().owns_tabbeacon_title()
+            != next.effective.title().owns_tabbeacon_title()
+        {
+            let reconcile = AgyProductionSetup::from_environment().and_then(|setup| {
+                setup.reconcile_title_ownership(next.effective.title().owns_tabbeacon_title())
+            });
+            if let Err(error) = reconcile {
+                let restored = matches!(
+                    store.restore_snapshot_if_unchanged(&receipt, snapshot),
+                    Ok(ConditionalSaveOutcome::Saved)
+                );
+                return Err(io::Error::other(format!(
+                    "{error}; rollback_verified={restored}"
+                )));
+            }
+        }
     }
     if target == CliTarget::Codex {
         let previous = resolve_presentation(
@@ -569,7 +627,7 @@ fn admitted_provider_mode(target: CliTarget, mode: ConfigProviderMode) -> Option
     };
     match (target, mode) {
         (CliTarget::Cursor, PresentationMode::ColorOnly | PresentationMode::PreserveNative)
-        | (CliTarget::Agy, PresentationMode::TitleOnly)
+        | (CliTarget::Agy, PresentationMode::TitleOnly | PresentationMode::PreserveNative)
         | (CliTarget::Codex, _) => Some(mode),
         _ => None,
     }
@@ -591,7 +649,14 @@ fn print_provider_config(
     println!("TITLE_CAPABILITY_LIMITED={}", resolved.title_limited);
     println!("COLOR_CAPABILITY_LIMITED={}", resolved.color_limited);
     println!("ACTIVITY_CAPABILITY_LIMITED={}", resolved.activity_limited);
-    println!("LIVE_APPLICATION=UNPROVEN");
+    let application = match resolved.application {
+        ApplicationStatus::NotInstalled => "NOT_INSTALLED",
+        ApplicationStatus::InstalledUntrusted => "INSTALLED_UNTRUSTED",
+        ApplicationStatus::RestartRequired => "RESTART_REQUIRED",
+        ApplicationStatus::Applied => "APPLIED",
+        ApplicationStatus::Unproven => "UNPROVEN",
+    };
+    println!("LIVE_APPLICATION={application}");
     println!("RESTART_MAY_BE_REQUIRED=true");
 }
 
@@ -1309,11 +1374,24 @@ fn setup_codex(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> 
 }
 
 fn setup_agy(output_mode: OutputMode) -> ExitCode {
+    let store = match settings_store() {
+        Ok(store) => store,
+        Err(error) => return management_error_for_output("SETUP", &error, output_mode, None),
+    };
+    let resolved = match store.resolve_provider_read_only(
+        CliTarget::Agy,
+        PresentationCapabilities::AGY_TITLE_ONLY,
+        ApplicationStatus::Unproven,
+    ) {
+        Ok(resolved) => resolved,
+        Err(error) => return management_error_for_output("SETUP", &error, output_mode, None),
+    };
     let setup = match AgyProductionSetup::from_environment() {
         Ok(setup) => setup,
         Err(error) => return print_agy_setup_error(error, output_mode),
     };
-    match setup.setup() {
+    let result = setup.reconcile_title_ownership(resolved.effective.title().owns_tabbeacon_title());
+    match result {
         Ok(outcome) => print_agy_setup_outcome(outcome, output_mode),
         Err(error) => print_agy_setup_error(error, output_mode),
     }
@@ -1329,14 +1407,18 @@ fn print_agy_setup_outcome(
         AgyProductionSetupOutcome::Removed => "removed",
         AgyProductionSetupOutcome::NotInstalled => "not_installed",
     };
+    let provider_enabled = matches!(
+        outcome,
+        AgyProductionSetupOutcome::Installed | AgyProductionSetupOutcome::AlreadyConfigured
+    );
     match output_mode {
         OutputMode::Json => println!(
             "{}",
-            serde_json::json!({"provider":"agy","setup":value,"provider_enabled":true})
+            serde_json::json!({"provider":"agy","setup":value,"provider_enabled":provider_enabled})
         ),
         OutputMode::Plain => {
             println!("AGY_SETUP={}", value.to_ascii_uppercase());
-            println!("AGY_PROVIDER_ENABLED=true");
+            println!("AGY_PROVIDER_ENABLED={provider_enabled}");
         }
         OutputMode::Human => println!("Agy setup: {value}."),
     }
@@ -3227,6 +3309,10 @@ fn config_provider_wizard(
             ConfigProvider::Agy,
             &[
                 ("Title only / 仅标题", Some(ConfigProviderMode::TitleOnly)),
+                (
+                    "Preserve native / 保留原生",
+                    Some(ConfigProviderMode::PreserveNative),
+                ),
                 ("Inherit / 继承", None),
                 ("Cancel / 取消", None),
             ],
@@ -5008,24 +5094,20 @@ fn collect_control_center_refresh(
         .snapshot_read_only()
         .map_err(io::Error::other)?;
     let presentation = settings_snapshot.settings();
-    let provider_presentation = [CliTarget::Codex, CliTarget::Agy, CliTarget::Cursor]
+    let provider_admission = [CliTarget::Codex, CliTarget::Agy, CliTarget::Cursor]
         .into_iter()
-        .map(|provider| {
+        .map(|provider| (provider, provider_presentation_admission(provider)))
+        .collect::<Vec<_>>();
+    let provider_presentation = provider_admission
+        .iter()
+        .copied()
+        .map(|(provider, (capabilities, application))| {
             let override_for_cli = settings_snapshot
                 .provider_override(provider)
                 .map_err(io::Error::other)?;
-            let capabilities = match provider {
-                CliTarget::Codex => PresentationCapabilities::CODEX,
-                CliTarget::Agy | CliTarget::Cursor => PresentationCapabilities::NONE,
-            };
             Ok((
                 provider,
-                resolve_presentation(
-                    presentation,
-                    override_for_cli,
-                    capabilities,
-                    ApplicationStatus::Unproven,
-                ),
+                resolve_presentation(presentation, override_for_cli, capabilities, application),
             ))
         })
         .collect::<io::Result<Vec<_>>>()?;
@@ -5058,6 +5140,10 @@ fn collect_control_center_refresh(
     Ok(tabbeacon::control_center::ControlCenterRefresh {
         presentation,
         provider_presentation,
+        provider_capabilities: provider_admission
+            .into_iter()
+            .map(|(provider, (capabilities, _))| (provider, capabilities))
+            .collect(),
         interface,
         snapshot: ManagementSnapshot::from_diagnostics(&report),
         overview: tabbeacon::management::ManagementOverview::from_diagnostics(&report),
@@ -5252,6 +5338,56 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn agy_explicit_native_mode_is_admitted_and_releases_its_title_channel() {
+        assert_eq!(
+            admitted_provider_mode(CliTarget::Agy, ConfigProviderMode::PreserveNative),
+            Some(PresentationMode::PreserveNative)
+        );
+        assert_eq!(
+            admitted_provider_mode(CliTarget::Agy, ConfigProviderMode::ColorOnly),
+            None
+        );
+        let native = resolve_presentation(
+            PresentationSettings::default(),
+            PresentationOverride::default().with_mode(PresentationMode::PreserveNative),
+            PresentationCapabilities::AGY_TITLE_ONLY,
+            ApplicationStatus::NotInstalled,
+        );
+        assert!(!native.effective.title().owns_tabbeacon_title());
+        assert_eq!(native.effective.tab_color(), TabColorMode::Native);
+        assert_eq!(native.effective.activity(), ActivityMode::Native);
+    }
+
+    #[test]
+    fn agy_effective_capability_requires_positive_local_admission() {
+        use tabbeacon::providers::agy_backend::AgyIntegrationReadiness;
+        assert_eq!(
+            agy_presentation_admission(AgyIntegrationReadiness::SupportedConfigured),
+            (
+                PresentationCapabilities::AGY_TITLE_ONLY,
+                ApplicationStatus::Unproven
+            )
+        );
+        assert_eq!(
+            agy_presentation_admission(AgyIntegrationReadiness::SupportedNotConfigured),
+            (
+                PresentationCapabilities::AGY_TITLE_ONLY,
+                ApplicationStatus::NotInstalled
+            )
+        );
+        for state in [
+            AgyIntegrationReadiness::KnownUnadmitted,
+            AgyIntegrationReadiness::UnsupportedVersion,
+            AgyIntegrationReadiness::ConfigurationDrift,
+        ] {
+            assert_eq!(
+                agy_presentation_admission(state),
+                (PresentationCapabilities::NONE, ApplicationStatus::Unproven)
+            );
+        }
+    }
 
     #[test]
     fn guided_setup_revisit_policy_distinguishes_fresh_quick_and_full_paths() {
