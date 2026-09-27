@@ -21,11 +21,15 @@ enabled or implied.
 Cursor Agent is being investigated for the v0.8.0 train. Its original command
 is `agent` on the observed ZenBook Duo installation. [Current Cursor Hook documentation](https://cursor.com/docs/hooks)
 names a structured `stop.status` outcome, but exact Windows Terminal color
-output and original-command lifecycle have only one isolated product observation.
-The Owner saw working/completed colors and no native-title interference; the
-later session left matching release/end state, while an earlier start-only route
-did not record an end. Per-Hook output results and mixed-session behavior remain
-unproven. Cursor is not
+output and original-command lifecycle have bounded isolated product observations.
+In the earlier single-session run, the Owner saw working/completed colors and no
+native-title interference; a later session left matching release/end state,
+while an earlier start-only route did not record an end. At candidate `e30303a`,
+the Owner observed two Cursor tabs working without interference. Their product
+state used one shared ownership root and retained distinct terminal, route,
+and last-flushed color owners. Exact A/B-to-session mapping, per-Hook flush
+history, and the end of those two sessions were not recorded. Mixed-provider
+behavior remains unproven. Cursor is not
 included in the current production support table until those gates pass.
 The candidate route guard now keeps bounded, process-safe generation history
 and rejects superseded turns after the 32nd round. This deterministic guard
@@ -47,7 +51,7 @@ title. See [Native](terminology.md#tb-t11), [Off](terminology.md#tb-t12), and
 | --- | --- | --- |
 | Structured interruption | The exact 0.156.1/0.157.1 source-audited profile, isolated owned declaration and trust gate, public Hook CLI, and runtime dispatch have deterministic proof. Daily installed `Interrupt` delivery and visible output remain unproven. | No admitted live interruption route. |
 | Structured warning or failed main turn | Unproven for the original HTTP 404 class in [Issue #116](https://github.com/JerrySkywalker/tabbeacon/issues/116). | Real structured `stop(completed)` delivery was observed by the earlier isolated collector; warning/failure outcomes remain unproven. |
-| Strict native presentation | Owned-channel release has deterministic tests; final visible transition proof is pending. | One isolated original-command color run preserved the native title by Owner observation; continuous owned Visual and mixed-session transitions remain unproven. |
+| Strict native presentation | Owned-channel release has deterministic tests; final visible transition proof is pending. | The earlier isolated original-command color run preserved the native title by Owner observation; the later two-Cursor observation showed no reported interference. Current candidate visible transition and mixed-provider behavior remain unproven. |
 
 An event from a child tool or terminal text alone cannot establish a failed
 main turn. The candidate keeps unknown events and unavailable evidence

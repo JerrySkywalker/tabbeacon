@@ -67,9 +67,12 @@ The output separates requested and capability-limited effective channels.
 `UNPROVEN` means the saved choice has not been proved active in the current CLI
 session. Agy's explicit `preserve-native` mode removes only an owned Agy title
 callback when applied; `tabbeacon setup agy` also respects that saved mode.
-One isolated original-command Cursor product run showed color and later-session
-release, but it does not qualify general live application or mixed-session
-routing. A saved choice does not install Cursor Hooks or prove color in a new
+An earlier isolated original-command Cursor product run showed color and
+later-session release. At `e30303a`, the Owner also observed two Cursor tabs
+without interference, with distinct saved owners in one product state root.
+Those observations do not qualify general live application, mixed-provider
+routing, or the unrecorded exits of the two later sessions. A saved choice does
+not install Cursor Hooks or prove color in a new
 terminal; `LIVE_APPLICATION=UNPROVEN` remains the honest general status.
 `CHANGE_APPLIED=true` reports only the saved preference. The public CLI,
 wizard, and Control Center cannot clear a different process's terminal at
