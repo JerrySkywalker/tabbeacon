@@ -650,6 +650,32 @@ impl PresentationSettingsResetReceipt {
             .and_then(|bytes| parse_settings_bytes(bytes).ok())
             .unwrap_or_default()
     }
+
+    /// Resolves title ownership from the exact bytes replaced by reset. An
+    /// invalid prior document has only the documented default effective state.
+    #[must_use]
+    pub fn previous_effective_title_ownership_or_default(
+        &self,
+        provider: CliTarget,
+        capabilities: PresentationCapabilities,
+    ) -> bool {
+        let override_for_cli = self
+            .original
+            .as_deref()
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .and_then(|text| text.parse::<DocumentMut>().ok())
+            .and_then(|document| provider_override_from_document(&document, provider).ok())
+            .unwrap_or_default();
+        resolve_presentation(
+            self.previous_settings_or_default(),
+            override_for_cli,
+            capabilities,
+            ApplicationStatus::Unproven,
+        )
+        .effective
+        .title()
+        .owns_tabbeacon_title()
+    }
 }
 
 impl PresentationSettingsWriteReceipt {

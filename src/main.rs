@@ -3269,11 +3269,20 @@ fn config_reset(output_mode: OutputMode, language: Option<InterfaceLanguage>) ->
         Ok(store) => store,
         Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
     };
-    let (defaults, title_outcome) = match apply_config_reset_with(&store, |owns_title| {
-        CodexIntegration::from_environment()
-            .and_then(|integration| integration.reconcile_title_ownership(owns_title))
-            .map_err(|error| error.to_string())
-    }) {
+    let (defaults, title_outcome, agy_reconciled) = match apply_config_reset_with(
+        &store,
+        |owns_title| {
+            CodexIntegration::from_environment()
+                .and_then(|integration| integration.reconcile_title_ownership(owns_title))
+                .map_err(|error| error.to_string())
+        },
+        |owns_title| {
+            AgyProductionSetup::from_environment()
+                .and_then(|setup| setup.reconcile_title_ownership(owns_title))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        },
+    ) {
         Ok(result) => result,
         Err((error, partial)) => {
             if partial {
@@ -3297,6 +3306,9 @@ fn config_reset(output_mode: OutputMode, language: Option<InterfaceLanguage>) ->
             );
         }
     }
+    if agy_reconciled && output_mode == OutputMode::Plain {
+        println!("AGY_TITLE_OWNERSHIP=RECONCILED");
+    }
     if output_mode == OutputMode::Plain {
         println!("CONFIG=PASS");
     } else {
@@ -3314,38 +3326,75 @@ fn config_reset(output_mode: OutputMode, language: Option<InterfaceLanguage>) ->
 
 fn apply_config_reset_with(
     store: &PresentationSettingsStore,
-    reconcile: impl FnOnce(bool) -> Result<TitleOwnershipOutcome, String>,
-) -> Result<(PresentationSettings, Option<TitleOwnershipOutcome>), (io::Error, bool)> {
+    mut reconcile_codex: impl FnMut(bool) -> Result<TitleOwnershipOutcome, String>,
+    mut reconcile_agy: impl FnMut(bool) -> Result<(), String>,
+) -> Result<(PresentationSettings, Option<TitleOwnershipOutcome>, bool), (io::Error, bool)> {
     let (defaults, receipt) = store
         .reset_with_receipt()
         // The atomic write may have committed before reporting an I/O error.
         .map_err(|error| (io::Error::other(error), true))?;
-    if receipt.previous_settings_or_default().title() == defaults.title() {
-        return Ok((defaults, None));
+    let codex_before = receipt.previous_effective_title_ownership_or_default(
+        CliTarget::Codex,
+        PresentationCapabilities::CODEX,
+    );
+    let agy_before = receipt.previous_effective_title_ownership_or_default(
+        CliTarget::Agy,
+        PresentationCapabilities::AGY_TITLE_ONLY,
+    );
+    let codex_after = resolve_presentation(
+        defaults,
+        PresentationOverride::default(),
+        PresentationCapabilities::CODEX,
+        ApplicationStatus::Unproven,
+    )
+    .effective
+    .title()
+    .owns_tabbeacon_title();
+    let agy_after = resolve_presentation(
+        defaults,
+        PresentationOverride::default(),
+        PresentationCapabilities::AGY_TITLE_ONLY,
+        ApplicationStatus::Unproven,
+    )
+    .effective
+    .title()
+    .owns_tabbeacon_title();
+    let codex_changed = codex_before != codex_after;
+    let agy_changed = agy_before != agy_after;
+    let mut codex_outcome = None;
+    if codex_changed {
+        match reconcile_codex(codex_after) {
+            Ok(outcome) => codex_outcome = Some(outcome),
+            Err(error) => {
+                let restored = matches!(
+                    store.restore_reset_if_unchanged(&receipt),
+                    Ok(ConditionalSaveOutcome::Saved)
+                );
+                let integration_recovered = restored && reconcile_codex(codex_before).is_ok();
+                return Err((
+                    io::Error::other(format!(
+                        "{error}; settings_rollback_verified={restored}; codex_recovery_verified={integration_recovered}; integration_state=unproven"
+                    )),
+                    true,
+                ));
+            }
+        }
     }
-    match reconcile(defaults.title().owns_tabbeacon_title()) {
-        Ok(outcome) => Ok((defaults, Some(outcome))),
-        Err(error) => match store.restore_reset_if_unchanged(&receipt) {
-            Ok(ConditionalSaveOutcome::Saved) => Err((
-                io::Error::other(format!(
-                    "{error}; settings_rollback_verified=true; integration_state=unproven"
-                )),
-                false,
+    if agy_changed && let Err(error) = reconcile_agy(agy_after) {
+        let restored = matches!(
+            store.restore_reset_if_unchanged(&receipt),
+            Ok(ConditionalSaveOutcome::Saved)
+        );
+        let agy_recovered = restored && reconcile_agy(agy_before).is_ok();
+        let codex_recovered = restored && (!codex_changed || reconcile_codex(codex_before).is_ok());
+        return Err((
+            io::Error::other(format!(
+                "{error}; settings_rollback_verified={restored}; agy_recovery_verified={agy_recovered}; codex_recovery_verified={codex_recovered}; integration_state=unproven"
             )),
-            Ok(ConditionalSaveOutcome::Conflict) => Err((
-                io::Error::other(format!(
-                    "{error}; settings rollback refused because the document changed concurrently"
-                )),
-                true,
-            )),
-            Err(rollback_error) => Err((
-                io::Error::other(format!(
-                    "{error}; settings rollback failed: {rollback_error}"
-                )),
-                true,
-            )),
-        },
+            true,
+        ));
     }
+    Ok((defaults, codex_outcome, agy_changed))
 }
 
 fn config_preset(
@@ -5542,10 +5591,13 @@ mod tests {
         let original = b"[presentation]\ntitle = \"native\"\n\n[foreign]\nkey = \"preserved\"\n";
         fs::write(&path, original).unwrap();
         let store = PresentationSettingsStore::new(&path);
-        let result =
-            apply_config_reset_with(&store, |_| Err("injected reconciliation failure".into()));
+        let result = apply_config_reset_with(
+            &store,
+            |_| Err("injected reconciliation failure".into()),
+            |_| Ok(()),
+        );
         let (error, partial) = result.unwrap_err();
-        assert!(!partial);
+        assert!(partial);
         assert!(
             error
                 .to_string()
@@ -5561,13 +5613,21 @@ mod tests {
         fs::write(&path, b"[presentation]\ntitle = \"native\"\n").unwrap();
         let store = PresentationSettingsStore::new(&path);
         let drift = b"[foreign]\nnew = true\n";
-        let result = apply_config_reset_with(&store, |_| {
-            fs::write(&path, drift).unwrap();
-            Err("injected reconciliation failure".into())
-        });
+        let result = apply_config_reset_with(
+            &store,
+            |_| {
+                fs::write(&path, drift).unwrap();
+                Err("injected reconciliation failure".into())
+            },
+            |_| Ok(()),
+        );
         let (error, partial) = result.unwrap_err();
         assert!(partial);
-        assert!(error.to_string().contains("changed concurrently"));
+        assert!(
+            error
+                .to_string()
+                .contains("settings_rollback_verified=false")
+        );
         assert_eq!(fs::read(&path).unwrap(), drift);
     }
 
@@ -5577,13 +5637,124 @@ mod tests {
         let path = root.path().join("config.toml");
         fs::write(&path, b"[presentation]\ntitle = \"native\"\n").unwrap();
         let store = PresentationSettingsStore::new(&path);
-        let (settings, outcome) = apply_config_reset_with(&store, |owns_title| {
-            assert!(owns_title);
-            Ok(TitleOwnershipOutcome::AlreadyConfigured)
-        })
+        let (settings, outcome, agy_reconciled) = apply_config_reset_with(
+            &store,
+            |owns_title| {
+                assert!(owns_title);
+                Ok(TitleOwnershipOutcome::AlreadyConfigured)
+            },
+            |owns_title| {
+                assert!(owns_title);
+                Ok(())
+            },
+        )
         .unwrap();
         assert_eq!(settings, PresentationSettings::default());
         assert!(outcome.is_some());
+        assert!(agy_reconciled);
+    }
+
+    #[test]
+    fn reset_reconciles_codex_and_agy_when_native_provider_overrides_are_removed() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        fs::write(
+            &path,
+            b"[provider_presentation.codex]\ntitle = \"native\"\n[provider_presentation.agy]\ntitle = \"native\"\n",
+        )
+        .unwrap();
+        let store = PresentationSettingsStore::new(&path);
+        let mut calls = Vec::new();
+        let (settings, codex, agy) = apply_config_reset_with(
+            &store,
+            |owns| {
+                calls.push((CliTarget::Codex, owns));
+                Ok(TitleOwnershipOutcome::Updated)
+            },
+            |owns| {
+                assert!(owns);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, [(CliTarget::Codex, true)]);
+        assert_eq!(settings, PresentationSettings::default());
+        assert!(codex.is_some() && agy);
+    }
+
+    #[test]
+    fn reset_reconciles_only_affected_provider_override() {
+        for (provider, document) in [
+            (
+                CliTarget::Codex,
+                "[provider_presentation.codex]\ntitle = \"native\"\n",
+            ),
+            (
+                CliTarget::Agy,
+                "[provider_presentation.agy]\ntitle = \"native\"\n",
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("config.toml");
+            fs::write(&path, document).unwrap();
+            let store = PresentationSettingsStore::new(&path);
+            let mut codex_calls = 0;
+            let mut agy_calls = 0;
+            let (_, codex, agy) = apply_config_reset_with(
+                &store,
+                |owns| {
+                    assert!(owns);
+                    codex_calls += 1;
+                    Ok(TitleOwnershipOutcome::Updated)
+                },
+                |owns| {
+                    assert!(owns);
+                    agy_calls += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(codex_calls, usize::from(provider == CliTarget::Codex));
+            assert_eq!(agy_calls, usize::from(provider == CliTarget::Agy));
+            assert_eq!(codex.is_some(), provider == CliTarget::Codex);
+            assert_eq!(agy, provider == CliTarget::Agy);
+        }
+    }
+
+    #[test]
+    fn reset_agy_failure_restores_settings_and_attempts_owned_title_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let original = b"[provider_presentation.codex]\ntitle = \"native\"\n[provider_presentation.agy]\ntitle = \"native\"\n[foreign]\nkeep = true\n";
+        fs::write(&path, original).unwrap();
+        let store = PresentationSettingsStore::new(&path);
+        let mut codex_calls = Vec::new();
+        let mut agy_calls = Vec::new();
+        let result = apply_config_reset_with(
+            &store,
+            |owns| {
+                codex_calls.push(owns);
+                Ok(TitleOwnershipOutcome::Updated)
+            },
+            |owns| {
+                agy_calls.push(owns);
+                if owns {
+                    Err("injected Agy failure".into())
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        let (error, partial) = result.unwrap_err();
+        assert!(partial);
+        assert!(
+            error
+                .to_string()
+                .contains("settings_rollback_verified=true")
+        );
+        assert_eq!(codex_calls, [true, false]);
+        assert_eq!(agy_calls, [true, false]);
+        assert_eq!(fs::read(path).unwrap(), original);
     }
 
     #[test]
