@@ -1152,7 +1152,13 @@ impl PresentationSettingsStore {
             match reconcile() {
                 Ok(value) => Ok(SettingsReconcileOutcome::Applied(value)),
                 Err(reason) => {
-                    let settings_restored = self.restore_snapshot_unlocked(original).is_ok();
+                    // An external editor need not honor config.lock. Never
+                    // overwrite its bytes while compensating a failed title
+                    // operation, even though cooperating writers are barred.
+                    let settings_restored = matches!(
+                        self.snapshot_unlocked(),
+                        Ok(ref latest) if receipt.matches(latest)
+                    ) && self.restore_snapshot_unlocked(original).is_ok();
                     Ok(SettingsReconcileOutcome::Failed {
                         reason,
                         settings_restored,
@@ -1785,6 +1791,39 @@ mod tests {
             Ok(super::SettingsReconcileOutcome::Conflict)
         ));
         assert_eq!(store.load().unwrap(), PresentationSettings::default());
+    }
+
+    #[test]
+    fn failed_title_reconcile_preserves_external_unlocked_toml_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let store = PresentationSettingsStore::new(&path);
+        let original = store.snapshot_read_only().unwrap();
+        let receipt = match store
+            .save_snapshot_if_unchanged(
+                &original,
+                original.settings().with_title(TitleMode::Native),
+            )
+            .unwrap()
+        {
+            super::SnapshotSaveOutcome::Saved(receipt) => receipt,
+            super::SnapshotSaveOutcome::Conflict => panic!("initial writer must save"),
+        };
+        let foreign = b"[presentation]\ntitle = \"native\"\n[foreign]\nkeep = true\n";
+        let outcome = store
+            .reconcile_snapshot_write_if_current(&receipt, &original, || -> Result<(), String> {
+                fs::write(&path, foreign).unwrap();
+                Err("injected reconciliation failure".into())
+            })
+            .unwrap();
+        assert!(matches!(
+            outcome,
+            super::SettingsReconcileOutcome::Failed {
+                settings_restored: false,
+                ..
+            }
+        ));
+        assert_eq!(fs::read(path).unwrap(), foreign);
     }
 
     #[test]
