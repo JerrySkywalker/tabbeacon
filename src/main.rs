@@ -3269,26 +3269,32 @@ fn config_reset(output_mode: OutputMode, language: Option<InterfaceLanguage>) ->
         Ok(store) => store,
         Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
     };
-    let current = store.load_or_default();
-    let defaults = match store.reset() {
-        Ok(settings) => settings,
-        Err(error) => return management_error_for_output("CONFIG", &error, output_mode, language),
-    };
-    if current.title() != defaults.title() {
-        match CodexIntegration::from_environment()
-            .and_then(|integration| integration.reconcile_title_ownership(true))
-        {
-            Ok(outcome) if output_mode == OutputMode::Plain => {
-                println!("CODEX_TITLE_OWNERSHIP={}", title_ownership_label(outcome));
+    let (defaults, title_outcome) = match apply_config_reset_with(&store, |owns_title| {
+        CodexIntegration::from_environment()
+            .and_then(|integration| integration.reconcile_title_ownership(owns_title))
+            .map_err(|error| error.to_string())
+    }) {
+        Ok(result) => result,
+        Err((error, partial)) => {
+            if partial {
+                eprintln!("CONFIG=PARTIAL_STATE");
+                if output_mode == OutputMode::Plain {
+                    eprintln!("REASON={error}");
+                    return ExitCode::FAILURE;
+                }
             }
-            Ok(_) => print_human_text(
+            return management_error_for_output("CONFIG", &error, output_mode, language);
+        }
+    };
+    if let Some(outcome) = title_outcome {
+        if output_mode == OutputMode::Plain {
+            println!("CODEX_TITLE_OWNERSHIP={}", title_ownership_label(outcome));
+        } else {
+            print_human_text(
                 HumanTone::Dim,
                 &HumanText::message(HumanMessageKey::TitleOwnershipReconciled),
                 language,
-            ),
-            Err(error) => {
-                return management_error_for_output("CONFIG", &error, output_mode, language);
-            }
+            );
         }
     }
     if output_mode == OutputMode::Plain {
@@ -3304,6 +3310,42 @@ fn config_reset(output_mode: OutputMode, language: Option<InterfaceLanguage>) ->
     }
     print_settings(&store, defaults, output_mode, language);
     ExitCode::SUCCESS
+}
+
+fn apply_config_reset_with(
+    store: &PresentationSettingsStore,
+    reconcile: impl FnOnce(bool) -> Result<TitleOwnershipOutcome, String>,
+) -> Result<(PresentationSettings, Option<TitleOwnershipOutcome>), (io::Error, bool)> {
+    let (defaults, receipt) = store
+        .reset_with_receipt()
+        // The atomic write may have committed before reporting an I/O error.
+        .map_err(|error| (io::Error::other(error), true))?;
+    if receipt.previous_settings_or_default().title() == defaults.title() {
+        return Ok((defaults, None));
+    }
+    match reconcile(defaults.title().owns_tabbeacon_title()) {
+        Ok(outcome) => Ok((defaults, Some(outcome))),
+        Err(error) => match store.restore_reset_if_unchanged(&receipt) {
+            Ok(ConditionalSaveOutcome::Saved) => Err((
+                io::Error::other(format!(
+                    "{error}; settings_rollback_verified=true; integration_state=unproven"
+                )),
+                false,
+            )),
+            Ok(ConditionalSaveOutcome::Conflict) => Err((
+                io::Error::other(format!(
+                    "{error}; settings rollback refused because the document changed concurrently"
+                )),
+                true,
+            )),
+            Err(rollback_error) => Err((
+                io::Error::other(format!(
+                    "{error}; settings rollback failed: {rollback_error}"
+                )),
+                true,
+            )),
+        },
+    }
 }
 
 fn config_preset(
@@ -5492,6 +5534,57 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn public_reset_reconciliation_failure_restores_exact_prior_document() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let original = b"[presentation]\ntitle = \"native\"\n\n[foreign]\nkey = \"preserved\"\n";
+        fs::write(&path, original).unwrap();
+        let store = PresentationSettingsStore::new(&path);
+        let result =
+            apply_config_reset_with(&store, |_| Err("injected reconciliation failure".into()));
+        let (error, partial) = result.unwrap_err();
+        assert!(!partial);
+        assert!(
+            error
+                .to_string()
+                .contains("settings_rollback_verified=true")
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn public_reset_reconciliation_failure_refuses_to_overwrite_concurrent_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        fs::write(&path, b"[presentation]\ntitle = \"native\"\n").unwrap();
+        let store = PresentationSettingsStore::new(&path);
+        let drift = b"[foreign]\nnew = true\n";
+        let result = apply_config_reset_with(&store, |_| {
+            fs::write(&path, drift).unwrap();
+            Err("injected reconciliation failure".into())
+        });
+        let (error, partial) = result.unwrap_err();
+        assert!(partial);
+        assert!(error.to_string().contains("changed concurrently"));
+        assert_eq!(fs::read(&path).unwrap(), drift);
+    }
+
+    #[test]
+    fn public_reset_success_reconciles_actual_previous_title() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        fs::write(&path, b"[presentation]\ntitle = \"native\"\n").unwrap();
+        let store = PresentationSettingsStore::new(&path);
+        let (settings, outcome) = apply_config_reset_with(&store, |owns_title| {
+            assert!(owns_title);
+            Ok(TitleOwnershipOutcome::AlreadyConfigured)
+        })
+        .unwrap();
+        assert_eq!(settings, PresentationSettings::default());
+        assert!(outcome.is_some());
+    }
 
     #[test]
     fn agy_explicit_native_mode_is_admitted_and_releases_its_title_channel() {

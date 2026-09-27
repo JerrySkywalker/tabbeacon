@@ -123,6 +123,31 @@ fn isolated_command_without_external_providers(root: &TestRoot) -> Command {
     command
 }
 
+#[test]
+fn config_reset_public_cli_recovers_malformed_isolated_settings() {
+    let root = TestRoot::new("config-reset-malformed");
+    let path = root
+        .child("local-appdata")
+        .join("TabBeacon")
+        .join("config.toml");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"[presentation\ntitle = \"native\"\n").unwrap();
+    let output = isolated_command_without_external_providers(&root)
+        .args(["config", "reset", "--plain"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("CONFIG=PASS"));
+    assert_eq!(
+        PresentationSettingsStore::new(path).load().unwrap(),
+        tabbeacon::settings::PresentationSettings::default()
+    );
+}
+
 fn isolated_command_with_codex(root: &TestRoot, codex_directory: &Path) -> Command {
     let mut command = isolated_command(root);
     let path = env::join_paths([codex_directory, inherited_path()])

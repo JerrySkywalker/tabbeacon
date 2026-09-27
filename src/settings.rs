@@ -634,6 +634,24 @@ pub struct PresentationSettingsWriteReceipt {
     contents: Vec<u8>,
 }
 
+/// Opaque bytes for rolling back a reset without overwriting a later writer.
+pub struct PresentationSettingsResetReceipt {
+    original: Option<Vec<u8>>,
+    applied: Vec<u8>,
+}
+
+impl PresentationSettingsResetReceipt {
+    /// Returns the settings represented by the bytes replaced by this reset.
+    /// Malformed input has the same effective default as `load_or_default`.
+    #[must_use]
+    pub fn previous_settings_or_default(&self) -> PresentationSettings {
+        self.original
+            .as_deref()
+            .and_then(|bytes| parse_settings_bytes(bytes).ok())
+            .unwrap_or_default()
+    }
+}
+
 impl PresentationSettingsWriteReceipt {
     fn matches(&self, snapshot: &PresentationSettingsSnapshot) -> bool {
         snapshot.contents.as_deref() == Some(self.contents.as_slice())
@@ -1041,13 +1059,52 @@ impl PresentationSettingsStore {
     ///
     /// Returns an error for an unsafe link or a failed process-safe atomic write.
     pub fn reset(&self) -> Result<PresentationSettings, SettingsError> {
+        self.reset_with_receipt().map(|(settings, _)| settings)
+    }
+
+    /// Resets even malformed settings and retains the exact prior bytes for a
+    /// conditional rollback if the caller's follow-up integration step fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe link, a failed read, or a failed atomic write.
+    pub fn reset_with_receipt(
+        &self,
+    ) -> Result<(PresentationSettings, PresentationSettingsResetReceipt), SettingsError> {
         let settings = PresentationSettings::default();
         self.with_lock(|| {
             self.reject_symbolic_link()?;
+            let original = read_optional_bytes(&self.path)?;
             let mut document = DocumentMut::new();
             write_settings(&mut document, settings)?;
-            atomic_write(&self.path, document.to_string().as_bytes())?;
-            Ok(settings)
+            let applied = document.to_string().into_bytes();
+            atomic_write(&self.path, &applied)?;
+            Ok((
+                settings,
+                PresentationSettingsResetReceipt { original, applied },
+            ))
+        })
+    }
+
+    /// Restores a reset only while the exact reset bytes remain current.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe link, a failed read, or a failed restore.
+    pub fn restore_reset_if_unchanged(
+        &self,
+        receipt: &PresentationSettingsResetReceipt,
+    ) -> Result<ConditionalSaveOutcome, SettingsError> {
+        self.with_lock(|| {
+            self.reject_symbolic_link()?;
+            if read_optional_bytes(&self.path)?.as_deref() != Some(receipt.applied.as_slice()) {
+                return Ok(ConditionalSaveOutcome::Conflict);
+            }
+            match receipt.original.as_deref() {
+                Some(bytes) => atomic_write(&self.path, bytes)?,
+                None => fs::remove_file(&self.path)?,
+            }
+            Ok(ConditionalSaveOutcome::Saved)
         })
     }
 
@@ -1475,6 +1532,47 @@ mod tests {
     };
 
     use crate::presentation_policy::{CliTarget, PresentationMode, PresentationOverride};
+
+    #[test]
+    fn reset_receipt_restores_exact_malformed_bytes_and_refuses_later_drift() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let store = PresentationSettingsStore::new(&path);
+        let malformed = b"[foreign]\r\nraw = [";
+        fs::write(&path, malformed).unwrap();
+        let (_, receipt) = store.reset_with_receipt().unwrap();
+        assert_eq!(
+            receipt.previous_settings_or_default(),
+            PresentationSettings::default()
+        );
+        assert!(matches!(
+            store.restore_reset_if_unchanged(&receipt),
+            Ok(ConditionalSaveOutcome::Saved)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), malformed);
+
+        let (_, receipt) = store.reset_with_receipt().unwrap();
+        fs::write(&path, b"[foreign]\nnew = true\n").unwrap();
+        assert!(matches!(
+            store.restore_reset_if_unchanged(&receipt),
+            Ok(ConditionalSaveOutcome::Conflict)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"[foreign]\nnew = true\n");
+    }
+
+    #[test]
+    fn reset_receipt_restores_absent_document() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let store = PresentationSettingsStore::new(&path);
+        let (_, receipt) = store.reset_with_receipt().unwrap();
+        assert!(path.exists());
+        assert!(matches!(
+            store.restore_reset_if_unchanged(&receipt),
+            Ok(ConditionalSaveOutcome::Saved)
+        ));
+        assert!(!path.exists());
+    }
 
     #[test]
     fn busy_settings_lock_refuses_a_writer_without_an_unbounded_wait_or_write() {
