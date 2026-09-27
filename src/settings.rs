@@ -734,6 +734,16 @@ pub enum SnapshotSaveOutcome {
     Conflict,
 }
 
+/// Result of a title reconciliation guarded by the exact settings write.
+pub enum SettingsReconcileOutcome<T> {
+    Applied(T),
+    Conflict,
+    Failed {
+        reason: String,
+        settings_restored: bool,
+    },
+}
+
 /// Process-safe, atomic per-user presentation settings storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PresentationSettingsStore {
@@ -1118,6 +1128,37 @@ impl PresentationSettingsStore {
             }
             self.restore_snapshot_unlocked(original)?;
             Ok(ConditionalSaveOutcome::Saved)
+        })
+    }
+
+    /// Reconciles an external title owner only while this exact settings
+    /// write is still current. The settings lock stays held through the
+    /// external operation and any exact-byte rollback.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe settings error if the current document cannot be read.
+    pub fn reconcile_snapshot_write_if_current<T>(
+        &self,
+        receipt: &PresentationSettingsWriteReceipt,
+        original: &PresentationSettingsSnapshot,
+        reconcile: impl FnOnce() -> Result<T, String>,
+    ) -> Result<SettingsReconcileOutcome<T>, SettingsError> {
+        self.with_lock(|| {
+            let current = self.snapshot_unlocked()?;
+            if !receipt.matches(&current) {
+                return Ok(SettingsReconcileOutcome::Conflict);
+            }
+            match reconcile() {
+                Ok(value) => Ok(SettingsReconcileOutcome::Applied(value)),
+                Err(reason) => {
+                    let settings_restored = self.restore_snapshot_unlocked(original).is_ok();
+                    Ok(SettingsReconcileOutcome::Failed {
+                        reason,
+                        settings_restored,
+                    })
+                }
+            }
         })
     }
 
@@ -1718,6 +1759,32 @@ mod tests {
                 assert_eq!(fs::read(&path).unwrap(), b"[foreign]\nkeep = true\n");
             })
             .unwrap();
+    }
+
+    #[test]
+    fn stale_title_writer_cannot_reconcile_after_a_later_reset() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        let store = PresentationSettingsStore::new(&path);
+        let original = store.snapshot_read_only().unwrap();
+        let changed = original.settings().with_title(TitleMode::Native);
+        let receipt = match store
+            .save_snapshot_if_unchanged(&original, changed)
+            .unwrap()
+        {
+            super::SnapshotSaveOutcome::Saved(receipt) => receipt,
+            super::SnapshotSaveOutcome::Conflict => panic!("initial writer must save"),
+        };
+        store.reset_with_transaction(|_| ()).unwrap();
+        assert!(matches!(
+            store.reconcile_snapshot_write_if_current(
+                &receipt,
+                &original,
+                || -> Result<(), String> { panic!("stale title reconciliation must not run") }
+            ),
+            Ok(super::SettingsReconcileOutcome::Conflict)
+        ));
+        assert_eq!(store.load().unwrap(), PresentationSettings::default());
     }
 
     #[test]

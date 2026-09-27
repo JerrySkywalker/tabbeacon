@@ -78,8 +78,9 @@ use tabbeacon::{
     },
     settings::{
         ActivityMode, ConditionalSaveOutcome, PresentationSettings, PresentationSettingsSnapshot,
-        PresentationSettingsStore, PresentationTheme, ProviderBadgePolicy, SnapshotSaveOutcome,
-        SpinnerPreset, TabColorMode, TitleMode,
+        PresentationSettingsStore, PresentationSettingsWriteReceipt, PresentationTheme,
+        ProviderBadgePolicy, SettingsReconcileOutcome, SnapshotSaveOutcome, SpinnerPreset,
+        TabColorMode, TitleMode,
     },
     settings_transfer::{
         ImportApplyOutcome, ImportPlan, MAX_EXPORT_BYTES, SettingsExportV1,
@@ -647,18 +648,16 @@ fn apply_changed_provider_override(
         if previous.effective.title().owns_tabbeacon_title()
             != next.effective.title().owns_tabbeacon_title()
         {
-            let reconcile = AgyProductionSetup::from_environment().and_then(|setup| {
-                setup.reconcile_title_ownership(next.effective.title().owns_tabbeacon_title())
-            });
-            if let Err(error) = reconcile {
-                let restored = matches!(
-                    store.restore_snapshot_if_unchanged(&receipt, snapshot),
-                    Ok(ConditionalSaveOutcome::Saved)
-                );
-                return Err(io::Error::other(format!(
-                    "{error}; rollback_verified={restored}"
-                )));
-            }
+            reconcile_saved_title(store, &receipt, snapshot, || {
+                AgyProductionSetup::from_environment()
+                    .and_then(|setup| {
+                        setup.reconcile_title_ownership(
+                            next.effective.title().owns_tabbeacon_title(),
+                        )
+                    })
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            })?;
         }
     }
     if target == CliTarget::Codex {
@@ -677,18 +676,16 @@ fn apply_changed_provider_override(
         if previous.effective.title().owns_tabbeacon_title()
             != next.effective.title().owns_tabbeacon_title()
         {
-            let reconcile = CodexIntegration::from_environment().and_then(|integration| {
-                integration.reconcile_title_ownership(next.effective.title().owns_tabbeacon_title())
-            });
-            if let Err(error) = reconcile {
-                let restored = matches!(
-                    store.restore_snapshot_if_unchanged(&receipt, snapshot),
-                    Ok(ConditionalSaveOutcome::Saved)
-                );
-                return Err(io::Error::other(format!(
-                    "{error}; rollback_verified={restored}"
-                )));
-            }
+            reconcile_saved_title(store, &receipt, snapshot, || {
+                CodexIntegration::from_environment()
+                    .and_then(|integration| {
+                        integration.reconcile_title_ownership(
+                            next.effective.title().owns_tabbeacon_title(),
+                        )
+                    })
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            })?;
         }
     }
     Ok(())
@@ -3897,35 +3894,27 @@ fn apply_settings_change(
     before: PresentationSettings,
     after: PresentationSettings,
 ) -> io::Result<TitleOwnershipOutcome> {
-    match store
-        .save_if_unchanged(before, after)
+    let snapshot = store.snapshot_read_only().map_err(io::Error::other)?;
+    if snapshot.settings() != before {
+        return Err(settings_conflict_error());
+    }
+    let receipt = match store
+        .save_snapshot_if_unchanged(&snapshot, after)
         .map_err(io::Error::other)?
     {
-        ConditionalSaveOutcome::Saved => {}
-        ConditionalSaveOutcome::Conflict => return Err(settings_conflict_error()),
-    }
+        SnapshotSaveOutcome::Saved(receipt) => receipt,
+        SnapshotSaveOutcome::Conflict => return Err(settings_conflict_error()),
+    };
     let title_outcome = if before.title() == after.title() {
         TitleOwnershipOutcome::AlreadyConfigured
     } else {
-        match CodexIntegration::from_environment().and_then(|integration| {
-            integration.reconcile_title_ownership(after.title().owns_tabbeacon_title())
-        }) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                let restored = matches!(
-                    store.save_if_unchanged(after, before),
-                    Ok(ConditionalSaveOutcome::Saved)
-                );
-                let reason = if restored {
-                    error.to_string()
-                } else {
-                    format!(
-                        "{error}; settings rollback refused because the document changed concurrently"
-                    )
-                };
-                return Err(io::Error::other(reason));
-            }
-        }
+        reconcile_saved_title(store, &receipt, &snapshot, || {
+            CodexIntegration::from_environment()
+                .and_then(|integration| {
+                    integration.reconcile_title_ownership(after.title().owns_tabbeacon_title())
+                })
+                .map_err(|error| error.to_string())
+        })?
     };
     Ok(title_outcome)
 }
@@ -3963,23 +3952,9 @@ fn apply_control_center_settings_change_with(
     let title_outcome = if before.title() == after.title() {
         TitleOwnershipOutcome::AlreadyConfigured
     } else {
-        match reconcile(after.title().owns_tabbeacon_title()) {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                let restored = matches!(
-                    store.restore_snapshot_if_unchanged(&receipt, snapshot),
-                    Ok(ConditionalSaveOutcome::Saved)
-                );
-                let reason = if restored {
-                    error
-                } else {
-                    format!(
-                        "{error}; settings rollback refused because the document changed concurrently"
-                    )
-                };
-                return Err(io::Error::other(reason));
-            }
-        }
+        reconcile_saved_title(store, &receipt, snapshot, || {
+            reconcile(after.title().owns_tabbeacon_title())
+        })?
     };
     let next_snapshot = store.snapshot_read_only().map_err(io::Error::other)?;
     if next_snapshot.settings() != after {
@@ -3990,6 +3965,27 @@ fn apply_control_center_settings_change_with(
 
 fn settings_conflict_error() -> io::Error {
     io::Error::other("settings changed concurrently; the stale draft was not applied")
+}
+
+fn reconcile_saved_title<T>(
+    store: &PresentationSettingsStore,
+    receipt: &PresentationSettingsWriteReceipt,
+    original: &PresentationSettingsSnapshot,
+    reconcile: impl FnOnce() -> Result<T, String>,
+) -> io::Result<T> {
+    match store
+        .reconcile_snapshot_write_if_current(receipt, original, reconcile)
+        .map_err(io::Error::other)?
+    {
+        SettingsReconcileOutcome::Applied(value) => Ok(value),
+        SettingsReconcileOutcome::Conflict => Err(settings_conflict_error()),
+        SettingsReconcileOutcome::Failed {
+            reason,
+            settings_restored,
+        } => Err(io::Error::other(format!(
+            "{reason}; settings_rollback_verified={settings_restored}; integration_state=unproven"
+        ))),
+    }
 }
 
 fn persist_settings_change(
@@ -6082,19 +6078,22 @@ mod tests {
 
         let current_snapshot = store.snapshot_read_only().unwrap();
         let after = concurrent.with_title(TitleMode::Native);
-        let concurrent_after_write = concurrent.with_title(TitleMode::Off);
         let failed = apply_control_center_settings_change_with(
             &store,
             &current_snapshot,
             concurrent,
             after,
             |_| {
-                store.save(concurrent_after_write).unwrap();
+                assert!(matches!(
+                    store.save(concurrent.with_title(TitleMode::Off)),
+                    Err(tabbeacon::settings::SettingsError::Io(ref error))
+                        if error.kind() == io::ErrorKind::WouldBlock
+                ));
                 Err("controlled title reconciliation failure".to_owned())
             },
         );
         assert!(failed.is_err());
-        assert_eq!(store.load().unwrap(), concurrent_after_write);
+        assert_eq!(store.load().unwrap(), concurrent);
         fs::remove_dir_all(root).unwrap();
     }
 
