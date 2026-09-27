@@ -1054,6 +1054,24 @@ impl AgyProductionSetup {
         }
     }
 
+    /// Reconciles a previously owned callback without installing a new one.
+    /// A settings reset may remove an override, but it does not authorize a
+    /// first Agy integration installation.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unsupported versions, ownership drift, and unsafe writes.
+    pub fn reconcile_title_ownership_if_owned(
+        &self,
+        own_title: bool,
+    ) -> Result<AgyProductionSetupOutcome, AgyProductionSetupError> {
+        if own_title {
+            self.setup_with_existing_requirement(true)
+        } else {
+            self.uninstall()
+        }
+    }
+
     /// Installs the smallest supported user-global title callback mutation.
     ///
     /// # Errors
@@ -1061,11 +1079,27 @@ impl AgyProductionSetup {
     /// Refuses unsupported versions, foreign title owners, malformed input,
     /// ownership-state drift, and any pre-write byte drift.
     pub fn setup(&self) -> Result<AgyProductionSetupOutcome, AgyProductionSetupError> {
-        self.require_admitted_version()?;
+        self.setup_with_existing_requirement(false)
+    }
+
+    fn setup_with_existing_requirement(
+        &self,
+        existing_only: bool,
+    ) -> Result<AgyProductionSetupOutcome, AgyProductionSetupError> {
+        if !existing_only {
+            self.require_admitted_version()?;
+        }
         self.validate_paths()?;
         let _lock = SetupLock::acquire(&self.state_root)?;
         self.validate_paths()?;
-        if let Some(manifest) = self.read_manifest()? {
+        let manifest = self.read_manifest()?;
+        if existing_only {
+            if manifest.is_none() {
+                return Ok(AgyProductionSetupOutcome::NotInstalled);
+            }
+            self.require_admitted_version()?;
+        }
+        if let Some(manifest) = manifest {
             let current = fs::read(&self.config_path)
                 .map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
             if self
@@ -2240,6 +2274,36 @@ mod tests {
         assert!(!state.join("codex-root-workspace-anchor-v1").exists());
         assert!(state.join("agy-root-workspace-anchor-v1").is_dir());
         fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn reset_reconciliation_never_installs_an_absent_agy_callback() {
+        let root = temp_root("reset-existing-only");
+        let config = root.join("home/.gemini/antigravity-cli/settings.json");
+        let state = root.join("state");
+        let executable = root.join("tabbeacon.exe");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, br#"{"foreign":true}"#).unwrap();
+        fs::write(&executable, b"fixture executable").unwrap();
+        let setup =
+            AgyProductionSetup::new(&config, &state, &executable, "agy").with_admitted_version();
+        let original = fs::read(&config).unwrap();
+        assert_eq!(
+            setup.reconcile_title_ownership_if_owned(true),
+            Ok(AgyProductionSetupOutcome::NotInstalled)
+        );
+        assert_eq!(fs::read(&config).unwrap(), original);
+        assert!(!setup.manifest_path().exists());
+        assert_eq!(setup.setup(), Ok(AgyProductionSetupOutcome::Installed));
+        assert_eq!(
+            setup.reconcile_title_ownership_if_owned(true),
+            Ok(AgyProductionSetupOutcome::AlreadyConfigured)
+        );
+        assert_eq!(
+            setup.reconcile_title_ownership_if_owned(false),
+            Ok(AgyProductionSetupOutcome::Removed)
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

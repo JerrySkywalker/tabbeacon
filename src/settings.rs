@@ -659,15 +659,20 @@ impl PresentationSettingsResetReceipt {
         provider: CliTarget,
         capabilities: PresentationCapabilities,
     ) -> bool {
-        let override_for_cli = self
+        let prior = self
             .original
             .as_deref()
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
             .and_then(|text| text.parse::<DocumentMut>().ok())
-            .and_then(|document| provider_override_from_document(&document, provider).ok())
-            .unwrap_or_default();
+            .and_then(|document| {
+                Some((
+                    settings_from_document(&document).ok()?,
+                    provider_override_from_document(&document, provider).ok()?,
+                ))
+            });
+        let (global, override_for_cli) = prior.unwrap_or_default();
         resolve_presentation(
-            self.previous_settings_or_default(),
+            global,
             override_for_cli,
             capabilities,
             ApplicationStatus::Unproven,
@@ -1121,16 +1126,35 @@ impl PresentationSettingsStore {
         &self,
         receipt: &PresentationSettingsResetReceipt,
     ) -> Result<ConditionalSaveOutcome, SettingsError> {
+        self.restore_reset_if_unchanged_with(receipt, || ())
+            .map(|outcome| match outcome {
+                Some(()) => ConditionalSaveOutcome::Saved,
+                None => ConditionalSaveOutcome::Conflict,
+            })
+    }
+
+    /// Holds the settings lock across exact-byte reset rollback and bounded
+    /// integration compensation, so a newer settings writer cannot interleave.
+    /// The callback must not attempt to acquire this settings lock recursively.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe link, a failed read, or a failed restore.
+    pub fn restore_reset_if_unchanged_with<T>(
+        &self,
+        receipt: &PresentationSettingsResetReceipt,
+        recovery: impl FnOnce() -> T,
+    ) -> Result<Option<T>, SettingsError> {
         self.with_lock(|| {
             self.reject_symbolic_link()?;
             if read_optional_bytes(&self.path)?.as_deref() != Some(receipt.applied.as_slice()) {
-                return Ok(ConditionalSaveOutcome::Conflict);
+                return Ok(None);
             }
             match receipt.original.as_deref() {
                 Some(bytes) => atomic_write(&self.path, bytes)?,
                 None => fs::remove_file(&self.path)?,
             }
-            Ok(ConditionalSaveOutcome::Saved)
+            Ok(Some(recovery()))
         })
     }
 
@@ -1598,6 +1622,46 @@ mod tests {
             Ok(ConditionalSaveOutcome::Saved)
         ));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn reset_receipt_does_not_mix_invalid_global_with_valid_provider_override() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        fs::write(
+            &path,
+            b"[presentation]\ntitle = \"invalid\"\n[provider_presentation.agy]\ntitle = \"native\"\n",
+        )
+        .unwrap();
+        let store = PresentationSettingsStore::new(&path);
+        let (_, receipt) = store.reset_with_receipt().unwrap();
+        assert!(receipt.previous_effective_title_ownership_or_default(
+            CliTarget::Agy,
+            crate::presentation_policy::PresentationCapabilities::AGY_TITLE_ONLY,
+        ));
+    }
+
+    #[test]
+    fn reset_recovery_holds_settings_lock_through_integration_compensation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config.toml");
+        fs::write(&path, b"[foreign]\nkeep = true\n").unwrap();
+        let store = Arc::new(PresentationSettingsStore::new(&path));
+        let (_, receipt) = store.reset_with_receipt().unwrap();
+        let competing = Arc::clone(&store);
+        let outcome = store
+            .restore_reset_if_unchanged_with(&receipt, || {
+                let worker = thread::spawn(move || competing.save(PresentationSettings::default()));
+                let refused = worker.join().unwrap();
+                assert!(matches!(
+                    refused,
+                    Err(super::SettingsError::Io(ref error))
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                ));
+                assert_eq!(fs::read(&path).unwrap(), b"[foreign]\nkeep = true\n");
+            })
+            .unwrap();
+        assert!(outcome.is_some());
     }
 
     #[test]

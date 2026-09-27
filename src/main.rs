@@ -3278,8 +3278,8 @@ fn config_reset(output_mode: OutputMode, language: Option<InterfaceLanguage>) ->
         },
         |owns_title| {
             AgyProductionSetup::from_environment()
-                .and_then(|setup| setup.reconcile_title_ownership(owns_title))
-                .map(|_| ())
+                .and_then(|setup| setup.reconcile_title_ownership_if_owned(owns_title))
+                .map(|outcome| outcome != AgyProductionSetupOutcome::NotInstalled)
                 .map_err(|error| error.to_string())
         },
     ) {
@@ -3306,8 +3306,12 @@ fn config_reset(output_mode: OutputMode, language: Option<InterfaceLanguage>) ->
             );
         }
     }
-    if agy_reconciled && output_mode == OutputMode::Plain {
-        println!("AGY_TITLE_OWNERSHIP=RECONCILED");
+    if output_mode == OutputMode::Plain {
+        match agy_reconciled {
+            Some(true) => println!("AGY_TITLE_OWNERSHIP=RECONCILED"),
+            Some(false) => println!("AGY_TITLE_OWNERSHIP=NOT_INSTALLED"),
+            None => {}
+        }
     }
     if output_mode == OutputMode::Plain {
         println!("CONFIG=PASS");
@@ -3324,11 +3328,20 @@ fn config_reset(output_mode: OutputMode, language: Option<InterfaceLanguage>) ->
     ExitCode::SUCCESS
 }
 
+type ConfigResetResult = Result<
+    (
+        PresentationSettings,
+        Option<TitleOwnershipOutcome>,
+        Option<bool>,
+    ),
+    (io::Error, bool),
+>;
+
 fn apply_config_reset_with(
     store: &PresentationSettingsStore,
     mut reconcile_codex: impl FnMut(bool) -> Result<TitleOwnershipOutcome, String>,
-    mut reconcile_agy: impl FnMut(bool) -> Result<(), String>,
-) -> Result<(PresentationSettings, Option<TitleOwnershipOutcome>, bool), (io::Error, bool)> {
+    mut reconcile_agy: impl FnMut(bool) -> Result<bool, String>,
+) -> ConfigResetResult {
     let (defaults, receipt) = store
         .reset_with_receipt()
         // The atomic write may have committed before reporting an I/O error.
@@ -3366,11 +3379,11 @@ fn apply_config_reset_with(
         match reconcile_codex(codex_after) {
             Ok(outcome) => codex_outcome = Some(outcome),
             Err(error) => {
-                let restored = matches!(
-                    store.restore_reset_if_unchanged(&receipt),
-                    Ok(ConditionalSaveOutcome::Saved)
-                );
-                let integration_recovered = restored && reconcile_codex(codex_before).is_ok();
+                let recovery = store.restore_reset_if_unchanged_with(&receipt, || {
+                    reconcile_codex(codex_before).is_ok()
+                });
+                let restored = matches!(recovery.as_ref(), Ok(Some(_)));
+                let integration_recovered = matches!(recovery.as_ref(), Ok(Some(true)));
                 return Err((
                     io::Error::other(format!(
                         "{error}; settings_rollback_verified={restored}; codex_recovery_verified={integration_recovered}; integration_state=unproven"
@@ -3380,21 +3393,30 @@ fn apply_config_reset_with(
             }
         }
     }
-    if agy_changed && let Err(error) = reconcile_agy(agy_after) {
-        let restored = matches!(
-            store.restore_reset_if_unchanged(&receipt),
-            Ok(ConditionalSaveOutcome::Saved)
-        );
-        let agy_recovered = restored && reconcile_agy(agy_before).is_ok();
-        let codex_recovered = restored && (!codex_changed || reconcile_codex(codex_before).is_ok());
-        return Err((
-            io::Error::other(format!(
-                "{error}; settings_rollback_verified={restored}; agy_recovery_verified={agy_recovered}; codex_recovery_verified={codex_recovered}; integration_state=unproven"
-            )),
-            true,
-        ));
-    }
-    Ok((defaults, codex_outcome, agy_changed))
+    let agy_reconciled = if agy_changed {
+        match reconcile_agy(agy_after) {
+            Ok(applied) => Some(applied),
+            Err(error) => {
+                let recovery = store.restore_reset_if_unchanged_with(&receipt, || {
+                    let agy_recovered = reconcile_agy(agy_before).is_ok();
+                    let codex_recovered = !codex_changed || reconcile_codex(codex_before).is_ok();
+                    (agy_recovered, codex_recovered)
+                });
+                let restored = matches!(recovery.as_ref(), Ok(Some(_)));
+                let (agy_recovered, codex_recovered) =
+                    recovery.ok().flatten().unwrap_or((false, !codex_changed));
+                return Err((
+                    io::Error::other(format!(
+                        "{error}; settings_rollback_verified={restored}; agy_recovery_verified={agy_recovered}; codex_recovery_verified={codex_recovered}; integration_state=unproven"
+                    )),
+                    true,
+                ));
+            }
+        }
+    } else {
+        None
+    };
+    Ok((defaults, codex_outcome, agy_reconciled))
 }
 
 fn config_preset(
@@ -5594,7 +5616,7 @@ mod tests {
         let result = apply_config_reset_with(
             &store,
             |_| Err("injected reconciliation failure".into()),
-            |_| Ok(()),
+            |_| Ok(true),
         );
         let (error, partial) = result.unwrap_err();
         assert!(partial);
@@ -5619,7 +5641,7 @@ mod tests {
                 fs::write(&path, drift).unwrap();
                 Err("injected reconciliation failure".into())
             },
-            |_| Ok(()),
+            |_| Ok(true),
         );
         let (error, partial) = result.unwrap_err();
         assert!(partial);
@@ -5645,13 +5667,13 @@ mod tests {
             },
             |owns_title| {
                 assert!(owns_title);
-                Ok(())
+                Ok(true)
             },
         )
         .unwrap();
         assert_eq!(settings, PresentationSettings::default());
         assert!(outcome.is_some());
-        assert!(agy_reconciled);
+        assert_eq!(agy_reconciled, Some(true));
     }
 
     #[test]
@@ -5673,13 +5695,13 @@ mod tests {
             },
             |owns| {
                 assert!(owns);
-                Ok(())
+                Ok(true)
             },
         )
         .unwrap();
         assert_eq!(calls, [(CliTarget::Codex, true)]);
         assert_eq!(settings, PresentationSettings::default());
-        assert!(codex.is_some() && agy);
+        assert!(codex.is_some() && agy == Some(true));
     }
 
     #[test]
@@ -5710,14 +5732,14 @@ mod tests {
                 |owns| {
                     assert!(owns);
                     agy_calls += 1;
-                    Ok(())
+                    Ok(true)
                 },
             )
             .unwrap();
             assert_eq!(codex_calls, usize::from(provider == CliTarget::Codex));
             assert_eq!(agy_calls, usize::from(provider == CliTarget::Agy));
             assert_eq!(codex.is_some(), provider == CliTarget::Codex);
-            assert_eq!(agy, provider == CliTarget::Agy);
+            assert_eq!(agy, (provider == CliTarget::Agy).then_some(true));
         }
     }
 
@@ -5741,7 +5763,7 @@ mod tests {
                 if owns {
                     Err("injected Agy failure".into())
                 } else {
-                    Ok(())
+                    Ok(true)
                 }
             },
         );

@@ -148,6 +148,39 @@ fn config_reset_public_cli_recovers_malformed_isolated_settings() {
     );
 }
 
+#[test]
+fn config_reset_public_cli_does_not_install_absent_agy_integration() {
+    let root = TestRoot::new("config-reset-agy-absent");
+    let path = root
+        .child("local-appdata")
+        .join("TabBeacon")
+        .join("config.toml");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, b"[provider_presentation.agy]\ntitle = \"native\"\n").unwrap();
+    let agy_config = root
+        .child("user-profile")
+        .join(".gemini")
+        .join("antigravity-cli")
+        .join("settings.json");
+    let output = isolated_command_without_external_providers(&root)
+        .args(["config", "reset", "--plain"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("CONFIG=PASS"));
+    assert!(stdout.contains("AGY_TITLE_OWNERSHIP=NOT_INSTALLED"));
+    assert!(!agy_config.exists());
+    assert_eq!(
+        PresentationSettingsStore::new(path).load().unwrap(),
+        tabbeacon::settings::PresentationSettings::default()
+    );
+}
+
 fn isolated_command_with_codex(root: &TestRoot, codex_directory: &Path) -> Command {
     let mut command = isolated_command(root);
     let path = env::join_paths([codex_directory, inherited_path()])
