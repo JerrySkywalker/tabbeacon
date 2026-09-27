@@ -1142,13 +1142,14 @@ impl ActivityCoordinator {
                     // lease before it may acquire terminal output ownership.
                     return Ok(());
                 }
-                let safe_bytes = if matches!(self.execution, ActivityExecution::UnboundSystem) {
-                    // A degraded production Hook has no exact terminal lease
-                    // and cannot claim the shared color channel. Explicit
-                    // injected runtimes keep their deterministic byte sink.
-                    crate::terminal_color::without_generated_color(bytes)
-                } else {
+                let safe_bytes = if matches!(self.execution, ActivityExecution::Disabled) {
                     bytes
+                } else {
+                    // Every degraded production Hook lacks an authoritative
+                    // activity write order, even if its terminal is bound.
+                    // It cannot claim or reset the shared color channel.
+                    // Explicit injected runtimes keep their test byte sink.
+                    crate::terminal_color::without_generated_color(bytes)
                 };
                 sink.write_all(safe_bytes)?;
                 sink.flush()
@@ -4439,6 +4440,118 @@ mod tests {
             )
             .unwrap();
         assert_eq!(output, b"\x1b]0;owned-title\x1b\\");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One shared sink covers forced activity failure and Cursor's subsequent owned release.
+    fn bound_codex_activity_failure_cannot_overwrite_cursor_owned_color() {
+        let root = TestRoot::new("bound-activity-failure-color");
+        fs::create_dir_all(root.0.join("cursor-route-v1")).unwrap();
+        let terminal = digest('c');
+        let cursor_route_terminal = digest('e');
+        let cursor_mode = resolve_presentation(
+            PresentationSettings::default(),
+            PresentationOverride::default().with_mode(PresentationMode::ColorOnly),
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        );
+        let cursor_event = |name: &str, generation: Option<&str>| {
+            let mut input =
+                serde_json::json!({"hook_event_name": name, "session_id": "cursor-failure"});
+            if let Some(generation) = generation {
+                input["generation_id"] = generation.into();
+            }
+            normalize_hook(input.to_string().as_bytes())
+                .unwrap()
+                .unwrap()
+        };
+        let cursor_write = |event, sink: &mut Vec<u8>| {
+            cursor_color::apply_admitted(
+                &root.0,
+                &cursor_route_terminal,
+                &terminal,
+                &event,
+                &cursor_mode,
+                sink,
+            )
+            .unwrap()
+        };
+        let mut output = Vec::new();
+        assert!(!cursor_write(
+            cursor_event("sessionStart", None),
+            &mut output
+        ));
+        assert!(cursor_write(
+            cursor_event("beforeSubmitPrompt", Some("g1")),
+            &mut output
+        ));
+        let cursor_color_len = output.len();
+        let store = ActivityLeaseStore::new(&root.0);
+        fs::write(&store.directory, b"owned test failure blocker").unwrap();
+        let coordinator = ActivityCoordinator {
+            store,
+            execution: ActivityExecution::System {
+                executable: root.0.join("unused.exe"),
+                owner_sha256: digest('d'),
+                terminal_binding_sha256: terminal.clone(),
+            },
+        };
+        let action = PresentationPolicy::resolve(SemanticPresentationInput::new(
+            Phase::Working,
+            Attention::None,
+            Health::Normal,
+            "OWH",
+        ));
+        let settings = PresentationSettings::default();
+        let (render, _) = coordinator.reconcile_with_workspace_observability(
+            &digest('a'),
+            Some(&digest('b')),
+            1,
+            1,
+            "codex",
+            "OWH",
+            &action,
+            settings,
+            SessionWorkspaceObservability::default(),
+            true,
+        );
+        assert_eq!(render, ActivityRender::UncoordinatedFull);
+        let bytes = WindowsTerminalRenderer::with_settings(
+            WindowsTerminalCapabilities::new(true),
+            settings,
+        )
+        .render(&action);
+        assert!(bytes.windows(b"]4;264".len()).any(|part| part == b"]4;264"));
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                1,
+                render,
+                &bytes,
+                OwnedTerminalChannels {
+                    color: true,
+                    progress: true,
+                },
+                false,
+                &mut output,
+            )
+            .unwrap();
+        let degraded_bytes = &output[cursor_color_len..];
+        assert!(
+            !degraded_bytes
+                .windows(b"]4;264".len())
+                .any(|part| part == b"]4;264")
+        );
+        assert!(
+            !degraded_bytes
+                .windows(b"]104;264".len())
+                .any(|part| part == b"]104;264")
+        );
+        let before_end = output.len();
+        assert!(cursor_write(cursor_event("sessionEnd", None), &mut output));
+        assert_eq!(&output[before_end..], b"\x1b]104;264\x1b\\");
     }
 
     #[test]
