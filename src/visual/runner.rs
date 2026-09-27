@@ -26,11 +26,11 @@ use super::{
 };
 
 const LIVE_VISUAL_WORKER_BUDGET: Duration = Duration::from_secs(90);
-// The public Codex native conversion runs three exact-owned windows in series.
+// Public native conversion runs three exact-owned windows in series.
 // The 9157006 receipt measured about 31 seconds through cleanup for each of
 // the first two; the 90-second worker stopped after the third capture and
 // before its cleanup. Keep that fixture bounded with room for finalization.
-const CODEX_PUBLIC_NATIVE_WORKER_BUDGET: Duration = Duration::from_mins(2);
+const THREE_WINDOW_WORKER_BUDGET: Duration = Duration::from_mins(2);
 const LIVE_VISUAL_WORKER_STAGING_DIRECTORY: &str = ".tabbeacon-visual-worker";
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const WORKER_TERMINATION_BUDGET: Duration = Duration::from_secs(5);
@@ -216,8 +216,11 @@ fn selected_fixture_names(request: &LiveVisualRunRequest) -> VisualResult<Vec<St
 }
 
 fn worker_budget(request: &LiveVisualRunRequest) -> Duration {
-    if request.fixture_name.as_deref() == Some(super::CODEX_PUBLIC_NATIVE_FIXTURE) {
-        CODEX_PUBLIC_NATIVE_WORKER_BUDGET
+    if matches!(
+        request.fixture_name.as_deref(),
+        Some(super::CODEX_PUBLIC_NATIVE_FIXTURE | super::AGY_PUBLIC_NATIVE_FIXTURE)
+    ) {
+        THREE_WINDOW_WORKER_BUDGET
     } else {
         LIVE_VISUAL_WORKER_BUDGET
     }
@@ -1013,7 +1016,10 @@ fn observe_replay(
     let launcher = TerminalTestSessionLauncher::default();
     let phase_signal = if matches!(
         replay.case.fixture_name.as_str(),
-        super::CODEX_PUBLIC_COLOR_FIXTURE | super::CODEX_PUBLIC_NATIVE_FIXTURE
+        super::CODEX_PUBLIC_COLOR_FIXTURE
+            | super::CODEX_PUBLIC_NATIVE_FIXTURE
+            | super::AGY_PUBLIC_TITLE_FIXTURE
+            | super::AGY_PUBLIC_NATIVE_FIXTURE
     ) {
         Some(
             writer
@@ -1045,10 +1051,12 @@ fn observe_replay(
         if let Some(path) = phase_signal.as_ref()
             && !wait_for_public_hook_phase(
                 path,
-                if replay.case.fixture_name == super::CODEX_PUBLIC_NATIVE_FIXTURE {
-                    b"post-native-session-end"
-                } else {
-                    b"post-working-hook"
+                match replay.case.fixture_name.as_str() {
+                    super::CODEX_PUBLIC_NATIVE_FIXTURE => b"post-native-session-end",
+                    super::CODEX_PUBLIC_COLOR_FIXTURE => b"post-working-hook",
+                    super::AGY_PUBLIC_TITLE_FIXTURE => b"post-managed-callback",
+                    super::AGY_PUBLIC_NATIVE_FIXTURE => b"post-native-callback",
+                    _ => unreachable!("phase signal exists only for public fixtures"),
                 },
                 PUBLIC_HOOK_PHASE_BUDGET,
             )?
@@ -1061,7 +1069,14 @@ fn observe_replay(
             return Ok(());
         }
         let locator = WindowsUiaLocator;
-        let target = match locate_activated_with_retry(locator, run_id, replay) {
+        let target = match if matches!(
+            replay.case.fixture_name.as_str(),
+            super::AGY_PUBLIC_TITLE_FIXTURE | super::AGY_PUBLIC_NATIVE_FIXTURE
+        ) {
+            locate_exact_sibling_with_retry(locator, &session)
+        } else {
+            locate_activated_with_retry(locator, run_id, replay)
+        } {
             Ok(target) => target,
             Err(failure) => {
                 if let Some(target) = failure.last_target {
@@ -1195,18 +1210,41 @@ fn locate_activated_with_retry(
     run_id: &str,
     replay: &super::FixtureReplay,
 ) -> Result<ActivatedTarget, Box<ActivationRetryFailure>> {
+    locate_with_retry(replay.case.expects_title_animation, || {
+        locator
+            .locate_and_activate_any_with_title_reader(run_id, &replay.case.expected_title_frames)
+    })
+}
+
+fn locate_exact_sibling_with_retry(
+    locator: WindowsUiaLocator,
+    session: &super::TerminalTestSession,
+) -> Result<ActivatedTarget, Box<ActivationRetryFailure>> {
+    let hwnd = session.exact_owned_hwnd().map_err(|error| {
+        Box::new(ActivationRetryFailure {
+            error,
+            last_target: None,
+        })
+    })?;
+    locate_with_retry(false, || {
+        locator.locate_and_activate_exact_anchor_sibling(&session.anchor_title, hwnd)
+    })
+}
+
+fn locate_with_retry(
+    expects_title_animation: bool,
+    mut lookup: impl FnMut() -> VisualResult<OwnedTabActivation>,
+) -> Result<ActivatedTarget, Box<ActivationRetryFailure>> {
     let mut last_target = None;
     let mut last_error = None;
     for _ in 0..20 {
-        match locator
-            .locate_and_activate_any_with_title_reader(run_id, &replay.case.expected_title_frames)
-        {
+        match lookup() {
             Ok(OwnedTabActivation::Activated {
                 dump, title_reader, ..
             }) => {
                 let target = ActivatedTarget {
                     dump,
-                    title_reader: replay.case.expects_title_animation.then_some(title_reader),
+                    title_reader: expects_title_animation.then_some(title_reader),
                 };
                 // UIA title evidence is valid after exact owned-tab
                 // correlation even if foreground activation or pixel capture
@@ -1631,6 +1669,23 @@ fn selected_replays(
         Some(super::CODEX_PUBLIC_COLOR_FIXTURE) => {
             Ok(vec![driver.codex_public_replay(
                 super::CODEX_PUBLIC_COLOR_FIXTURE,
+                &request.run_id,
+            )?])
+        }
+        Some(super::AGY_PUBLIC_NATIVE_FIXTURE) => {
+            let ready = all
+                .into_iter()
+                .find(|replay| replay.case.fixture_name == "ready")
+                .ok_or_else(|| VisualError::Platform("Agy native baseline missing".to_owned()))?;
+            Ok(vec![
+                ready,
+                driver.agy_public_replay(super::AGY_PUBLIC_TITLE_FIXTURE, &request.run_id)?,
+                driver.agy_public_replay(super::AGY_PUBLIC_NATIVE_FIXTURE, &request.run_id)?,
+            ])
+        }
+        Some(super::AGY_PUBLIC_TITLE_FIXTURE) => {
+            Ok(vec![driver.agy_public_replay(
+                super::AGY_PUBLIC_TITLE_FIXTURE,
                 &request.run_id,
             )?])
         }
@@ -2258,6 +2313,30 @@ mod tests {
                 super::super::CODEX_PUBLIC_NATIVE_FIXTURE,
             ]
         );
+        assert_eq!(worker_budget(&request), Duration::from_mins(2));
+    }
+
+    #[test]
+    fn agy_native_visual_fixture_captures_managed_and_exact_native_titles() {
+        let request = LiveVisualRunRequest {
+            expected_head: "a".repeat(40),
+            run_id: "TB80-agy-selection".to_owned(),
+            evidence_root: PathBuf::from("target/visual-worker-tests"),
+            fixture_name: Some(super::super::AGY_PUBLIC_NATIVE_FIXTURE.to_owned()),
+        };
+        let replays = selected_replays(&FixtureDriver::default(), &request).unwrap();
+        assert_eq!(
+            replays
+                .iter()
+                .map(|replay| replay.case.fixture_name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "ready",
+                super::super::AGY_PUBLIC_TITLE_FIXTURE,
+                super::super::AGY_PUBLIC_NATIVE_FIXTURE,
+            ]
+        );
+        assert_eq!(replays[2].case.expected_title, "Agy");
         assert_eq!(worker_budget(&request), Duration::from_mins(2));
     }
 

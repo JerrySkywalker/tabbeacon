@@ -20,6 +20,8 @@ pub const CURSOR_COLOR_NATIVE_FIXTURE: &str = "cursor-color-native";
 /// The events are synthetic and do not qualify real Codex model delivery.
 pub const CODEX_PUBLIC_COLOR_FIXTURE: &str = "codex-public-color";
 pub const CODEX_PUBLIC_NATIVE_FIXTURE: &str = "codex-public-native";
+pub const AGY_PUBLIC_TITLE_FIXTURE: &str = "agy-public-title";
+pub const AGY_PUBLIC_NATIVE_FIXTURE: &str = "agy-public-native";
 
 /// One uniquely identified replay of a presentation fixture case.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +129,37 @@ impl FixtureDriver {
         replay.case.expects_animation = false;
         replay.case.expects_title_animation = false;
         replay.case.expected_title_frames = vec![replay.case.expected_title.clone()];
+        replay.title_frame_bytes.clear();
+        Ok(replay)
+    }
+
+    /// Expected titles for the isolated public Agy callback fixture. Agy's
+    /// native title is deliberately not rewritten with a run token; exact
+    /// anchor/HWND correlation identifies its tab during Visual inspection.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unknown fixture or invalid run identity.
+    pub fn agy_public_replay(&self, name: &str, run_id: &str) -> VisualResult<FixtureReplay> {
+        let title = match name {
+            AGY_PUBLIC_TITLE_FIXTURE => format!("Agy • {run_id}"),
+            AGY_PUBLIC_NATIVE_FIXTURE => "Agy".to_owned(),
+            _ => {
+                return Err(VisualError::Platform(
+                    "unknown Agy public fixture".to_owned(),
+                ));
+            }
+        };
+        let fixture = presentation_fixture()
+            .iter()
+            .find(|fixture| fixture.name() == "ready")
+            .ok_or_else(|| VisualError::Platform("Agy baseline fixture missing".to_owned()))?;
+        let mut replay = self.replay(fixture, run_id)?;
+        name.clone_into(&mut replay.case.fixture_name);
+        replay.case.expected_title.clone_from(&title);
+        replay.case.expected_title_frames = vec![title];
+        replay.case.expects_animation = false;
+        replay.case.expects_title_animation = false;
         replay.title_frame_bytes.clear();
         Ok(replay)
     }
@@ -330,8 +363,9 @@ fn is_safe_run_id(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        CODEX_PUBLIC_COLOR_FIXTURE, CODEX_PUBLIC_NATIVE_FIXTURE, CURSOR_COLOR_NATIVE_FIXTURE,
-        CURSOR_COLOR_WORKING_FIXTURE, FixtureDriver, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME,
+        AGY_PUBLIC_NATIVE_FIXTURE, AGY_PUBLIC_TITLE_FIXTURE, CODEX_PUBLIC_COLOR_FIXTURE,
+        CODEX_PUBLIC_NATIVE_FIXTURE, CURSOR_COLOR_NATIVE_FIXTURE, CURSOR_COLOR_WORKING_FIXTURE,
+        FixtureDriver, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME,
     };
     use crate::presentation::presentation_fixture;
 
@@ -396,5 +430,20 @@ mod tests {
             assert!(!replay.case.expects_title_animation);
             assert!(!replay.case.expects_animation);
         }
+    }
+
+    #[test]
+    fn agy_public_visual_oracle_preserves_the_actual_native_title() {
+        let driver = FixtureDriver::default();
+        let managed = driver
+            .agy_public_replay(AGY_PUBLIC_TITLE_FIXTURE, "TB80-agy")
+            .unwrap();
+        let native = driver
+            .agy_public_replay(AGY_PUBLIC_NATIVE_FIXTURE, "TB80-agy")
+            .unwrap();
+        assert_eq!(managed.case.expected_title, "Agy • TB80-agy");
+        assert_eq!(native.case.expected_title, "Agy");
+        assert!(!managed.case.expects_animation);
+        assert!(!native.case.expects_title_animation);
     }
 }

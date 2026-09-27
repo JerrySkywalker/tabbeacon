@@ -33,13 +33,13 @@ use tabbeacon::{
     repo::WorkspaceIdentityResolver,
     settings::{PresentationSettings, PresentationSettingsStore},
     visual::{
-        CODEX_PUBLIC_COLOR_FIXTURE, CODEX_PUBLIC_NATIVE_FIXTURE, CURSOR_COLOR_COMPLETED_FIXTURE,
-        CURSOR_COLOR_NATIVE_FIXTURE, CURSOR_COLOR_WORKING_FIXTURE, CaptureBackend,
-        ExactOwnedWindowBackend, FixtureDriver, LiveVisualRunRequest, PrintWindowCaptureBackend,
-        ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME, TemporaryWindowProductDisposition,
-        TemporaryWindowsTerminalOwnership, TerminalTestSession, TerminalTestSessionLauncher,
-        VisualDisposition, VisualError, VisualResult, WindowsUiaLocator,
-        root_workspace_anchor_fixture_alias,
+        AGY_PUBLIC_NATIVE_FIXTURE, AGY_PUBLIC_TITLE_FIXTURE, CODEX_PUBLIC_COLOR_FIXTURE,
+        CODEX_PUBLIC_NATIVE_FIXTURE, CURSOR_COLOR_COMPLETED_FIXTURE, CURSOR_COLOR_NATIVE_FIXTURE,
+        CURSOR_COLOR_WORKING_FIXTURE, CaptureBackend, ExactOwnedWindowBackend, FixtureDriver,
+        LiveVisualRunRequest, PrintWindowCaptureBackend, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME,
+        TemporaryWindowProductDisposition, TemporaryWindowsTerminalOwnership, TerminalTestSession,
+        TerminalTestSessionLauncher, VisualDisposition, VisualError, VisualResult,
+        WindowsUiaLocator, root_workspace_anchor_fixture_alias,
         runner::{authorize_live_worker, run_live, run_live_in_worker},
     },
 };
@@ -83,6 +83,18 @@ fn emit(arguments: &[String]) -> VisualResult<()> {
     ) {
         let phase_signal = argument_value(arguments, "--phase-signal")?;
         return emit_codex_public_fixture(
+            &fixture_name,
+            &run_id,
+            hold_millis,
+            Path::new(&phase_signal),
+        );
+    }
+    if matches!(
+        fixture_name.as_str(),
+        AGY_PUBLIC_TITLE_FIXTURE | AGY_PUBLIC_NATIVE_FIXTURE
+    ) {
+        let phase_signal = argument_value(arguments, "--phase-signal")?;
+        return emit_agy_public_fixture(
             &fixture_name,
             &run_id,
             hold_millis,
@@ -300,6 +312,202 @@ fn run_isolated_cursor_apply(
         ));
     }
     Ok(())
+}
+
+/// Exercises public Agy setup/Apply and the actual plain title callback in an
+/// isolated home. The fixture models Agy applying the callback's title to its
+/// owned test tab; no real Agy model session or production config is involved.
+#[allow(clippy::too_many_lines)] // One isolated setup, title transition, and cleanup scope.
+fn emit_agy_public_fixture(
+    name: &str,
+    run_id: &str,
+    hold_millis: u64,
+    phase_signal: &Path,
+) -> VisualResult<()> {
+    let temp = env::temp_dir().canonicalize()?;
+    let root = temp.join(format!("tabbeacon-agy-public-{run_id}-{}", process::id()));
+    if root.exists() {
+        return Err(VisualError::Platform(
+            "owned Agy visual fixture state already exists".to_owned(),
+        ));
+    }
+    fs::create_dir(&root)?;
+    let result = (|| -> VisualResult<()> {
+        let workspace = root.join("workspace");
+        let local_appdata = root.join("local-appdata");
+        let user_profile = root.join("user-profile");
+        let fake_agy = root.join("fake-agy");
+        for path in [&workspace, &local_appdata, &user_profile, &fake_agy] {
+            fs::create_dir(path)?;
+        }
+        let version_source = fake_agy.join("version.rs");
+        fs::write(
+            &version_source,
+            b"fn main() { if std::env::args().nth(1).as_deref() == Some(\"--version\") { println!(\"1.1.19\"); } else { std::process::exit(2); } }\n",
+        )?;
+        let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let compiled = Command::new(rustc)
+            .args(["--edition=2024", "-o"])
+            .arg(fake_agy.join("agy.exe"))
+            .arg(&version_source)
+            .output()?;
+        if !compiled.status.success() {
+            return Err(VisualError::Platform(
+                "isolated Agy version-only fixture did not compile".to_owned(),
+            ));
+        }
+        let inherited_path = env::var_os("PATH")
+            .ok_or_else(|| VisualError::Platform("visual fixture PATH is absent".to_owned()))?;
+        let path = env::join_paths(
+            std::iter::once(fake_agy.clone()).chain(env::split_paths(&inherited_path)),
+        )
+        .map_err(|_| VisualError::Platform("visual fixture PATH is invalid".to_owned()))?;
+        let executable = env::current_exe()?.with_file_name("tabbeacon.exe");
+        if !executable.is_file() {
+            return Err(VisualError::Platform(
+                "owned Agy visual fixture product binary is unavailable".to_owned(),
+            ));
+        }
+        let run = |args: &[&str]| {
+            let output = Command::new(&executable)
+                .args(args)
+                .current_dir(&workspace)
+                .env("LOCALAPPDATA", &local_appdata)
+                .env("USERPROFILE", &user_profile)
+                .env("PATH", &path)
+                .output()?;
+            if !output.status.success() || !output.stderr.is_empty() {
+                return Err(VisualError::Platform(
+                    "isolated Agy public setup or Apply was not admitted".to_owned(),
+                ));
+            }
+            Ok(())
+        };
+        run(&["setup", "agy", "--plain"])?;
+        run(&["alias", "set", run_id, "--plain"])?;
+        run(&[
+            "config",
+            "--plain",
+            "provider",
+            "agy",
+            "apply",
+            "title-only",
+        ])?;
+        let payload = json!({
+            "version": "1.1.19",
+            "agent_state": "working",
+            "conversation_id": format!("synthetic-{run_id}"),
+            "workspace": {"current_dir": workspace, "project_dir": workspace},
+        });
+        let managed = run_isolated_agy_callback(
+            &executable,
+            &workspace,
+            &local_appdata,
+            &user_profile,
+            &path,
+            &payload,
+        )?;
+        if managed != format!("Agy • {run_id}") {
+            return Err(VisualError::Platform(
+                "isolated Agy managed callback title differed from the fixture oracle".to_owned(),
+            ));
+        }
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(format!("\x1b]0;{managed}\x1b\\").as_bytes())?;
+        stdout.flush()?;
+        if name == AGY_PUBLIC_NATIVE_FIXTURE {
+            run(&[
+                "config",
+                "--plain",
+                "provider",
+                "agy",
+                "apply",
+                "preserve-native",
+            ])?;
+            let native = run_isolated_agy_callback(
+                &executable,
+                &workspace,
+                &local_appdata,
+                &user_profile,
+                &path,
+                &payload,
+            )?;
+            if native != "Agy" {
+                return Err(VisualError::Platform(
+                    "isolated Agy native callback did not release the managed title".to_owned(),
+                ));
+            }
+            stdout.write_all(format!("\x1b]0;{native}\x1b\\").as_bytes())?;
+            stdout.flush()?;
+        }
+        let phase = if name == AGY_PUBLIC_NATIVE_FIXTURE {
+            b"post-native-callback".as_slice()
+        } else {
+            b"post-managed-callback".as_slice()
+        };
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(phase_signal)?
+            .write_all(phase)?;
+        thread::sleep(Duration::from_millis(hold_millis));
+        Ok(())
+    })();
+    let owned = root.canonicalize()?;
+    if owned.parent() != Some(temp.as_path()) {
+        return Err(VisualError::Platform(
+            "Agy visual fixture cleanup root drifted".to_owned(),
+        ));
+    }
+    fs::remove_dir_all(&owned)?;
+    result
+}
+
+#[allow(clippy::too_many_arguments)] // Exact isolated Agy process inputs stay explicit.
+fn run_isolated_agy_callback(
+    executable: &Path,
+    workspace: &Path,
+    local_appdata: &Path,
+    user_profile: &Path,
+    path: &std::ffi::OsStr,
+    payload: &serde_json::Value,
+) -> VisualResult<String> {
+    let mut child = Command::new(executable)
+        .args(["agy", "__title-callback-v1"])
+        .current_dir(workspace)
+        .env("LOCALAPPDATA", local_appdata)
+        .env("USERPROFILE", user_profile)
+        .env("PATH", path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let input = serde_json::to_vec(payload).map_err(VisualError::Json)?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| VisualError::Platform("Agy callback stdin is absent".to_owned()))?
+        .write_all(&input)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            child.kill()?;
+            let _ = child.wait();
+            return Err(VisualError::Platform(
+                "isolated Agy callback exceeded the visual fixture budget".to_owned(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        return Err(VisualError::Platform(
+            "isolated Agy callback process failed".to_owned(),
+        ));
+    }
+    let title = String::from_utf8(output.stdout)
+        .map_err(|_| VisualError::Platform("Agy callback title was not UTF-8".to_owned()))?;
+    Ok(title.trim_end_matches(['\r', '\n']).to_owned())
 }
 
 /// Drives candidate CLI Apply and the silent public Codex Hook subprocess in

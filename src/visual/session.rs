@@ -9,6 +9,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
+use super::wt_lifecycle::validated_window_id_for_prepared;
 use super::{
     FixtureReplay, TemporaryWindowProductDisposition, TemporaryWindowsTerminalAcquisition,
     TemporaryWindowsTerminalCleanupReceipt, TemporaryWindowsTerminalPreparedRun, VisualError,
@@ -37,6 +38,16 @@ pub struct TerminalTestSession {
 }
 
 impl TerminalTestSession {
+    /// Returns the immutable HWND only when this session's prepared identity
+    /// still matches its validated ownership record.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unreadable, malformed, or mismatched ownership evidence.
+    pub fn exact_owned_hwnd(&self) -> VisualResult<isize> {
+        validated_window_id_for_prepared(&self.prepared_lifecycle, &self.ownership_path)
+    }
+
     /// Closes only this exact-owned window and writes the separate cleanup
     /// receipt without changing the caller's primary disposition.
     ///

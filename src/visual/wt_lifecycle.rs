@@ -1434,6 +1434,33 @@ fn read_validated_ownership(
     Ok((ownership, hex_sha256(&ownership_bytes)))
 }
 
+pub(super) fn validated_window_id_for_prepared(
+    prepared: &TemporaryWindowsTerminalPreparedRun,
+    ownership_path: &Path,
+) -> VisualResult<isize> {
+    let expected_path = prepared
+        .evidence_root
+        .join(format!("temporary-wt-{}.ownership.json", prepared.run_id));
+    if ownership_path != expected_path {
+        return Err(VisualError::Platform(
+            "fixture ownership path no longer matches its prepared run".to_owned(),
+        ));
+    }
+    let (ownership, _) = read_validated_ownership(ownership_path)?;
+    if ownership.run_id != prepared.run_id
+        || ownership.anchor_title != prepared.anchor_title
+        || ownership.window_routing_id != prepared.window_routing_id
+        || ownership.creator_process_id != prepared.creator_process_id
+        || ownership.creator_process_started_unix_ms
+            != Some(prepared.creator_process_started_unix_ms)
+    {
+        return Err(VisualError::Platform(
+            "fixture ownership record no longer matches its prepared run".to_owned(),
+        ));
+    }
+    Ok(ownership.native_window_id)
+}
+
 fn latest_cleanup_receipt(
     ownership_path: &Path,
     ownership_sha256: &str,
@@ -1589,6 +1616,7 @@ mod tests {
         finalize_temporary_windows_terminal_lifecycle,
         prepare_temporary_windows_terminal_lifecycle, recover_stale_temporary_windows_terminals,
         register_temporary_windows_terminal, retry_temporary_windows_terminal_cleanup,
+        validated_window_id_for_prepared,
     };
     use crate::visual::VisualResult;
 
@@ -2272,6 +2300,39 @@ mod tests {
         };
         assert!(ownership_path.is_file());
         assert_eq!(backend.close_calls.get(), 0);
+    }
+
+    #[test]
+    fn prepared_session_resolves_only_its_validated_exact_hwnd() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let prepared = prepare_temporary_windows_terminal_lifecycle(
+            &backend,
+            &root.0,
+            "TBWT-verified-hwnd",
+            "TB-WT-ANCHOR-TBWT-verified-hwnd",
+            "tabbeacon-TBWT-verified-hwnd",
+            4242,
+        )
+        .unwrap();
+        let ownership = register_temporary_windows_terminal(
+            &backend,
+            &root.0,
+            "TBWT-verified-hwnd",
+            "TB-WT-ANCHOR-TBWT-verified-hwnd",
+            "tabbeacon-TBWT-verified-hwnd",
+            4242,
+        )
+        .unwrap();
+        assert_eq!(
+            validated_window_id_for_prepared(&prepared, &ownership).unwrap(),
+            72
+        );
+        let mut altered: serde_json::Value =
+            serde_json::from_slice(&fs::read(&ownership).unwrap()).unwrap();
+        altered["window_routing_id"] = "foreign-window".into();
+        fs::write(&ownership, serde_json::to_vec(&altered).unwrap()).unwrap();
+        assert!(validated_window_id_for_prepared(&prepared, &ownership).is_err());
     }
 
     #[test]

@@ -18,9 +18,10 @@ pub use evidence::{
     WindowActivation,
 };
 pub use fixture::{
-    CODEX_PUBLIC_COLOR_FIXTURE, CODEX_PUBLIC_NATIVE_FIXTURE, CURSOR_COLOR_COMPLETED_FIXTURE,
-    CURSOR_COLOR_NATIVE_FIXTURE, CURSOR_COLOR_WORKING_FIXTURE, FixtureDriver, FixtureReplay,
-    ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME, VisualTestCase, root_workspace_anchor_fixture_alias,
+    AGY_PUBLIC_NATIVE_FIXTURE, AGY_PUBLIC_TITLE_FIXTURE, CODEX_PUBLIC_COLOR_FIXTURE,
+    CODEX_PUBLIC_NATIVE_FIXTURE, CURSOR_COLOR_COMPLETED_FIXTURE, CURSOR_COLOR_NATIVE_FIXTURE,
+    CURSOR_COLOR_WORKING_FIXTURE, FixtureDriver, FixtureReplay, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME,
+    VisualTestCase, root_workspace_anchor_fixture_alias,
 };
 pub use image::{Rgb, RgbaFrame, Roi, ScreenRect};
 pub use oracle::{
