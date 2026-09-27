@@ -683,6 +683,43 @@ impl PresentationSettingsResetReceipt {
     }
 }
 
+/// One reset operation while the process-safe settings lock remains held.
+/// External reconciliation may run here without a newer settings writer
+/// overtaking the reset. The caller must not acquire this settings lock again.
+pub struct PresentationSettingsResetTransaction<'a> {
+    store: &'a PresentationSettingsStore,
+    defaults: PresentationSettings,
+    receipt: PresentationSettingsResetReceipt,
+}
+
+impl PresentationSettingsResetTransaction<'_> {
+    /// The newly saved defaults.
+    #[must_use]
+    pub const fn defaults(&self) -> PresentationSettings {
+        self.defaults
+    }
+
+    /// Title ownership from the exact document replaced by this reset.
+    #[must_use]
+    pub fn previous_effective_title_ownership_or_default(
+        &self,
+        provider: CliTarget,
+        capabilities: PresentationCapabilities,
+    ) -> bool {
+        self.receipt
+            .previous_effective_title_ownership_or_default(provider, capabilities)
+    }
+
+    /// Restores the exact prior document only if the reset bytes remain current.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe storage error if restoration fails.
+    pub fn restore_if_unchanged(&self) -> Result<ConditionalSaveOutcome, SettingsError> {
+        self.store.restore_reset_unlocked(&self.receipt)
+    }
+}
+
 impl PresentationSettingsWriteReceipt {
     fn matches(&self, snapshot: &PresentationSettingsSnapshot) -> bool {
         snapshot.contents.as_deref() == Some(self.contents.as_slice())
@@ -1102,19 +1139,45 @@ impl PresentationSettingsStore {
     pub fn reset_with_receipt(
         &self,
     ) -> Result<(PresentationSettings, PresentationSettingsResetReceipt), SettingsError> {
-        let settings = PresentationSettings::default();
+        self.with_lock(|| self.reset_unlocked_with_receipt())
+    }
+
+    /// Holds the settings lock across reset, external reconciliation, and any
+    /// conditional rollback. A bounded Hook will fail open while this user
+    /// configuration operation is in progress.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the settings lock or reset write cannot complete.
+    pub fn reset_with_transaction<T>(
+        &self,
+        operation: impl FnOnce(&PresentationSettingsResetTransaction<'_>) -> T,
+    ) -> Result<T, SettingsError> {
         self.with_lock(|| {
-            self.reject_symbolic_link()?;
-            let original = read_optional_bytes(&self.path)?;
-            let mut document = DocumentMut::new();
-            write_settings(&mut document, settings)?;
-            let applied = document.to_string().into_bytes();
-            atomic_write(&self.path, &applied)?;
-            Ok((
-                settings,
-                PresentationSettingsResetReceipt { original, applied },
-            ))
+            let (defaults, receipt) = self.reset_unlocked_with_receipt()?;
+            let transaction = PresentationSettingsResetTransaction {
+                store: self,
+                defaults,
+                receipt,
+            };
+            Ok(operation(&transaction))
         })
+    }
+
+    fn reset_unlocked_with_receipt(
+        &self,
+    ) -> Result<(PresentationSettings, PresentationSettingsResetReceipt), SettingsError> {
+        let settings = PresentationSettings::default();
+        self.reject_symbolic_link()?;
+        let original = read_optional_bytes(&self.path)?;
+        let mut document = DocumentMut::new();
+        write_settings(&mut document, settings)?;
+        let applied = document.to_string().into_bytes();
+        atomic_write(&self.path, &applied)?;
+        Ok((
+            settings,
+            PresentationSettingsResetReceipt { original, applied },
+        ))
     }
 
     /// Restores a reset only while the exact reset bytes remain current.
@@ -1126,36 +1189,22 @@ impl PresentationSettingsStore {
         &self,
         receipt: &PresentationSettingsResetReceipt,
     ) -> Result<ConditionalSaveOutcome, SettingsError> {
-        self.restore_reset_if_unchanged_with(receipt, || ())
-            .map(|outcome| match outcome {
-                Some(()) => ConditionalSaveOutcome::Saved,
-                None => ConditionalSaveOutcome::Conflict,
-            })
+        self.with_lock(|| self.restore_reset_unlocked(receipt))
     }
 
-    /// Holds the settings lock across exact-byte reset rollback and bounded
-    /// integration compensation, so a newer settings writer cannot interleave.
-    /// The callback must not attempt to acquire this settings lock recursively.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an unsafe link, a failed read, or a failed restore.
-    pub fn restore_reset_if_unchanged_with<T>(
+    fn restore_reset_unlocked(
         &self,
         receipt: &PresentationSettingsResetReceipt,
-        recovery: impl FnOnce() -> T,
-    ) -> Result<Option<T>, SettingsError> {
-        self.with_lock(|| {
-            self.reject_symbolic_link()?;
-            if read_optional_bytes(&self.path)?.as_deref() != Some(receipt.applied.as_slice()) {
-                return Ok(None);
-            }
-            match receipt.original.as_deref() {
-                Some(bytes) => atomic_write(&self.path, bytes)?,
-                None => fs::remove_file(&self.path)?,
-            }
-            Ok(Some(recovery()))
-        })
+    ) -> Result<ConditionalSaveOutcome, SettingsError> {
+        self.reject_symbolic_link()?;
+        if read_optional_bytes(&self.path)?.as_deref() != Some(receipt.applied.as_slice()) {
+            return Ok(ConditionalSaveOutcome::Conflict);
+        }
+        match receipt.original.as_deref() {
+            Some(bytes) => atomic_write(&self.path, bytes)?,
+            None => fs::remove_file(&self.path)?,
+        }
+        Ok(ConditionalSaveOutcome::Saved)
     }
 
     fn with_lock<T>(
@@ -1642,26 +1691,33 @@ mod tests {
     }
 
     #[test]
-    fn reset_recovery_holds_settings_lock_through_integration_compensation() {
+    fn reset_transaction_holds_settings_lock_through_success_and_compensation() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("config.toml");
         fs::write(&path, b"[foreign]\nkeep = true\n").unwrap();
         let store = Arc::new(PresentationSettingsStore::new(&path));
-        let (_, receipt) = store.reset_with_receipt().unwrap();
-        let competing = Arc::clone(&store);
-        let outcome = store
-            .restore_reset_if_unchanged_with(&receipt, || {
-                let worker = thread::spawn(move || competing.save(PresentationSettings::default()));
-                let refused = worker.join().unwrap();
-                assert!(matches!(
-                    refused,
-                    Err(super::SettingsError::Io(ref error))
-                        if error.kind() == std::io::ErrorKind::WouldBlock
-                ));
+        store
+            .reset_with_transaction(|transaction| {
+                for restore in [false, true] {
+                    if restore {
+                        assert!(matches!(
+                            transaction.restore_if_unchanged(),
+                            Ok(ConditionalSaveOutcome::Saved)
+                        ));
+                    }
+                    let competing = Arc::clone(&store);
+                    let worker =
+                        thread::spawn(move || competing.save(PresentationSettings::default()));
+                    let refused = worker.join().unwrap();
+                    assert!(matches!(
+                        refused,
+                        Err(super::SettingsError::Io(ref error))
+                            if error.kind() == std::io::ErrorKind::WouldBlock
+                    ));
+                }
                 assert_eq!(fs::read(&path).unwrap(), b"[foreign]\nkeep = true\n");
             })
             .unwrap();
-        assert!(outcome.is_some());
     }
 
     #[test]

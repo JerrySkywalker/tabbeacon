@@ -3342,15 +3342,13 @@ fn apply_config_reset_with(
     mut reconcile_codex: impl FnMut(bool) -> Result<TitleOwnershipOutcome, String>,
     mut reconcile_agy: impl FnMut(bool) -> Result<bool, String>,
 ) -> ConfigResetResult {
-    let (defaults, receipt) = store
-        .reset_with_receipt()
-        // The atomic write may have committed before reporting an I/O error.
-        .map_err(|error| (io::Error::other(error), true))?;
-    let codex_before = receipt.previous_effective_title_ownership_or_default(
+    store.reset_with_transaction(|transaction| {
+    let defaults = transaction.defaults();
+    let codex_before = transaction.previous_effective_title_ownership_or_default(
         CliTarget::Codex,
         PresentationCapabilities::CODEX,
     );
-    let agy_before = receipt.previous_effective_title_ownership_or_default(
+    let agy_before = transaction.previous_effective_title_ownership_or_default(
         CliTarget::Agy,
         PresentationCapabilities::AGY_TITLE_ONLY,
     );
@@ -3379,11 +3377,11 @@ fn apply_config_reset_with(
         match reconcile_codex(codex_after) {
             Ok(outcome) => codex_outcome = Some(outcome),
             Err(error) => {
-                let recovery = store.restore_reset_if_unchanged_with(&receipt, || {
-                    reconcile_codex(codex_before).is_ok()
-                });
-                let restored = matches!(recovery.as_ref(), Ok(Some(_)));
-                let integration_recovered = matches!(recovery.as_ref(), Ok(Some(true)));
+                let restored = matches!(
+                    transaction.restore_if_unchanged(),
+                    Ok(ConditionalSaveOutcome::Saved)
+                );
+                let integration_recovered = restored && reconcile_codex(codex_before).is_ok();
                 return Err((
                     io::Error::other(format!(
                         "{error}; settings_rollback_verified={restored}; codex_recovery_verified={integration_recovered}; integration_state=unproven"
@@ -3397,14 +3395,13 @@ fn apply_config_reset_with(
         match reconcile_agy(agy_after) {
             Ok(applied) => Some(applied),
             Err(error) => {
-                let recovery = store.restore_reset_if_unchanged_with(&receipt, || {
-                    let agy_recovered = reconcile_agy(agy_before).is_ok();
-                    let codex_recovered = !codex_changed || reconcile_codex(codex_before).is_ok();
-                    (agy_recovered, codex_recovered)
-                });
-                let restored = matches!(recovery.as_ref(), Ok(Some(_)));
-                let (agy_recovered, codex_recovered) =
-                    recovery.ok().flatten().unwrap_or((false, !codex_changed));
+                let restored = matches!(
+                    transaction.restore_if_unchanged(),
+                    Ok(ConditionalSaveOutcome::Saved)
+                );
+                let agy_recovered = restored && reconcile_agy(agy_before).is_ok();
+                let codex_recovered =
+                    restored && (!codex_changed || reconcile_codex(codex_before).is_ok());
                 return Err((
                     io::Error::other(format!(
                         "{error}; settings_rollback_verified={restored}; agy_recovery_verified={agy_recovered}; codex_recovery_verified={codex_recovered}; integration_state=unproven"
@@ -3417,6 +3414,9 @@ fn apply_config_reset_with(
         None
     };
     Ok((defaults, codex_outcome, agy_reconciled))
+    })
+    // The atomic write may have committed before reporting an I/O error.
+    .map_err(|error| (io::Error::other(error), true))?
 }
 
 fn config_preset(
