@@ -350,13 +350,14 @@ pub fn complete_temporary_windows_terminal_acquisition<B: ExactOwnedWindowRecove
         write_lifecycle_receipt(prepared, &receipt)?;
         return Ok(TemporaryWindowsTerminalAcquisition::Failed(receipt));
     }
-    let registration = register_temporary_windows_terminal_with_retry(
+    let registration = register_temporary_windows_terminal_with_retry_for_creator(
         backend,
         &prepared.evidence_root,
         &prepared.run_id,
         &prepared.anchor_title,
         &prepared.window_routing_id,
         prepared.creator_process_id,
+        Some(prepared.creator_process_started_unix_ms),
         registration_budget,
     );
     let registration = retry_late_exact_anchor(backend, prepared, registration);
@@ -421,17 +422,15 @@ fn retry_late_exact_anchor<B: ExactOwnedWindowRecoveryBackend>(
             target_window_match_count: 1,
             native_window_id: Some(hwnd),
         }) if hwnd != 0
-    ) && matches!(
-        backend.creator_process_started_unix_ms(prepared.creator_process_id),
-        Ok(Some(started)) if started == prepared.creator_process_started_unix_ms
     ) {
-        return register_temporary_windows_terminal(
+        return register_temporary_windows_terminal_for_creator(
             backend,
             &prepared.evidence_root,
             &prepared.run_id,
             &prepared.anchor_title,
             &prepared.window_routing_id,
             prepared.creator_process_id,
+            Some(prepared.creator_process_started_unix_ms),
         );
     }
     registration
@@ -902,6 +901,27 @@ pub fn register_temporary_windows_terminal<B: ExactOwnedWindowRecoveryBackend>(
     window_routing_id: &str,
     creator_process_id: u32,
 ) -> VisualResult<PathBuf> {
+    register_temporary_windows_terminal_for_creator(
+        backend,
+        evidence_root,
+        run_id,
+        anchor_title,
+        window_routing_id,
+        creator_process_id,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // The optional instance is the prepared run's exact creator.
+fn register_temporary_windows_terminal_for_creator<B: ExactOwnedWindowRecoveryBackend>(
+    backend: &B,
+    evidence_root: &Path,
+    run_id: &str,
+    anchor_title: &str,
+    window_routing_id: &str,
+    creator_process_id: u32,
+    expected_creator_started_unix_ms: Option<u64>,
+) -> VisualResult<PathBuf> {
     validate_registration(evidence_root, run_id, anchor_title, window_routing_id)?;
     if creator_process_id == 0 {
         return Err(VisualError::Platform(
@@ -916,6 +936,13 @@ pub fn register_temporary_windows_terminal<B: ExactOwnedWindowRecoveryBackend>(
                     .to_owned(),
             )
         })?;
+    if expected_creator_started_unix_ms
+        .is_some_and(|expected| expected != creator_process_started_unix_ms)
+    {
+        return Err(VisualError::Platform(
+            "CREATOR_INSTANCE_MISMATCH_REFUSED".to_owned(),
+        ));
+    }
     let observation = backend.observe_exact_anchor(anchor_title)?;
     if observation.anchor_tab_match_count != 1 || observation.target_window_match_count != 1 {
         return Err(VisualError::Platform(format!(
@@ -931,6 +958,13 @@ pub fn register_temporary_windows_terminal<B: ExactOwnedWindowRecoveryBackend>(
     if native_window_id == 0 {
         return Err(VisualError::Platform(
             "exact temporary Windows Terminal ownership has a zero ancestor HWND".to_owned(),
+        ));
+    }
+    if backend.creator_process_started_unix_ms(creator_process_id)?
+        != Some(creator_process_started_unix_ms)
+    {
+        return Err(VisualError::Platform(
+            "CREATOR_INSTANCE_MISMATCH_REFUSED".to_owned(),
         ));
     }
 
@@ -972,17 +1006,46 @@ pub fn register_temporary_windows_terminal_with_retry<B: ExactOwnedWindowRecover
     creator_process_id: u32,
     budget: Duration,
 ) -> VisualResult<PathBuf> {
+    register_temporary_windows_terminal_with_retry_for_creator(
+        backend,
+        evidence_root,
+        run_id,
+        anchor_title,
+        window_routing_id,
+        creator_process_id,
+        None,
+        budget,
+    )
+}
+
+#[allow(clippy::too_many_arguments)] // The optional instance is the prepared run's exact creator.
+fn register_temporary_windows_terminal_with_retry_for_creator<
+    B: ExactOwnedWindowRecoveryBackend,
+>(
+    backend: &B,
+    evidence_root: &Path,
+    run_id: &str,
+    anchor_title: &str,
+    window_routing_id: &str,
+    creator_process_id: u32,
+    expected_creator_started_unix_ms: Option<u64>,
+    budget: Duration,
+) -> VisualResult<PathBuf> {
     let deadline = Instant::now() + budget;
     loop {
-        match register_temporary_windows_terminal(
+        match register_temporary_windows_terminal_for_creator(
             backend,
             evidence_root,
             run_id,
             anchor_title,
             window_routing_id,
             creator_process_id,
+            expected_creator_started_unix_ms,
         ) {
             Ok(path) => return Ok(path),
+            Err(VisualError::Platform(detail)) if detail.contains("CREATOR_INSTANCE_") => {
+                return Err(VisualError::Platform(detail));
+            }
             Err(VisualError::Platform(_)) if Instant::now() < deadline => {
                 thread::sleep(Duration::from_millis(50));
             }
@@ -1558,6 +1621,7 @@ mod tests {
         native_window_id: Cell<Option<isize>>,
         miss_first_anchor_observation: Cell<bool>,
         replace_creator_after_first_miss: Cell<bool>,
+        replace_creator_on_exact_observation: Cell<bool>,
         close_calls: Cell<u32>,
         close_fails: Cell<bool>,
         close_leaves_window: Cell<bool>,
@@ -1572,6 +1636,7 @@ mod tests {
                 native_window_id: Cell::new(Some(72)),
                 miss_first_anchor_observation: Cell::new(false),
                 replace_creator_after_first_miss: Cell::new(false),
+                replace_creator_on_exact_observation: Cell::new(false),
                 close_calls: Cell::new(0),
                 close_fails: Cell::new(false),
                 close_leaves_window: Cell::new(false),
@@ -1594,6 +1659,9 @@ mod tests {
                     target_window_match_count: 0,
                     native_window_id: None,
                 });
+            }
+            if self.replace_creator_on_exact_observation.replace(false) {
+                self.creator_process_started_unix_ms.set(Some(42));
             }
             Ok(ExactWindowObservation {
                 anchor_tab_match_count: self.anchor_matches.get(),
@@ -2229,14 +2297,49 @@ mod tests {
             None,
         )
         .expect("ambiguous late anchor is accounted");
-        assert!(matches!(
-            outcome,
-            TemporaryWindowsTerminalAcquisition::Failed(_)
-        ));
+        let TemporaryWindowsTerminalAcquisition::Failed(receipt) = outcome else {
+            panic!("reused creator must be refused");
+        };
+        assert_eq!(
+            receipt.cleanup_disposition,
+            TemporaryWindowCleanupDisposition::Ambiguous
+        );
+        assert!(
+            receipt
+                .registration_detail
+                .contains("CREATOR_INSTANCE_MISMATCH_REFUSED")
+        );
         assert!(
             !root
                 .0
                 .join("temporary-wt-TBWT-late-reused-creator.ownership.json")
+                .exists()
+        );
+        assert_eq!(backend.close_calls.get(), 0);
+    }
+
+    #[test]
+    fn registration_refuses_creator_replacement_during_exact_anchor_observation() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        backend.replace_creator_on_exact_observation.set(true);
+        let result = register_temporary_windows_terminal(
+            &backend,
+            &root.0,
+            "TBWT-mid-observation-reuse",
+            "TB-WT-ANCHOR-TBWT-mid-observation-reuse",
+            "tabbeacon-TBWT-mid-observation-reuse",
+            4242,
+        );
+        assert!(matches!(
+            result,
+            Err(crate::visual::VisualError::Platform(detail))
+                if detail == "CREATOR_INSTANCE_MISMATCH_REFUSED"
+        ));
+        assert!(
+            !root
+                .0
+                .join("temporary-wt-TBWT-mid-observation-reuse.ownership.json")
                 .exists()
         );
         assert_eq!(backend.close_calls.get(), 0);

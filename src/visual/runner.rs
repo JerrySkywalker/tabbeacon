@@ -26,12 +26,16 @@ use super::{
 };
 
 const LIVE_VISUAL_WORKER_BUDGET: Duration = Duration::from_secs(90);
-const LIVE_VISUAL_WORKER_BUDGET_MILLIS: u64 = 90_000;
+// The public Codex native conversion runs three exact-owned windows in series.
+// The 9157006 receipt measured about 31 seconds through cleanup for each of
+// the first two; the 90-second worker stopped after the third capture and
+// before its cleanup. Keep that fixture bounded with room for finalization.
+const CODEX_PUBLIC_NATIVE_WORKER_BUDGET: Duration = Duration::from_mins(2);
 const LIVE_VISUAL_WORKER_STAGING_DIRECTORY: &str = ".tabbeacon-visual-worker";
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const WORKER_TERMINATION_BUDGET: Duration = Duration::from_secs(5);
 // The exact parent/identity CIM query took 6.6 seconds on this admitted host.
-// Preserve both identity checks while bounding each query within the 90s worker.
+// Preserve both identity checks while bounding each query within the worker.
 const WORKER_PROCESS_QUERY_BUDGET: Duration = Duration::from_secs(12);
 const PUBLIC_HOOK_PHASE_BUDGET: Duration = Duration::from_secs(5);
 const WORKER_BUDGET_ENVIRONMENT_VARIABLE: &str = "TABBEACON_VISUAL_WORKER_BUDGET_MILLIS";
@@ -173,7 +177,8 @@ pub fn run_live(request: &LiveVisualRunRequest) -> VisualResult<LiveVisualRunSum
                 &fixture_names,
                 VisualDisposition::Blocked,
                 &format!(
-                    "isolated visual worker exceeded its 90-second wall-clock budget and was terminated as an owned process tree; last_stage={stage}"
+                    "isolated visual worker exceeded its {}-second wall-clock budget and was terminated as an owned process tree; last_stage={stage}",
+                    worker_budget(request).as_secs()
                 ),
             );
         }
@@ -208,6 +213,14 @@ fn selected_fixture_names(request: &LiveVisualRunRequest) -> VisualResult<Vec<St
         .iter()
         .map(|replay| replay.case.fixture_name.clone())
         .collect())
+}
+
+fn worker_budget(request: &LiveVisualRunRequest) -> Duration {
+    if request.fixture_name.as_deref() == Some(super::CODEX_PUBLIC_NATIVE_FIXTURE) {
+        CODEX_PUBLIC_NATIVE_WORKER_BUDGET
+    } else {
+        LIVE_VISUAL_WORKER_BUDGET
+    }
 }
 
 fn worker_paths(request: &LiveVisualRunRequest) -> VisualResult<(PathBuf, PathBuf, PathBuf)> {
@@ -277,7 +290,7 @@ fn run_authorized_worker(
 ) -> VisualResult<BoundedWorkerOutput> {
     let authorization = create_worker_authorization(worker_root, &request.run_id)?;
     let result = spawn_authorized_worker(request, worker_root, &authorization)
-        .and_then(|worker| wait_for_bounded_worker(worker, LIVE_VISUAL_WORKER_BUDGET));
+        .and_then(|worker| wait_for_bounded_worker(worker, worker_budget(request)));
     clear_worker_authorization(&authorization);
     result
 }
@@ -305,7 +318,7 @@ fn spawn_authorized_worker(
     worker
         .env(
             WORKER_BUDGET_ENVIRONMENT_VARIABLE,
-            LIVE_VISUAL_WORKER_BUDGET_MILLIS.to_string(),
+            worker_budget(request).as_millis().to_string(),
         )
         .env(WORKER_NONCE_ENVIRONMENT_VARIABLE, &authorization.nonce)
         .stdout(Stdio::null())
@@ -727,7 +740,7 @@ fn worker_evidence_summary(
         &assertions,
     )
     .then_some(())?;
-    worker_supervision_matches(&supervision).then_some(())?;
+    worker_supervision_matches(&supervision, request).then_some(())?;
     evidence_integrity_matches(worker_directory, &integrity).then_some(())?;
     Some(LiveVisualRunSummary {
         disposition: manifest.disposition,
@@ -784,12 +797,16 @@ fn worker_manifest_matches(
     }
 }
 
-fn worker_supervision_matches(supervision: &WorkerSupervisionEvidence) -> bool {
+fn worker_supervision_matches(
+    supervision: &WorkerSupervisionEvidence,
+    request: &LiveVisualRunRequest,
+) -> bool {
     supervision
         == &WorkerSupervisionEvidence {
             schema: "TABBEACON_VISUAL_WORKER_SUPERVISION_V1".to_owned(),
             execution: "isolated-child-process".to_owned(),
-            wall_clock_budget_millis: LIVE_VISUAL_WORKER_BUDGET_MILLIS,
+            wall_clock_budget_millis: u64::try_from(worker_budget(request).as_millis())
+                .unwrap_or(u64::MAX),
             deadline_action: "terminate-direct-owned-worker".to_owned(),
         }
 }
@@ -2050,7 +2067,7 @@ mod tests {
         consume_worker_authorization, create_worker_authorization, empty_uia_dump,
         evidence_integrity_matches, progress_roi, read_worker_stage, relative_roi,
         selected_replays, target_has_capturable_geometry, wait_for_bounded_worker,
-        wait_for_public_hook_phase, write_worker_stage,
+        wait_for_public_hook_phase, worker_budget, write_worker_stage,
     };
 
     #[test]
@@ -2217,6 +2234,7 @@ mod tests {
             .map(|replay| replay.case.fixture_name)
             .collect::<Vec<_>>();
         assert_eq!(names, ["ready", super::super::CURSOR_COLOR_NATIVE_FIXTURE]);
+        assert_eq!(worker_budget(&request), Duration::from_secs(90));
     }
 
     #[test]
@@ -2240,6 +2258,7 @@ mod tests {
                 super::super::CODEX_PUBLIC_NATIVE_FIXTURE,
             ]
         );
+        assert_eq!(worker_budget(&request), Duration::from_mins(2));
     }
 
     #[test]
