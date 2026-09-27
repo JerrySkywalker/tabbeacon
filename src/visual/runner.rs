@@ -1137,7 +1137,37 @@ fn observe_replay(
                 return Ok(());
             }
         };
-        observe_capture(writer, replay, &capture_target, tab_bounds, observation)
+        if matches!(
+            replay.case.fixture_name.as_str(),
+            super::AGY_PUBLIC_TITLE_FIXTURE | super::AGY_PUBLIC_NATIVE_FIXTURE
+        ) && !target
+            .title_reader
+            .as_ref()
+            .ok_or_else(|| VisualError::Platform("exact Agy tab reader is absent".to_owned()))?
+            .is_selected()?
+        {
+            observation.record_capture_blocked(
+                &replay.case.fixture_name,
+                "exact Agy sibling tab was deselected before capture",
+            );
+            return Ok(());
+        }
+        observe_capture(writer, replay, &capture_target, tab_bounds, observation)?;
+        if matches!(
+            replay.case.fixture_name.as_str(),
+            super::AGY_PUBLIC_TITLE_FIXTURE | super::AGY_PUBLIC_NATIVE_FIXTURE
+        ) && !target
+            .title_reader
+            .as_ref()
+            .ok_or_else(|| VisualError::Platform("exact Agy tab reader is absent".to_owned()))?
+            .is_selected()?
+        {
+            observation.record_capture_blocked(
+                &replay.case.fixture_name,
+                "exact Agy sibling tab was deselected during capture",
+            );
+        }
+        Ok(())
     })();
     let phase_cleanup_result = if let Some(path) = phase_signal.as_ref()
         && path.exists()
@@ -1226,7 +1256,7 @@ fn locate_exact_sibling_with_retry(
             last_target: None,
         })
     })?;
-    locate_with_retry(false, || {
+    locate_with_retry(true, || {
         locator.locate_and_activate_exact_anchor_sibling(&session.anchor_title, hwnd)
     })
 }

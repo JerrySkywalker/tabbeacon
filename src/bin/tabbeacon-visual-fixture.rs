@@ -346,11 +346,12 @@ fn emit_agy_public_fixture(
             b"fn main() { if std::env::args().nth(1).as_deref() == Some(\"--version\") { println!(\"1.1.19\"); } else { std::process::exit(2); } }\n",
         )?;
         let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-        let compiled = Command::new(rustc)
+        let mut compile = Command::new(rustc);
+        compile
             .args(["--edition=2024", "-o"])
             .arg(fake_agy.join("agy.exe"))
-            .arg(&version_source)
-            .output()?;
+            .arg(&version_source);
+        let compiled = bounded_agy_fixture_output(&mut compile, Duration::from_secs(15))?;
         if !compiled.status.success() {
             return Err(VisualError::Platform(
                 "isolated Agy version-only fixture did not compile".to_owned(),
@@ -369,17 +370,21 @@ fn emit_agy_public_fixture(
             ));
         }
         let run = |args: &[&str]| {
-            let output = Command::new(&executable)
+            let mut command = Command::new(&executable);
+            command
                 .args(args)
                 .current_dir(&workspace)
                 .env("LOCALAPPDATA", &local_appdata)
                 .env("USERPROFILE", &user_profile)
-                .env("PATH", &path)
-                .output()?;
+                .env("PATH", &path);
+            let output = bounded_agy_fixture_output(&mut command, Duration::from_secs(5))?;
             if !output.status.success() || !output.stderr.is_empty() {
-                return Err(VisualError::Platform(
-                    "isolated Agy public setup or Apply was not admitted".to_owned(),
-                ));
+                return Err(VisualError::Platform(format!(
+                    "isolated Agy public command was not admitted: stage={}, code={:?}, stderr_bytes={}",
+                    args.first().copied().unwrap_or("unknown"),
+                    output.status.code(),
+                    output.stderr.len()
+                )));
             }
             Ok(())
         };
@@ -424,20 +429,33 @@ fn emit_agy_public_fixture(
                 "apply",
                 "preserve-native",
             ])?;
-            let native = run_isolated_agy_callback(
-                &executable,
-                &workspace,
-                &local_appdata,
-                &user_profile,
-                &path,
-                &payload,
-            )?;
-            if native != "Agy" {
+            let agy_settings = user_profile
+                .join(".gemini")
+                .join("antigravity-cli")
+                .join("settings.json");
+            if agy_settings.exists() {
+                let saved: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&agy_settings)?).map_err(VisualError::Json)?;
+                if saved.get("title").is_some() {
+                    return Err(VisualError::Platform(
+                        "isolated Agy native Apply retained a title callback".to_owned(),
+                    ));
+                }
+            }
+            if local_appdata
+                .join("TabBeacon")
+                .join("agy")
+                .join("setup.json")
+                .exists()
+            {
                 return Err(VisualError::Platform(
-                    "isolated Agy native callback did not release the managed title".to_owned(),
+                    "isolated Agy native Apply retained callback ownership".to_owned(),
                 ));
             }
-            stdout.write_all(format!("\x1b]0;{native}\x1b\\").as_bytes())?;
+            // The real provider owns its native title after Apply removes our
+            // callback. This synthetic fixture models that external write;
+            // it does not claim TabBeacon or a real Agy session produced it.
+            stdout.write_all(b"\x1b]0;Agy\x1b\\")?;
             stdout.flush()?;
         }
         let phase = if name == AGY_PUBLIC_NATIVE_FIXTURE {
@@ -461,6 +479,28 @@ fn emit_agy_public_fixture(
     }
     fs::remove_dir_all(&owned)?;
     result
+}
+
+fn bounded_agy_fixture_output(
+    command: &mut Command,
+    budget: Duration,
+) -> VisualResult<std::process::Output> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let deadline = Instant::now() + budget;
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            child.kill()?;
+            let _ = child.wait();
+            return Err(VisualError::Platform(
+                "isolated Agy fixture child exceeded its bounded budget".to_owned(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    child.wait_with_output().map_err(Into::into)
 }
 
 #[allow(clippy::too_many_arguments)] // Exact isolated Agy process inputs stay explicit.

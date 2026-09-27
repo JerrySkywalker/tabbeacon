@@ -10,6 +10,7 @@ use uiautomation::{
     UIAutomation, UIElement,
     actions::Window,
     controls::WindowControl,
+    patterns::UISelectionItemPattern,
     types::{ControlType, Rect},
 };
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
@@ -79,6 +80,19 @@ pub enum OwnedTabActivation {
 }
 
 impl OwnedTabTitleReader {
+    /// Checks that the exact correlated tab is currently selected for capture.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when UIA cannot expose or read the selection pattern.
+    pub fn is_selected(&self) -> VisualResult<bool> {
+        self.tab
+            .get_pattern::<UISelectionItemPattern>()
+            .map_err(platform_error)?
+            .is_selected()
+            .map_err(platform_error)
+    }
+
     /// Samples the exact already-correlated tab on a bounded monotonic
     /// timeline, reducing each raw title to a non-sensitive classification.
     ///
@@ -445,6 +459,15 @@ impl WindowsUiaLocator {
         let sibling = sibling.ok_or_else(|| {
             VisualError::Platform("exact fixture sibling tab vanished".to_owned())
         })?;
+        let selection = sibling
+            .get_pattern::<UISelectionItemPattern>()
+            .map_err(platform_error)?;
+        selection.select().map_err(platform_error)?;
+        if !selection.is_selected().map_err(platform_error)? {
+            return Err(VisualError::Platform(
+                "exact fixture sibling tab did not become selected".to_owned(),
+            ));
+        }
         activate_resolved_window_tab(window, sibling)
     }
 }
