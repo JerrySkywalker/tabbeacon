@@ -15,6 +15,7 @@ use crate::{
     presentation::{TabColor, owned_channel_release_bytes, strict_color_only_bytes},
     presentation_policy::ResolvedPresentation,
     settings::{ActivityMode, TabColorMode, TitleMode},
+    terminal_color::{LockedColor, TerminalColorStore},
 };
 
 use super::cursor::{CursorEvent, CursorLifecycle};
@@ -161,11 +162,20 @@ fn event_color(event: &CursorLifecycle) -> Option<(TabColor, &'static str)> {
 pub fn apply_admitted(
     state_root: &Path,
     terminal: &str,
+    color_terminal: &str,
     event: &CursorLifecycle,
     resolved: &ResolvedPresentation,
     sink: &mut impl Write,
 ) -> io::Result<bool> {
-    apply_admitted_with(state_root, terminal, event, resolved, sink, &mut save)
+    apply_admitted_with(
+        state_root,
+        terminal,
+        color_terminal,
+        event,
+        resolved,
+        sink,
+        &mut save,
+    )
 }
 
 #[derive(Debug)]
@@ -188,10 +198,25 @@ pub(crate) fn flushed_before_error(error: &io::Error) -> bool {
 fn apply_admitted_with(
     state_root: &Path,
     terminal: &str,
+    color_terminal: &str,
     event: &CursorLifecycle,
     resolved: &ResolvedPresentation,
     sink: &mut impl Write,
     persist: &mut impl FnMut(&Path, &ColorLease) -> io::Result<()>,
+) -> io::Result<bool> {
+    TerminalColorStore::new(state_root, color_terminal)?.with_lock(|color| {
+        apply_admitted_locked(state_root, terminal, event, resolved, sink, persist, color)
+    })
+}
+
+fn apply_admitted_locked(
+    state_root: &Path,
+    terminal: &str,
+    event: &CursorLifecycle,
+    resolved: &ResolvedPresentation,
+    sink: &mut impl Write,
+    persist: &mut impl FnMut(&Path, &ColorLease) -> io::Result<()>,
+    color_owner: &mut LockedColor<'_>,
 ) -> io::Result<bool> {
     let path = lease_path(state_root, terminal);
     let mut lease =
@@ -199,23 +224,27 @@ fn apply_admitted_with(
     if event.event == CursorEvent::SessionStart {
         let old_owned =
             lease.session_sha256 != event.session_sha256 && lease.state == LeaseState::Owned;
+        let mut released = false;
         if old_owned {
             // Revoke release authority before touching the terminal. An old
             // sessionEnd can never reset a color acquired by this new session.
             lease.state = LeaseState::Unowned;
             persist(&path, &lease)?;
-            let bytes = owned_channel_release_bytes(true, false);
-            sink.write_all(&bytes)?;
-            sink.flush()?;
+            if color_owner.revoke_if_owned("cursor", &lease.session_sha256)? {
+                let bytes = owned_channel_release_bytes(true, false);
+                sink.write_all(&bytes)?;
+                sink.flush()?;
+                released = true;
+            }
         }
         if let Err(error) = persist(&path, &ColorLease::new(terminal, &event.session_sha256)) {
-            return Err(if old_owned {
+            return Err(if released {
                 io::Error::other(FlushedStateUnconfirmed)
             } else {
                 error
             });
         }
-        return Ok(old_owned);
+        return Ok(released);
     }
     if lease.session_sha256 != event.session_sha256 {
         return Ok(false);
@@ -228,10 +257,13 @@ fn apply_admitted_with(
         lease.generation_sha256 = None;
         lease.color = None;
         persist(&path, &lease)?;
-        let bytes = owned_channel_release_bytes(true, false);
-        sink.write_all(&bytes)?;
-        sink.flush()?;
-        return Ok(true);
+        if color_owner.revoke_if_owned("cursor", &lease.session_sha256)? {
+            let bytes = owned_channel_release_bytes(true, false);
+            sink.write_all(&bytes)?;
+            sink.flush()?;
+            return Ok(true);
+        }
+        return Ok(false);
     }
     let Some((color, name)) = event_color(event) else {
         return Ok(false);
@@ -246,9 +278,13 @@ fn apply_admitted_with(
     lease.generation_sha256.clone_from(&event.generation_sha256);
     lease.color = Some(name.to_owned());
     persist(&path, &lease)?;
+    color_owner.begin_write()?;
     let bytes = strict_color_only_bytes(color, resolved.effective.theme());
     sink.write_all(&bytes)?;
     sink.flush()?;
+    color_owner
+        .confirm_write("cursor", &event.session_sha256)
+        .map_err(|_| io::Error::other(FlushedStateUnconfirmed))?;
     lease.state = LeaseState::Owned;
     persist(&path, &lease).map_err(|_| io::Error::other(FlushedStateUnconfirmed))?;
     Ok(true)
@@ -307,11 +343,41 @@ mod tests {
         let prompt = event("beforeSubmitPrompt", "one", Some("g1"));
         let end = event("sessionEnd", "one", None);
         let mut bytes = Vec::new();
-        assert!(!apply_admitted(root.path(), &terminal, &start, &color, &mut bytes).unwrap());
-        assert!(!apply_admitted(root.path(), &terminal, &prompt, &native, &mut bytes).unwrap());
+        assert!(
+            !apply_admitted(
+                root.path(),
+                &terminal,
+                &terminal,
+                &start,
+                &color,
+                &mut bytes
+            )
+            .unwrap()
+        );
+        assert!(
+            !apply_admitted(
+                root.path(),
+                &terminal,
+                &terminal,
+                &prompt,
+                &native,
+                &mut bytes
+            )
+            .unwrap()
+        );
         assert!(bytes.is_empty());
         let mut failing = PartialSink(Vec::new());
-        assert!(apply_admitted(root.path(), &terminal, &prompt, &color, &mut failing).is_err());
+        assert!(
+            apply_admitted(
+                root.path(),
+                &terminal,
+                &terminal,
+                &prompt,
+                &color,
+                &mut failing
+            )
+            .is_err()
+        );
         assert_eq!(
             load(&lease_path(root.path(), &terminal), &terminal)
                 .unwrap()
@@ -319,13 +385,25 @@ mod tests {
                 .state,
             LeaseState::Unknown
         );
-        assert!(!apply_admitted(root.path(), &terminal, &end, &color, &mut bytes).unwrap());
+        assert!(
+            !apply_admitted(root.path(), &terminal, &terminal, &end, &color, &mut bytes).unwrap()
+        );
         assert!(
             bytes.is_empty(),
             "ambiguous partial write has no reset authority"
         );
         let next = event("sessionStart", "two", None);
-        assert!(!apply_admitted(root.path(), &terminal, &next, &native, &mut bytes).unwrap());
+        assert!(
+            !apply_admitted(
+                root.path(),
+                &terminal,
+                &terminal,
+                &next,
+                &native,
+                &mut bytes
+            )
+            .unwrap()
+        );
         assert!(
             bytes.is_empty(),
             "new native session does not reset unknown output"
@@ -356,6 +434,7 @@ mod tests {
         let error = apply_admitted_with(
             root.path(),
             &terminal,
+            &terminal,
             &prompt,
             &resolved,
             &mut output,
@@ -379,7 +458,17 @@ mod tests {
             LeaseState::Unknown
         );
         output.clear();
-        assert!(!apply_admitted(root.path(), &terminal, &end, &resolved, &mut output).unwrap());
+        assert!(
+            !apply_admitted(
+                root.path(),
+                &terminal,
+                &terminal,
+                &end,
+                &resolved,
+                &mut output
+            )
+            .unwrap()
+        );
         assert!(
             output.is_empty(),
             "uncertain ownership cannot grant reset authority"
@@ -402,7 +491,17 @@ mod tests {
             br#"{"hook_event_name":"beforeSubmitPrompt","session_id":"inherited","generation_id":"g1"}"#
         ).unwrap().unwrap();
         let mut bytes = Vec::new();
-        assert!(apply_admitted(root.path(), &terminal, &prompt, &resolved, &mut bytes).unwrap());
+        assert!(
+            apply_admitted(
+                root.path(),
+                &terminal,
+                &terminal,
+                &prompt,
+                &resolved,
+                &mut bytes
+            )
+            .unwrap()
+        );
         assert!(bytes.starts_with(b"\x1b]4;264;rgb:"));
         assert!(
             !bytes

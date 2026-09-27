@@ -88,7 +88,16 @@ pub fn dispatch_with_output_bounded(
         expected_terminal_sha256,
         terminal_identity,
         console_openable,
-        |event, terminal| cursor_color::apply_admitted(state_root, terminal, event, resolved, sink),
+        |event, terminal| {
+            cursor_color::apply_admitted(
+                state_root,
+                terminal,
+                &crate::terminal_color::binding_from_identity(terminal_identity),
+                event,
+                resolved,
+                sink,
+            )
+        },
     )
 }
 
@@ -135,7 +144,14 @@ pub fn dispatch_with_settings_bounded(
                         ApplicationStatus::Unproven,
                     )
                     .map_err(io::Error::other)?;
-                cursor_color::apply_admitted(state_root, terminal, event, &resolved, sink)
+                cursor_color::apply_admitted(
+                    state_root,
+                    terminal,
+                    &crate::terminal_color::binding_from_identity(terminal_identity),
+                    event,
+                    &resolved,
+                    sink,
+                )
             },
         )
     })

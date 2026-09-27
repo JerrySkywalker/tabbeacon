@@ -155,7 +155,7 @@ impl CodexHookRuntime {
             PresentationSettings::default(),
         );
         runtime.activity = ActivityCoordinator::system(&state_root)
-            .unwrap_or_else(|_| ActivityCoordinator::disabled(&state_root));
+            .unwrap_or_else(|_| ActivityCoordinator::unbound_system(&state_root));
         runtime.system_settings = Some(settings);
         Ok(runtime)
     }
@@ -231,7 +231,7 @@ impl CodexHookRuntime {
         )
         .with_hook_profile(profile);
         runtime.activity = ActivityCoordinator::system(&state_root)
-            .unwrap_or_else(|_| ActivityCoordinator::disabled(&state_root));
+            .unwrap_or_else(|_| ActivityCoordinator::unbound_system(&state_root));
         runtime.system_settings = Some(settings);
         timing.record("runtime_initialization", started);
 

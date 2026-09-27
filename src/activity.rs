@@ -852,6 +852,9 @@ const fn already_active_worker_render() -> ActivityRender {
 #[derive(Debug, Clone)]
 enum ActivityExecution {
     Disabled,
+    // The production Hook could not establish a terminal-bound lease. It may
+    // still render non-color legacy decoration, but cannot own shared color.
+    UnboundSystem,
     System {
         executable: PathBuf,
         owner_sha256: String,
@@ -873,6 +876,14 @@ impl ActivityCoordinator {
         Self {
             store: ActivityLeaseStore::new(state_root),
             execution: ActivityExecution::Disabled,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn unbound_system(state_root: impl Into<PathBuf>) -> Self {
+        Self {
+            store: ActivityLeaseStore::new(state_root),
+            execution: ActivityExecution::UnboundSystem,
         }
     }
 
@@ -1131,7 +1142,15 @@ impl ActivityCoordinator {
                     // lease before it may acquire terminal output ownership.
                     return Ok(());
                 }
-                sink.write_all(bytes)?;
+                let safe_bytes = if matches!(self.execution, ActivityExecution::UnboundSystem) {
+                    // A degraded production Hook has no exact terminal lease
+                    // and cannot claim the shared color channel. Explicit
+                    // injected runtimes keep their deterministic byte sink.
+                    crate::terminal_color::without_generated_color(bytes)
+                } else {
+                    bytes
+                };
+                sink.write_all(safe_bytes)?;
                 sink.flush()
             }
             ActivityRender::Full | ActivityRender::WithoutTitle => {
@@ -1162,31 +1181,55 @@ impl ActivityCoordinator {
                         && current.terminal_binding_sha256 == *terminal_binding_sha256
                         && current.owner_sha256 == *owner_sha256
                     {
-                        let release = OwnedTerminalChannels {
-                            color: strict_channel_policy
-                                && current.owned_channels.color
-                                && !desired_channels.color,
-                            progress: strict_channel_policy
-                                && current.owned_channels.progress
-                                && !desired_channels.progress,
-                        };
-                        // Revoke release authority before touching the terminal.
-                        // A failed write may leave decoration behind, but cannot
-                        // authorize a later reset of a foreign replacement.
-                        if release != OwnedTerminalChannels::default() {
-                            current.owned_channels.color &= !release.color;
-                            current.owned_channels.progress &= !release.progress;
-                            self.store.write(&current)?;
-                        }
-                        let release_bytes =
-                            owned_channel_release_bytes(release.color, release.progress);
-                        sink.write_all(&release_bytes)?;
-                        sink.write_all(bytes)?;
-                        sink.flush()?;
-                        if current.owned_channels != desired_channels {
-                            current.owned_channels = desired_channels;
-                            self.store.write(&current)?;
-                        }
+                        crate::terminal_color::TerminalColorStore::new(
+                            &self.store.state_root(),
+                            terminal_binding_sha256,
+                        )?
+                        .with_lock(|color_owner| {
+                            // The shared record is the final authority for a
+                            // color reset across Cursor and Codex on one tab.
+                            let color_release_admitted = if desired_channels.color {
+                                color_owner.begin_write()?;
+                                false
+                            } else {
+                                color_owner.revoke_if_owned("codex", session_sha256)?
+                            };
+                            let release = OwnedTerminalChannels {
+                                color: strict_channel_policy
+                                    && current.owned_channels.color
+                                    && !desired_channels.color
+                                    && color_release_admitted,
+                                progress: strict_channel_policy
+                                    && current.owned_channels.progress
+                                    && !desired_channels.progress,
+                            };
+                            // Revoke local release authority before terminal I/O.
+                            if current.owned_channels.color && !desired_channels.color
+                                || release.progress
+                            {
+                                current.owned_channels.color = false;
+                                current.owned_channels.progress &= !release.progress;
+                                self.store.write(&current)?;
+                            }
+                            let release_bytes =
+                                owned_channel_release_bytes(release.color, release.progress);
+                            sink.write_all(&release_bytes)?;
+                            let safe_bytes = if desired_channels.color || color_release_admitted {
+                                bytes
+                            } else {
+                                crate::terminal_color::without_generated_color(bytes)
+                            };
+                            sink.write_all(safe_bytes)?;
+                            sink.flush()?;
+                            if desired_channels.color {
+                                color_owner.confirm_write("codex", session_sha256)?;
+                            }
+                            if current.owned_channels != desired_channels {
+                                current.owned_channels = desired_channels;
+                                self.store.write(&current)?;
+                            }
+                            Ok(())
+                        })?;
                     }
                     Ok(())
                 })
@@ -3161,10 +3204,17 @@ mod tests {
     use crate::{
         core::{Attention, Health, Phase},
         presentation::{
-            PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleStatus,
-            WindowsTerminalCapabilities, WindowsTerminalRenderer,
+            PresentationAction, PresentationPolicy, SemanticPresentationInput, TabColor,
+            TitleStatus, WindowsTerminalCapabilities, WindowsTerminalRenderer,
+            strict_color_only_bytes,
         },
-        providers::visual_identity::ProviderVisualIdentity,
+        presentation_policy::{
+            ApplicationStatus, PresentationCapabilities, PresentationMode, PresentationOverride,
+            resolve_presentation,
+        },
+        providers::{
+            cursor::normalize_hook, cursor_color, visual_identity::ProviderVisualIdentity,
+        },
         settings::{
             ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
             TitleMode,
@@ -4207,6 +4257,142 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One ordered sink proves both same-terminal handoff directions.
+    fn cursor_and_codex_cannot_reset_each_others_newer_same_terminal_color() {
+        assert_eq!(
+            crate::terminal_color::binding_from_identity("wt-session-测试"),
+            super::framed_digest(&["wt-session-测试"]),
+            "Cursor and Codex must address the same shared color record",
+        );
+        let root = TestRoot::new("shared-terminal-color");
+        fs::create_dir_all(root.0.join("cursor-route-v1")).unwrap();
+        let route_terminal = digest('e');
+        let color_terminal = digest('c');
+        let store = ActivityLeaseStore::new(&root.0);
+        let coordinator = ActivityCoordinator {
+            store: store.clone(),
+            execution: ActivityExecution::System {
+                executable: root.0.join("unused.exe"),
+                owner_sha256: digest('d'),
+                terminal_binding_sha256: color_terminal.clone(),
+            },
+        };
+        let codex_key = key(1, 'a', 'c');
+        let mode = |value| {
+            resolve_presentation(
+                PresentationSettings::default(),
+                PresentationOverride::default().with_mode(value),
+                PresentationCapabilities::CURSOR_COLOR_ONLY,
+                ApplicationStatus::Unproven,
+            )
+        };
+        let color = mode(PresentationMode::ColorOnly);
+        let native = mode(PresentationMode::PreserveNative);
+        let cursor_event = |name: &str, session: &str, generation: Option<&str>| {
+            let mut input = serde_json::json!({"hook_event_name": name, "session_id": session});
+            if let Some(generation) = generation {
+                input["generation_id"] = generation.into();
+            }
+            normalize_hook(input.to_string().as_bytes())
+                .unwrap()
+                .unwrap()
+        };
+        let cursor_write = |event, resolved, sink: &mut Vec<u8>| {
+            cursor_color::apply_admitted(
+                &root.0,
+                &route_terminal,
+                &color_terminal,
+                &event,
+                resolved,
+                sink,
+            )
+            .unwrap()
+        };
+        let mut output = Vec::new();
+        assert!(!cursor_write(
+            cursor_event("sessionStart", "cursor-a", None),
+            &color,
+            &mut output
+        ));
+        assert!(cursor_write(
+            cursor_event("beforeSubmitPrompt", "cursor-a", Some("g1")),
+            &color,
+            &mut output
+        ));
+        assert!(output.starts_with(b"\x1b]4;264;rgb:"));
+        store
+            .publish_stopped(&codex_key, 1, &digest('d'), 1_000)
+            .unwrap();
+        let codex_color = strict_color_only_bytes(TabColor::Working, PresentationTheme::MutedDark);
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                1,
+                ActivityRender::Full,
+                &codex_color,
+                OwnedTerminalChannels {
+                    color: true,
+                    progress: false,
+                },
+                true,
+                &mut output,
+            )
+            .unwrap();
+        let before_late_end = output.len();
+        assert!(!cursor_write(
+            cursor_event("sessionEnd", "cursor-a", None),
+            &color,
+            &mut output
+        ));
+        assert_eq!(
+            output.len(),
+            before_late_end,
+            "old Cursor end cannot reset Codex color"
+        );
+
+        assert!(!cursor_write(
+            cursor_event("sessionStart", "cursor-b", None),
+            &native,
+            &mut output
+        ));
+        assert!(cursor_write(
+            cursor_event("beforeSubmitPrompt", "cursor-b", Some("g1")),
+            &color,
+            &mut output
+        ));
+        store
+            .publish_stopped(&codex_key, 2, &digest('d'), 1_100)
+            .unwrap();
+        let before_late_codex = output.len();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                2,
+                ActivityRender::Full,
+                b"\x1b]104;264\x1b\\",
+                OwnedTerminalChannels::default(),
+                true,
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(
+            output.len(),
+            before_late_codex,
+            "old Codex native release cannot reset Cursor color"
+        );
+        assert!(cursor_write(
+            cursor_event("sessionEnd", "cursor-b", None),
+            &color,
+            &mut output
+        ));
+        assert_eq!(&output[before_late_codex..], b"\x1b]104;264\x1b\\");
+    }
+
+    #[test]
     fn strict_channels_do_not_acquire_output_without_an_exact_terminal_lease() {
         let root = TestRoot::new("strict-no-binding");
         let coordinator = ActivityCoordinator::disabled(&root.0);
@@ -4228,6 +4414,31 @@ mod tests {
             )
             .expect("lack of binding remains fail-open");
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn uncoordinated_legacy_hook_cannot_write_unclaimed_frame_color() {
+        let root = TestRoot::new("uncoordinated-color");
+        let coordinator = ActivityCoordinator::unbound_system(&root.0);
+        let mut output = Vec::new();
+        let bytes = b"\x1b]0;owned-title\x1b\\\x1b]4;264;rgb:11/22/33\x1b\\";
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                1,
+                ActivityRender::UncoordinatedFull,
+                bytes,
+                OwnedTerminalChannels {
+                    color: true,
+                    progress: false,
+                },
+                false,
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(output, b"\x1b]0;owned-title\x1b\\");
     }
 
     #[test]

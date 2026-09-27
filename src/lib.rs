@@ -27,6 +27,7 @@ pub mod repo;
 pub mod settings;
 pub mod settings_transfer;
 pub mod setup;
+mod terminal_color;
 pub mod title_authority;
 pub mod title_explanation;
 pub mod upgrade_preflight;
