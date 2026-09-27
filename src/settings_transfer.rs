@@ -1639,7 +1639,7 @@ mod tests {
         },
         settings::{
             ActivityMode, PresentationSettings, PresentationSettingsStore, PresentationTheme,
-            ProviderBadgePolicy, SpinnerPreset, TabColorMode, TitleMode,
+            ProviderBadgePolicy, SettingsError, SpinnerPreset, TabColorMode, TitleMode,
         },
     };
 
@@ -2285,6 +2285,71 @@ mod tests {
                 .unwrap()
                 .ends_with(b"# external drift\n"),
             "rollback must preserve an uncooperative editor's bytes"
+        );
+    }
+
+    #[test]
+    fn title_changing_import_bars_later_writer_during_hook_and_compensation() {
+        let root = tempfile::tempdir().unwrap();
+        let presentation_store = PresentationSettingsStore::new(root.path().join("config.toml"));
+        let interface_store = InterfacePreferencesStore::new(root.path().join("interface.toml"));
+        let workspace_store = WorkspacePreferenceStore::new(root.path().join("preferences.json"));
+        let presentation_snapshot = presentation_store.snapshot_read_only().unwrap();
+        let interface_snapshot = interface_store.snapshot_read_only().unwrap();
+        let workspace_snapshot = workspace_store.snapshot_read_only().unwrap();
+        let document = SettingsExportV1::new(None, None, &WorkspacePreferences::default())
+            .with_provider_overrides(BTreeMap::from([(
+                CliTarget::Codex,
+                PresentationOverride::default().with_mode(PresentationMode::PreserveNative),
+            )]));
+        let plan = document
+            .import_plan(
+                &presentation_snapshot,
+                &interface_snapshot,
+                &workspace_snapshot,
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+            )
+            .unwrap();
+        let mut attempts = Vec::new();
+        let mut writer_blocked = Vec::new();
+        let outcome = apply_import_plan_with_reconciliation(
+            &plan,
+            &presentation_store,
+            &presentation_snapshot,
+            &interface_store,
+            &interface_snapshot,
+            &workspace_store,
+            &workspace_snapshot,
+            |owns_title| {
+                attempts.push(owns_title);
+                let competing = presentation_store.clone();
+                let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+                let write_result = std::thread::scope(|scope| {
+                    let writer = scope.spawn(move || {
+                        started_tx.send(()).unwrap();
+                        competing.save(
+                            PresentationSettings::default().with_theme(PresentationTheme::Classic),
+                        )
+                    });
+                    started_rx.recv().unwrap();
+                    writer.join().unwrap()
+                });
+                writer_blocked.push(matches!(
+                    write_result,
+                    Err(SettingsError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock
+                ));
+                Err("synthetic Hook failure".to_owned())
+            },
+        );
+        assert_eq!(attempts, [false, true], "failure attempted compensation");
+        assert_eq!(writer_blocked, [true, true]);
+        assert_eq!(outcome, ImportApplyOutcome::PartialState);
+        assert!(
+            presentation_store
+                .snapshot_is_current(&presentation_snapshot)
+                .unwrap(),
+            "the later writer did not displace the compensated import"
         );
     }
 
