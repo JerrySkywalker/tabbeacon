@@ -359,6 +359,7 @@ pub fn complete_temporary_windows_terminal_acquisition<B: ExactOwnedWindowRecove
         prepared.creator_process_id,
         registration_budget,
     );
+    let registration = retry_late_exact_anchor(backend, prepared, registration);
     match registration {
         Ok(ownership_path) if launch_error.is_none() => {
             Ok(TemporaryWindowsTerminalAcquisition::Registered { ownership_path })
@@ -399,6 +400,41 @@ pub fn complete_temporary_windows_terminal_acquisition<B: ExactOwnedWindowRecove
             Ok(TemporaryWindowsTerminalAcquisition::Failed(receipt))
         }
     }
+}
+
+fn retry_late_exact_anchor<B: ExactOwnedWindowRecoveryBackend>(
+    backend: &B,
+    prepared: &TemporaryWindowsTerminalPreparedRun,
+    registration: VisualResult<PathBuf>,
+) -> VisualResult<PathBuf> {
+    // A synchronous UIA lookup can consume the remaining registration budget.
+    // An exact anchor seen during failure accounting gets one full ownership
+    // recheck. Ambiguous matches and creator-instance drift remain refused.
+    if matches!(
+        &registration,
+        Err(VisualError::Platform(detail))
+            if detail == "exact temporary Windows Terminal ownership is ambiguous: anchor_matches=0 window_matches=0"
+    ) && matches!(
+        backend.observe_exact_anchor(&prepared.anchor_title),
+        Ok(ExactWindowObservation {
+            anchor_tab_match_count: 1,
+            target_window_match_count: 1,
+            native_window_id: Some(hwnd),
+        }) if hwnd != 0
+    ) && matches!(
+        backend.creator_process_started_unix_ms(prepared.creator_process_id),
+        Ok(Some(started)) if started == prepared.creator_process_started_unix_ms
+    ) {
+        return register_temporary_windows_terminal(
+            backend,
+            &prepared.evidence_root,
+            &prepared.run_id,
+            &prepared.anchor_title,
+            &prepared.window_routing_id,
+            prepared.creator_process_id,
+        );
+    }
+    registration
 }
 
 /// Finalizes one registered lifecycle around capture or another bounded body.
@@ -1520,6 +1556,8 @@ mod tests {
         anchor_matches: Cell<u32>,
         window_matches: Cell<u32>,
         native_window_id: Cell<Option<isize>>,
+        miss_first_anchor_observation: Cell<bool>,
+        replace_creator_after_first_miss: Cell<bool>,
         close_calls: Cell<u32>,
         close_fails: Cell<bool>,
         close_leaves_window: Cell<bool>,
@@ -1532,6 +1570,8 @@ mod tests {
                 anchor_matches: Cell::new(1),
                 window_matches: Cell::new(1),
                 native_window_id: Cell::new(Some(72)),
+                miss_first_anchor_observation: Cell::new(false),
+                replace_creator_after_first_miss: Cell::new(false),
                 close_calls: Cell::new(0),
                 close_fails: Cell::new(false),
                 close_leaves_window: Cell::new(false),
@@ -1545,6 +1585,16 @@ mod tests {
             &self,
             _anchor_title: &str,
         ) -> VisualResult<ExactWindowObservation> {
+            if self.miss_first_anchor_observation.replace(false) {
+                if self.replace_creator_after_first_miss.get() {
+                    self.creator_process_started_unix_ms.set(Some(42));
+                }
+                return Ok(ExactWindowObservation {
+                    anchor_tab_match_count: 0,
+                    target_window_match_count: 0,
+                    native_window_id: None,
+                });
+            }
             Ok(ExactWindowObservation {
                 anchor_tab_match_count: self.anchor_matches.get(),
                 target_window_match_count: self.window_matches.get(),
@@ -2125,6 +2175,71 @@ mod tests {
         assert_eq!(receipt.temporary_windows_closed, Some(1));
         assert_eq!(receipt.owned_temporary_wt_remaining, Some(0));
         assert_eq!(backend.close_calls.get(), 1);
+    }
+
+    #[test]
+    fn late_exact_anchor_rechecks_creator_and_registers_after_zero_last_poll() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let prepared = prepare_temporary_windows_terminal_lifecycle(
+            &backend,
+            &root.0,
+            "TBWT-late-exact-anchor",
+            "TB-WT-ANCHOR-TBWT-late-exact-anchor",
+            "tabbeacon-TBWT-late-exact-anchor",
+            4242,
+        )
+        .expect("durable PREPARED record");
+        backend.miss_first_anchor_observation.set(true);
+
+        let outcome = complete_temporary_windows_terminal_acquisition(
+            &backend,
+            &prepared,
+            std::time::Duration::ZERO,
+            None,
+        )
+        .expect("late exact anchor is registered");
+        let TemporaryWindowsTerminalAcquisition::Registered { ownership_path } = outcome else {
+            panic!("exact recheck must register the same creator's window");
+        };
+        assert!(ownership_path.is_file());
+        assert_eq!(backend.close_calls.get(), 0);
+    }
+
+    #[test]
+    fn late_exact_anchor_refuses_reused_creator_process() {
+        let root = TestRoot::new();
+        let backend = FakeBackend::exact();
+        let prepared = prepare_temporary_windows_terminal_lifecycle(
+            &backend,
+            &root.0,
+            "TBWT-late-reused-creator",
+            "TB-WT-ANCHOR-TBWT-late-reused-creator",
+            "tabbeacon-TBWT-late-reused-creator",
+            4242,
+        )
+        .expect("durable PREPARED record");
+        backend.miss_first_anchor_observation.set(true);
+        backend.replace_creator_after_first_miss.set(true);
+
+        let outcome = complete_temporary_windows_terminal_acquisition(
+            &backend,
+            &prepared,
+            std::time::Duration::ZERO,
+            None,
+        )
+        .expect("ambiguous late anchor is accounted");
+        assert!(matches!(
+            outcome,
+            TemporaryWindowsTerminalAcquisition::Failed(_)
+        ));
+        assert!(
+            !root
+                .0
+                .join("temporary-wt-TBWT-late-reused-creator.ownership.json")
+                .exists()
+        );
+        assert_eq!(backend.close_calls.get(), 0);
     }
 
     #[test]
