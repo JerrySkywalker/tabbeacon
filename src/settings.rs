@@ -1168,6 +1168,27 @@ impl PresentationSettingsStore {
         })
     }
 
+    /// Runs a multi-store coordinator only while this exact presentation
+    /// write remains current. The caller retains responsibility for its
+    /// cross-file recovery journal and rollback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when current settings cannot be safely checked.
+    pub fn with_snapshot_write_receipt_lock<T>(
+        &self,
+        receipt: &PresentationSettingsWriteReceipt,
+        operation: impl FnOnce() -> T,
+    ) -> Result<Option<T>, SettingsError> {
+        self.with_lock(|| {
+            let current = self.snapshot_unlocked()?;
+            if !receipt.matches(&current) {
+                return Ok(None);
+            }
+            Ok(Some(operation()))
+        })
+    }
+
     /// Replaces the settings with documented v0.1 defaults.
     ///
     /// # Errors

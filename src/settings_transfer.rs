@@ -1462,12 +1462,20 @@ fn apply_import_plan_inner(
             .expect("title change requires coordinator");
         #[cfg(test)]
         interrupt_import_test_at("hook_before");
-        if coordinator(next_owner).is_err() {
-            // A failed external write might already have reached one owned
-            // Codex file. Attempt an ownership-checked compensation, but do
-            // not call the combined operation rolled back without a durable
-            // external receipt.
-            let _ = coordinator(previous_owner);
+        let coordinated = presentation_receipt.as_ref().map(|receipt| {
+            presentation_store.with_snapshot_write_receipt_lock(receipt, || {
+                if coordinator(next_owner).is_ok() {
+                    true
+                } else {
+                    // A failed external write might already have reached an
+                    // owned Codex file. Keep compensation serialized with
+                    // the presentation document it is restoring.
+                    let _ = coordinator(previous_owner);
+                    false
+                }
+            })
+        });
+        if !matches!(coordinated, Some(Ok(Some(true)))) {
             let _ = rollback_import(
                 presentation_store,
                 presentation_snapshot,
@@ -2260,14 +2268,23 @@ mod tests {
                 &workspace_store,
                 &workspace_snapshot,
                 |_| {
-                    presentation_store
-                        .save(PresentationSettings::default())
-                        .unwrap();
+                    // An external editor can ignore config.lock. Its exact
+                    // bytes must survive the import's failed postcheck.
+                    let path = root.path().join("config.toml");
+                    let mut bytes = fs::read(&path).unwrap();
+                    bytes.extend_from_slice(b"\n# external drift\n");
+                    fs::write(path, bytes).unwrap();
                     Ok(())
                 },
             ),
             ImportApplyOutcome::PartialState,
             "drift during external coordination cannot be reported as Applied"
+        );
+        assert!(
+            fs::read(root.path().join("config.toml"))
+                .unwrap()
+                .ends_with(b"# external drift\n"),
+            "rollback must preserve an uncooperative editor's bytes"
         );
     }
 
