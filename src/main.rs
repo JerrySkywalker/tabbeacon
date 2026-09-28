@@ -1435,18 +1435,33 @@ fn convergence_verify(path: &std::path::Path, expected_head: &str) -> ExitCode {
 }
 
 fn setup_codex(output_mode: OutputMode, language: Option<InterfaceLanguage>) -> ExitCode {
-    let settings = settings_store().map_or_else(
-        |_| PresentationSettings::default(),
-        |store| store.load_or_default(),
-    );
+    let store = match settings_store() {
+        Ok(store) => store,
+        Err(error) => return management_error_for_output("SETUP", &error, output_mode, language),
+    };
+    let owns_title = match codex_setup_title_ownership(&store) {
+        Ok(owns_title) => owns_title,
+        Err(error) => return management_error_for_output("SETUP", &error, output_mode, language),
+    };
     let integration = match CodexIntegration::from_environment() {
         Ok(integration) => integration,
         Err(error) => return setup_management_error(&error, output_mode, language),
     };
-    match integration.setup_with_title_ownership(settings.title().owns_tabbeacon_title()) {
+    match integration.setup_with_title_ownership(owns_title) {
         Ok(outcome) => print_setup_outcome(outcome, output_mode, language),
         Err(error) => setup_management_error(&error, output_mode, language),
     }
+}
+
+fn codex_setup_title_ownership(store: &PresentationSettingsStore) -> io::Result<bool> {
+    store
+        .resolve_provider_read_only(
+            CliTarget::Codex,
+            PresentationCapabilities::CODEX,
+            ApplicationStatus::Unproven,
+        )
+        .map(|resolved| resolved.effective.title().owns_tabbeacon_title())
+        .map_err(io::Error::other)
 }
 
 fn setup_agy(output_mode: OutputMode) -> ExitCode {
@@ -3898,6 +3913,8 @@ fn apply_settings_change(
     if snapshot.settings() != before {
         return Err(settings_conflict_error());
     }
+    let (before_owns_title, after_owns_title) =
+        codex_global_title_transition(&snapshot, before, after)?;
     let receipt = match store
         .save_snapshot_if_unchanged(&snapshot, after)
         .map_err(io::Error::other)?
@@ -3905,14 +3922,12 @@ fn apply_settings_change(
         SnapshotSaveOutcome::Saved(receipt) => receipt,
         SnapshotSaveOutcome::Conflict => return Err(settings_conflict_error()),
     };
-    let title_outcome = if before.title() == after.title() {
+    let title_outcome = if before_owns_title == after_owns_title {
         TitleOwnershipOutcome::AlreadyConfigured
     } else {
         reconcile_saved_title(store, &receipt, &snapshot, || {
             CodexIntegration::from_environment()
-                .and_then(|integration| {
-                    integration.reconcile_title_ownership(after.title().owns_tabbeacon_title())
-                })
+                .and_then(|integration| integration.reconcile_title_ownership(after_owns_title))
                 .map_err(|error| error.to_string())
         })?
     };
@@ -3942,6 +3957,8 @@ fn apply_control_center_settings_change_with(
     if snapshot.settings() != before {
         return Err(settings_conflict_error());
     }
+    let (before_owns_title, after_owns_title) =
+        codex_global_title_transition(snapshot, before, after)?;
     let receipt = match store
         .save_snapshot_if_unchanged(snapshot, after)
         .map_err(io::Error::other)?
@@ -3949,18 +3966,38 @@ fn apply_control_center_settings_change_with(
         SnapshotSaveOutcome::Saved(receipt) => receipt,
         SnapshotSaveOutcome::Conflict => return Err(settings_conflict_error()),
     };
-    let title_outcome = if before.title() == after.title() {
+    let title_outcome = if before_owns_title == after_owns_title {
         TitleOwnershipOutcome::AlreadyConfigured
     } else {
-        reconcile_saved_title(store, &receipt, snapshot, || {
-            reconcile(after.title().owns_tabbeacon_title())
-        })?
+        reconcile_saved_title(store, &receipt, snapshot, || reconcile(after_owns_title))?
     };
     let next_snapshot = store.snapshot_read_only().map_err(io::Error::other)?;
     if next_snapshot.settings() != after {
         return Err(settings_conflict_error());
     }
     Ok((title_outcome, next_snapshot))
+}
+
+fn codex_global_title_transition(
+    snapshot: &PresentationSettingsSnapshot,
+    before: PresentationSettings,
+    after: PresentationSettings,
+) -> io::Result<(bool, bool)> {
+    let provider = snapshot
+        .provider_override(CliTarget::Codex)
+        .map_err(io::Error::other)?;
+    let owns_title = |global| {
+        resolve_presentation(
+            global,
+            provider,
+            PresentationCapabilities::CODEX,
+            ApplicationStatus::Unproven,
+        )
+        .effective
+        .title()
+        .owns_tabbeacon_title()
+    };
+    Ok((owns_title(before), owns_title(after)))
 }
 
 fn settings_conflict_error() -> io::Error {
@@ -6095,6 +6132,47 @@ mod tests {
         assert!(failed.is_err());
         assert_eq!(store.load().unwrap(), concurrent);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn control_center_global_title_apply_respects_explicit_and_partial_codex_overrides() {
+        for (title, expected_calls) in [(Some("native"), 0), (Some("tabbeacon"), 0), (None, 1)] {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("tabbeacon-ui-provider-title-{unique}"));
+            fs::create_dir_all(&root).unwrap();
+            let path = root.join("config.toml");
+            let title_line =
+                title.map_or_else(String::new, |title| format!("title = \"{title}\"\n"));
+            fs::write(&path, format!("[presentation]\ntitle = \"native\"\n\n[provider_presentation.codex]\n{title_line}tab_color = \"tabbeacon\"\n\n[foreign]\nkeep = true\n")).unwrap();
+            let store = PresentationSettingsStore::new(&path);
+            let snapshot = store.snapshot_read_only().unwrap();
+            let before = snapshot.settings();
+            let after = before.with_title(TitleMode::TabBeacon);
+            let mut calls = 0;
+            let (_, saved) = apply_control_center_settings_change_with(
+                &store,
+                &snapshot,
+                before,
+                after,
+                |owns_title| {
+                    assert!(owns_title);
+                    calls += 1;
+                    Ok(TitleOwnershipOutcome::Updated)
+                },
+            )
+            .unwrap();
+            assert_eq!(calls, expected_calls);
+            assert_eq!(saved.settings(), after);
+            assert_eq!(
+                saved.provider_override(CliTarget::Codex).unwrap(),
+                snapshot.provider_override(CliTarget::Codex).unwrap()
+            );
+            assert!(fs::read_to_string(&path).unwrap().contains("keep = true"));
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

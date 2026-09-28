@@ -13,6 +13,9 @@ use crate::{
         InterfacePreferencesSnapshot, InterfacePreferencesSnapshotSaveOutcome,
         InterfacePreferencesStore,
     },
+    presentation_policy::{
+        ApplicationStatus, CliTarget, PresentationCapabilities, resolve_presentation,
+    },
     providers::codex::{CodexDoctorReport, CodexHookProfile, DoctorStatus, SetupOutcome},
     providers::registry::ProviderRegistry,
     settings::{
@@ -281,11 +284,12 @@ impl SetupPlan {
         if snapshot.settings() != self.before {
             return Ok(SetupApplyResult::SettingsConflict);
         }
+        let owns_title = codex_draft_title_ownership(snapshot, self.draft)?;
         let receipt = match store.save_snapshot_if_unchanged(snapshot, self.draft)? {
             SnapshotSaveOutcome::Conflict => return Ok(SetupApplyResult::SettingsConflict),
             SnapshotSaveOutcome::Saved(receipt) => receipt,
         };
-        match setup(self.draft.title().owns_tabbeacon_title()) {
+        match setup(owns_title) {
             Ok(outcome) => Ok(SetupApplyResult::Applied(outcome)),
             Err(reason) => {
                 let settings_restored = matches!(
@@ -452,6 +456,7 @@ impl GuidedSetupPlan {
         if interface_snapshot.preferences() != self.interface_before {
             return Ok(GuidedSetupApplyResult::InterfaceConflict);
         }
+        let owns_title = codex_draft_title_ownership(settings_snapshot, self.draft)?;
 
         let interface_receipt = if self.interface_draft == self.interface_before {
             None
@@ -493,7 +498,7 @@ impl GuidedSetupPlan {
             }
         };
 
-        match setup(self.draft.title().owns_tabbeacon_title()) {
+        match setup(owns_title) {
             Ok(outcome) => Ok(GuidedSetupApplyResult::Applied(outcome)),
             Err(reason) => {
                 let settings_restored = settings_receipt.as_ref().is_none_or(|receipt| {
@@ -516,6 +521,21 @@ impl GuidedSetupPlan {
             }
         }
     }
+}
+
+fn codex_draft_title_ownership(
+    snapshot: &PresentationSettingsSnapshot,
+    draft: PresentationSettings,
+) -> Result<bool, SettingsError> {
+    Ok(resolve_presentation(
+        draft,
+        snapshot.provider_override(CliTarget::Codex)?,
+        PresentationCapabilities::CODEX,
+        ApplicationStatus::Unproven,
+    )
+    .effective
+    .title()
+    .owns_tabbeacon_title())
 }
 
 /// Result of applying or cancelling the combined guided setup draft.
@@ -633,6 +653,69 @@ mod tests {
         assert_eq!(plan.preview_settings(), draft);
         assert_eq!(plan.cancel(), SetupApplyResult::Cancelled);
         assert!(!root.exists(), "cancel must not create settings or a lock");
+    }
+
+    #[test]
+    fn setup_plans_use_snapshot_provider_title_with_global_draft() {
+        for composite in [false, true] {
+            for (provider_title, expected_owner) in [("native", false), ("tabbeacon", true)] {
+                let config = temporary_config("provider-title-draft");
+                let root = config.parent().unwrap().parent().unwrap();
+                fs::create_dir_all(config.parent().unwrap()).unwrap();
+                fs::write(&config, format!(
+                    "[presentation]\ntitle = \"native\"\n\n[provider_presentation.codex]\ntitle = \"{provider_title}\"\ntab_color = \"tabbeacon\"\nactivity = \"off\"\n\n[foreign]\nkeep = true\n"
+                )).unwrap();
+                let store = PresentationSettingsStore::new(&config);
+                let snapshot = store.snapshot_read_only().unwrap();
+                let draft = snapshot.settings().with_title(TitleMode::TabBeacon);
+                let calls = Cell::new(0);
+                let setup = |owns_title| {
+                    assert_eq!(owns_title, expected_owner);
+                    calls.set(calls.get() + 1);
+                    Ok(SetupOutcome::AlreadyInstalled)
+                };
+                if composite {
+                    let interface_store =
+                        InterfacePreferencesStore::new(config.with_file_name("interface.toml"));
+                    let interface_snapshot = interface_store.snapshot_read_only().unwrap();
+                    let plan = GuidedSetupPlan::new(
+                        snapshot.settings(),
+                        interface_snapshot.preferences(),
+                        discovery(),
+                    )
+                    .with_presentation_draft(draft);
+                    assert!(matches!(
+                        plan.apply(
+                            &store,
+                            &snapshot,
+                            &interface_store,
+                            &interface_snapshot,
+                            setup
+                        )
+                        .unwrap(),
+                        GuidedSetupApplyResult::Applied(_)
+                    ));
+                    assert!(!interface_store.path().exists());
+                } else {
+                    assert!(matches!(
+                        SetupPlan::new(snapshot.settings(), discovery())
+                            .with_draft(draft)
+                            .apply(&store, &snapshot, setup)
+                            .unwrap(),
+                        SetupApplyResult::Applied(_)
+                    ));
+                }
+                assert_eq!(calls.get(), 1);
+                let saved = store.snapshot_read_only().unwrap();
+                assert_eq!(saved.settings(), draft);
+                assert_eq!(
+                    saved.provider_override(CliTarget::Codex).unwrap(),
+                    snapshot.provider_override(CliTarget::Codex).unwrap()
+                );
+                assert!(fs::read_to_string(&config).unwrap().contains("keep = true"));
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
     }
 
     #[test]

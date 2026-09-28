@@ -2007,6 +2007,136 @@ fn setup_codex_defaults_to_human_output_and_plain_retains_receipts() {
 }
 
 #[test]
+fn setup_codex_preserves_provider_title_override_on_install_and_repeat() {
+    for (label, global_title, provider_title, owns_title) in [
+        ("native-override", "tabbeacon", "native", false),
+        ("owned-override", "native", "tabbeacon", true),
+        ("inherited-title", "native", "", false),
+    ] {
+        let root = TestRoot::new(label);
+        let codex = fake_codex_directory(&root, "0.149.0");
+        let settings_path = root.child("local-appdata/TabBeacon/config.toml");
+        fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+        let title_override = if provider_title.is_empty() {
+            String::new()
+        } else {
+            format!("title = \"{provider_title}\"\n")
+        };
+        let settings = format!(
+            "[presentation]\ntitle = \"{global_title}\"\n\n[provider_presentation.codex]\n{title_override}tab_color = \"tabbeacon\"\nactivity = \"off\"\n\n[provider_presentation.agy]\ntitle = \"native\"\n\n[foreign]\nkeep = true\n"
+        );
+        fs::write(&settings_path, settings.as_bytes()).unwrap();
+        let config_path = root.child("codex-home/config.toml");
+        fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        fs::write(
+            &config_path,
+            "[tui]\nterminal_title = [\"model\"]\n\n[foreign]\nkeep = true\n",
+        )
+        .unwrap();
+        let manifest_path =
+            root.child("local-appdata/TabBeacon/codex-integration/integration-v1.json");
+        let hooks_path = root.child("codex-home/hooks.json");
+        let setup = isolated_command_with_codex(&root, &codex)
+            .args(["setup", "codex", "--plain"])
+            .output()
+            .unwrap();
+        assert!(
+            setup.status.success(),
+            "{}",
+            String::from_utf8_lossy(&setup.stderr)
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        assert_eq!(manifest["title_owned"], owns_title, "{label}");
+        let config_bytes = fs::read(&config_path).unwrap();
+        let config: toml_edit::DocumentMut = String::from_utf8(config_bytes.clone())
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(config["foreign"]["keep"].as_bool(), Some(true));
+        let title = config["tui"]["terminal_title"].as_array().unwrap();
+        assert_eq!(title.is_empty(), owns_title, "{label}");
+        if !owns_title {
+            assert_eq!(title.get(0).unwrap().as_str(), Some("model"));
+        }
+        let hooks_bytes = fs::read(&hooks_path).unwrap();
+        let manifest_bytes = fs::read(&manifest_path).unwrap();
+        let repeat = isolated_command_with_codex(&root, &codex)
+            .args(["setup", "codex", "--plain"])
+            .output()
+            .unwrap();
+        assert!(
+            repeat.status.success(),
+            "{}",
+            String::from_utf8_lossy(&repeat.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&repeat.stdout).contains("CODEX_INTEGRATION=ALREADY_INSTALLED")
+        );
+        assert_eq!(fs::read(&settings_path).unwrap(), settings.as_bytes());
+        assert_eq!(fs::read(&config_path).unwrap(), config_bytes);
+        assert_eq!(fs::read(&hooks_path).unwrap(), hooks_bytes);
+        assert_eq!(fs::read(&manifest_path).unwrap(), manifest_bytes);
+    }
+}
+
+#[test]
+fn setup_codex_rejects_malformed_preferences_before_external_writes() {
+    let root = TestRoot::new("setup-malformed-provider");
+    let codex = fake_codex_directory(&root, "0.149.0");
+    let path = root.child("local-appdata/TabBeacon/config.toml");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let original = b"[provider_presentation.codex]\ntitle = 123\n";
+    fs::write(&path, original).unwrap();
+    let setup = isolated_command_with_codex(&root, &codex)
+        .args(["setup", "codex", "--plain"])
+        .output()
+        .unwrap();
+    assert!(!setup.status.success());
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert!(!root.child("codex-home/hooks.json").exists());
+    assert!(
+        !root
+            .child("local-appdata/TabBeacon/codex-integration/integration-v1.json")
+            .exists()
+    );
+}
+
+#[test]
+fn global_title_apply_cannot_retake_explicit_native_codex_title() {
+    let root = TestRoot::new("global-title-provider-override");
+    let codex = fake_codex_directory(&root, "0.149.0");
+    let settings = root.child("local-appdata/TabBeacon/config.toml");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::write(&settings, "[presentation]\ntitle = \"native\"\n\n[provider_presentation.codex]\ntitle = \"native\"\ntab_color = \"tabbeacon\"\nactivity = \"off\"\n\n[foreign]\nkeep = true\n").unwrap();
+    let setup = isolated_command_with_codex(&root, &codex)
+        .args(["setup", "codex", "--plain"])
+        .output()
+        .unwrap();
+    assert!(setup.status.success());
+    let config_path = root.child("codex-home/config.toml");
+    let config_before = fs::read(&config_path).ok();
+    let manifest_path = root.child("local-appdata/TabBeacon/codex-integration/integration-v1.json");
+    let manifest_before = fs::read(&manifest_path).unwrap();
+    let apply = isolated_command_with_codex(&root, &codex)
+        .args(["config", "set", "title", "tabbeacon", "--plain"])
+        .output()
+        .unwrap();
+    assert!(
+        apply.status.success(),
+        "{}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    assert_eq!(fs::read(&config_path).ok(), config_before);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+    let effective = isolated_command_with_codex(&root, &codex)
+        .args(["config", "provider", "codex", "show", "--plain"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&effective.stdout).contains("EFFECTIVE_TITLE=native"));
+}
+
+#[test]
 fn codex_repair_v2_plain_and_json_diagnostics_bind_apply_to_preview_digest() {
     let root = TestRoot::new("codex-repair-v2-output");
     let codex = fake_codex_directory(&root, "0.149.0");
