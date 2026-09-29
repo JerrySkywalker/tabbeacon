@@ -16,6 +16,26 @@ or after each car. Read current repository instructions first, verify the merged
 admission, then execute G00-G06 continuously as prerequisites permit. G07 remains
 an explicit public-release boundary. Do not infer completion from this runbook.
 
+## Current closeout authority — 2026-09-29
+
+Continue the existing owned `feat/v080-multicli-train-001` worktree and Draft
+PR #119 from admitted fd9aebd00cf99c45634d0ea240e7d4afc64f5f62; do not reset to
+that reference or repeat G00/completed real acceptance. Recheck current paths,
+process ownership, isolation and exact remote state after reboot.
+
+Owner approved the bounded Codex 0.157.1 original-Hook Warning/Failed/404 known
+limitation and actual Agy 1.2.7 title-only/preserve-native admission work described
+in ROADMAP_V08. Neither decision is a detection/compatibility/L4 PASS. Preserve
+all remaining P/C/T, supported E, P08, Visual, mixed-provider and safety gates.
+Finish changed-title Visual and narrow Agy work, freeze version/source/release
+binary before one combined attended packet, then complete G06 only after required
+real evidence. Reuse accepted unchanged-risk single-Codex Interrupt and dual-Cursor
+proofs with their original pins. Do not repeat trust/login if still valid.
+
+This current instruction overrides the generic merge steps below: keep Draft;
+no merge, ready conversion, tag, publication, daily install or automatic trust.
+All safe implementation/test/commit/push/PR-text/checkpoint work is authorized.
+
 ## 1. Storage and launch
 
 ZenBook Duo uses these Owner-approved roots:

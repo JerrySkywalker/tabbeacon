@@ -29,6 +29,12 @@ shows that `Stop` input exposes a turn ID but no failure category;
 `Interrupt` identifies an interrupted main turn. A warning or failed-turn color
 must be based on proved structured evidence. If that evidence is unavailable,
 TabBeacon remains fail-open and the original 404 class stays unresolved.
+The Owner approved this audited 0.157.1 original-command Hook Warning/Failed/404
+gap as a v0.8.0 known limitation. These errors may leave the tab's normal color
+or state unchanged; detection is not proved and #116 remains OPEN. Interrupt
+success does not repair them. This is a bounded path/version finding, not a
+claim about every Codex version. New authoritative structured signals can reopen
+the fix; no terminal-text, ANSI, transcript or model-output inference is used.
 The v0.8.0 candidate has a separately admitted profile for the exact audited
 Codex 0.156.1 and 0.157.1 Hook contracts. Isolated tests cover the owned `Interrupt`
 declaration, fresh trust, public Hook command, generation reconciliation, and

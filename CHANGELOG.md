@@ -12,7 +12,9 @@ All notable changes to TabBeacon will be documented here.
   while preserving its native title; the original daily command remains `agent`.
 - Added a capability-gated Codex structured `Interrupt` path and bilingual
   product terminology. Warning, failed-turn, and the original HTTP 404 class
-  remain separate evidence questions; Issue #116 is open.
+  in the audited Codex 0.157.1 original-command Hook path are Owner-approved
+  v0.8.0 known limitations: these errors may leave tab state unchanged, their
+  detection is not PASS, and Issue #116 remains open.
 - Kept public release and real mixed-provider acceptance separate from the
   deterministic candidate tests. No provider support expansion is declared by
   this changelog entry.

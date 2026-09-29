@@ -43,6 +43,15 @@ cover several rows under [QUALITY_GATES.md](QUALITY_GATES.md).
 
 ### E — Codex abnormal outcomes
 
+Owner decision (2026-09-29, same Train/PR #119): unobservable Warning, Failed
+and original HTTP 404 in the audited Codex 0.157.1 original-command Hook path
+are approved v0.8.0 known limitations. Their detection remains UNPROVEN, not
+PASS; #116 stays OPEN and these errors may leave tab state unchanged. E02/E04/
+E05/E06 still apply to supported authoritative states and real Interrupt/recovery;
+E01/E07 must prove accurate inventory/disclosure. E is not N/A. P/C/T, P08,
+ownership and other gates are unchanged. New legitimate structured signals reopen
+the actual defect work; no all-version impossibility claim or text inference.
+
 | ID | Required proof | Representative family |
 | --- | --- | --- |
 | E01 | Enumerate authoritative evidence for warning/interruption/failed-turn outcomes and separately classify the original Issue #116 HTTP 404 symptom. | CODEX_EVIDENCE |
@@ -70,7 +79,7 @@ cover several rows under [QUALITY_GATES.md](QUALITY_GATES.md).
 | X01 | Upgrade from a representative v0.7.3 configuration | Preserve settings, aliases, unrelated integrations, and old meanings; do not install Cursor or replace preferences automatically. |
 | X02 | Codex, Agy, and Cursor run concurrently | Independent policy and session state, no shared writer interference, no unsupported Agy capabilities. |
 | X03 | Cursor updates its own title repeatedly | TabBeacon never races or restores a cached title; only exact-owned color updates are allowed in strict color-only mode. |
-| X04 | Codex fails and later succeeds | Correct abnormal state, generation-safe recovery, no stale success and no permanently sticky red state. |
+| X04 | Codex has an authoritative abnormal outcome and later succeeds | Correct supported abnormal state and generation-safe recovery; unobservable Warning/Failed/original404 retain the approved limitation above, without claiming detection. |
 | X05 | Switch an active provider to preserve-native | Stop persistent presentation, release only proved ownership, preserve foreign sessions/processes and native title. |
 | X06 | User config drifts or a capability is missing | Refuse unsafe overwrite; explain requested/effective mismatch and restart needs; never silently claim success. |
 | X07 | Export/import and downgrade/rollback | Round-trip overrides and prove an actionable restore path; replacing the executable alone is not accepted rollback proof. |
@@ -110,6 +119,11 @@ When the original #116 class remains unsupported, show the exact missing signal 
 safe fail-open behavior; leave the issue unresolved. Required release scope is not
 reduced automatically. Continue safe independent work and obtain a specific Owner
 decision only for an actual unresolved release-impacting limitation.
+That bounded Owner decision was supplied on 2026-09-29 as recorded above;
+do not request it again or mark the unavailable detection PASS. Actual Agy 1.2.7
+narrow title-profile admission is also authorized, but still needs configuration,
+contract and real callback/preserve-native evidence. Exact 1.1.19 remains supported;
+version ordering, fixtures and admission authorization alone do not prove L4.
 
 ## 4. Candidate and publication acceptance
 

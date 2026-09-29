@@ -31,13 +31,37 @@ Read with:
 
 ## 1. Owner decisions and release shape
 
+### Owner closeout decisions — 2026-09-29
+
+The Owner's explicit continuation instruction for PR #119 approves two bounded
+decisions within this same Train. P/C/T and all other gates remain unchanged.
+
+- In the audited Codex 0.157.1 original-command Hook path, Warning, Failed,
+  and the original HTTP 404 class lack authoritative signals. v0.8.0 may disclose
+  them as approved known limitations instead of requiring their detection.
+  This is neither detection PASS nor a fix: these errors may leave the tab state
+  unchanged, and #116 remains OPEN. Interrupt/recovery, structured supported
+  states, attribution, Cursor and P08 still require their actual proofs. Do not
+  generalize this path/version finding or infer errors from text/ANSI/transcripts.
+  Resume the actual #116 fix when a lawful structured signal becomes available.
+- Actual Agy 1.2.7 may undergo narrow admission in the existing adapter for
+  title-only, preserve-native and safe configuration coordination. Approval to
+  investigate is not compatibility or real L4 PASS. Preserve exact 1.1.19 support;
+  no arbitrary version-range extension, fake provider proof, added channels,
+  architecture rewrite or daily installation change. If a small compatible change
+  is insufficient, check a genuine source-trusted isolated 1.1.19 fallback and
+  report its concrete prerequisite if absent.
+
+Keep PR #119 Draft. Merge, ready-for-review conversion, tags, publication, daily
+installation and automatic Hook trust are not authorized; G07 remains separate.
+
 One stable release contains all four work packages:
 
 | Package | Required user value |
 | --- | --- |
 | P — per-CLI presentation policy | Codex, Agy, and Cursor can have independent presentation preferences, with honest capability constraints. |
 | C — Cursor integration | Preserve the existing Cursor CLI command and native title; formally qualify strict color-only operation. |
-| E — Codex abnormal outcomes | Project structured warning, interruption, and failure evidence and reconcile subsequent recovery; track Issue #116 explicitly. |
+| E — Codex abnormal outcomes | Preserve proven structured state, interruption and recovery; disclose the approved unobservable Warning/Failed/original-404 limitation and keep Issue #116 open. |
 | T — bilingual terminology | Provide a consistent English/Chinese glossary and align configuration, diagnosis, help, and support wording. |
 
 Implement through focused, independently revertible PRs. Do not publish a partial
@@ -203,6 +227,8 @@ or unavailable. If required evidence cannot be obtained, latch that limitation,
 continue safe independent work, and do not close #116 or declare the release ready
 on unrelated failures' evidence. Resolving a release-impacting gap requires proof
 or an explicit Owner scope/limitation decision, not an Implementer-created waiver.
+The 2026-09-29 decision above supplies that bounded limitation approval. E remains
+applicable; supported state, Interrupt, recovery and truthful disclosure must pass.
 
 ## 7. T — bilingual terminology and product-text consistency
 

@@ -39,6 +39,16 @@ reaches capacity.
 
 ## v0.8.0 candidate evidence boundary
 
+Owner closeout decisions (2026-09-29): Warning/Failed/original HTTP 404 without
+authoritative signals in the audited Codex 0.157.1 original-command Hook path
+are approved known limitations, not detection PASS. Errors may leave tab state
+unchanged; #116 stays OPEN. Supported structured states, Interrupt/recovery,
+ownership and real mixed-provider acceptance remain required. The pinned release
+single-Codex Interrupt/recovery/normal-exit observation is accepted; daily
+installation is a separate, unauthorized action. Actual Agy 1.2.7 narrow
+title-only/preserve-native admission is authorized but not yet compatibility/L4
+PASS; this does not change the public support table or exact 1.1.19 support.
+
 The candidate's saved per-CLI preferences and deterministic event fixtures do
 not change the production table above. Installed Hook delivery, Hook trust,
 terminal binding, and effective visible output are separate observations.
