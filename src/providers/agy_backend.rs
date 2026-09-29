@@ -1052,11 +1052,16 @@ impl AgyProductionSetup {
                 false,
             ),
             Ok(Some(manifest)) => match self.current_matches_owned(&manifest) {
-                Ok(true) if manifest.schema == AGY_SETUP_MANIFEST_SCHEMA => readiness(
-                    AgyIntegrationReadiness::SupportedConfigured,
-                    Some(version),
-                    true,
-                ),
+                Ok(true)
+                    if manifest.schema == AGY_SETUP_MANIFEST_SCHEMA
+                        && manifest.admitted_version == version =>
+                {
+                    readiness(
+                        AgyIntegrationReadiness::SupportedConfigured,
+                        Some(version),
+                        true,
+                    )
+                }
                 Ok(true | false) | Err(_) => readiness(
                     AgyIntegrationReadiness::ConfigurationDrift,
                     Some(version),
@@ -1135,6 +1140,9 @@ impl AgyProductionSetup {
             admitted_version = Some(self.require_admitted_version()?);
         }
         if let Some(manifest) = manifest {
+            if admitted_version.as_deref() != Some(manifest.admitted_version.as_str()) {
+                return Err(AgyProductionSetupError::ConfigurationDrift);
+            }
             let current = fs::read(&self.config_path)
                 .map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
             if self
@@ -2038,6 +2046,42 @@ mod tests {
             );
         }
         // Pure normalization does not create this workspace or persist content.
+    }
+
+    #[test]
+    fn owned_manifest_refuses_live_version_changes_without_writes() {
+        for (installed, current) in [("1.1.19", "1.2.7"), ("1.2.7", "1.1.19")] {
+            let root = temp_root("version-drift");
+            let config = root.join("settings.json");
+            let executable = root.join("tabbeacon.exe");
+            fs::create_dir_all(&root).unwrap();
+            fs::write(&executable, b"synthetic product fixture, not Agy").unwrap();
+            fs::write(&config, b"{\"unrelated\":true}\n").unwrap();
+            let mut setup =
+                AgyProductionSetup::new(&config, root.join("state"), &executable, "agy");
+            setup.version_override = super::AgyVersion::parse(installed);
+            assert_eq!(setup.setup(), Ok(AgyProductionSetupOutcome::Installed));
+            let before = fs::read(&config).unwrap();
+            let manifest = fs::read(setup.manifest_path()).unwrap();
+            setup.version_override = super::AgyVersion::parse(current);
+            assert_eq!(
+                setup.inspect().state,
+                AgyIntegrationReadiness::ConfigurationDrift
+            );
+            assert_eq!(
+                setup.setup(),
+                Err(AgyProductionSetupError::ConfigurationDrift)
+            );
+            assert_eq!(
+                setup.reconcile_title_ownership_if_owned(true),
+                Err(AgyProductionSetupError::ConfigurationDrift)
+            );
+            assert_eq!(fs::read(&config).unwrap(), before);
+            assert_eq!(fs::read(setup.manifest_path()).unwrap(), manifest);
+            // Removal still proves ownership and restores without requiring a version downgrade.
+            assert_eq!(setup.uninstall(), Ok(AgyProductionSetupOutcome::Removed));
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

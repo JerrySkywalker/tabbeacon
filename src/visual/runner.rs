@@ -1289,6 +1289,9 @@ fn observe_codex_title_precedence(
                 expected.case.expected_title_frames = vec![expected.case.expected_title.clone()];
             }
             observation.record_target(writer, &expected, &target.dump)?;
+            // Consume this exact phase before acknowledging it. Otherwise the next
+            // wait can race the emitter and reject the previous phase's marker.
+            fs::remove_file(&signal)?;
             fs::write(&ack, phase)?;
         }
         Ok(())
