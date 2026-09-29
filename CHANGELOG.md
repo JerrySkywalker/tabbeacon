@@ -2,9 +2,7 @@
 
 All notable changes to TabBeacon will be documented here.
 
-## [Unreleased]
-
-### v0.8.0 candidate work (not publicly released)
+## [0.8.0] - 2026-09-30
 
 - Added partial per-provider presentation overrides, explicit preview/Apply,
   portable v2 configuration transfer, and ownership-aware transition handling.
@@ -15,9 +13,12 @@ All notable changes to TabBeacon will be documented here.
   in the audited Codex 0.157.1 original-command Hook path are Owner-approved
   v0.8.0 known limitations: these errors may leave tab state unchanged, their
   detection is not PASS, and Issue #116 remains open.
-- Kept public release and real mixed-provider acceptance separate from the
-  deterministic candidate tests. No provider support expansion is declared by
-  this changelog entry.
+- Admitted exactly Agy 1.2.7 alongside 1.1.19 for title-only and
+  preserve-native configuration. Its real mixed Working title is observed;
+  real Ready visibility and attended preserve-native switching remain unproven.
+- Accepted mixed Codex/Cursor/Agy working, completion and noninterference
+  observations; same-tab handoff and Agy native switching were not executed
+  at the Owner's direction. Cursor remains strict color-only with native title.
 
 ## [0.7.3] - 2026-09-01
 

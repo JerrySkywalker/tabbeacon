@@ -35,7 +35,7 @@ If one step fails, record the exact completed boundary and stop for a truthful
 recovery decision rather than silently claiming a release. Do not expose
 credentials or use an unreviewed token path in release evidence.
 
-The current public release is **v0.7.3**. Its closeout completed only after its
+The current public release is **v0.8.0**. The preceding v0.7.3 closeout completed only after its
 package, immutable tag, GitHub Release, Windows checksum, default and exact
 crates.io installs, and fresh GitHub-asset consumer were verified. The
 repository is now in long-term dogfood with no active feature development. Any

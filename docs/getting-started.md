@@ -7,7 +7,7 @@ the coding-agent command.
 ## Before you start
 
 Use Windows with Windows Terminal and a Rust toolchain capable of installing the
-current package. The current public release is **v0.7.3**.
+current package. The current public release is **v0.8.0**.
 
 ## Install
 
@@ -41,7 +41,8 @@ if evidence is unavailable, Codex remains usable.
 
 ## Use the admitted Agy profile
 
-TabBeacon production support for Agy is intentionally narrow: **Agy 1.1.19**.
+TabBeacon production title support for Agy is intentionally narrow: **exact
+1.1.19 and 1.2.7**. Daily Agy 1.2.13 is not admitted.
 Install its owned title callback once, then retain Agy's literal daily command:
 
 ```powershell

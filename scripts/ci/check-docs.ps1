@@ -255,18 +255,18 @@ foreach ($path in $currentFacingPaths) {
 }
 
 $currentReleaseProofs = @(
-    @{ Path = 'README.md'; Pattern = 'Current public release:\s+\*\*v0\.7\.3\*\*' },
-    @{ Path = 'README.zh-CN.md'; Pattern = '\u5f53\u524d\u516c\u5f00\u7248\u672c\uff1a\*\*v0\.7\.3\*\*' },
-    @{ Path = 'SECURITY.md'; Pattern = 'current published release is \*\*v0\.7\.3\*\*' },
-    @{ Path = 'docs/README.md'; Pattern = 'Current public release:\s+\*\*v0\.7\.3\*\*' },
-    @{ Path = 'docs/getting-started.md'; Pattern = 'current public release is \*\*v0\.7\.3\*\*' },
-    @{ Path = 'docs/development/release-process.md'; Pattern = 'current public release is \*\*v0\.7\.3\*\*' },
-    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.7\.3' },
-    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.7\.3' }
+    @{ Path = 'README.md'; Pattern = 'Current public release:\s+\*\*v0\.8\.0\*\*' },
+    @{ Path = 'README.zh-CN.md'; Pattern = '\u5f53\u524d\u516c\u5f00\u7248\u672c\uff1a\*\*v0\.8\.0\*\*' },
+    @{ Path = 'SECURITY.md'; Pattern = 'current published release is \*\*v0\.8\.0\*\*' },
+    @{ Path = 'docs/README.md'; Pattern = 'Current public release:\s+\*\*v0\.8\.0\*\*' },
+    @{ Path = 'docs/getting-started.md'; Pattern = 'current public release is \*\*v0\.8\.0\*\*' },
+    @{ Path = 'docs/development/release-process.md'; Pattern = 'current public release is \*\*v0\.8\.0\*\*' },
+    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.8\.0' },
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.8\.0' }
 )
 foreach ($proof in $currentReleaseProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw -Encoding UTF8
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not declare v0.7.3 as the current public release"
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not declare v0.8.0 as the current public release"
 }
 
 $releaseProofs = @(
@@ -283,13 +283,13 @@ foreach ($proof in $releaseProofs) {
 }
 
 $releaseTargetProofs = @(
-    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_TARGET=v0\.7\.3' },
+    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_TARGET=v0\.8\.0' },
     @{ Path = 'docs/v0.7.3-release-notes.md'; Pattern = '# TabBeacon v0\.7\.3' },
     @{ Path = 'docs/v0.7.2-release-notes.md'; Pattern = '# TabBeacon v0\.7\.2' }
 )
 foreach ($proof in $releaseTargetProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not identify the current or immediately prior release record"
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not identify the target or immediately prior release record"
 }
 
 # The Owner-approved v0.8.0 admission supersedes the dogfood-only pause.

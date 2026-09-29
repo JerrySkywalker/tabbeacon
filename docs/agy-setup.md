@@ -1,6 +1,6 @@
 # Agy setup
 
-TabBeacon supports exactly Agy 1.1.19 on Windows through Agy's
+TabBeacon supports exactly Agy 1.1.19 and 1.2.7 on Windows through Agy's
 user-global structured title callback. Install the provider integration once:
 
 ```powershell
@@ -31,7 +31,7 @@ are refused.
 
 ## Admitted capabilities
 
-Agy 1.1.19 provides a stable conversation identity, equal current/project
+Agy's admitted title profiles provide a stable conversation identity, equal current/project
 workspace roots, and the exact lifecycle subset `idle` (Ready) plus
 `initializing`/`working` (Working). The callback returns a plain title.
 
@@ -48,7 +48,7 @@ callback fails, native Agy remains usable.
 No wrapper, PATH shadow, PTY host, Hook configuration, or resident daemon is
 installed.
 
-## v0.8.0 exact 1.2.7 candidate
+## v0.8.0 exact 1.2.7 qualification
 
 The Owner authorized narrow re-admission on 2026-09-29. The actual Windows
 1.2.7 executable has a valid Google signature. An isolated native TUI startup
@@ -56,12 +56,16 @@ delivered the original structured title command input with exact version,
 equal current/project workspace and `initializing`; session identity was absent
 at that startup boundary and is deliberately not invented.
 
-The candidate keeps exact 1.1.19 and adds only exact 1.2.7 to the existing title
+v0.8.0 keeps exact 1.1.19 and adds only exact 1.2.7 to the existing title
 contract. Payload version must match its profile, and unknown/adjacent versions,
 missing identities, foreign callbacks and ownership drift remain fail safe.
 Setup/reconcile/preserve-native/uninstall retain the same minimal `title` member
 and backup contract. This is no arbitrary future-version range or new backend.
 The [official title contract](https://antigravity.google/docs/cli/title/) describes
-structured stdin and plain stdout; documentation and startup delivery alone do
-not prove authenticated working/completion, visible titles or preserve-native L4.
-Those remain required in the frozen candidate's combined attended packet.
+structured stdin and plain stdout. A real authenticated 1.2.7 mixed session
+showed Working title `Agy⭕AGYWORKS` without cross-provider interference.
+After the response the same title remained visible; real Ready/idle title
+conversion is unproven. Isolated tests map a delivered `idle` callback to Ready.
+The Owner stopped the additional real preserve-native/title-only switch, so
+that L4 scenario is not claimed PASS; owned configuration and visual fixtures
+retain their narrower proofs. Agy 1.2.13 remains unsupported.
