@@ -3,7 +3,7 @@
 use std::{
     env, fs,
     fs::OpenOptions,
-    io::{self, BufWriter, Write},
+    io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{self, Child, Command, Stdio},
     thread,
@@ -34,9 +34,10 @@ use tabbeacon::{
     settings::{PresentationSettings, PresentationSettingsStore},
     visual::{
         AGY_PUBLIC_NATIVE_FIXTURE, AGY_PUBLIC_TITLE_FIXTURE, CODEX_PUBLIC_COLOR_FIXTURE,
-        CODEX_PUBLIC_NATIVE_FIXTURE, CURSOR_COLOR_COMPLETED_FIXTURE, CURSOR_COLOR_NATIVE_FIXTURE,
-        CURSOR_COLOR_WORKING_FIXTURE, CaptureBackend, ExactOwnedWindowBackend, FixtureDriver,
-        LiveVisualRunRequest, PrintWindowCaptureBackend, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME,
+        CODEX_PUBLIC_NATIVE_FIXTURE, CODEX_TITLE_PRECEDENCE_FIXTURE,
+        CURSOR_COLOR_COMPLETED_FIXTURE, CURSOR_COLOR_NATIVE_FIXTURE, CURSOR_COLOR_WORKING_FIXTURE,
+        CaptureBackend, ExactOwnedWindowBackend, FixtureDriver, LiveVisualRunRequest,
+        PrintWindowCaptureBackend, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME,
         TemporaryWindowProductDisposition, TemporaryWindowsTerminalOwnership, TerminalTestSession,
         TerminalTestSessionLauncher, VisualDisposition, VisualError, VisualResult,
         WindowsUiaLocator, root_workspace_anchor_fixture_alias,
@@ -79,7 +80,7 @@ fn emit(arguments: &[String]) -> VisualResult<()> {
     }
     if matches!(
         fixture_name.as_str(),
-        CODEX_PUBLIC_COLOR_FIXTURE | CODEX_PUBLIC_NATIVE_FIXTURE
+        CODEX_PUBLIC_COLOR_FIXTURE | CODEX_PUBLIC_NATIVE_FIXTURE | CODEX_TITLE_PRECEDENCE_FIXTURE
     ) {
         let phase_signal = argument_value(arguments, "--phase-signal")?;
         return emit_codex_public_fixture(
@@ -609,6 +610,19 @@ fn emit_codex_public_fixture(
                 expected,
             )
         };
+        if name == CODEX_TITLE_PRECEDENCE_FIXTURE {
+            return emit_codex_title_precedence(
+                &run,
+                &executable,
+                &workspace,
+                &local_appdata,
+                &codex_home,
+                &root,
+                &path,
+                run_id,
+                phase_signal,
+            );
+        }
         run(&["setup", "codex", "--plain"], None)?;
         run(
             &[
@@ -709,6 +723,85 @@ fn emit_codex_public_fixture(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn emit_codex_title_precedence(
+    run: &impl Fn(&[&str], Option<&str>) -> VisualResult<()>,
+    executable: &Path,
+    workspace: &Path,
+    local_appdata: &Path,
+    codex_home: &Path,
+    root: &Path,
+    path: &std::ffi::OsStr,
+    run_id: &str,
+    signal: &Path,
+) -> VisualResult<()> {
+    fs::create_dir_all(local_appdata.join("TabBeacon"))?;
+    fs::write(local_appdata.join("TabBeacon/config.toml"),
+        b"[presentation]\ntitle=\"tabbeacon\"\ntab_color=\"native\"\nactivity=\"off\"\nprovider_badge=\"off\"\n[provider_presentation.codex]\ntitle=\"native\"\n")?;
+    let marker = format!("TB-NATIVE-{run_id}");
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(format!("\x1b]0;{marker}\x1b\\").as_bytes())?;
+    stdout.flush()?;
+    let config_before = fs::read(codex_home.join("config.toml"))?;
+    let hook = || {
+        run_isolated_codex_hook(
+            executable,
+            workspace,
+            local_appdata,
+            codex_home,
+            root,
+            path,
+            &json!({"hook_event_name":"SessionStart",
+            "session_id": format!("visual-title-{run_id}"), "cwd":workspace,"source":"startup"}),
+        )
+    };
+    run(&["setup", "codex", "--plain"], None)?;
+    run(&["setup", "codex", "--plain"], None)?;
+    if fs::read(codex_home.join("config.toml"))? != config_before {
+        return Err(VisualError::Platform(
+            "native repeat setup changed provider title bytes".to_owned(),
+        ));
+    }
+    hook()?;
+    await_title_observation(signal, "native_setup")?;
+    run(&["config", "set", "title", "native", "--plain"], None)?;
+    run(&["config", "set", "title", "tabbeacon", "--plain"], None)?;
+    hook()?;
+    await_title_observation(signal, "native_global")?;
+    run(&["config", "set", "title", "native", "--plain"], None)?;
+    run(
+        &[
+            "config", "provider", "codex", "inherit", "--apply", "--plain",
+        ],
+        None,
+    )?;
+    hook()?;
+    await_title_observation(signal, "inherited_native")?;
+    run(
+        &["alias", "set", &format!("TB03-{run_id}-ready"), "--plain"],
+        None,
+    )?;
+    run(&["config", "set", "title", "tabbeacon", "--plain"], None)?;
+    hook()?;
+    await_title_observation(signal, "inherited_managed")?;
+    Ok(())
+}
+
+fn await_title_observation(signal: &Path, phase: &str) -> VisualResult<()> {
+    fs::write(signal, phase)?;
+    let acknowledgement = signal.with_extension("ack");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while fs::read(&acknowledgement).ok().as_deref() != Some(phase.as_bytes()) {
+        if Instant::now() >= deadline {
+            return Err(VisualError::Platform(
+                "title phase UIA acknowledgement was not received".to_owned(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_isolated_codex_product(
     executable: &Path,
     workspace: &Path,
@@ -719,14 +812,15 @@ fn run_isolated_codex_product(
     args: &[&str],
     expected: Option<&str>,
 ) -> VisualResult<()> {
-    let output = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .args(args)
         .current_dir(workspace)
         .env("LOCALAPPDATA", local_appdata)
         .env("CODEX_HOME", codex_home)
         .env("USERPROFILE", user_profile)
-        .env("PATH", path)
-        .output()?;
+        .env("PATH", path);
+    let output = bounded_codex_product_output(&mut command, user_profile)?;
     if !output.status.success()
         || expected.is_some_and(|value| !String::from_utf8_lossy(&output.stdout).contains(value))
     {
@@ -735,6 +829,70 @@ fn run_isolated_codex_product(
         ));
     }
     Ok(())
+}
+
+fn bounded_codex_product_output(
+    command: &mut Command,
+    root: &Path,
+) -> VisualResult<std::process::Output> {
+    let token = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let stdout_path = root.join(format!("product-{token}.stdout"));
+    let stderr_path = root.join(format!("product-{token}.stderr"));
+    let mut stdout = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&stdout_path)?;
+    let mut stderr = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&stderr_path)?;
+    let result = (|| -> VisualResult<std::process::Output> {
+        // A descendant retaining a pipe cannot extend the product phase past
+        // its budget. Only this exact fixture child's files are read/removed.
+        let mut child = command
+            .stdout(Stdio::from(stdout.try_clone()?))
+            .stderr(Stdio::from(stderr.try_clone()?))
+            .spawn()?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill()?;
+                let _ = child.wait();
+                return Err(VisualError::Platform(
+                    "isolated Codex product command exceeded bounded phase".to_owned(),
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        stdout.seek(SeekFrom::Start(0))?;
+        stderr.seek(SeekFrom::Start(0))?;
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+        (&mut stdout).take(65_537).read_to_end(&mut stdout_bytes)?;
+        (&mut stderr).take(65_537).read_to_end(&mut stderr_bytes)?;
+        if stdout_bytes.len() > 65_536 || stderr_bytes.len() > 65_536 {
+            return Err(VisualError::Platform(
+                "isolated product command output exceeded bound".to_owned(),
+            ));
+        }
+        Ok(std::process::Output {
+            status,
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
+        })
+    })();
+    drop(stdout);
+    drop(stderr);
+    fs::remove_file(stdout_path)?;
+    fs::remove_file(stderr_path)?;
+    result
 }
 
 #[allow(clippy::too_many_arguments)]

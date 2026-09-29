@@ -13,7 +13,7 @@ param(
 
     [string]$EvidenceRoot = 'artifacts/visual',
 
-    [ValidateSet('cursor-color-working', 'cursor-color-completed', 'cursor-color-native', 'codex-public-color', 'codex-public-native', 'agy-public-title', 'agy-public-native')]
+    [ValidateSet('cursor-color-working', 'cursor-color-completed', 'cursor-color-native', 'codex-public-color', 'codex-public-native', 'codex-title-precedence', 'agy-public-title', 'agy-public-native')]
     [string]$Fixture
 )
 
@@ -31,8 +31,8 @@ if ($actualHead -ne $ExpectedHead) {
 
 New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
 
-if ($Fixture -in @('cursor-color-native', 'codex-public-color', 'codex-public-native', 'agy-public-title', 'agy-public-native')) {
-    & cargo build --locked --bin tabbeacon
+if ($Fixture -in @('cursor-color-native', 'codex-public-color', 'codex-public-native', 'codex-title-precedence', 'agy-public-title', 'agy-public-native')) {
+    & cargo build --locked --release --bin tabbeacon
     if ($LASTEXITCODE -ne 0) {
         throw "Owned Cursor public-Apply fixture product binary build failed: exit=$LASTEXITCODE"
     }
@@ -40,7 +40,7 @@ if ($Fixture -in @('cursor-color-native', 'codex-public-color', 'codex-public-na
 
 $visualArguments = @('run', '--expected-head', $ExpectedHead, '--run-id', $RunId, '--evidence-root', $EvidenceRoot)
 if ($Fixture) { $visualArguments += @('--fixture', $Fixture) }
-& cargo run --locked --features visual-fixture --bin tabbeacon-visual-fixture -- @visualArguments
+& cargo run --locked --release --features visual-fixture --bin tabbeacon-visual-fixture -- @visualArguments
 $visualExit = $LASTEXITCODE
 
 if ($visualExit -eq 0) {

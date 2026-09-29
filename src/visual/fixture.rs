@@ -20,6 +20,8 @@ pub const CURSOR_COLOR_NATIVE_FIXTURE: &str = "cursor-color-native";
 /// The events are synthetic and do not qualify real Codex model delivery.
 pub const CODEX_PUBLIC_COLOR_FIXTURE: &str = "codex-public-color";
 pub const CODEX_PUBLIC_NATIVE_FIXTURE: &str = "codex-public-native";
+/// One owned tab checks setup/global precedence and restoration of inheritance.
+pub const CODEX_TITLE_PRECEDENCE_FIXTURE: &str = "codex-title-precedence";
 pub const AGY_PUBLIC_TITLE_FIXTURE: &str = "agy-public-title";
 pub const AGY_PUBLIC_NATIVE_FIXTURE: &str = "agy-public-native";
 
@@ -114,6 +116,7 @@ impl FixtureDriver {
         let source = match name {
             CODEX_PUBLIC_COLOR_FIXTURE => "working",
             CODEX_PUBLIC_NATIVE_FIXTURE => "reset",
+            CODEX_TITLE_PRECEDENCE_FIXTURE => "ready",
             _ => {
                 return Err(VisualError::Platform(
                     "unknown Codex public fixture".to_owned(),

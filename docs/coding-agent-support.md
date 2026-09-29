@@ -46,8 +46,10 @@ unchanged; #116 stays OPEN. Supported structured states, Interrupt/recovery,
 ownership and real mixed-provider acceptance remain required. The pinned release
 single-Codex Interrupt/recovery/normal-exit observation is accepted; daily
 installation is a separate, unauthorized action. Actual Agy 1.2.7 narrow
-title-only/preserve-native admission is authorized but not yet compatibility/L4
-PASS; this does not change the public support table or exact 1.1.19 support.
+title-only/preserve-native admission is authorized. Signed native startup callback
+evidence establishes the bounded contract, and the candidate admits exactly 1.2.7
+alongside 1.1.19; real working/completion/preserve-native L4 remains pending.
+This does not change the public support table or declare all-provider L4 PASS.
 
 The candidate's saved per-CLI preferences and deterministic event fixtures do
 not change the production table above. Installed Hook delivery, Hook trust,
@@ -59,7 +61,7 @@ title. See [Native](terminology.md#tb-t11), [Off](terminology.md#tb-t12), and
 
 | Candidate fact | Codex CLI | Cursor Agent |
 | --- | --- | --- |
-| Structured interruption | The exact 0.156.1/0.157.1 source-audited profile, isolated owned declaration and trust gate, public Hook CLI, and runtime dispatch have deterministic proof. Daily installed `Interrupt` delivery and visible output remain unproven. | No admitted live interruption route. |
+| Structured interruption | The pinned release single-Codex Interrupt/recovery/completion/normal-exit observation is Owner-accepted at 92c0cd9; deterministic profile, trust and dispatch proof is retained. Daily installation remains separate. | No admitted live interruption route. |
 | Structured warning or failed main turn | Unproven for the original HTTP 404 class in [Issue #116](https://github.com/JerrySkywalker/tabbeacon/issues/116). | Real structured `stop(completed)` delivery was observed by the earlier isolated collector; warning/failure outcomes remain unproven. |
 | Strict native presentation | Owned-channel release has deterministic tests; final visible transition proof is pending. | The earlier isolated original-command color run preserved the native title by Owner observation; the later two-Cursor observation showed no reported interference. Current candidate visible transition and mixed-provider behavior remain unproven. |
 

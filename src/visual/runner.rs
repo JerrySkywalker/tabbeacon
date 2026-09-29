@@ -266,6 +266,11 @@ fn read_worker_stage(worker_root: &Path, run_id: &str) -> &'static str {
         b"evidence" => "evidence",
         b"preflight" => "preflight",
         b"fixture" => "fixture",
+        b"window_acquisition" => "window_acquisition",
+        b"hook_wait" => "hook_wait",
+        b"uia_resolution" => "uia_resolution",
+        b"capture" => "capture",
+        b"cleanup" => "cleanup",
         b"fixture_done" => "fixture_done",
         b"finalizing" => "finalizing",
         b"done" => "done",
@@ -281,6 +286,11 @@ fn is_known_worker_stage(stage: &str) -> bool {
             | "evidence"
             | "preflight"
             | "fixture"
+            | "window_acquisition"
+            | "hook_wait"
+            | "uia_resolution"
+            | "capture"
+            | "cleanup"
             | "fixture_done"
             | "finalizing"
             | "done"
@@ -1013,6 +1023,15 @@ fn observe_replay(
     replay: &super::FixtureReplay,
     observation: &mut Observation,
 ) -> VisualResult<()> {
+    if replay.case.fixture_name == super::CODEX_TITLE_PRECEDENCE_FIXTURE {
+        return observe_codex_title_precedence(
+            writer,
+            fixture_executable,
+            run_id,
+            replay,
+            observation,
+        );
+    }
     let launcher = TerminalTestSessionLauncher::default();
     let phase_signal = if matches!(
         replay.case.fixture_name.as_str(),
@@ -1034,6 +1053,11 @@ fn observe_replay(
     {
         return Err(VisualError::EvidenceArtifactExists(path.clone()));
     }
+    write_worker_stage(
+        writer.directory().parent().unwrap(),
+        run_id,
+        "window_acquisition",
+    )?;
     let session = match launcher.launch(
         fixture_executable,
         replay,
@@ -1048,6 +1072,7 @@ fn observe_replay(
         }
     };
     let body_result = (|| -> VisualResult<()> {
+        write_worker_stage(writer.directory().parent().unwrap(), run_id, "hook_wait")?;
         if let Some(path) = phase_signal.as_ref()
             && !wait_for_public_hook_phase(
                 path,
@@ -1068,6 +1093,11 @@ fn observe_replay(
             );
             return Ok(());
         }
+        write_worker_stage(
+            writer.directory().parent().unwrap(),
+            run_id,
+            "uia_resolution",
+        )?;
         let locator = WindowsUiaLocator;
         let target = match if matches!(
             replay.case.fixture_name.as_str(),
@@ -1152,6 +1182,7 @@ fn observe_replay(
             );
             return Ok(());
         }
+        write_worker_stage(writer.directory().parent().unwrap(), run_id, "capture")?;
         observe_capture(writer, replay, &capture_target, tab_bounds, observation)?;
         if matches!(
             replay.case.fixture_name.as_str(),
@@ -1186,6 +1217,7 @@ fn observe_replay(
     } else {
         TemporaryWindowProductDisposition::Pass
     };
+    write_worker_stage(writer.directory().parent().unwrap(), run_id, "cleanup")?;
     match session.cleanup(product_disposition) {
         Ok(receipt) if receipt.temporary_wt_cleanup == "PASS" => {}
         Ok(receipt) => observation.record_uia_blocked(
@@ -1202,6 +1234,102 @@ fn observe_replay(
     }
     phase_cleanup_result.map_err(VisualError::Io)?;
     body_result
+}
+
+fn observe_codex_title_precedence(
+    writer: &EvidenceWriter,
+    fixture_executable: &Path,
+    run_id: &str,
+    replay: &super::FixtureReplay,
+    observation: &mut Observation,
+) -> VisualResult<()> {
+    let worker_root = writer
+        .directory()
+        .parent()
+        .ok_or_else(|| VisualError::Platform("owned evidence parent absent".to_owned()))?;
+    let signal = writer.directory().with_extension("title.phase");
+    let ack = signal.with_extension("ack");
+    if signal.exists() || ack.exists() {
+        return Err(VisualError::EvidenceArtifactExists(signal));
+    }
+    write_worker_stage(worker_root, run_id, "window_acquisition")?;
+    let session = match TerminalTestSessionLauncher::default().launch(
+        fixture_executable,
+        replay,
+        run_id,
+        writer.directory(),
+        Some(&signal),
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            observation.record_uia_blocked(&replay.case.fixture_name, error.to_string());
+            return Ok(());
+        }
+    };
+    let result = (|| -> VisualResult<()> {
+        for phase in [
+            "native_setup",
+            "native_global",
+            "inherited_native",
+            "inherited_managed",
+        ] {
+            write_worker_stage(worker_root, run_id, "hook_wait")?;
+            if !wait_for_public_hook_phase(&signal, phase.as_bytes(), Duration::from_secs(30))? {
+                observation
+                    .record_uia_blocked(phase, "bounded title phase was not reached".to_owned());
+                return Ok(());
+            }
+            write_worker_stage(worker_root, run_id, "uia_resolution")?;
+            let target = locate_exact_sibling_with_retry(WindowsUiaLocator, &session)
+                .map_err(|failure| failure.error)?;
+            let mut expected = replay.clone();
+            phase.clone_into(&mut expected.case.fixture_name);
+            if phase != "inherited_managed" {
+                expected.case.expected_title = format!("TB-NATIVE-{run_id}");
+                expected.case.expected_title_frames = vec![expected.case.expected_title.clone()];
+            }
+            observation.record_target(writer, &expected, &target.dump)?;
+            fs::write(&ack, phase)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = &result {
+        observation.record_uia_blocked(&replay.case.fixture_name, error.to_string());
+    }
+    write_worker_stage(worker_root, run_id, "cleanup")?;
+    let disposition = if observation.lanes.has_failure() {
+        TemporaryWindowProductDisposition::Fail
+    } else if observation.lanes.has_blocker() {
+        TemporaryWindowProductDisposition::Blocked
+    } else {
+        TemporaryWindowProductDisposition::Pass
+    };
+    let cleanup = session.cleanup(disposition)?;
+    let passed = cleanup.temporary_wt_cleanup == "PASS";
+    observation.assertions.push(AssertionResult::new(
+        AssertionKind::Cleanup,
+        if passed {
+            VisualDisposition::Pass
+        } else {
+            VisualDisposition::Blocked
+        },
+        Some(replay.case.fixture_name.clone()),
+        cleanup.detail,
+    ));
+    if !passed {
+        observation.record_uia_blocked(
+            &replay.case.fixture_name,
+            "exact owned cleanup did not pass".to_owned(),
+        );
+    }
+    for file in [&signal, &ack] {
+        if file.exists() {
+            fs::remove_file(file)?;
+        }
+    }
+    // Only title ownership changed. No new capture/color/animation claim;
+    // the summary leaves those lanes UNPROVEN while scoped title evidence stands.
+    Ok(())
 }
 
 fn wait_for_public_hook_phase(
@@ -1685,6 +1813,12 @@ fn selected_replays(
 ) -> VisualResult<Vec<super::FixtureReplay>> {
     let all = driver.all_cases(&request.run_id)?;
     match request.fixture_name.as_deref() {
+        Some(super::CODEX_TITLE_PRECEDENCE_FIXTURE) => {
+            Ok(vec![driver.codex_public_replay(
+                super::CODEX_TITLE_PRECEDENCE_FIXTURE,
+                &request.run_id,
+            )?])
+        }
         Some(super::CODEX_PUBLIC_NATIVE_FIXTURE) => {
             let ready = all
                 .into_iter()
@@ -2169,10 +2303,37 @@ mod tests {
         assert_eq!(read_worker_stage(&root, run_id), "unknown");
         write_worker_stage(&root, run_id, "preflight").unwrap();
         assert_eq!(read_worker_stage(&root, run_id), "preflight");
+        for stage in [
+            "window_acquisition",
+            "hook_wait",
+            "uia_resolution",
+            "capture",
+            "cleanup",
+        ] {
+            write_worker_stage(&root, run_id, stage).unwrap();
+            assert_eq!(read_worker_stage(&root, run_id), stage);
+        }
         assert!(write_worker_stage(&root, run_id, "private-window-title").is_err());
         fs::write(root.join(format!("{run_id}.stage")), "private-window-title").unwrap();
         assert_eq!(read_worker_stage(&root, run_id), "unknown");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn title_precedence_selects_one_window_without_color_baseline_replays() {
+        let request = LiveVisualRunRequest {
+            expected_head: "a".repeat(40),
+            run_id: "TB80-title".to_owned(),
+            evidence_root: PathBuf::from("artifacts/visual"),
+            fixture_name: Some(super::super::CODEX_TITLE_PRECEDENCE_FIXTURE.to_owned()),
+        };
+        let replays = selected_replays(&FixtureDriver::default(), &request).unwrap();
+        assert_eq!(replays.len(), 1);
+        assert_eq!(
+            replays[0].case.fixture_name,
+            super::super::CODEX_TITLE_PRECEDENCE_FIXTURE
+        );
+        assert_eq!(worker_budget(&request), super::LIVE_VISUAL_WORKER_BUDGET);
     }
 
     #[test]

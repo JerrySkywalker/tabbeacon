@@ -40,7 +40,9 @@ Codex 0.156.1 and 0.157.1 Hook contracts. Isolated tests cover the owned `Interr
 declaration, fresh trust, public Hook command, generation reconciliation, and
 terminal dispatch. The runtime refuses `Interrupt` when the declaration or
 trust is absent or drifted. Daily installed Hook delivery and visible output
-still need real qualification; the fixture is not a live interruption report.
+for the pinned isolated release single-Codex test were Owner-accepted; daily
+production installation remains separate. A fixture is not a live interruption
+report and does not cover the approved unobservable error categories.
 
 ## Hook trust needs review
 

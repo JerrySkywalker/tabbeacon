@@ -312,6 +312,7 @@ impl TerminalTestSessionLauncher {
             &window_name,
             std::process::id(),
         )?;
+        record_launch_stage(evidence_root, "prepared")?;
         let position = format!(
             "{},{}",
             self.requested_position.0, self.requested_position.1
@@ -322,6 +323,7 @@ impl TerminalTestSessionLauncher {
         // Observe an early dispatcher failure when one is available, but do
         // not wait for (or terminate) the launcher. Exact anchor registration
         // remains the authority that proves the resulting terminal window.
+        record_launch_stage(evidence_root, "dispatch")?;
         let launch_result = Command::new("wt.exe")
             .args(["-w", &window_name, "--pos", &position, "--size", &size])
             .arg("new-tab")
@@ -349,6 +351,7 @@ impl TerminalTestSessionLauncher {
                 observe_windows_terminal_dispatch(&mut launcher, "exact-owned fixture")
             });
         let launch_error = launch_result.err().map(|error| error.to_string());
+        record_launch_stage(evidence_root, "registration")?;
         let acquisition = complete_temporary_windows_terminal_acquisition(
             &WindowsUiaLocator,
             &prepared_lifecycle,
@@ -367,6 +370,7 @@ impl TerminalTestSessionLauncher {
                 )));
             }
         };
+        record_launch_stage(evidence_root, "registered")?;
         Ok(TerminalTestSession {
             run_id: run_id.to_owned(),
             window_name,
@@ -377,6 +381,18 @@ impl TerminalTestSessionLauncher {
             prepared_lifecycle,
         })
     }
+}
+
+fn record_launch_stage(root: &Path, stage: &str) -> VisualResult<()> {
+    // Fixed harness phases only; no window text, provider payload or Owner data.
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    std::fs::write(
+        root.join("fixture-launch-stage.json"),
+        format!("{{\"stage\":\"{stage}\",\"unix_ms\":{timestamp}}}"),
+    )?;
+    Ok(())
 }
 
 fn observe_windows_terminal_dispatch(launcher: &mut Child, context: &str) -> VisualResult<()> {
