@@ -150,7 +150,7 @@ than the source freeze. Active docs never completed the corresponding transition
 | docs/README.md, getting-started, SECURITY.md, release-process | Candidate/current-target wording remains; docs portal refers to active Train. | Public 0.8.0, verified sources, stable support envelope; retain historical source preparation as history. |
 | v0.8.0 release notes / upgrade / support | Notes say “when published”; other support statements retain appropriately narrow provider scope. | Add post-publication navigation/annotation; preserve frozen receipt and original observations. Do not silently rewrite the published acceptance narrative. |
 | ROADMAP_V08 / matrix / runbook | G06/pending-G07 directions remain in historical Train material. | Mark completed historical execution authority and link to post-release truth. Keep original heads, failures and Owner stops intact. |
-| RELEASE_CRITERIA / AGENTS storage references | Legacy Codex-centric prose and V: canonical/build naming coexist with current C: source authority. | Audit wording consistency and explicitly admit any path correction separately; no storage or provider-policy change follows from this report. |
+| RELEASE_CRITERIA | Architecture/release prose remains Codex-centric despite the three-provider release. Release-tree AGENTS already admits C: ZenBook Duo roots; the older canonical checkout's V: text is not current release-tree authority. | Reconcile provider-scope wording with the bounded support matrix. No AGENTS storage correction or storage mutation is recommended from the obsolete checkout text. |
 
 PLANNING_PROPOSAL for the stable state:
 
