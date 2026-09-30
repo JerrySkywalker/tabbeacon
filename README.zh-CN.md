@@ -25,12 +25,12 @@
 
 <p align="center"><sub>由 TabBeacon 确定性展示夹具驱动的真实 Windows Terminal 渲染；不包含实时 Codex 或 Agy 模型对话。</sub></p>
 
-## 支持的编码智能体
+## v0.8.0 编码智能体范围
 
 | 编码智能体 | 状态 | 日常命令 | 兼容性策略 |
 | --- | --- | --- | --- |
 | Codex CLI | 生产支持 | `codex` | 基于能力；版本字符串仅用于诊断。 |
-| Agy CLI | 生产支持 | `agy` | 精确准入标题配置：Agy 1.1.19、1.2.7；不包括 1.2.13。 |
+| Agy CLI | 有界标题支持 | `agy` | 精确 1.1.19/1.2.7 合同；1.2.7 真人 Working/互不干扰已证明，Ready/原生切换未获真人资格；不包括 1.2.13。 |
 | Cursor Agent | 生产支持 | `agent` | 受管项目 Hook；严格仅颜色或保留原生，标题由 Cursor 控制。 |
 
 ### 延后集成
@@ -78,7 +78,7 @@ PTY 主机、终端替代品或后台守护进程。
 
 ## 快速开始
 
-当前公开版本：**v0.8.0**。本版提供按 CLI 独立呈现、Cursor 严格仅颜色接入、
+v0.8.0 发布候选提供按 CLI 独立呈现、Cursor 严格仅颜色接入、
 已证明的 Codex 结构化状态和[中英文术语](docs/terminology.md)。精确能力与
 已知限制见 [v0.8.0 发布说明](docs/v0.8.0-release-notes.md)。
 
@@ -99,7 +99,7 @@ tabbeacon setup agy
 agy
 ```
 
-精确发布验证与普通用户路径保持分离。若要验证已发布的 v0.8.0 crate，请同时固定版本
+精确发布验证与普通用户路径保持分离。v0.8.0 发布后，验证 crate 时请同时固定版本
 与锁文件：
 
 ```powershell
@@ -113,7 +113,7 @@ cargo install tabbeacon --version 0.8.0 --locked
 ## 升级
 
 对于通过 Cargo 安装的 TabBeacon，最容易记的顺序是 **版本 → 预检 → 安装 →
-诊断**：
+诊断**。v0.8.0 发布后使用：
 
 ```powershell
 tabbeacon --version
@@ -152,7 +152,8 @@ tabbeacon setup codex
 
 TabBeacon 面向 Windows 上的 Windows Terminal。Codex 支持由本地观察到的必需能力
 确定，而不是由版本排序规则确定。Agy 支持刻意更窄：只有精确准入的 1.1.19 和 1.2.7 标题配置
-被生产支持。不可用或未证明的证据会 fail-open，而不会被猜测为兼容状态。
+被准入。1.2.7 的真人 Working 与互不干扰已有证明；Ready 可见转换和原生模式切换
+未获得真人 L4 资格，不属于本版公开承诺。不可用或未证明的证据会 fail-open，而不会被猜测为兼容状态。
 
 ## 工作方式
 

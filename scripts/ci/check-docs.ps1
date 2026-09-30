@@ -254,19 +254,24 @@ foreach ($path in $currentFacingPaths) {
     Assert-Docs ($content -notmatch '(?i)TabBeacon\s+0\.6\.0\s+(supports|is|includes)') "$path contains stale v0.6.0 current-product wording"
 }
 
-$currentReleaseProofs = @(
-    @{ Path = 'README.md'; Pattern = 'Current public release:\s+\*\*v0\.8\.0\*\*' },
-    @{ Path = 'README.zh-CN.md'; Pattern = '\u5f53\u524d\u516c\u5f00\u7248\u672c\uff1a\*\*v0\.8\.0\*\*' },
-    @{ Path = 'SECURITY.md'; Pattern = 'current published release is \*\*v0\.8\.0\*\*' },
-    @{ Path = 'docs/README.md'; Pattern = 'Current public release:\s+\*\*v0\.8\.0\*\*' },
-    @{ Path = 'docs/getting-started.md'; Pattern = 'current public release is \*\*v0\.8\.0\*\*' },
-    @{ Path = 'docs/development/release-process.md'; Pattern = 'current public release is \*\*v0\.8\.0\*\*' },
-    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.8\.0' },
-    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.8\.0' }
+# Candidate metadata is source truth; publication requires external receipts.
+# Never require source documentation to assert that publication already happened.
+$candidateScopeProofs = @(
+    @{ Path = 'README.md'; Pattern = 'v0\.8\.0 release candidate' },
+    @{ Path = 'README.zh-CN.md'; Pattern = 'v0\.8\.0 \u53d1\u5e03\u5019\u9009' },
+    @{ Path = 'SECURITY.md'; Pattern = 'v0\.8\.0 is a release candidate' },
+    @{ Path = 'docs/README.md'; Pattern = 'v0\.8\.0 release candidate' },
+    @{ Path = 'docs/getting-started.md'; Pattern = 'v0\.8\.0 release candidate' },
+    @{ Path = 'docs/development/release-process.md'; Pattern = 'v0\.8\.0 release candidate' },
+    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'LAST_VERIFIED_PUBLIC_RELEASE=v0\.7\.3' },
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'LAST_VERIFIED_PUBLIC_RELEASE=v0\.7\.3' },
+    @{ Path = 'docs/v0.8.0-release-notes.md'; Pattern = 'When v0\.8\.0 is published' },
+    @{ Path = 'docs/v0.8.0-upgrade.md'; Pattern = 'When v0\.8\.0 is published' }
 )
-foreach ($proof in $currentReleaseProofs) {
+foreach ($proof in $candidateScopeProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw -Encoding UTF8
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not declare v0.8.0 as the current public release"
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not separate candidate scope from publication"
+    Assert-Docs ($content -notmatch '(?i)(current\s+(public|published)\s+release[^\n]*|CURRENT_PUBLIC_RELEASE=|\u5f53\u524d\u516c\u5f00\u7248\u672c[^\n]*)v?0\.8\.0') "$($proof.Path) prematurely asserts v0.8.0 publication"
 }
 
 $releaseProofs = @(
@@ -324,6 +329,15 @@ foreach ($path in @(
 }
 $roadmap = Get-RequiredContent 'dev_governance_files/ROADMAP_V08.md'
 $matrix = Get-RequiredContent 'dev_governance_files/V080_ACCEPTANCE_MATRIX.md'
+foreach ($status in @(
+    'AGY_READY_VISIBLE_L4=UNPROVEN',
+    'SAME_TAB_HANDOFF_L4=NOT_EXECUTED_OWNER_STOP',
+    'AGY_PRESERVE_NATIVE_L4=NOT_EXECUTED_OWNER_STOP',
+    'ATTENDED_FOLLOWUP_REQUIREMENT=NOT_REQUIRED_FOR_V080_PUBLIC_SCOPE'
+)) {
+    Assert-Docs ($matrix.Contains($status)) "acceptance matrix loses reconciled evidence boundary: $status"
+}
+Assert-Docs ($matrix -notmatch '(?m)^(AGY_READY_VISIBLE_L4|SAME_TAB_HANDOFF_L4|AGY_PRESERVE_NATIVE_L4)=PASS\b') 'unexecuted/unproven attended evidence cannot become PASS'
 foreach ($package in @(
     @{ Prefix = 'P'; Count = 8 },
     @{ Prefix = 'C'; Count = 7 },

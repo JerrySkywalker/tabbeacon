@@ -4,10 +4,10 @@ This is the English-canonical documentation for TabBeacon. The project landing
 pages are available in [English](../README.md) and [Simplified Chinese](../README.zh-CN.md);
 technical guides remain English-canonical.
 
-Current public release: **v0.8.0**. See the
+This source describes the **v0.8.0 release candidate**. See the
 [release notes](v0.8.0-release-notes.md) and [upgrade guide](v0.8.0-upgrade.md)
 for exact provider scope and known limitations. The v0.8.0 Goal Train remains
-the historical source of this bounded release scope.
+the authority for this bounded release scope; source preparation does not prove publication.
 
 ## Start here
 

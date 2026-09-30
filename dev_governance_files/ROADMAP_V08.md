@@ -31,6 +31,22 @@ Read with:
 
 ## 1. Owner decisions and release shape
 
+### Owner G06 scope reconciliation — 2026-09-30
+
+The current external Owner instruction narrows Agy 1.2.7 public support to its
+exact title-callback contract, real authenticated Working/default-color and mixed
+noninterference observations, plus separately labelled isolated configuration
+safety and deterministic `idle` to Ready mapping. It does not promise attended
+Ready or preserve-native transitions, or same-tab handoff. The Owner stopped
+additional attended tests. Their historical UNPROVEN / NOT_EXECUTED_OWNER_STOP
+results remain unchanged; they are optional future qualification, not passed
+retroactively. See the acceptance matrix reconciliation for the evidence policy.
+P/C/E/T, P08/X05 ownership/channel safety, exact 1.1.19 support and all applicable
+RELEASE_CRITERIA gates remain required. No product behavior changes follow from
+this claim reduction. Current authority overrides older closeout instructions
+only as explicitly stated: keep Draft and stop after G06 PASS for one new
+exact-SHA publication confirmation before Ready, merge or publication.
+
 ### Owner closeout decisions — 2026-09-29
 
 The Owner's explicit continuation instruction for PR #119 approves two bounded

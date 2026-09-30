@@ -5,7 +5,7 @@ TabBeacon normalizes admitted provider evidence into provider-neutral state. Cap
 | Coding agent | Status | Daily command | Exact boundary |
 | --- | --- | --- | --- |
 | Codex CLI | Production | `codex` | Capability-based command-Hook admission; version ordering is not a support gate. |
-| Agy CLI | Production | `agy` | Exact 1.1.19 and 1.2.7 title-callback profiles only; 1.2.13 is not admitted. |
+| Agy CLI | Bounded title support | `agy` | Exact 1.1.19/1.2.7 contracts; 1.2.7 real Working/default-color/noninterference proved. Ready and native switching are not attended-qualified public claims; 1.2.13 is not admitted. |
 | Cursor Agent | Production | `agent` | Exact-owned project Hooks; strict color-only or preserve-native, Cursor-native title. |
 | Claude Code | Deferred | N/A | No integration. |
 | OpenCode | Deferred | N/A | No integration. |
@@ -18,7 +18,7 @@ The current observed Codex 0.159.0 command-Hook profile has 11 baseline events. 
 
 Only exact 1.1.19 and 1.2.7 title callbacks are admitted. `initializing`/`working` map to Working and an actual `idle` callback maps to Ready. Result-ready, approval, failure/health, tab color, progress and animation are unavailable. In a real mixed 1.2.7 session the Working title was `Agy⭕AGYWORKS` and Agy did not interfere with Codex/Cursor colors. After the observed response the title remained `Agy⭕AGYWORKS`; a real Ready/idle visible transition is **UNPROVEN**. Deterministic tests of `idle` do not supply a missing real callback. Daily Agy 1.2.13 remains unsupported and should not receive automated setup or downgrade. See [Agy setup](agy-setup.md) and [ADR 0015](adr/0015-agy-1-1-19-production-profile.md).
 
-The Owner stopped the additional attended Agy preserve-native-to-title-only switch. Its real L4 is **NOT EXECUTED**, while isolated configuration, ownership/restore and owned Visual tests retain their specific proofs. Setup owns only the admitted `title` member and preserves unrelated settings.
+The Owner stopped the additional attended Agy preserve-native-to-title-only switch. Its real L4 is **NOT_EXECUTED_OWNER_STOP**, while isolated configuration, ownership/restore and owned Visual tests retain their specific proofs. Setup owns only the admitted `title` member and preserves unrelated settings. Real visible Ready and attended preserve-native transitions are outside the v0.8.0 public promise; implemented mapping and configuration controls are supported only to their stated deterministic/isolated evidence scope. These follow-ups may receive new qualification later and are not retroactively PASS.
 
 ## Cursor and mixed-provider boundary
 

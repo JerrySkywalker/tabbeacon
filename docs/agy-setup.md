@@ -1,7 +1,10 @@
 # Agy setup
 
 TabBeacon supports exactly Agy 1.1.19 and 1.2.7 on Windows through Agy's
-user-global structured title callback. Install the provider integration once:
+user-global structured title callback. For 1.2.7, public support is bounded to the
+exact callback contract and proved real Working/default-color/noninterference;
+visible Ready and attended native switching are outside the v0.8.0 promise.
+Install the provider integration once:
 
 ```powershell
 tabbeacon setup agy
@@ -32,7 +35,7 @@ are refused.
 ## Admitted capabilities
 
 Agy's admitted title profiles provide a stable conversation identity, equal current/project
-workspace roots, and the exact lifecycle subset `idle` (Ready) plus
+workspace roots, and the exact deterministic lifecycle mapping `idle` (Ready) plus
 `initializing`/`working` (Working). The callback returns a plain title.
 
 Approval, result-ready, stop authority, health, background-task count,
@@ -67,5 +70,7 @@ showed Working title `Agy⭕AGYWORKS` without cross-provider interference.
 After the response the same title remained visible; real Ready/idle title
 conversion is unproven. Isolated tests map a delivered `idle` callback to Ready.
 The Owner stopped the additional real preserve-native/title-only switch, so
-that L4 scenario is not claimed PASS; owned configuration and visual fixtures
-retain their narrower proofs. Agy 1.2.13 remains unsupported.
+that L4 scenario remains NOT_EXECUTED_OWNER_STOP; owned configuration and visual
+fixtures retain their narrower proofs. Real Ready remains UNPROVEN. These attended
+follow-ups are not required for the narrowed v0.8.0 public scope and are not
+retroactively passed. Agy 1.2.13 remains unsupported.

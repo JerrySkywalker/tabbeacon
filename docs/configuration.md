@@ -67,6 +67,11 @@ The output separates requested and capability-limited effective channels.
 `UNPROVEN` means the saved choice has not been proved active in the current CLI
 session. Agy's explicit `preserve-native` mode removes only an owned Agy title
 callback when applied; `tabbeacon setup agy` also respects that saved mode.
+For exact Agy 1.2.7 this control has deterministic/isolated configuration and
+ownership/restore/drift proof, not attended native-transition qualification.
+Real visible Ready remains UNPROVEN; attended preserve-native switching and
+same-tab handoff remain NOT_EXECUTED_OWNER_STOP and are outside the v0.8.0 public
+promise. Saving or reconciling a control never supplies that missing real proof.
 An earlier isolated original-command Cursor product run showed color and
 later-session release. At `e30303a`, the Owner also observed two Cursor tabs
 without interference, with distinct saved owners in one product state root.

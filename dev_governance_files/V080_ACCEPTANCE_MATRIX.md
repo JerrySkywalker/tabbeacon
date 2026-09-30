@@ -14,6 +14,41 @@ PASS/FAIL/BLOCKED/UNPROVEN/REUSED/N/A disposition. N/A is for an inapplicable ga
 not a way to remove a required product task. One representative proof family may
 cover several rows under [QUALITY_GATES.md](QUALITY_GATES.md).
 
+## Release-scope reconciliation — 2026-09-30
+
+Owner instruction for the existing G06 closeout narrows public claims to verified
+scope; it does not delete a gate because an attended test was stopped.
+Rationale: **release scope narrowed to verified claims; evidence requirement not
+retroactively passed**. RELEASE_CRITERIA requires behavior according to the visual
+contract and ownership-safe configuration, but does not prescribe attended Agy
+Ready or preserve-native transitions. QUALITY_GATES selects real L4 for claims
+that cannot be proved by admitted fixtures and permits shared proof families.
+
+| Class | v0.8.0 obligation / evidence boundary |
+| --- | --- |
+| Required public capability | P/C/E/T, fail-open, typed channel policy, provider isolation, exact ownership, restore/drift safety and #116 disclosure remain required. Exact Agy 1.1.19 support is preserved; 1.2.7 admits only the exact title-callback contract and bounded real Working/default-color/mixed noninterference claims. |
+| Implemented, narrower proof | Agy 1.2.7 setup/reconcile/uninstall/restore/drift safety has isolated evidence; delivered `idle` maps to Ready in deterministic code/fixtures. Owned title UIA proves only its fixture scope. These are not attended transition claims. |
+| Outside public promise | Real visible Agy 1.2.7 Ready, attended preserve-native switching, and same-tab provider handoff are not promised as qualified v0.8.0 behaviors. |
+| Overbroad original requirement | The original blanket Agy callback/preserve-native L4 requirement below is replaced by the bounded real Working/noninterference family plus isolated safety/contract proofs. X05/P08 remain required safety obligations; their existence does not mandate an additional attended Agy transition. |
+
+```text
+AGY_READY_VISIBLE_L4=UNPROVEN
+SAME_TAB_HANDOFF_L4=NOT_EXECUTED_OWNER_STOP
+AGY_PRESERVE_NATIVE_L4=NOT_EXECUTED_OWNER_STOP
+ATTENDED_FOLLOWUP_REQUIREMENT=NOT_REQUIRED_FOR_V080_PUBLIC_SCOPE
+FOLLOWUP=OPTIONAL_FOLLOWUP_NEW_ISSUE_OR_LATER_QUALIFICATION
+```
+
+The Owner stopped the latter two scenarios and declined further attended tests;
+no re-run is required by this narrowed public scope. Ready was observed still at
+`Agy⭕AGYWORKS`, not proved transitioned. These evidence results are permanent
+historical facts, not PASS or N/A. Follow-up qualification needs new structured
+evidence and its own admission; no response-text heuristic is authorized.
+Release notes, support, setup and configuration docs must disclose these limits.
+All applicable safety, code CI, package, smoke and independent release-review
+gates remain mandatory. #116 remains OPEN_KNOWN_LIMITATION; no Agy 1.2.13 or
+Codex 0.159.0 inheritance of 0.157.1 Interrupt proof is admitted.
+
 ## 1. Task-level obligations
 
 ### P — independent presentation
@@ -122,7 +157,10 @@ decision only for an actual unresolved release-impacting limitation.
 That bounded Owner decision was supplied on 2026-09-29 as recorded above;
 do not request it again or mark the unavailable detection PASS. Actual Agy 1.2.7
 narrow title-profile admission is also authorized, but still needs configuration,
-contract and real callback/preserve-native evidence. Exact 1.1.19 remains supported;
+contract and real Working callback/noninterference evidence within the reconciled
+public scope above. Attended Ready/preserve-native/same-tab qualification is
+OPTIONAL_FOLLOWUP, NOT_REQUIRED_FOR_V080_PUBLIC_SCOPE; isolated safety requirements
+remain mandatory. Exact 1.1.19 remains supported;
 version ordering, fixtures and admission authorization alone do not prove L4.
 
 ## 4. Candidate and publication acceptance

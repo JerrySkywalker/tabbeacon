@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-The current published release is **v0.8.0**. Security fixes target the current
+v0.8.0 is a release candidate in this source. Security fixes target the current
 `main` branch and the latest published release when practical.
 
 ## Reporting a vulnerability

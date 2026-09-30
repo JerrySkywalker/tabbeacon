@@ -3,11 +3,11 @@
 The historical filename is retained for existing links. The Owner's 2026-09-26
 approval, effective when the admission documentation PR merged, resumed bounded
 feature development under [ROADMAP_V08.md](ROADMAP_V08.md). The fields below
-preserve the original admission decision; the v0.8.0 release supersedes its
-initial no-publication state.
+preserve the original admission decision. Current external Owner authority and
+exact-candidate confirmation govern publication, not the candidate version text.
 
 ```text
-CURRENT_PUBLIC_RELEASE=v0.8.0
+LAST_VERIFIED_PUBLIC_RELEASE=v0.7.3
 CURRENT_DEVELOPMENT_TARGET=v0.8.0
 V073_IMPLEMENTATION=COMPLETE
 ACTIVE_FEATURE_DEVELOPMENT=V080_ADMITTED

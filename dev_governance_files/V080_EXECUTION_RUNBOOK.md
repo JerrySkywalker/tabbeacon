@@ -18,6 +18,19 @@ an explicit public-release boundary. Do not infer completion from this runbook.
 
 ## Current closeout authority — 2026-09-29
 
+G06 reconciliation update (2026-09-30, external Owner instruction): continue the
+same Train without repeating accepted A/B/C L4. Apply the narrowed public Agy
+scope and evidence policy in V080_ACCEPTANCE_MATRIX; preserve permanent Ready
+UNPROVEN and preserve-native/same-tab NOT_EXECUTED_OWNER_STOP records. No additional
+attended test is required for those excluded public claims. Required P08/X05
+ownership/channel/configuration safety remains covered only by its scoped proofs.
+Complete release-text correction, exact-head CI, package/build/smoke/hash checks
+and one independent native read-only focused release review. Only then report
+G06 PASS and request publication authorization for the new exact SHA. Keep Draft;
+no Ready, merge, tag, publication or production change before that confirmation.
+This update supersedes the older broader attended-packet requirement below, not
+the RELEASE_CRITERIA or unexecuted evidence facts.
+
 Continue the existing owned `feat/v080-multicli-train-001` worktree and Draft
 PR #119 from admitted fd9aebd00cf99c45634d0ea240e7d4afc64f5f62; do not reset to
 that reference or repeat G00/completed real acceptance. Recheck current paths,

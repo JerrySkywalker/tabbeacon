@@ -4,7 +4,7 @@ Roadmap IDs are stable governance identifiers. `X` suffixes denote experimental 
 
 The Owner-approved [v0.8.0 Goal Train](ROADMAP_V08.md) supplied the release scope.
 Prior release sequences below are historical records, not active implementation
-instructions. v0.8.0 is the public release represented by this source.
+instructions. This source prepares the v0.8.0 candidate; it does not prove publication.
 
 ## v0.6.1 production release — COMPLETE
 
@@ -35,7 +35,7 @@ TAG=v0.6.1
 
 ## Current production baseline and development admission
 
-CURRENT_PUBLIC_RELEASE=v0.8.0
+LAST_VERIFIED_PUBLIC_RELEASE=v0.7.3
 CURRENT_PUBLIC_TARGET=v0.8.0
 CURRENT_DEVELOPMENT_TARGET=v0.8.0
 V073_IMPLEMENTATION=COMPLETE
