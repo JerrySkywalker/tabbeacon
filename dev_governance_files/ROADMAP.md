@@ -2,9 +2,9 @@
 
 Roadmap IDs are stable governance identifiers. `X` suffixes denote experimental work that does not block the adjacent production release unless promoted by a later decision.
 
-Current development is the Owner-approved [v0.8.0 Goal Train](ROADMAP_V08.md).
-The prior release sequences below are retained as historical records, not active
-implementation instructions. Public v0.7.3 support remains unchanged by plan admission.
+The Owner-approved [v0.8.0 Goal Train](ROADMAP_V08.md) supplied the release scope.
+Prior release sequences below are historical records, not active implementation
+instructions. This source prepares the v0.8.0 candidate; it does not prove publication.
 
 ## v0.6.1 production release — COMPLETE
 
@@ -35,8 +35,8 @@ TAG=v0.6.1
 
 ## Current production baseline and development admission
 
-CURRENT_PUBLIC_RELEASE=v0.7.3
-CURRENT_PUBLIC_TARGET=v0.7.3
+LAST_VERIFIED_PUBLIC_RELEASE=v0.7.3
+CURRENT_PUBLIC_TARGET=v0.8.0
 CURRENT_DEVELOPMENT_TARGET=v0.8.0
 V073_IMPLEMENTATION=COMPLETE
 ACTIVE_FEATURE_DEVELOPMENT=V080_ADMITTED
@@ -44,9 +44,9 @@ V08_OPTIONS_STATUS=HISTORICAL_NON_AUTHORITATIVE
 ROADMAP_V08_CREATED=true
 NEXT_RECOMMENDED_GOAL=V080_G00_RESUME_AUDIT_THEN_CONTINUOUS_IMPLEMENTATION
 
-The v0.7.3 discoverability and distribution maintenance release is publicly
-distributed. Its accepted release source, immutable tag, registry package, and
-Windows asset are:
+The prior v0.7.3 discoverability and distribution maintenance release was
+publicly distributed. Its accepted release source, immutable tag, registry
+package, and Windows asset were:
 
 ```text
 RELEASE_SHA=1485b4dc0fe634a21634adc9ec539deb76beaad2

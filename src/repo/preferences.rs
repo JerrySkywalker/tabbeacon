@@ -134,6 +134,9 @@ pub struct WorkspacePreferencesSnapshot {
 }
 
 impl WorkspacePreferencesSnapshot {
+    pub(crate) fn recovery_contents(&self) -> Option<&[u8]> {
+        self.contents.as_deref()
+    }
     /// Typed preferences at the snapshot point.
     #[must_use]
     pub fn preferences(&self) -> &WorkspacePreferences {
@@ -310,6 +313,38 @@ impl WorkspacePreferenceStore {
         })
     }
 
+    pub(crate) fn render_replacement_bytes(
+        replacement: WorkspacePreferences,
+    ) -> Result<Vec<u8>, WorkspacePreferenceError> {
+        Ok(serde_json::to_vec_pretty(&SerializablePreferences::from(
+            replacement,
+        ))?)
+    }
+
+    pub(crate) fn recover_import_bytes_if_unchanged(
+        &self,
+        planned: &[u8],
+        original: Option<&[u8]>,
+    ) -> Result<bool, WorkspacePreferenceError> {
+        if let Some(bytes) = original {
+            preferences_from_bytes(bytes)?;
+        }
+        self.with_lock(|| {
+            let current = self.snapshot_unlocked()?;
+            if current.contents.as_deref() == original {
+                return Ok(true);
+            }
+            if current.contents.as_deref() != Some(planned) {
+                return Ok(false);
+            }
+            match original {
+                Some(bytes) => atomic_write(&self.path, bytes)?,
+                None => fs::remove_file(&self.path)?,
+            }
+            Ok(self.snapshot_unlocked()?.contents.as_deref() == original)
+        })
+    }
+
     /// Restores an original snapshot only when the prior write remains exact.
     ///
     /// # Errors
@@ -369,7 +404,7 @@ impl WorkspacePreferenceStore {
         &self,
         preferences: WorkspacePreferences,
     ) -> Result<WorkspacePreferencesWriteReceipt, WorkspacePreferenceError> {
-        let contents = serde_json::to_vec_pretty(&SerializablePreferences::from(preferences))?;
+        let contents = Self::render_replacement_bytes(preferences)?;
         atomic_write(&self.path, &contents)?;
         Ok(WorkspacePreferencesWriteReceipt { contents })
     }

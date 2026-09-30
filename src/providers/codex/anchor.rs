@@ -4,13 +4,17 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{activity::SessionWorkspaceObservability, repo::RepositoryAlias};
+use crate::{
+    activity::SessionWorkspaceObservability, lock_budget::try_lock_file_with_budget,
+    repo::RepositoryAlias,
+};
 
 use super::{CodexHookContext, CodexHookEvent, CodexSessionStartSource};
 
@@ -18,6 +22,7 @@ const STATE_DIRECTORY: &str = "codex-root-workspace-anchor-v1";
 const LOCK_FILE: &str = "root-workspace-anchor.lock";
 const STATE_SCHEMA: &str = "tabbeacon-codex-root-workspace-anchor-v1";
 const MAX_ACTIVE_SUBAGENTS: u16 = 1_024;
+const STATE_LOCK_BUDGET: Duration = Duration::from_millis(100);
 // This state is only a bridge between one-shot Hook processes. It must never
 // turn a lost `SessionEnd` into durable workspace authority for a reused native
 // provider session ID.
@@ -293,7 +298,7 @@ impl RootWorkspaceAnchorStore {
     ) -> io::Result<T> {
         self.prepare_directory()?;
         let lock = self.open_lock()?;
-        lock.lock()?;
+        try_lock_file_with_budget(&lock, STATE_LOCK_BUDGET)?;
         self.prune_expired_states_locked(observed_at_unix_seconds)?;
         let path = self.state_path(session_sha256)?;
         let mut state =

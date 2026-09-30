@@ -141,7 +141,8 @@ pub fn hook_input_template(event: CodexHookEvent) -> Option<Value> {
     };
 
     match event {
-        CodexHookEvent::SessionEnd => None,
+        // Interrupt delivery is not yet admitted in an owned profile.
+        CodexHookEvent::SessionEnd | CodexHookEvent::Interrupt => None,
         CodexHookEvent::SessionStart => Some(common(Map::from_iter([
             ("cwd".to_owned(), Value::String("${cwd}".to_owned())),
             ("source".to_owned(), Value::String("${source}".to_owned())),

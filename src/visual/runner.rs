@@ -2,7 +2,7 @@
 
 use std::{
     env, fs,
-    io::Write,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{self, Child, Command, Stdio},
     thread,
@@ -26,11 +26,18 @@ use super::{
 };
 
 const LIVE_VISUAL_WORKER_BUDGET: Duration = Duration::from_secs(90);
-const LIVE_VISUAL_WORKER_BUDGET_MILLIS: u64 = 90_000;
+// Public native conversion runs three exact-owned windows in series.
+// The 9157006 receipt measured about 31 seconds through cleanup for each of
+// the first two; the 90-second worker stopped after the third capture and
+// before its cleanup. Keep that fixture bounded with room for finalization.
+const THREE_WINDOW_WORKER_BUDGET: Duration = Duration::from_mins(2);
 const LIVE_VISUAL_WORKER_STAGING_DIRECTORY: &str = ".tabbeacon-visual-worker";
 const WORKER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const WORKER_TERMINATION_BUDGET: Duration = Duration::from_secs(5);
-const WORKER_PROCESS_QUERY_BUDGET: Duration = Duration::from_secs(3);
+// The exact parent/identity CIM query took 6.6 seconds on this admitted host.
+// Preserve both identity checks while bounding each query within the worker.
+const WORKER_PROCESS_QUERY_BUDGET: Duration = Duration::from_secs(12);
+const PUBLIC_HOOK_PHASE_BUDGET: Duration = Duration::from_secs(5);
 const WORKER_BUDGET_ENVIRONMENT_VARIABLE: &str = "TABBEACON_VISUAL_WORKER_BUDGET_MILLIS";
 const WORKER_NONCE_ENVIRONMENT_VARIABLE: &str = "TABBEACON_VISUAL_WORKER_NONCE";
 
@@ -128,36 +135,51 @@ pub fn run_live(request: &LiveVisualRunRequest) -> VisualResult<LiveVisualRunSum
     };
 
     let mut summary = match completion {
-        BoundedWorkerOutput::Completed => worker_evidence_summary(
-            &worker_directory,
-            request,
-            &checked_out_head,
-            &fixture_names,
-        )
-        .ok_or_else(|| {
-            VisualError::Platform(
-                "isolated visual worker did not produce a valid finalized evidence bundle"
-                    .to_owned(),
-            )
-        })
-        .or_else(|_| {
-            write_worker_failure(
+        BoundedWorkerOutput::Completed(status) => {
+            if !status.success() {
+                let stage = read_worker_stage(&worker_root, &request.run_id);
+                return write_worker_failure(
+                    request,
+                    &checked_out_head,
+                    exact_head,
+                    &fixture_names,
+                    VisualDisposition::Unproven,
+                    &format!(
+                        "isolated visual worker exited before final evidence; last_stage={stage}; exit_code={}",
+                        status.code().unwrap_or(-1)
+                    ),
+                );
+            }
+            let Some(summary) = worker_evidence_summary(
+                &worker_directory,
                 request,
                 &checked_out_head,
-                exact_head,
                 &fixture_names,
-                VisualDisposition::Unproven,
-                "isolated visual worker exited without a valid finalized evidence bundle",
-            )
-        })?,
+            ) else {
+                let stage = read_worker_stage(&worker_root, &request.run_id);
+                return write_worker_failure(
+                    request,
+                    &checked_out_head,
+                    exact_head,
+                    &fixture_names,
+                    VisualDisposition::Unproven,
+                    &format!("isolated visual worker evidence was invalid; last_stage={stage}"),
+                );
+            };
+            summary
+        }
         BoundedWorkerOutput::TimedOut => {
+            let stage = read_worker_stage(&worker_root, &request.run_id);
             return write_worker_failure(
                 request,
                 &checked_out_head,
                 exact_head,
                 &fixture_names,
                 VisualDisposition::Blocked,
-                "isolated visual worker exceeded its 90-second wall-clock budget and was terminated as an owned process tree",
+                &format!(
+                    "isolated visual worker exceeded its {}-second wall-clock budget and was terminated as an owned process tree; last_stage={stage}",
+                    worker_budget(request).as_secs()
+                ),
             );
         }
         BoundedWorkerOutput::TerminationFailed => {
@@ -193,6 +215,17 @@ fn selected_fixture_names(request: &LiveVisualRunRequest) -> VisualResult<Vec<St
         .collect())
 }
 
+fn worker_budget(request: &LiveVisualRunRequest) -> Duration {
+    if matches!(
+        request.fixture_name.as_deref(),
+        Some(super::CODEX_PUBLIC_NATIVE_FIXTURE | super::AGY_PUBLIC_NATIVE_FIXTURE)
+    ) {
+        THREE_WINDOW_WORKER_BUDGET
+    } else {
+        LIVE_VISUAL_WORKER_BUDGET
+    }
+}
+
 fn worker_paths(request: &LiveVisualRunRequest) -> VisualResult<(PathBuf, PathBuf, PathBuf)> {
     let final_directory = request.evidence_root.join(&request.run_id);
     if final_directory.exists() {
@@ -208,13 +241,69 @@ fn worker_paths(request: &LiveVisualRunRequest) -> VisualResult<(PathBuf, PathBu
     Ok((worker_root, worker_directory, final_directory))
 }
 
+/// Static phase only; never Hook content, window text, paths, or screenshots.
+fn worker_stage_path(worker_root: &Path, run_id: &str) -> PathBuf {
+    worker_root.join(format!("{run_id}.stage"))
+}
+
+fn write_worker_stage(worker_root: &Path, run_id: &str, stage: &str) -> VisualResult<()> {
+    if !is_safe_run_id(run_id) || !is_known_worker_stage(stage) {
+        return Err(VisualError::InvalidIdentifier(run_id.to_owned()));
+    }
+    fs::write(worker_stage_path(worker_root, run_id), stage).map_err(VisualError::Io)
+}
+
+fn read_worker_stage(worker_root: &Path, run_id: &str) -> &'static str {
+    if !is_safe_run_id(run_id) {
+        return "unknown";
+    }
+    let Ok(bytes) = fs::read(worker_stage_path(worker_root, run_id)) else {
+        return "unknown";
+    };
+    match bytes.as_slice() {
+        b"started" => "started",
+        b"environment" => "environment",
+        b"evidence" => "evidence",
+        b"preflight" => "preflight",
+        b"fixture" => "fixture",
+        b"window_acquisition" => "window_acquisition",
+        b"hook_wait" => "hook_wait",
+        b"uia_resolution" => "uia_resolution",
+        b"capture" => "capture",
+        b"cleanup" => "cleanup",
+        b"fixture_done" => "fixture_done",
+        b"finalizing" => "finalizing",
+        b"done" => "done",
+        _ => "unknown",
+    }
+}
+
+fn is_known_worker_stage(stage: &str) -> bool {
+    matches!(
+        stage,
+        "started"
+            | "environment"
+            | "evidence"
+            | "preflight"
+            | "fixture"
+            | "window_acquisition"
+            | "hook_wait"
+            | "uia_resolution"
+            | "capture"
+            | "cleanup"
+            | "fixture_done"
+            | "finalizing"
+            | "done"
+    )
+}
+
 fn run_authorized_worker(
     request: &LiveVisualRunRequest,
     worker_root: &Path,
 ) -> VisualResult<BoundedWorkerOutput> {
     let authorization = create_worker_authorization(worker_root, &request.run_id)?;
     let result = spawn_authorized_worker(request, worker_root, &authorization)
-        .and_then(|worker| wait_for_bounded_worker(worker, LIVE_VISUAL_WORKER_BUDGET));
+        .and_then(|worker| wait_for_bounded_worker(worker, worker_budget(request)));
     clear_worker_authorization(&authorization);
     result
 }
@@ -242,7 +331,7 @@ fn spawn_authorized_worker(
     worker
         .env(
             WORKER_BUDGET_ENVIRONMENT_VARIABLE,
-            LIVE_VISUAL_WORKER_BUDGET_MILLIS.to_string(),
+            worker_budget(request).as_millis().to_string(),
         )
         .env(WORKER_NONCE_ENVIRONMENT_VARIABLE, &authorization.nonce)
         .stdout(Stdio::null())
@@ -262,8 +351,10 @@ fn spawn_authorized_worker(
 /// Returns the classified filesystem, process, UIA, capture, or evidence error
 /// that the worker observed before it could emit its summary.
 pub fn run_live_in_worker(request: &LiveVisualRunRequest) -> VisualResult<LiveVisualRunSummary> {
+    write_worker_stage(&request.evidence_root, &request.run_id, "started")?;
     let checked_out_head = checked_out_head()?;
     let (environment, base_probe) = inspect_environment();
+    write_worker_stage(&request.evidence_root, &request.run_id, "environment")?;
     let driver = FixtureDriver::default();
     let replays = selected_replays(&driver, request)?;
     let fixture_names = replays
@@ -271,12 +362,14 @@ pub fn run_live_in_worker(request: &LiveVisualRunRequest) -> VisualResult<LiveVi
         .map(|replay| replay.case.fixture_name.clone())
         .collect::<Vec<_>>();
     let writer = EvidenceWriter::create(&request.evidence_root, &request.run_id)?;
+    write_worker_stage(&request.evidence_root, &request.run_id, "evidence")?;
 
     let exact_head = is_exact_sha(&request.expected_head)
         && is_exact_sha(&checked_out_head)
         && request.expected_head == checked_out_head;
     let mut observation = Observation::new(DesktopPreflight::assess(base_probe), exact_head);
     observation.record_exact_head(&request.expected_head, &checked_out_head, exact_head);
+    write_worker_stage(&request.evidence_root, &request.run_id, "preflight")?;
 
     if !matches!(
         observation.preflight.disposition,
@@ -285,6 +378,7 @@ pub fn run_live_in_worker(request: &LiveVisualRunRequest) -> VisualResult<LiveVi
     {
         let fixture_executable = env::current_exe().map_err(VisualError::Io)?;
         for replay in &replays {
+            write_worker_stage(&request.evidence_root, &request.run_id, "fixture")?;
             observe_replay(
                 &writer,
                 &fixture_executable,
@@ -292,9 +386,11 @@ pub fn run_live_in_worker(request: &LiveVisualRunRequest) -> VisualResult<LiveVi
                 replay,
                 &mut observation,
             )?;
+            write_worker_stage(&request.evidence_root, &request.run_id, "fixture_done")?;
         }
     }
 
+    write_worker_stage(&request.evidence_root, &request.run_id, "finalizing")?;
     observation.finalize_preflight(base_probe);
     let final_disposition = observation.disposition(exact_head);
     let visual_head =
@@ -325,6 +421,7 @@ pub fn run_live_in_worker(request: &LiveVisualRunRequest) -> VisualResult<LiveVi
     }
     writer.write_bundle(&bundle)?;
     let integrity = writer.write_integrity_manifest()?;
+    write_worker_stage(&request.evidence_root, &request.run_id, "done")?;
     Ok(LiveVisualRunSummary {
         disposition: final_disposition,
         expected_head: request.expected_head.clone(),
@@ -342,7 +439,7 @@ pub fn run_live_in_worker(request: &LiveVisualRunRequest) -> VisualResult<LiveVi
 }
 
 enum BoundedWorkerOutput {
-    Completed,
+    Completed(std::process::ExitStatus),
     TimedOut,
     TerminationFailed,
 }
@@ -364,8 +461,8 @@ fn wait_for_bounded_worker(
     mut worker: Child,
     budget: Duration,
 ) -> VisualResult<BoundedWorkerOutput> {
-    if wait_for_child_exit(&mut worker, budget)?.is_some() {
-        return Ok(BoundedWorkerOutput::Completed);
+    if let Some(status) = wait_for_child_exit(&mut worker, budget)? {
+        return Ok(BoundedWorkerOutput::Completed(status));
     }
     if terminate_owned_worker_tree(&mut worker)? {
         Ok(BoundedWorkerOutput::TimedOut)
@@ -426,19 +523,54 @@ fn terminate_direct_worker(worker: &mut Child) -> VisualResult<bool> {
 fn bounded_powershell_output(
     script: &str,
     budget: Duration,
+    output_path: &Path,
 ) -> VisualResult<Option<std::process::Output>> {
+    // A finished PowerShell process can leave an inherited stdout pipe open in
+    // a descendant. `wait_with_output` would then hang beyond this budget.
+    // Redirect only this content-minimal identity result to an exact-owned
+    // file, read it through the original handle, and remove that one file.
+    let mut output_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(output_path)
+        .map_err(VisualError::Io)?;
     let mut command = Command::new("powershell.exe");
     command
         .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .stdout(Stdio::piped())
+        .stdout(Stdio::from(
+            output_file.try_clone().map_err(VisualError::Io)?,
+        ))
         .stderr(Stdio::null());
-    let mut child = command.spawn().map_err(VisualError::Io)?;
-    if wait_for_child_exit(&mut child, budget)?.is_none() {
-        let _ = child.kill();
-        let _ = wait_for_child_exit(&mut child, WORKER_TERMINATION_BUDGET);
-        return Ok(None);
-    }
-    child.wait_with_output().map(Some).map_err(VisualError::Io)
+    let result = (|| -> VisualResult<Option<std::process::Output>> {
+        let mut child = command.spawn().map_err(VisualError::Io)?;
+        let Some(status) = wait_for_child_exit(&mut child, budget)? else {
+            let _ = child.kill();
+            let _ = wait_for_child_exit(&mut child, WORKER_TERMINATION_BUDGET);
+            return Ok(None);
+        };
+        output_file
+            .seek(SeekFrom::Start(0))
+            .map_err(VisualError::Io)?;
+        let mut stdout = Vec::new();
+        (&mut output_file)
+            .take(4_097)
+            .read_to_end(&mut stdout)
+            .map_err(VisualError::Io)?;
+        if stdout.len() > 4_096 {
+            return Err(VisualError::Platform(
+                "visual worker identity query output exceeded its bound".to_owned(),
+            ));
+        }
+        Ok(Some(std::process::Output {
+            status,
+            stdout,
+            stderr: Vec::new(),
+        }))
+    })();
+    drop(output_file);
+    fs::remove_file(output_path).map_err(VisualError::Io)?;
+    result
 }
 
 fn create_worker_authorization(
@@ -507,9 +639,13 @@ pub fn authorize_live_worker(
         ));
     }
     let authorization = consume_worker_authorization(authorization_path, request, nonce)?;
-    let parent_process_id = worker_parent_process_id()?;
+    let parent_process_id = worker_parent_process_id(&request.evidence_root, &request.run_id)?;
     if authorization.supervisor_process_id != parent_process_id
-        || !parent_is_fixture_executable(parent_process_id)?
+        || !parent_is_fixture_executable(
+            parent_process_id,
+            &request.evidence_root,
+            &request.run_id,
+        )?
     {
         return Err(VisualError::Platform(
             "visual worker was not launched by the active fixture supervisor".to_owned(),
@@ -542,15 +678,19 @@ fn consume_worker_authorization(
     result
 }
 
-fn worker_parent_process_id() -> VisualResult<u32> {
+fn worker_parent_process_id(worker_root: &Path, run_id: &str) -> VisualResult<u32> {
     let process_id = process::id().to_string();
     let script = format!(
         "(Get-CimInstance Win32_Process -Filter 'ProcessId = {process_id}').ParentProcessId"
     );
-    let output =
-        bounded_powershell_output(&script, WORKER_PROCESS_QUERY_BUDGET)?.ok_or_else(|| {
-            VisualError::Platform("visual worker parent process query timed out".to_owned())
-        })?;
+    let output = bounded_powershell_output(
+        &script,
+        WORKER_PROCESS_QUERY_BUDGET,
+        &worker_root.join(format!("{run_id}.parent-query.stdout")),
+    )?
+    .ok_or_else(|| {
+        VisualError::Platform("visual worker parent process query timed out".to_owned())
+    })?;
     if !output.status.success() {
         return Err(VisualError::Platform(
             "visual worker parent process query did not complete".to_owned(),
@@ -564,14 +704,22 @@ fn worker_parent_process_id() -> VisualResult<u32> {
         })
 }
 
-fn parent_is_fixture_executable(parent_process_id: u32) -> VisualResult<bool> {
+fn parent_is_fixture_executable(
+    parent_process_id: u32,
+    worker_root: &Path,
+    run_id: &str,
+) -> VisualResult<bool> {
     let script = format!(
         "(Get-CimInstance Win32_Process -Filter 'ProcessId = {parent_process_id}').ExecutablePath"
     );
-    let output =
-        bounded_powershell_output(&script, WORKER_PROCESS_QUERY_BUDGET)?.ok_or_else(|| {
-            VisualError::Platform("visual worker parent identity query timed out".to_owned())
-        })?;
+    let output = bounded_powershell_output(
+        &script,
+        WORKER_PROCESS_QUERY_BUDGET,
+        &worker_root.join(format!("{run_id}.parent-image-query.stdout")),
+    )?
+    .ok_or_else(|| {
+        VisualError::Platform("visual worker parent identity query timed out".to_owned())
+    })?;
     if !output.status.success() {
         return Err(VisualError::Platform(
             "visual worker parent identity query did not complete".to_owned(),
@@ -605,7 +753,7 @@ fn worker_evidence_summary(
         &assertions,
     )
     .then_some(())?;
-    worker_supervision_matches(&supervision).then_some(())?;
+    worker_supervision_matches(&supervision, request).then_some(())?;
     evidence_integrity_matches(worker_directory, &integrity).then_some(())?;
     Some(LiveVisualRunSummary {
         disposition: manifest.disposition,
@@ -662,12 +810,16 @@ fn worker_manifest_matches(
     }
 }
 
-fn worker_supervision_matches(supervision: &WorkerSupervisionEvidence) -> bool {
+fn worker_supervision_matches(
+    supervision: &WorkerSupervisionEvidence,
+    request: &LiveVisualRunRequest,
+) -> bool {
     supervision
         == &WorkerSupervisionEvidence {
             schema: "TABBEACON_VISUAL_WORKER_SUPERVISION_V1".to_owned(),
             execution: "isolated-child-process".to_owned(),
-            wall_clock_budget_millis: LIVE_VISUAL_WORKER_BUDGET_MILLIS,
+            wall_clock_budget_millis: u64::try_from(worker_budget(request).as_millis())
+                .unwrap_or(u64::MAX),
             deadline_action: "terminate-direct-owned-worker".to_owned(),
         }
 }
@@ -863,6 +1015,7 @@ fn unobserved_worker_environment() -> MachineEnvironment {
     }
 }
 
+#[allow(clippy::too_many_lines)] // Keeps owned launch, phase gate, observation, and cleanup in one scope.
 fn observe_replay(
     writer: &EvidenceWriter,
     fixture_executable: &Path,
@@ -870,8 +1023,48 @@ fn observe_replay(
     replay: &super::FixtureReplay,
     observation: &mut Observation,
 ) -> VisualResult<()> {
+    if replay.case.fixture_name == super::CODEX_TITLE_PRECEDENCE_FIXTURE {
+        return observe_codex_title_precedence(
+            writer,
+            fixture_executable,
+            run_id,
+            replay,
+            observation,
+        );
+    }
     let launcher = TerminalTestSessionLauncher::default();
-    let session = match launcher.launch(fixture_executable, replay, run_id, writer.directory()) {
+    let phase_signal = if matches!(
+        replay.case.fixture_name.as_str(),
+        super::CODEX_PUBLIC_COLOR_FIXTURE
+            | super::CODEX_PUBLIC_NATIVE_FIXTURE
+            | super::AGY_PUBLIC_TITLE_FIXTURE
+            | super::AGY_PUBLIC_NATIVE_FIXTURE
+    ) {
+        Some(
+            writer
+                .directory()
+                .with_extension(format!("{}.phase", replay.case.fixture_name)),
+        )
+    } else {
+        None
+    };
+    if let Some(path) = phase_signal.as_ref()
+        && path.exists()
+    {
+        return Err(VisualError::EvidenceArtifactExists(path.clone()));
+    }
+    write_worker_stage(
+        writer.directory().parent().unwrap(),
+        run_id,
+        "window_acquisition",
+    )?;
+    let session = match launcher.launch(
+        fixture_executable,
+        replay,
+        run_id,
+        writer.directory(),
+        phase_signal.as_deref(),
+    ) {
         Ok(session) => session,
         Err(error) => {
             observation.record_uia_blocked(&replay.case.fixture_name, error.to_string());
@@ -879,8 +1072,41 @@ fn observe_replay(
         }
     };
     let body_result = (|| -> VisualResult<()> {
+        write_worker_stage(writer.directory().parent().unwrap(), run_id, "hook_wait")?;
+        if let Some(path) = phase_signal.as_ref()
+            && !wait_for_public_hook_phase(
+                path,
+                match replay.case.fixture_name.as_str() {
+                    super::CODEX_PUBLIC_NATIVE_FIXTURE => b"post-native-session-end",
+                    super::CODEX_PUBLIC_COLOR_FIXTURE => b"post-working-hook",
+                    super::AGY_PUBLIC_TITLE_FIXTURE => b"post-managed-callback",
+                    super::AGY_PUBLIC_NATIVE_FIXTURE => b"post-native-callback",
+                    _ => unreachable!("phase signal exists only for public fixtures"),
+                },
+                PUBLIC_HOOK_PHASE_BUDGET,
+            )?
+        {
+            observation.record_uia_blocked(
+                &replay.case.fixture_name,
+                "public Hook fixture did not reach the post-transition observation phase"
+                    .to_owned(),
+            );
+            return Ok(());
+        }
+        write_worker_stage(
+            writer.directory().parent().unwrap(),
+            run_id,
+            "uia_resolution",
+        )?;
         let locator = WindowsUiaLocator;
-        let target = match locate_activated_with_retry(locator, run_id, replay) {
+        let target = match if matches!(
+            replay.case.fixture_name.as_str(),
+            super::AGY_PUBLIC_TITLE_FIXTURE | super::AGY_PUBLIC_NATIVE_FIXTURE
+        ) {
+            locate_exact_sibling_with_retry(locator, &session)
+        } else {
+            locate_activated_with_retry(locator, run_id, replay)
+        } {
             Ok(target) => target,
             Err(failure) => {
                 if let Some(target) = failure.last_target {
@@ -941,8 +1167,46 @@ fn observe_replay(
                 return Ok(());
             }
         };
-        observe_capture(writer, replay, &capture_target, tab_bounds, observation)
+        if matches!(
+            replay.case.fixture_name.as_str(),
+            super::AGY_PUBLIC_TITLE_FIXTURE | super::AGY_PUBLIC_NATIVE_FIXTURE
+        ) && !target
+            .title_reader
+            .as_ref()
+            .ok_or_else(|| VisualError::Platform("exact Agy tab reader is absent".to_owned()))?
+            .is_selected()?
+        {
+            observation.record_capture_blocked(
+                &replay.case.fixture_name,
+                "exact Agy sibling tab was deselected before capture",
+            );
+            return Ok(());
+        }
+        write_worker_stage(writer.directory().parent().unwrap(), run_id, "capture")?;
+        observe_capture(writer, replay, &capture_target, tab_bounds, observation)?;
+        if matches!(
+            replay.case.fixture_name.as_str(),
+            super::AGY_PUBLIC_TITLE_FIXTURE | super::AGY_PUBLIC_NATIVE_FIXTURE
+        ) && !target
+            .title_reader
+            .as_ref()
+            .ok_or_else(|| VisualError::Platform("exact Agy tab reader is absent".to_owned()))?
+            .is_selected()?
+        {
+            observation.record_capture_blocked(
+                &replay.case.fixture_name,
+                "exact Agy sibling tab was deselected during capture",
+            );
+        }
+        Ok(())
     })();
+    let phase_cleanup_result = if let Some(path) = phase_signal.as_ref()
+        && path.exists()
+    {
+        fs::remove_file(path)
+    } else {
+        Ok(())
+    };
 
     let product_disposition = if body_result.is_err() {
         TemporaryWindowProductDisposition::Exception
@@ -953,6 +1217,7 @@ fn observe_replay(
     } else {
         TemporaryWindowProductDisposition::Pass
     };
+    write_worker_stage(writer.directory().parent().unwrap(), run_id, "cleanup")?;
     match session.cleanup(product_disposition) {
         Ok(receipt) if receipt.temporary_wt_cleanup == "PASS" => {}
         Ok(receipt) => observation.record_uia_blocked(
@@ -967,7 +1232,128 @@ fn observe_replay(
             format!("exact-owned temporary Windows Terminal cleanup was unproven: {error}"),
         ),
     }
+    phase_cleanup_result.map_err(VisualError::Io)?;
     body_result
+}
+
+fn observe_codex_title_precedence(
+    writer: &EvidenceWriter,
+    fixture_executable: &Path,
+    run_id: &str,
+    replay: &super::FixtureReplay,
+    observation: &mut Observation,
+) -> VisualResult<()> {
+    let worker_root = writer
+        .directory()
+        .parent()
+        .ok_or_else(|| VisualError::Platform("owned evidence parent absent".to_owned()))?;
+    let signal = writer.directory().with_extension("title.phase");
+    let ack = signal.with_extension("ack");
+    if signal.exists() || ack.exists() {
+        return Err(VisualError::EvidenceArtifactExists(signal));
+    }
+    write_worker_stage(worker_root, run_id, "window_acquisition")?;
+    let session = match TerminalTestSessionLauncher::default().launch(
+        fixture_executable,
+        replay,
+        run_id,
+        writer.directory(),
+        Some(&signal),
+    ) {
+        Ok(session) => session,
+        Err(error) => {
+            observation.record_uia_blocked(&replay.case.fixture_name, error.to_string());
+            return Ok(());
+        }
+    };
+    let result = (|| -> VisualResult<()> {
+        for phase in [
+            "native_setup",
+            "native_global",
+            "inherited_native",
+            "inherited_managed",
+        ] {
+            write_worker_stage(worker_root, run_id, "hook_wait")?;
+            if !wait_for_public_hook_phase(&signal, phase.as_bytes(), Duration::from_secs(30))? {
+                observation
+                    .record_uia_blocked(phase, "bounded title phase was not reached".to_owned());
+                return Ok(());
+            }
+            write_worker_stage(worker_root, run_id, "uia_resolution")?;
+            let target = locate_exact_sibling_with_retry(WindowsUiaLocator, &session)
+                .map_err(|failure| failure.error)?;
+            let mut expected = replay.clone();
+            phase.clone_into(&mut expected.case.fixture_name);
+            if phase != "inherited_managed" {
+                expected.case.expected_title = format!("TB-NATIVE-{run_id}");
+                expected.case.expected_title_frames = vec![expected.case.expected_title.clone()];
+            }
+            observation.record_target(writer, &expected, &target.dump)?;
+            // Consume this exact phase before acknowledging it. Otherwise the next
+            // wait can race the emitter and reject the previous phase's marker.
+            fs::remove_file(&signal)?;
+            fs::write(&ack, phase)?;
+        }
+        Ok(())
+    })();
+    if let Err(error) = &result {
+        observation.record_uia_blocked(&replay.case.fixture_name, error.to_string());
+    }
+    write_worker_stage(worker_root, run_id, "cleanup")?;
+    let disposition = if observation.lanes.has_failure() {
+        TemporaryWindowProductDisposition::Fail
+    } else if observation.lanes.has_blocker() {
+        TemporaryWindowProductDisposition::Blocked
+    } else {
+        TemporaryWindowProductDisposition::Pass
+    };
+    let cleanup = session.cleanup(disposition)?;
+    let passed = cleanup.temporary_wt_cleanup == "PASS";
+    observation.assertions.push(AssertionResult::new(
+        AssertionKind::Cleanup,
+        if passed {
+            VisualDisposition::Pass
+        } else {
+            VisualDisposition::Blocked
+        },
+        Some(replay.case.fixture_name.clone()),
+        cleanup.detail,
+    ));
+    if !passed {
+        observation.record_uia_blocked(
+            &replay.case.fixture_name,
+            "exact owned cleanup did not pass".to_owned(),
+        );
+    }
+    for file in [&signal, &ack] {
+        if file.exists() {
+            fs::remove_file(file)?;
+        }
+    }
+    // Only title ownership changed. No new capture/color/animation claim;
+    // the summary leaves those lanes UNPROVEN while scoped title evidence stands.
+    Ok(())
+}
+
+fn wait_for_public_hook_phase(
+    path: &Path,
+    expected: &[u8],
+    budget: Duration,
+) -> VisualResult<bool> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match fs::read(path) {
+            Ok(bytes) if bytes == expected => return Ok(true),
+            Ok(bytes) if bytes.is_empty() => {}
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(VisualError::Io(error)),
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 struct ActivationRetryFailure {
@@ -985,18 +1371,41 @@ fn locate_activated_with_retry(
     run_id: &str,
     replay: &super::FixtureReplay,
 ) -> Result<ActivatedTarget, Box<ActivationRetryFailure>> {
+    locate_with_retry(replay.case.expects_title_animation, || {
+        locator
+            .locate_and_activate_any_with_title_reader(run_id, &replay.case.expected_title_frames)
+    })
+}
+
+fn locate_exact_sibling_with_retry(
+    locator: WindowsUiaLocator,
+    session: &super::TerminalTestSession,
+) -> Result<ActivatedTarget, Box<ActivationRetryFailure>> {
+    let hwnd = session.exact_owned_hwnd().map_err(|error| {
+        Box::new(ActivationRetryFailure {
+            error,
+            last_target: None,
+        })
+    })?;
+    locate_with_retry(true, || {
+        locator.locate_and_activate_exact_anchor_sibling(&session.anchor_title, hwnd)
+    })
+}
+
+fn locate_with_retry(
+    expects_title_animation: bool,
+    mut lookup: impl FnMut() -> VisualResult<OwnedTabActivation>,
+) -> Result<ActivatedTarget, Box<ActivationRetryFailure>> {
     let mut last_target = None;
     let mut last_error = None;
     for _ in 0..20 {
-        match locator
-            .locate_and_activate_any_with_title_reader(run_id, &replay.case.expected_title_frames)
-        {
+        match lookup() {
             Ok(OwnedTabActivation::Activated {
                 dump, title_reader, ..
             }) => {
                 let target = ActivatedTarget {
                     dump,
-                    title_reader: replay.case.expects_title_animation.then_some(title_reader),
+                    title_reader: expects_title_animation.then_some(title_reader),
                 };
                 // UIA title evidence is valid after exact owned-tab
                 // correlation even if foreground activation or pixel capture
@@ -1407,6 +1816,59 @@ fn selected_replays(
 ) -> VisualResult<Vec<super::FixtureReplay>> {
     let all = driver.all_cases(&request.run_id)?;
     match request.fixture_name.as_deref() {
+        Some(super::CODEX_TITLE_PRECEDENCE_FIXTURE) => {
+            Ok(vec![driver.codex_public_replay(
+                super::CODEX_TITLE_PRECEDENCE_FIXTURE,
+                &request.run_id,
+            )?])
+        }
+        Some(super::CODEX_PUBLIC_NATIVE_FIXTURE) => {
+            let ready = all
+                .into_iter()
+                .find(|replay| replay.case.fixture_name == "ready")
+                .ok_or_else(|| VisualError::Platform("native color baseline missing".to_owned()))?;
+            Ok(vec![
+                ready,
+                driver.codex_public_replay(super::CODEX_PUBLIC_COLOR_FIXTURE, &request.run_id)?,
+                driver.codex_public_replay(super::CODEX_PUBLIC_NATIVE_FIXTURE, &request.run_id)?,
+            ])
+        }
+        Some(super::CODEX_PUBLIC_COLOR_FIXTURE) => {
+            Ok(vec![driver.codex_public_replay(
+                super::CODEX_PUBLIC_COLOR_FIXTURE,
+                &request.run_id,
+            )?])
+        }
+        Some(super::AGY_PUBLIC_NATIVE_FIXTURE) => {
+            let ready = all
+                .into_iter()
+                .find(|replay| replay.case.fixture_name == "ready")
+                .ok_or_else(|| VisualError::Platform("Agy native baseline missing".to_owned()))?;
+            Ok(vec![
+                ready,
+                driver.agy_public_replay(super::AGY_PUBLIC_TITLE_FIXTURE, &request.run_id)?,
+                driver.agy_public_replay(super::AGY_PUBLIC_NATIVE_FIXTURE, &request.run_id)?,
+            ])
+        }
+        Some(super::AGY_PUBLIC_TITLE_FIXTURE) => {
+            Ok(vec![driver.agy_public_replay(
+                super::AGY_PUBLIC_TITLE_FIXTURE,
+                &request.run_id,
+            )?])
+        }
+        Some(super::CURSOR_COLOR_NATIVE_FIXTURE) => {
+            let ready = all
+                .into_iter()
+                .find(|replay| replay.case.fixture_name == "ready")
+                .ok_or_else(|| VisualError::Platform("native color baseline missing".to_owned()))?;
+            Ok(vec![
+                ready,
+                driver.cursor_color_replay(super::CURSOR_COLOR_NATIVE_FIXTURE, &request.run_id)?,
+            ])
+        }
+        Some(
+            name @ (super::CURSOR_COLOR_WORKING_FIXTURE | super::CURSOR_COLOR_COMPLETED_FIXTURE),
+        ) => Ok(vec![driver.cursor_color_replay(name, &request.run_id)?]),
         Some(ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME) => {
             let ready = all
                 .into_iter()
@@ -1823,10 +2285,120 @@ mod tests {
 
     use super::{
         BoundedWorkerOutput, LiveVisualRunRequest, RgbaFrame, Roi, ScreenRect, UiaDump,
-        authorize_live_worker, clear_worker_authorization, consume_worker_authorization,
-        create_worker_authorization, empty_uia_dump, evidence_integrity_matches, progress_roi,
-        relative_roi, selected_replays, target_has_capturable_geometry, wait_for_bounded_worker,
+        authorize_live_worker, bounded_powershell_output, clear_worker_authorization,
+        consume_worker_authorization, create_worker_authorization, empty_uia_dump,
+        evidence_integrity_matches, progress_roi, read_worker_stage, relative_roi,
+        selected_replays, target_has_capturable_geometry, wait_for_bounded_worker,
+        wait_for_public_hook_phase, worker_budget, write_worker_stage,
     };
+
+    #[test]
+    fn worker_stage_reports_only_allowlisted_phase_labels() {
+        let root = std::env::temp_dir().join(format!(
+            "tabbeacon-visual-stage-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let run_id = "TBV080-STAGE-001";
+        assert_eq!(read_worker_stage(&root, run_id), "unknown");
+        write_worker_stage(&root, run_id, "preflight").unwrap();
+        assert_eq!(read_worker_stage(&root, run_id), "preflight");
+        for stage in [
+            "window_acquisition",
+            "hook_wait",
+            "uia_resolution",
+            "capture",
+            "cleanup",
+        ] {
+            write_worker_stage(&root, run_id, stage).unwrap();
+            assert_eq!(read_worker_stage(&root, run_id), stage);
+        }
+        assert!(write_worker_stage(&root, run_id, "private-window-title").is_err());
+        fs::write(root.join(format!("{run_id}.stage")), "private-window-title").unwrap();
+        assert_eq!(read_worker_stage(&root, run_id), "unknown");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn title_precedence_selects_one_window_without_color_baseline_replays() {
+        let request = LiveVisualRunRequest {
+            expected_head: "a".repeat(40),
+            run_id: "TB80-title".to_owned(),
+            evidence_root: PathBuf::from("artifacts/visual"),
+            fixture_name: Some(super::super::CODEX_TITLE_PRECEDENCE_FIXTURE.to_owned()),
+        };
+        let replays = selected_replays(&FixtureDriver::default(), &request).unwrap();
+        assert_eq!(replays.len(), 1);
+        assert_eq!(
+            replays[0].case.fixture_name,
+            super::super::CODEX_TITLE_PRECEDENCE_FIXTURE
+        );
+        assert_eq!(worker_budget(&request), super::LIVE_VISUAL_WORKER_BUDGET);
+    }
+
+    #[test]
+    fn public_hook_phase_blocks_early_capture_and_rejects_missing_or_wrong_marker() {
+        let path = std::env::temp_dir().join(format!(
+            "tabbeacon-public-phase-{}-{}.phase",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        assert!(
+            !wait_for_public_hook_phase(&path, b"post-native-session-end", Duration::ZERO).unwrap()
+        );
+        let delayed = path.clone();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            fs::write(delayed, b"post-native-session-end").unwrap();
+        });
+        assert!(
+            wait_for_public_hook_phase(&path, b"post-native-session-end", Duration::from_secs(1))
+                .unwrap()
+        );
+        writer.join().unwrap();
+        assert!(!wait_for_public_hook_phase(&path, b"post-working-hook", Duration::ZERO).unwrap());
+        fs::write(&path, b"wrong-phase").unwrap();
+        assert!(
+            !wait_for_public_hook_phase(&path, b"post-native-session-end", Duration::ZERO).unwrap()
+        );
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn bounded_identity_query_reads_owned_file_and_removes_it() {
+        let path = std::env::temp_dir().join(format!(
+            "tabbeacon-visual-query-{}-{}.stdout",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let result = bounded_powershell_output("Write-Output 7", Duration::from_secs(30), &path)
+            .unwrap()
+            .unwrap();
+        assert!(result.status.success());
+        assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "7");
+        assert!(!path.exists());
+
+        let timed_path = path.with_extension("timed.stdout");
+        assert!(
+            bounded_powershell_output(
+                "Start-Sleep -Seconds 30",
+                Duration::from_millis(20),
+                &timed_path,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(!timed_path.exists());
+    }
 
     #[test]
     fn tab_roi_uses_actual_capture_to_uia_window_mapping() {
@@ -1895,6 +2467,71 @@ mod tests {
             .map(|replay| replay.case.fixture_name.as_str())
             .collect::<Vec<_>>();
         assert_eq!(names, ["ready", ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME]);
+    }
+
+    #[test]
+    fn cursor_native_visual_fixture_captures_default_baseline_first() {
+        let request = LiveVisualRunRequest {
+            expected_head: "a".repeat(40),
+            run_id: "TB80-native-selection".to_owned(),
+            evidence_root: PathBuf::from("target/visual-worker-tests"),
+            fixture_name: Some(super::super::CURSOR_COLOR_NATIVE_FIXTURE.to_owned()),
+        };
+        let names = selected_replays(&FixtureDriver::default(), &request)
+            .unwrap()
+            .into_iter()
+            .map(|replay| replay.case.fixture_name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["ready", super::super::CURSOR_COLOR_NATIVE_FIXTURE]);
+        assert_eq!(worker_budget(&request), Duration::from_secs(90));
+    }
+
+    #[test]
+    fn codex_native_visual_fixture_captures_color_and_default_baselines() {
+        let request = LiveVisualRunRequest {
+            expected_head: "a".repeat(40),
+            run_id: "TB80-codex-selection".to_owned(),
+            evidence_root: PathBuf::from("target/visual-worker-tests"),
+            fixture_name: Some(super::super::CODEX_PUBLIC_NATIVE_FIXTURE.to_owned()),
+        };
+        let names = selected_replays(&FixtureDriver::default(), &request)
+            .unwrap()
+            .into_iter()
+            .map(|replay| replay.case.fixture_name)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            [
+                "ready",
+                super::super::CODEX_PUBLIC_COLOR_FIXTURE,
+                super::super::CODEX_PUBLIC_NATIVE_FIXTURE,
+            ]
+        );
+        assert_eq!(worker_budget(&request), Duration::from_mins(2));
+    }
+
+    #[test]
+    fn agy_native_visual_fixture_captures_managed_and_exact_native_titles() {
+        let request = LiveVisualRunRequest {
+            expected_head: "a".repeat(40),
+            run_id: "TB80-agy-selection".to_owned(),
+            evidence_root: PathBuf::from("target/visual-worker-tests"),
+            fixture_name: Some(super::super::AGY_PUBLIC_NATIVE_FIXTURE.to_owned()),
+        };
+        let replays = selected_replays(&FixtureDriver::default(), &request).unwrap();
+        assert_eq!(
+            replays
+                .iter()
+                .map(|replay| replay.case.fixture_name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "ready",
+                super::super::AGY_PUBLIC_TITLE_FIXTURE,
+                super::super::AGY_PUBLIC_NATIVE_FIXTURE,
+            ]
+        );
+        assert_eq!(replays[2].case.expected_title, "Agy");
+        assert_eq!(worker_budget(&request), Duration::from_mins(2));
     }
 
     #[test]

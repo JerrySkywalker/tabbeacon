@@ -45,6 +45,10 @@ use crate::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput,
         WindowsTerminalCapabilities, WindowsTerminalRenderer,
     },
+    presentation_policy::{
+        CliTarget, PreferenceOrigin, PresentationCapabilities, PresentationMode,
+        PresentationOverride, ResolvedPresentation, resolve_presentation,
+    },
     providers::registry::ProviderRegistry,
     repo::WorkspaceAliasInspection,
     settings::{
@@ -192,6 +196,10 @@ pub struct ControlCenterDraft {
 pub struct ControlCenterRefresh {
     /// Latest read-only Presentation baseline.
     pub presentation: PresentationSettings,
+    /// Capability-limited provider preferences observed without mutation.
+    pub provider_presentation: Vec<(CliTarget, ResolvedPresentation)>,
+    /// Read-only capability proof used by provider previews.
+    pub provider_capabilities: Vec<(CliTarget, PresentationCapabilities)>,
     /// Latest read-only Interface baseline.
     pub interface: InterfacePreferences,
     /// Shared bounded management projection.
@@ -224,6 +232,13 @@ pub enum ControlCenterCommand {
         /// Staged typed state to apply.
         after: ControlCenterDraft,
     },
+    /// Persist a previewed per-provider preference through an exact snapshot.
+    ApplyProvider {
+        provider: CliTarget,
+        expected_global: PresentationSettings,
+        before: PresentationOverride,
+        after: PresentationOverride,
+    },
     /// Persist one staged, device-local workspace alias override through the
     /// caller-owned collision-safe resolver.
     ApplyWorkspace {
@@ -247,6 +262,13 @@ enum ControlCenterOverlay {
     Help,
     RepairPreview(ChangePlan),
     TitleExplanation,
+    ProviderPreview {
+        provider: CliTarget,
+        expected_global: PresentationSettings,
+        before: PresentationOverride,
+        after: PresentationOverride,
+        resolved: ResolvedPresentation,
+    },
 }
 
 impl ControlCenterOverlay {
@@ -260,6 +282,7 @@ impl ControlCenterOverlay {
             Self::Help => Some(catalog(locale, HumanMessageKey::Help)),
             Self::RepairPreview(_) => Some(catalog(locale, HumanMessageKey::RepairPreview)),
             Self::TitleExplanation => Some(catalog(locale, HumanMessageKey::WhyThisTitle)),
+            Self::ProviderPreview { .. } => Some("Provider preference / 提供方偏好"),
         }
     }
 }
@@ -273,6 +296,10 @@ pub struct ControlCenterApp {
     snapshot: ManagementSnapshot,
     overview: ManagementOverview,
     current: PresentationSettings,
+    provider_presentation: Vec<(CliTarget, ResolvedPresentation)>,
+    provider_capabilities: Vec<(CliTarget, PresentationCapabilities)>,
+    selected_provider: CliTarget,
+    selected_provider_mode: Option<PresentationMode>,
     draft: PresentationSettings,
     current_interface: InterfacePreferences,
     interface_draft: InterfacePreferences,
@@ -312,6 +339,10 @@ impl ControlCenterApp {
             snapshot,
             overview,
             current,
+            provider_presentation: Vec::new(),
+            provider_capabilities: Vec::new(),
+            selected_provider: CliTarget::Codex,
+            selected_provider_mode: None,
             draft: current,
             current_interface: InterfacePreferences::default(),
             interface_draft: InterfacePreferences::default(),
@@ -465,6 +496,8 @@ impl ControlCenterApp {
     pub fn merge_refresh(&mut self, refresh: ControlCenterRefresh) {
         self.snapshot = refresh.snapshot;
         self.overview = refresh.overview;
+        self.provider_presentation = refresh.provider_presentation;
+        self.provider_capabilities = refresh.provider_capabilities;
         self.hooks = refresh.hooks;
         self.integrations = refresh.integrations;
         self.title_explanation = refresh.title_explanation;
@@ -561,6 +594,24 @@ impl ControlCenterApp {
                 _ => {}
             }
         }
+        if self.screen == Screen::Integration {
+            match key {
+                KeyCode::Char('1') => self.select_provider(CliTarget::Codex),
+                KeyCode::Char('2') => self.select_provider(CliTarget::Agy),
+                KeyCode::Char('3') => self.select_provider(CliTarget::Cursor),
+                KeyCode::Left => self.cycle_provider_mode(-1),
+                KeyCode::Right => self.cycle_provider_mode(1),
+                KeyCode::Char('r') => self.selected_provider_mode = None,
+                KeyCode::Char('v') => self.open_provider_preview(),
+                _ => {}
+            }
+            if matches!(
+                key,
+                KeyCode::Char('1' | '2' | '3' | 'r' | 'v') | KeyCode::Left | KeyCode::Right
+            ) {
+                return ControlCenterCommand::None;
+            }
+        }
         match key {
             KeyCode::Up | KeyCode::Char('k') => self.step(-1),
             KeyCode::Down | KeyCode::Char('j') => self.step(1),
@@ -584,6 +635,50 @@ impl ControlCenterApp {
             _ => {}
         }
         ControlCenterCommand::None
+    }
+
+    fn select_provider(&mut self, provider: CliTarget) {
+        if self.selected_provider != provider {
+            self.selected_provider = provider;
+            self.selected_provider_mode = None;
+        }
+    }
+
+    fn cycle_provider_mode(&mut self, offset: isize) {
+        let modes = provider_modes(self.selected_provider);
+        let index = modes
+            .iter()
+            .position(|mode| *mode == self.selected_provider_mode)
+            .unwrap_or(0);
+        self.selected_provider_mode = modes[shifted_index(index, modes.len(), offset)];
+    }
+
+    fn open_provider_preview(&mut self) {
+        let Some((_, current)) = self
+            .provider_presentation
+            .iter()
+            .find(|(provider, _)| *provider == self.selected_provider)
+        else {
+            return;
+        };
+        let before = override_from_resolved(*current);
+        let after = self
+            .selected_provider_mode
+            .map_or_else(PresentationOverride::default, |mode| before.with_mode(mode));
+        let capabilities = self
+            .provider_capabilities
+            .iter()
+            .find(|(provider, _)| *provider == self.selected_provider)
+            .map_or(PresentationCapabilities::NONE, |(_, capabilities)| {
+                *capabilities
+            });
+        self.overlay = ControlCenterOverlay::ProviderPreview {
+            provider: self.selected_provider,
+            expected_global: self.current,
+            before,
+            after,
+            resolved: resolve_presentation(self.current, after, capabilities, current.application),
+        };
     }
 
     /// Applies a terminal key event, including the interrupt key path.
@@ -687,6 +782,28 @@ impl ControlCenterApp {
                     self.overlay = ControlCenterOverlay::None;
                 }
             }
+            ControlCenterOverlay::ProviderPreview {
+                provider,
+                expected_global,
+                before,
+                after,
+                ..
+            } => match key {
+                KeyCode::Char('a') => {
+                    let command = ControlCenterCommand::ApplyProvider {
+                        provider: *provider,
+                        expected_global: *expected_global,
+                        before: *before,
+                        after: *after,
+                    };
+                    self.overlay = ControlCenterOverlay::None;
+                    return command;
+                }
+                KeyCode::Esc | KeyCode::Char('q' | 'v') => {
+                    self.overlay = ControlCenterOverlay::None;
+                }
+                _ => {}
+            },
             ControlCenterOverlay::None => {}
         }
         ControlCenterCommand::None
@@ -885,6 +1002,53 @@ fn shifted_index(index: usize, length: usize, offset: isize) -> usize {
     }
 }
 
+fn provider_modes(provider: CliTarget) -> &'static [Option<PresentationMode>] {
+    const CODEX: &[Option<PresentationMode>] = &[
+        None,
+        Some(PresentationMode::FullTakeover),
+        Some(PresentationMode::TitleOnly),
+        Some(PresentationMode::ColorOnly),
+        Some(PresentationMode::PreserveNative),
+    ];
+    const AGY: &[Option<PresentationMode>] = &[
+        None,
+        Some(PresentationMode::TitleOnly),
+        Some(PresentationMode::PreserveNative),
+    ];
+    const CURSOR: &[Option<PresentationMode>] = &[
+        None,
+        Some(PresentationMode::ColorOnly),
+        Some(PresentationMode::PreserveNative),
+    ];
+    match provider {
+        CliTarget::Codex => CODEX,
+        CliTarget::Agy => AGY,
+        CliTarget::Cursor => CURSOR,
+    }
+}
+
+fn override_from_resolved(resolved: ResolvedPresentation) -> PresentationOverride {
+    PresentationOverride {
+        title: (resolved.title_origin == PreferenceOrigin::ProviderOverride)
+            .then_some(resolved.requested.title()),
+        tab_color: (resolved.color_origin == PreferenceOrigin::ProviderOverride)
+            .then_some(resolved.requested.tab_color()),
+        activity: (resolved.activity_origin == PreferenceOrigin::ProviderOverride)
+            .then_some(resolved.requested.activity()),
+    }
+}
+
+const fn provider_mode_label(mode: Option<PresentationMode>) -> &'static str {
+    match mode {
+        None => "inherit / 继承",
+        Some(PresentationMode::FullTakeover) => "full takeover / 完整接管",
+        Some(PresentationMode::TitleOnly) => "title only / 仅标题",
+        Some(PresentationMode::ColorOnly) => "color only / 仅颜色",
+        Some(PresentationMode::PreserveNative) => "preserve native / 保留原生",
+        Some(PresentationMode::Custom) => "custom / 自定义",
+    }
+}
+
 fn cycle_title(value: TitleMode, offset: isize) -> TitleMode {
     cycle(
         [TitleMode::TabBeacon, TitleMode::Native, TitleMode::Off],
@@ -992,18 +1156,25 @@ fn cycle<T: Copy + Eq>(values: impl AsRef<[T]>, value: T, offset: isize) -> T {
 /// # Errors
 ///
 /// Returns terminal I/O errors or an Apply error after the terminal has been restored.
-pub fn run<F, W, R, P>(
+pub fn run<F, W, R, P, C>(
     mut app: ControlCenterApp,
     mut apply: F,
     mut apply_workspace: W,
     mut refresh: R,
     mut repair: P,
+    mut apply_provider: C,
 ) -> io::Result<()>
 where
     F: FnMut(ControlCenterDraft, ControlCenterDraft) -> io::Result<()>,
     W: FnMut(Option<String>, Option<String>) -> io::Result<()>,
     R: FnMut() -> io::Result<ControlCenterRefresh>,
     P: FnMut(&str) -> io::Result<()>,
+    C: FnMut(
+        CliTarget,
+        PresentationSettings,
+        PresentationOverride,
+        PresentationOverride,
+    ) -> io::Result<()>,
 {
     let mut session = TerminalSession::enter()?;
     let mut next_refresh = Instant::now() + CONTROL_CENTER_REFRESH_INTERVAL;
@@ -1030,6 +1201,15 @@ where
                 ControlCenterCommand::ApplyRepair { action_id } => {
                     repair(&action_id)?;
                     app.repair_apply_succeeded();
+                    app.merge_refresh(refresh()?);
+                }
+                ControlCenterCommand::ApplyProvider {
+                    provider,
+                    expected_global,
+                    before,
+                    after,
+                } => {
+                    apply_provider(provider, expected_global, before, after)?;
                     app.merge_refresh(refresh()?);
                 }
                 ControlCenterCommand::Quit => break,
@@ -1110,6 +1290,8 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
     let original_locale = app.locale();
     let refresh = ControlCenterRefresh {
         presentation: original,
+        provider_presentation: app.provider_presentation.clone(),
+        provider_capabilities: app.provider_capabilities.clone(),
         interface: original_interface,
         snapshot: app.snapshot.clone(),
         overview: app.overview.clone(),
@@ -1637,8 +1819,25 @@ fn content(app: &ControlCenterApp) -> Paragraph<'static> {
 
 fn overlay_lines(app: &ControlCenterApp) -> String {
     match &app.overlay {
+        ControlCenterOverlay::ProviderPreview {
+            provider,
+            before,
+            after,
+            resolved,
+            ..
+        } => format!(
+            "{}\n\nBefore / 原值: {before:?}\nAfter / 草稿: {after:?}\nRequested / 请求: {}/{}/{}\nEffective / 受限生效值: {}/{}/{}\nApplication / 当前会话: {:?}\n\na Apply / 应用 · Esc Cancel / 取消",
+            provider.as_str(),
+            resolved.requested.title().as_str(),
+            resolved.requested.tab_color().as_str(),
+            resolved.requested.activity().as_str(),
+            resolved.effective.title().as_str(),
+            resolved.effective.tab_color().as_str(),
+            resolved.effective.activity().as_str(),
+            resolved.application,
+        ),
         ControlCenterOverlay::Help => format!(
-            "{}\n\n{}\n{}\n{}\n{}\n{}",
+            "{}\n\n{}\n{}\n{}\n{}\nTerminology / 术语: https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/terminology.md\n{}",
             catalog(app.locale(), HumanMessageKey::HelpNavigation),
             catalog(app.locale(), HumanMessageKey::HelpSettings),
             catalog(app.locale(), HumanMessageKey::HelpWorkspaceSessions),
@@ -2060,7 +2259,7 @@ fn interface_lines(app: &ControlCenterApp) -> String {
 }
 
 fn integration_lines(app: &ControlCenterApp) -> String {
-    app.integrations
+    let integrations = app.integrations
         .providers
         .iter()
         .map(|provider| {
@@ -2122,7 +2321,33 @@ fn integration_lines(app: &ControlCenterApp) -> String {
             )
         })
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+    let provider_preferences = app
+        .provider_presentation
+        .iter()
+        .map(|(provider, resolved)| {
+            format!(
+                "{}: requested={}/{}/{} effective={}/{}/{} origin={:?}/{:?}/{:?} application={:?} visible_apply_boundary=next_owned_event_or_old_tab_close",
+                provider.as_str(),
+                resolved.requested.title().as_str(),
+                resolved.requested.tab_color().as_str(),
+                resolved.requested.activity().as_str(),
+                resolved.effective.title().as_str(),
+                resolved.effective.tab_color().as_str(),
+                resolved.effective.activity().as_str(),
+                resolved.title_origin,
+                resolved.color_origin,
+                resolved.activity_origin,
+                resolved.application,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "Provider preferences / 提供方偏好\n1 Codex · 2 Agy · 3 Cursor · ←/→ mode · r inherit · v preview\nSelected / 已选: {} · {}\n{provider_preferences}\nSaved preference is not live application; old output may remain until the next owned event or the old tab closes / 已保存偏好不代表当前会话生效，旧输出可能保留至下次自有事件或旧标签关闭\n\n{integrations}",
+        app.selected_provider.as_str(),
+        provider_mode_label(app.selected_provider_mode),
+    )
 }
 
 fn hooks_lines(app: &ControlCenterApp) -> String {
@@ -2419,12 +2644,142 @@ mod tests {
         )
     }
 
+    #[test]
+    fn integration_screen_reports_provider_preference_without_claiming_live_application() {
+        use crate::presentation_policy::{
+            ApplicationStatus, PresentationCapabilities, PresentationMode, PresentationOverride,
+            resolve_presentation,
+        };
+
+        let mut app = app();
+        app.provider_presentation.push((
+            CliTarget::Cursor,
+            resolve_presentation(
+                PresentationSettings::default(),
+                PresentationOverride::default().with_mode(PresentationMode::ColorOnly),
+                PresentationCapabilities::NONE,
+                ApplicationStatus::Unproven,
+            ),
+        ));
+        let lines = super::integration_lines(&app);
+        assert!(lines.contains("cursor: requested=native/tabbeacon/off"));
+        assert!(lines.contains("effective=native/native/off"));
+        assert!(lines.contains("application=Unproven"));
+        assert!(lines.contains("visible_apply_boundary=next_owned_event_or_old_tab_close"));
+    }
+
+    #[test]
+    fn agy_native_mode_is_selectable_without_a_managed_title_preview() {
+        use crate::presentation_policy::{
+            ApplicationStatus, PresentationCapabilities, PresentationOverride, resolve_presentation,
+        };
+        let mut app = app();
+        app.screen = Screen::Integration;
+        app.provider_presentation.push((
+            CliTarget::Agy,
+            resolve_presentation(
+                app.current,
+                PresentationOverride::default(),
+                PresentationCapabilities::AGY_TITLE_ONLY,
+                ApplicationStatus::Unproven,
+            ),
+        ));
+        app.provider_capabilities
+            .push((CliTarget::Agy, PresentationCapabilities::AGY_TITLE_ONLY));
+        app.select_provider(CliTarget::Agy);
+        app.cycle_provider_mode(1);
+        app.cycle_provider_mode(1);
+        assert_eq!(
+            app.selected_provider_mode,
+            Some(PresentationMode::PreserveNative)
+        );
+        app.open_provider_preview();
+        let ControlCenterOverlay::ProviderPreview { resolved, .. } = app.overlay else {
+            panic!("expected preview");
+        };
+        assert!(!resolved.effective.title().owns_tabbeacon_title());
+        assert_eq!(resolved.effective.tab_color(), TabColorMode::Native);
+        assert_eq!(resolved.effective.activity(), ActivityMode::Native);
+    }
+
+    #[test]
+    fn provider_preview_cancel_and_apply_remain_explicit_requests() {
+        use crate::presentation_policy::{
+            ApplicationStatus, PresentationCapabilities, PresentationMode, PresentationOverride,
+            resolve_presentation,
+        };
+
+        let mut app = app();
+        app.screen = Screen::Integration;
+        app.provider_presentation.push((
+            CliTarget::Cursor,
+            resolve_presentation(
+                app.current,
+                PresentationOverride::default(),
+                PresentationCapabilities::NONE,
+                ApplicationStatus::Unproven,
+            ),
+        ));
+        assert_eq!(
+            app.handle_key(KeyCode::Char('3')),
+            ControlCenterCommand::None
+        );
+        assert_eq!(app.handle_key(KeyCode::Right), ControlCenterCommand::None);
+        assert_eq!(
+            app.selected_provider_mode,
+            Some(PresentationMode::ColorOnly)
+        );
+        assert_eq!(
+            app.handle_key(KeyCode::Char('v')),
+            ControlCenterCommand::None
+        );
+        assert!(app.overlay_open());
+        assert_eq!(app.handle_key(KeyCode::Esc), ControlCenterCommand::None);
+        assert!(!app.overlay_open());
+        assert_eq!(
+            app.handle_key(KeyCode::Char('v')),
+            ControlCenterCommand::None
+        );
+        assert_eq!(
+            app.handle_key(KeyCode::Char('a')),
+            ControlCenterCommand::ApplyProvider {
+                provider: CliTarget::Cursor,
+                expected_global: app.current,
+                before: PresentationOverride::default(),
+                after: PresentationOverride::default().with_mode(PresentationMode::ColorOnly),
+            }
+        );
+        assert!(!app.overlay_open());
+        assert!(!app.dirty());
+    }
+
+    #[test]
+    fn switching_provider_clears_incompatible_staged_mode() {
+        let mut app = app();
+        app.screen = Screen::Integration;
+        app.handle_key(KeyCode::Right);
+        assert_eq!(
+            app.selected_provider_mode,
+            Some(PresentationMode::FullTakeover)
+        );
+        app.handle_key(KeyCode::Char('3'));
+        assert_eq!(app.selected_provider, CliTarget::Cursor);
+        assert_eq!(app.selected_provider_mode, None);
+        app.handle_key(KeyCode::Right);
+        assert_eq!(
+            app.selected_provider_mode,
+            Some(PresentationMode::ColorOnly)
+        );
+    }
+
     fn refresh(
         presentation: PresentationSettings,
         interface: InterfacePreferences,
     ) -> ControlCenterRefresh {
         ControlCenterRefresh {
             presentation,
+            provider_presentation: Vec::new(),
+            provider_capabilities: Vec::new(),
             interface,
             snapshot: ManagementSnapshot {
                 health: ManagementHealth::Healthy,
@@ -2512,6 +2867,8 @@ mod tests {
         );
         app.merge_refresh(ControlCenterRefresh {
             presentation: app.current(),
+            provider_presentation: Vec::new(),
+            provider_capabilities: Vec::new(),
             interface: app.current_interface(),
             snapshot: ManagementSnapshot {
                 health: ManagementHealth::Healthy,

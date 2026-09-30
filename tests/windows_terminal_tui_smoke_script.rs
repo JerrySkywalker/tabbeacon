@@ -143,7 +143,10 @@ fn visual_worker_process_queries_share_the_bounded_helper_contract() {
     assert!(
         runner.contains("visual worker parent process query timed out")
             && runner.contains("visual worker parent identity query timed out")
-            && runner.contains("bounded_powershell_output(&script, WORKER_PROCESS_QUERY_BUDGET)"),
+            && runner.matches("bounded_powershell_output(").count() >= 3
+            && runner.matches("WORKER_PROCESS_QUERY_BUDGET,").count() >= 2
+            && runner.contains("fs::remove_file(output_path)")
+            && !runner.contains("child.wait_with_output()"),
         "worker parent and identity probes must not use synchronous unbounded PowerShell output"
     );
 }

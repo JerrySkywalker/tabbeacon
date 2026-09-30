@@ -3,25 +3,39 @@
 use std::{
     env, fs,
     fs::OpenOptions,
-    io::{self, BufWriter, Write},
+    io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    process::{self, Child, Command},
+    process::{self, Child, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
 
 use serde::Serialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use tabbeacon::{
     activity::next_animation_frame_deadline,
     presentation::{
         PresentationAction, TitleStatus, WindowsTerminalCapabilities, WindowsTerminalRenderer,
         presentation_fixture,
     },
-    providers::codex::{CodexHookRuntime, HookDispatchOutcome},
+    presentation_policy::{
+        ApplicationStatus, PresentationCapabilities, PresentationMode, PresentationOverride,
+        ResolvedPresentation, resolve_presentation,
+    },
+    providers::{
+        codex::{CodexHookRuntime, HookDispatchOutcome},
+        cursor_integration::CursorHookIntegration,
+        cursor_runtime::{
+            CursorDispatchOutcome, dispatch_with_output_bounded, dispatch_with_settings_bounded,
+        },
+    },
     repo::WorkspaceIdentityResolver,
-    settings::PresentationSettings,
+    settings::{PresentationSettings, PresentationSettingsStore},
     visual::{
+        AGY_PUBLIC_NATIVE_FIXTURE, AGY_PUBLIC_TITLE_FIXTURE, CODEX_PUBLIC_COLOR_FIXTURE,
+        CODEX_PUBLIC_NATIVE_FIXTURE, CODEX_TITLE_PRECEDENCE_FIXTURE,
+        CURSOR_COLOR_COMPLETED_FIXTURE, CURSOR_COLOR_NATIVE_FIXTURE, CURSOR_COLOR_WORKING_FIXTURE,
         CaptureBackend, ExactOwnedWindowBackend, FixtureDriver, LiveVisualRunRequest,
         PrintWindowCaptureBackend, ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME,
         TemporaryWindowProductDisposition, TemporaryWindowsTerminalOwnership, TerminalTestSession,
@@ -64,6 +78,36 @@ fn emit(arguments: &[String]) -> VisualResult<()> {
     if fixture_name == ROOT_WORKSPACE_ANCHOR_FIXTURE_NAME {
         return emit_root_workspace_anchor(&run_id, hold_millis);
     }
+    if matches!(
+        fixture_name.as_str(),
+        CODEX_PUBLIC_COLOR_FIXTURE | CODEX_PUBLIC_NATIVE_FIXTURE | CODEX_TITLE_PRECEDENCE_FIXTURE
+    ) {
+        let phase_signal = argument_value(arguments, "--phase-signal")?;
+        return emit_codex_public_fixture(
+            &fixture_name,
+            &run_id,
+            hold_millis,
+            Path::new(&phase_signal),
+        );
+    }
+    if matches!(
+        fixture_name.as_str(),
+        AGY_PUBLIC_TITLE_FIXTURE | AGY_PUBLIC_NATIVE_FIXTURE
+    ) {
+        let phase_signal = argument_value(arguments, "--phase-signal")?;
+        return emit_agy_public_fixture(
+            &fixture_name,
+            &run_id,
+            hold_millis,
+            Path::new(&phase_signal),
+        );
+    }
+    if matches!(
+        fixture_name.as_str(),
+        CURSOR_COLOR_WORKING_FIXTURE | CURSOR_COLOR_COMPLETED_FIXTURE | CURSOR_COLOR_NATIVE_FIXTURE
+    ) {
+        return emit_cursor_color_fixture(&fixture_name, &run_id, hold_millis);
+    }
     let fixture = presentation_fixture()
         .iter()
         .find(|fixture| fixture.name() == fixture_name)
@@ -96,6 +140,807 @@ fn emit(arguments: &[String]) -> VisualResult<()> {
     }
     stdout.write_all(&reset.vt_bytes)?;
     stdout.flush()?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)] // One owned fixture exercises the product color and release sequence.
+fn emit_cursor_color_fixture(name: &str, run_id: &str, hold_millis: u64) -> VisualResult<()> {
+    let replay = FixtureDriver::default().cursor_color_replay(name, run_id)?;
+    let temp = env::temp_dir().canonicalize()?;
+    let root = temp.join(format!(
+        "tabbeacon-cursor-visual-{run_id}-{}",
+        process::id()
+    ));
+    fs::create_dir(&root)?;
+    let workspace = root.join("workspace");
+    let isolated_local_appdata = root.join("local-appdata");
+    let native_public_apply = name == CURSOR_COLOR_NATIVE_FIXTURE;
+    let state_root = if native_public_apply {
+        isolated_local_appdata.join("TabBeacon")
+    } else {
+        root.join("state")
+    };
+    let result = (|| -> VisualResult<()> {
+        fs::create_dir(&workspace)?;
+        if !native_public_apply {
+            fs::create_dir(&state_root)?;
+        }
+        let executable = if native_public_apply {
+            env::current_exe()?.with_file_name("tabbeacon.exe")
+        } else {
+            env::current_exe()?
+        };
+        if !executable.is_file() {
+            return Err(VisualError::Platform(
+                "owned Cursor visual fixture product binary is unavailable".to_owned(),
+            ));
+        }
+        CursorHookIntegration::new(&workspace, &executable)?.install()?;
+        let settings =
+            PresentationSettingsStore::new(isolated_local_appdata.join("TabBeacon/config.toml"));
+        if native_public_apply {
+            fs::create_dir(&isolated_local_appdata)?;
+            run_isolated_cursor_apply(
+                &executable,
+                &workspace,
+                &isolated_local_appdata,
+                "color-only",
+            )?;
+        }
+        let terminal = env::var("WT_SESSION").map_err(|_| {
+            VisualError::Platform("owned Cursor visual tab has no WT_SESSION".to_owned())
+        })?;
+        let digest = format!("{:x}", Sha256::digest(terminal.as_bytes()));
+        let color = resolve_presentation(
+            PresentationSettings::default(),
+            PresentationOverride::default().with_mode(PresentationMode::ColorOnly),
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        );
+        let native = resolve_presentation(
+            PresentationSettings::default(),
+            PresentationOverride::default().with_mode(PresentationMode::PreserveNative),
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        );
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(format!("\x1b]0;{}\x1b\\", replay.case.expected_title).as_bytes())?;
+        stdout.flush()?;
+        let mut console = tabbeacon::console_output::open_owned_console()?;
+        let session = format!("visual-{run_id}");
+        let call = |event: &str,
+                    generation: Option<&str>,
+                    status: Option<&str>,
+                    mode: &ResolvedPresentation,
+                    sink: &mut tabbeacon::console_output::OwnedConsole|
+         -> VisualResult<CursorDispatchOutcome> {
+            let mut payload = json!({"hook_event_name":event,"session_id":session});
+            if let Some(generation) = generation {
+                payload["generation_id"] = generation.into();
+            }
+            if let Some(status) = status {
+                payload["status"] = status.into();
+            }
+            let raw = payload.to_string();
+            let outcome = if native_public_apply {
+                dispatch_with_settings_bounded(
+                    raw.as_bytes(),
+                    &workspace,
+                    &executable,
+                    &state_root,
+                    &digest,
+                    &terminal,
+                    true,
+                    &settings,
+                    sink,
+                )?
+            } else {
+                dispatch_with_output_bounded(
+                    raw.as_bytes(),
+                    &workspace,
+                    &executable,
+                    &state_root,
+                    &digest,
+                    &terminal,
+                    true,
+                    mode,
+                    sink,
+                )?
+            };
+            if matches!(
+                outcome,
+                CursorDispatchOutcome::Ignored
+                    | CursorDispatchOutcome::OutputFailed
+                    | CursorDispatchOutcome::OutputFlushedStateUnconfirmed
+            ) {
+                return Err(VisualError::Platform(
+                    "owned Cursor color fixture dispatch refused".to_owned(),
+                ));
+            }
+            Ok(outcome)
+        };
+        call("sessionStart", None, None, &color, &mut console)?;
+        call("beforeSubmitPrompt", Some("g1"), None, &color, &mut console)?;
+        if native_public_apply {
+            run_isolated_cursor_apply(
+                &executable,
+                &workspace,
+                &isolated_local_appdata,
+                "preserve-native",
+            )?;
+        }
+        if name != CURSOR_COLOR_WORKING_FIXTURE {
+            let mode = if name == CURSOR_COLOR_NATIVE_FIXTURE {
+                &native
+            } else {
+                &color
+            };
+            call("stop", Some("g1"), Some("completed"), mode, &mut console)?;
+        }
+        thread::sleep(Duration::from_millis(hold_millis));
+        call("sessionEnd", None, None, &color, &mut console)?;
+        Ok(())
+    })();
+    let owned = root.canonicalize()?;
+    if owned.parent() != Some(temp.as_path()) {
+        return Err(VisualError::Platform(
+            "Cursor visual fixture cleanup root drifted".to_owned(),
+        ));
+    }
+    fs::remove_dir_all(&owned)?;
+    result
+}
+
+fn run_isolated_cursor_apply(
+    executable: &Path,
+    workspace: &Path,
+    local_appdata: &Path,
+    mode: &str,
+) -> VisualResult<()> {
+    let output = Command::new(executable)
+        .args(["config", "--plain", "provider", "cursor", "apply", mode])
+        .current_dir(workspace)
+        .env("LOCALAPPDATA", local_appdata)
+        .output()?;
+    if !output.status.success()
+        || !output.stderr.is_empty()
+        || !String::from_utf8_lossy(&output.stdout).contains("CHANGE_APPLIED=true")
+        || !String::from_utf8_lossy(&output.stdout)
+            .contains("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE")
+    {
+        return Err(VisualError::Platform(
+            "isolated public Cursor preference Apply was not admitted".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Exercises public Agy setup/Apply and the actual plain title callback in an
+/// isolated home. The fixture models Agy applying the callback's title to its
+/// owned test tab; no real Agy model session or production config is involved.
+#[allow(clippy::too_many_lines)] // One isolated setup, title transition, and cleanup scope.
+fn emit_agy_public_fixture(
+    name: &str,
+    run_id: &str,
+    hold_millis: u64,
+    phase_signal: &Path,
+) -> VisualResult<()> {
+    let temp = env::temp_dir().canonicalize()?;
+    let root = temp.join(format!("tabbeacon-agy-public-{run_id}-{}", process::id()));
+    if root.exists() {
+        return Err(VisualError::Platform(
+            "owned Agy visual fixture state already exists".to_owned(),
+        ));
+    }
+    fs::create_dir(&root)?;
+    let result = (|| -> VisualResult<()> {
+        let workspace = root.join("workspace");
+        let local_appdata = root.join("local-appdata");
+        let user_profile = root.join("user-profile");
+        let fake_agy = root.join("fake-agy");
+        for path in [&workspace, &local_appdata, &user_profile, &fake_agy] {
+            fs::create_dir(path)?;
+        }
+        let version_source = fake_agy.join("version.rs");
+        fs::write(
+            &version_source,
+            b"fn main() { if std::env::args().nth(1).as_deref() == Some(\"--version\") { println!(\"1.1.19\"); } else { std::process::exit(2); } }\n",
+        )?;
+        let rustc = env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+        let mut compile = Command::new(rustc);
+        compile
+            .args(["--edition=2024", "-o"])
+            .arg(fake_agy.join("agy.exe"))
+            .arg(&version_source);
+        let compiled = bounded_agy_fixture_output(&mut compile, Duration::from_secs(15))?;
+        if !compiled.status.success() {
+            return Err(VisualError::Platform(
+                "isolated Agy version-only fixture did not compile".to_owned(),
+            ));
+        }
+        let inherited_path = env::var_os("PATH")
+            .ok_or_else(|| VisualError::Platform("visual fixture PATH is absent".to_owned()))?;
+        let path = env::join_paths(
+            std::iter::once(fake_agy.clone()).chain(env::split_paths(&inherited_path)),
+        )
+        .map_err(|_| VisualError::Platform("visual fixture PATH is invalid".to_owned()))?;
+        let executable = env::current_exe()?.with_file_name("tabbeacon.exe");
+        if !executable.is_file() {
+            return Err(VisualError::Platform(
+                "owned Agy visual fixture product binary is unavailable".to_owned(),
+            ));
+        }
+        let run = |args: &[&str]| {
+            let mut command = Command::new(&executable);
+            command
+                .args(args)
+                .current_dir(&workspace)
+                .env("LOCALAPPDATA", &local_appdata)
+                .env("USERPROFILE", &user_profile)
+                .env("PATH", &path);
+            let output = bounded_agy_fixture_output(&mut command, Duration::from_secs(5))?;
+            if !output.status.success() || !output.stderr.is_empty() {
+                return Err(VisualError::Platform(format!(
+                    "isolated Agy public command was not admitted: stage={}, code={:?}, stderr_bytes={}",
+                    args.first().copied().unwrap_or("unknown"),
+                    output.status.code(),
+                    output.stderr.len()
+                )));
+            }
+            Ok(())
+        };
+        run(&["setup", "agy", "--plain"])?;
+        run(&["alias", "set", run_id, "--plain"])?;
+        run(&[
+            "config",
+            "--plain",
+            "provider",
+            "agy",
+            "apply",
+            "title-only",
+        ])?;
+        let payload = json!({
+            "version": "1.1.19",
+            "agent_state": "working",
+            "conversation_id": format!("synthetic-{run_id}"),
+            "workspace": {"current_dir": workspace, "project_dir": workspace},
+        });
+        let managed = run_isolated_agy_callback(
+            &executable,
+            &workspace,
+            &local_appdata,
+            &user_profile,
+            &path,
+            &payload,
+        )?;
+        if managed != format!("Agy • {run_id}") {
+            return Err(VisualError::Platform(
+                "isolated Agy managed callback title differed from the fixture oracle".to_owned(),
+            ));
+        }
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(format!("\x1b]0;{managed}\x1b\\").as_bytes())?;
+        stdout.flush()?;
+        if name == AGY_PUBLIC_NATIVE_FIXTURE {
+            run(&[
+                "config",
+                "--plain",
+                "provider",
+                "agy",
+                "apply",
+                "preserve-native",
+            ])?;
+            let agy_settings = user_profile
+                .join(".gemini")
+                .join("antigravity-cli")
+                .join("settings.json");
+            if agy_settings.exists() {
+                let saved: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&agy_settings)?).map_err(VisualError::Json)?;
+                if saved.get("title").is_some() {
+                    return Err(VisualError::Platform(
+                        "isolated Agy native Apply retained a title callback".to_owned(),
+                    ));
+                }
+            }
+            if local_appdata
+                .join("TabBeacon")
+                .join("agy")
+                .join("setup.json")
+                .exists()
+            {
+                return Err(VisualError::Platform(
+                    "isolated Agy native Apply retained callback ownership".to_owned(),
+                ));
+            }
+            // The real provider owns its native title after Apply removes our
+            // callback. This synthetic fixture models that external write;
+            // it does not claim TabBeacon or a real Agy session produced it.
+            stdout.write_all(b"\x1b]0;Agy\x1b\\")?;
+            stdout.flush()?;
+        }
+        let phase = if name == AGY_PUBLIC_NATIVE_FIXTURE {
+            b"post-native-callback".as_slice()
+        } else {
+            b"post-managed-callback".as_slice()
+        };
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(phase_signal)?
+            .write_all(phase)?;
+        thread::sleep(Duration::from_millis(hold_millis));
+        Ok(())
+    })();
+    let owned = root.canonicalize()?;
+    if owned.parent() != Some(temp.as_path()) {
+        return Err(VisualError::Platform(
+            "Agy visual fixture cleanup root drifted".to_owned(),
+        ));
+    }
+    fs::remove_dir_all(&owned)?;
+    result
+}
+
+fn bounded_agy_fixture_output(
+    command: &mut Command,
+    budget: Duration,
+) -> VisualResult<std::process::Output> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let deadline = Instant::now() + budget;
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            child.kill()?;
+            let _ = child.wait();
+            return Err(VisualError::Platform(
+                "isolated Agy fixture child exceeded its bounded budget".to_owned(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    child.wait_with_output().map_err(Into::into)
+}
+
+#[allow(clippy::too_many_arguments)] // Exact isolated Agy process inputs stay explicit.
+fn run_isolated_agy_callback(
+    executable: &Path,
+    workspace: &Path,
+    local_appdata: &Path,
+    user_profile: &Path,
+    path: &std::ffi::OsStr,
+    payload: &serde_json::Value,
+) -> VisualResult<String> {
+    let mut child = Command::new(executable)
+        .args(["agy", "__title-callback-v1"])
+        .current_dir(workspace)
+        .env("LOCALAPPDATA", local_appdata)
+        .env("USERPROFILE", user_profile)
+        .env("PATH", path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let input = serde_json::to_vec(payload).map_err(VisualError::Json)?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| VisualError::Platform("Agy callback stdin is absent".to_owned()))?
+        .write_all(&input)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            child.kill()?;
+            let _ = child.wait();
+            return Err(VisualError::Platform(
+                "isolated Agy callback exceeded the visual fixture budget".to_owned(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() || !output.stderr.is_empty() {
+        return Err(VisualError::Platform(
+            "isolated Agy callback process failed".to_owned(),
+        ));
+    }
+    let title = String::from_utf8(output.stdout)
+        .map_err(|_| VisualError::Platform("Agy callback title was not UTF-8".to_owned()))?;
+    Ok(title.trim_end_matches(['\r', '\n']).to_owned())
+}
+
+/// Drives candidate CLI Apply and the silent public Codex Hook subprocess in
+/// one fixture-owned terminal. Structured events and the version-only Codex
+/// capability fixture are synthetic; the terminal bytes come from the product.
+#[allow(clippy::too_many_lines)]
+fn emit_codex_public_fixture(
+    name: &str,
+    run_id: &str,
+    hold_millis: u64,
+    phase_signal: &Path,
+) -> VisualResult<()> {
+    let replay = FixtureDriver::default().codex_public_replay(name, run_id)?;
+    let temp = env::temp_dir().canonicalize()?;
+    let root = temp.join(format!("tabbeacon-codex-public-{run_id}-{}", process::id()));
+    if root.exists() {
+        return Err(VisualError::Platform(
+            "owned Codex visual fixture state already exists".to_owned(),
+        ));
+    }
+    fs::create_dir(&root)?;
+    let result = (|| -> VisualResult<()> {
+        let workspace = root.join("workspace");
+        let local_appdata = root.join("local-appdata");
+        let codex_home = root.join("codex-home");
+        let fake_codex = root.join("fake-codex");
+        for path in [&workspace, &local_appdata, &codex_home, &fake_codex] {
+            fs::create_dir(path)?;
+        }
+        fs::write(
+            codex_home.join("config.toml"),
+            b"[tui]\nterminal_title = [\"activity\", \"project\"]\n",
+        )?;
+        fs::write(
+            fake_codex.join("codex.cmd"),
+            b"@echo off\r\nif \"%1\"==\"--version\" (echo codex-cli 0.156.1 & exit /b 0)\r\nif \"%1\"==\"features\" if \"%2\"==\"list\" (echo hooks stable true & exit /b 0)\r\nif \"%1\"==\"app-server\" if \"%2\"==\"generate-json-schema\" (mkdir \"%4\" 2>nul & echo {\"hooks\":\"command\"}>\"%4\\schema.json\" & exit /b 0)\r\nexit /b 2\r\n",
+        )?;
+        let inherited_path = env::var_os("PATH")
+            .ok_or_else(|| VisualError::Platform("visual fixture PATH is absent".to_owned()))?;
+        let path = env::join_paths(
+            std::iter::once(fake_codex.clone()).chain(env::split_paths(&inherited_path)),
+        )
+        .map_err(|_| VisualError::Platform("visual fixture PATH is invalid".to_owned()))?;
+        let executable = env::current_exe()?.with_file_name("tabbeacon.exe");
+        if !executable.is_file() {
+            return Err(VisualError::Platform(
+                "owned Codex visual fixture product binary is unavailable".to_owned(),
+            ));
+        }
+        let run = |args: &[&str], expected: Option<&str>| {
+            run_isolated_codex_product(
+                &executable,
+                &workspace,
+                &local_appdata,
+                &codex_home,
+                &root,
+                &path,
+                args,
+                expected,
+            )
+        };
+        if name == CODEX_TITLE_PRECEDENCE_FIXTURE {
+            return emit_codex_title_precedence(
+                &run,
+                &executable,
+                &workspace,
+                &local_appdata,
+                &codex_home,
+                &root,
+                &path,
+                run_id,
+                phase_signal,
+            );
+        }
+        run(&["setup", "codex", "--plain"], None)?;
+        run(
+            &[
+                "config",
+                "--plain",
+                "provider",
+                "codex",
+                "apply",
+                "full-takeover",
+            ],
+            Some("CHANGE_APPLIED=true"),
+        )?;
+        let session = format!("visual-{run_id}");
+        let hook = |event: &str, turn: Option<&str>| {
+            let mut payload = json!({
+                "hook_event_name": event,
+                "session_id": session,
+                "cwd": workspace,
+            });
+            if let Some(turn) = turn {
+                payload["turn_id"] = turn.into();
+            }
+            if event == "SessionStart" {
+                payload["source"] = "startup".into();
+            }
+            run_isolated_codex_hook(
+                &executable,
+                &workspace,
+                &local_appdata,
+                &codex_home,
+                &root,
+                &path,
+                &payload,
+            )
+        };
+        hook("SessionStart", None)?;
+        run(
+            &[
+                "config",
+                "--plain",
+                "provider",
+                "codex",
+                "apply",
+                "color-only",
+            ],
+            Some("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE"),
+        )?;
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(format!("\x1b]0;{}\x1b\\", replay.case.expected_title).as_bytes())?;
+        stdout.flush()?;
+        hook("UserPromptSubmit", Some("turn-1"))?;
+        if name == CODEX_PUBLIC_NATIVE_FIXTURE {
+            run(
+                &[
+                    "config",
+                    "--plain",
+                    "provider",
+                    "codex",
+                    "apply",
+                    "preserve-native",
+                ],
+                Some("VISIBLE_OUTPUT_APPLY_BOUNDARY=NEXT_OWNED_EVENT_OR_OLD_TAB_CLOSE"),
+            )?;
+            hook("Stop", Some("turn-1"))?;
+            // The marker written before the color-only Hook must survive
+            // both this release and a later native turn without being set
+            // again by the fixture. UIA checks only its final retention.
+            hook("UserPromptSubmit", Some("turn-2"))?;
+            hook("SessionEnd", None)?;
+        }
+        // The runner may inspect UIA only after the public Hook sequence for
+        // this case has returned. The native case includes SessionEnd; the
+        // working-color case defers SessionEnd until after its color capture.
+        let phase = if name == CODEX_PUBLIC_NATIVE_FIXTURE {
+            b"post-native-session-end".as_slice()
+        } else {
+            b"post-working-hook".as_slice()
+        };
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(phase_signal)?
+            .write_all(phase)?;
+        thread::sleep(Duration::from_millis(hold_millis));
+        if name == CODEX_PUBLIC_COLOR_FIXTURE {
+            hook("SessionEnd", None)?;
+        }
+        Ok(())
+    })();
+    let owned = root.canonicalize()?;
+    if owned.parent() != Some(temp.as_path()) {
+        return Err(VisualError::Platform(
+            "Codex visual fixture cleanup root drifted".to_owned(),
+        ));
+    }
+    fs::remove_dir_all(&owned)?;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_codex_title_precedence(
+    run: &impl Fn(&[&str], Option<&str>) -> VisualResult<()>,
+    executable: &Path,
+    workspace: &Path,
+    local_appdata: &Path,
+    codex_home: &Path,
+    root: &Path,
+    path: &std::ffi::OsStr,
+    run_id: &str,
+    signal: &Path,
+) -> VisualResult<()> {
+    fs::create_dir_all(local_appdata.join("TabBeacon"))?;
+    fs::write(local_appdata.join("TabBeacon/config.toml"),
+        b"[presentation]\ntitle=\"tabbeacon\"\ntab_color=\"native\"\nactivity=\"off\"\nprovider_badge=\"off\"\n[provider_presentation.codex]\ntitle=\"native\"\n")?;
+    let marker = format!("TB-NATIVE-{run_id}");
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(format!("\x1b]0;{marker}\x1b\\").as_bytes())?;
+    stdout.flush()?;
+    let config_before = fs::read(codex_home.join("config.toml"))?;
+    let hook = || {
+        run_isolated_codex_hook(
+            executable,
+            workspace,
+            local_appdata,
+            codex_home,
+            root,
+            path,
+            &json!({"hook_event_name":"SessionStart",
+            "session_id": format!("visual-title-{run_id}"), "cwd":workspace,"source":"startup"}),
+        )
+    };
+    run(&["setup", "codex", "--plain"], None)?;
+    run(&["setup", "codex", "--plain"], None)?;
+    if fs::read(codex_home.join("config.toml"))? != config_before {
+        return Err(VisualError::Platform(
+            "native repeat setup changed provider title bytes".to_owned(),
+        ));
+    }
+    hook()?;
+    await_title_observation(signal, "native_setup")?;
+    run(&["config", "set", "title", "native", "--plain"], None)?;
+    run(&["config", "set", "title", "tabbeacon", "--plain"], None)?;
+    hook()?;
+    await_title_observation(signal, "native_global")?;
+    run(&["config", "set", "title", "native", "--plain"], None)?;
+    run(
+        &[
+            "config", "provider", "codex", "inherit", "--apply", "--plain",
+        ],
+        None,
+    )?;
+    hook()?;
+    await_title_observation(signal, "inherited_native")?;
+    run(
+        &["alias", "set", &format!("TB03-{run_id}-ready"), "--plain"],
+        None,
+    )?;
+    run(&["config", "set", "title", "tabbeacon", "--plain"], None)?;
+    hook()?;
+    await_title_observation(signal, "inherited_managed")?;
+    Ok(())
+}
+
+fn await_title_observation(signal: &Path, phase: &str) -> VisualResult<()> {
+    fs::write(signal, phase)?;
+    let acknowledgement = signal.with_extension("ack");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while fs::read(&acknowledgement).ok().as_deref() != Some(phase.as_bytes()) {
+        if Instant::now() >= deadline {
+            return Err(VisualError::Platform(
+                "title phase UIA acknowledgement was not received".to_owned(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_isolated_codex_product(
+    executable: &Path,
+    workspace: &Path,
+    local_appdata: &Path,
+    codex_home: &Path,
+    user_profile: &Path,
+    path: &std::ffi::OsStr,
+    args: &[&str],
+    expected: Option<&str>,
+) -> VisualResult<()> {
+    let mut command = Command::new(executable);
+    command
+        .args(args)
+        .current_dir(workspace)
+        .env("LOCALAPPDATA", local_appdata)
+        .env("CODEX_HOME", codex_home)
+        .env("USERPROFILE", user_profile)
+        .env("PATH", path);
+    let output = bounded_codex_product_output(&mut command, user_profile)?;
+    if !output.status.success()
+        || expected.is_some_and(|value| !String::from_utf8_lossy(&output.stdout).contains(value))
+    {
+        return Err(VisualError::Platform(
+            "isolated Codex product setup or public Apply was not admitted".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn bounded_codex_product_output(
+    command: &mut Command,
+    root: &Path,
+) -> VisualResult<std::process::Output> {
+    let token = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let stdout_path = root.join(format!("product-{token}.stdout"));
+    let stderr_path = root.join(format!("product-{token}.stderr"));
+    let mut stdout = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&stdout_path)?;
+    let mut stderr = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&stderr_path)?;
+    let result = (|| -> VisualResult<std::process::Output> {
+        // A descendant retaining a pipe cannot extend the product phase past
+        // its budget. Only this exact fixture child's files are read/removed.
+        let mut child = command
+            .stdout(Stdio::from(stdout.try_clone()?))
+            .stderr(Stdio::from(stderr.try_clone()?))
+            .spawn()?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill()?;
+                let _ = child.wait();
+                return Err(VisualError::Platform(
+                    "isolated Codex product command exceeded bounded phase".to_owned(),
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        };
+        stdout.seek(SeekFrom::Start(0))?;
+        stderr.seek(SeekFrom::Start(0))?;
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+        (&mut stdout).take(65_537).read_to_end(&mut stdout_bytes)?;
+        (&mut stderr).take(65_537).read_to_end(&mut stderr_bytes)?;
+        if stdout_bytes.len() > 65_536 || stderr_bytes.len() > 65_536 {
+            return Err(VisualError::Platform(
+                "isolated product command output exceeded bound".to_owned(),
+            ));
+        }
+        Ok(std::process::Output {
+            status,
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
+        })
+    })();
+    drop(stdout);
+    drop(stderr);
+    fs::remove_file(stdout_path)?;
+    fs::remove_file(stderr_path)?;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_isolated_codex_hook(
+    executable: &Path,
+    workspace: &Path,
+    local_appdata: &Path,
+    codex_home: &Path,
+    user_profile: &Path,
+    path: &std::ffi::OsStr,
+    payload: &serde_json::Value,
+) -> VisualResult<()> {
+    let mut child = Command::new(executable)
+        .args(["hook", "codex"])
+        .current_dir(workspace)
+        .env("LOCALAPPDATA", local_appdata)
+        .env("CODEX_HOME", codex_home)
+        .env("USERPROFILE", user_profile)
+        .env("PATH", path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let input = serde_json::to_vec(payload).map_err(VisualError::Json)?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| VisualError::Platform("Codex Hook stdin is absent".to_owned()))?
+        .write_all(&input)?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            // This exact child was created by the fixture. Leave any other
+            // process alone, including unknown provider or terminal processes.
+            child.kill()?;
+            let _ = child.wait();
+            return Err(VisualError::Platform(
+                "isolated Codex Hook exceeded the visual fixture budget".to_owned(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let output = child.wait_with_output()?;
+    if !output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty() {
+        return Err(VisualError::Platform(
+            "isolated Codex Hook protocol or process failed".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -801,7 +1646,36 @@ fn run_live_worker(arguments: &[String]) -> VisualResult<()> {
     let nonce = env::var("TABBEACON_VISUAL_WORKER_NONCE").map_err(|_| {
         VisualError::Platform("visual worker requires supervisor authorization".to_owned())
     })?;
-    authorize_live_worker(&request, &authorization_path, &nonce)?;
+    if let Err(error) = authorize_live_worker(&request, &authorization_path, &nonce) {
+        // The parent records only this fixed stage code. The raw error can
+        // include local paths and must never become a public evidence field.
+        let code = match error {
+            VisualError::Platform(message)
+                if message.contains("parent process query timed out") =>
+            {
+                83
+            }
+            VisualError::Platform(message)
+                if message.contains("parent process query did not complete")
+                    || message.contains("parent process was unavailable") =>
+            {
+                84
+            }
+            VisualError::Platform(message)
+                if message.contains("not launched by the active fixture supervisor") =>
+            {
+                85
+            }
+            VisualError::Platform(message)
+                if message.contains("authorization path did not match")
+                    || message.contains("authorization did not match") =>
+            {
+                82
+            }
+            _ => 81,
+        };
+        process::exit(code);
+    }
     run_live_in_worker(&request)?;
     Ok(())
 }

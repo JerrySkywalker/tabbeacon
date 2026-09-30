@@ -15,6 +15,8 @@
 
 <p align="center"><a href="https://github.com/JerrySkywalker/tabbeacon/releases">发布版本</a> · <a href="https://crates.io/crates/tabbeacon">crates.io</a> · <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/README.md">文档</a> · <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/LICENSE">MIT 许可证</a></p>
 
+中英产品用语：[TabBeacon 术语表](docs/terminology.md)。
+
 <!-- tabbeacon:critical-invariants install=cargo-install-tabbeacon setup=tabbeacon-setup codex=codex agy=agy providers=codex-agy claude=deferred opencode=deferred trust=manual fail-open=true privacy=content-minimal -->
 
 <p align="center">
@@ -23,12 +25,13 @@
 
 <p align="center"><sub>由 TabBeacon 确定性展示夹具驱动的真实 Windows Terminal 渲染；不包含实时 Codex 或 Agy 模型对话。</sub></p>
 
-## 支持的编码智能体
+## v0.8.0 编码智能体范围
 
 | 编码智能体 | 状态 | 日常命令 | 兼容性策略 |
 | --- | --- | --- | --- |
 | Codex CLI | 生产支持 | `codex` | 基于能力；版本字符串仅用于诊断。 |
-| Agy CLI | 生产支持 | `agy` | 精确准入配置：Agy 1.1.19。 |
+| Agy CLI | 有界标题支持 | `agy` | 精确 1.1.19/1.2.7 合同；1.2.7 真人 Working/互不干扰已证明，Ready/原生切换未获真人资格；不包括 1.2.13。 |
+| Cursor Agent | 生产支持 | `agent` | 受管项目 Hook；严格仅颜色或保留原生，标题由 Cursor 控制。 |
 
 ### 延后集成
 
@@ -75,10 +78,9 @@ PTY 主机、终端替代品或后台守护进程。
 
 ## 快速开始
 
-当前公开版本：**v0.7.3**。已批准的
-[v0.8.0 Goal Train](dev_governance_files/ROADMAP_V08.md) 恢复范围受控的开发：
-按 CLI 独立接管、Cursor 仅颜色接入、Codex 异常与恢复闭环、中英文术语索引。
-这四项仍是待开发与验收内容，不代表已发布的 v0.7.3 具备这些能力；最终统一发布 v0.8.0。
+v0.8.0 发布候选提供按 CLI 独立呈现、Cursor 严格仅颜色接入、
+已证明的 Codex 结构化状态和[中英文术语](docs/terminology.md)。精确能力与
+已知限制见 [v0.8.0 发布说明](docs/v0.8.0-release-notes.md)。
 
 安装公开 CLI、运行引导式设置，然后按原样启动 Codex：
 
@@ -97,11 +99,11 @@ tabbeacon setup agy
 agy
 ```
 
-精确发布验证与普通用户路径保持分离。若要验证已发布的 v0.7.3 crate，请同时固定版本
+精确发布验证与普通用户路径保持分离。v0.8.0 发布后，验证 crate 时请同时固定版本
 与锁文件：
 
 ```powershell
-cargo install tabbeacon --version 0.7.3 --locked
+cargo install tabbeacon --version 0.8.0 --locked
 ```
 
 > [!TIP]
@@ -111,12 +113,12 @@ cargo install tabbeacon --version 0.7.3 --locked
 ## 升级
 
 对于通过 Cargo 安装的 TabBeacon，最容易记的顺序是 **版本 → 预检 → 安装 →
-诊断**：
+诊断**。v0.8.0 发布后使用：
 
 ```powershell
 tabbeacon --version
 tabbeacon upgrade-preflight
-cargo install tabbeacon --version 0.7.3 --locked --force
+cargo install tabbeacon --version 0.8.0 --locked --force
 tabbeacon --version
 tabbeacon doctor
 ```
@@ -133,28 +135,25 @@ tabbeacon upgrade-preflight
 如果某个进程被报告为未证明所有权或存在歧义，请**不要**按进程名直接终止；让对应的
 编码智能体会话正常退出后再重新运行预检。
 
-升级到 v0.7.3 本身不要求重新运行 `tabbeacon setup`。只有当
-`tabbeacon doctor` 明确报告受管 Codex 集成需要协调时，再运行：
+升级到 v0.8.0 后，对现有受管 Codex 集成进行所有权感知协调：
 
 ```powershell
 tabbeacon setup codex
 ```
 
 之后仍需手动审查任何发生变化的 Hook 定义；TabBeacon 永远不会自动授予 Hook 信任。
-完整的所有权边界请参阅 [v0.7.3 升级指南](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/v0.7.3-upgrade.md)。
+完整的所有权边界请参阅 [v0.8.0 升级指南](docs/v0.8.0-upgrade.md)。
 
 > [!NOTE]
-> 使用已发布 v0.7.3 的锁文件安装时，Cargo 可能警告传递依赖
-> `chacha20 0.10.1` 已被 crates.io yank。发布后审计将这一 registry yank 与安全公告
-> 区分处理；依赖维护已跟踪在 [Issue #114](https://github.com/JerrySkywalker/tabbeacon/issues/114)。
-> 复现或升级到已发布的 v0.7.3 依赖图时，请保留 `--locked`，不要仅为了消除该警告而
-> 去掉它。
+> 旧版 v0.7.3 锁文件可能提示 `chacha20 0.10.1` 被 yank；v0.8.0 使用不同的
+> 锁定依赖图。复现 v0.8.0 时仍须保留 `--locked`。
 
 ## 兼容性
 
 TabBeacon 面向 Windows 上的 Windows Terminal。Codex 支持由本地观察到的必需能力
-确定，而不是由版本排序规则确定。Agy 支持刻意更窄：只有精确准入的 1.1.19 配置
-被生产支持。不可用或未证明的证据会 fail-open，而不会被猜测为兼容状态。
+确定，而不是由版本排序规则确定。Agy 支持刻意更窄：只有精确准入的 1.1.19 和 1.2.7 标题配置
+被准入。1.2.7 的真人 Working 与互不干扰已有证明；Ready 可见转换和原生模式切换
+未获得真人 L4 资格，不属于本版公开承诺。不可用或未证明的证据会 fail-open，而不会被猜测为兼容状态。
 
 ## 工作方式
 

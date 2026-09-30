@@ -13,7 +13,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use atomic_write_file::AtomicWriteFile;
@@ -28,10 +28,12 @@ use crate::{
         EvidenceAuthority, EvidenceConfidence, EvidenceSource, EvidenceTieBreak, FieldUpdate,
         Phase, SessionReconciler, StatePatch,
     },
+    lock_budget::try_lock_file_with_budget,
     presentation::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleMarkBackend,
         WindowsTerminalCapabilities,
     },
+    presentation_policy::{ApplicationStatus, CliTarget, PresentationCapabilities},
     providers::registry::ProviderRegistry,
     repo::{RepositoryAlias, StableAliasRegistry, WorkspaceIdentityResolver},
     settings::{PresentationSettings, PresentationSettingsStore},
@@ -47,6 +49,9 @@ use super::agy_qualification::probe_direct_agy_version;
 pub const AGY_DAILY_COMMAND: &str = "agy";
 /// Exact Agy release admitted by the Owner-present G64 transaction.
 pub const AGY_ADMITTED_VERSION: &str = "1.1.19";
+/// Exact title-contract candidate observed from signed native 1.2.7 callbacks.
+/// Full original-command lifecycle/preserve-native L4 remains separately required.
+pub const AGY_TITLE_CONTRACT_V127: &str = "1.2.7";
 /// Stable frozen profile schema accepted by the production capability gate.
 pub const AGY_ADMITTED_PROFILE_SCHEMA: &str = "tabbeacon-agy-admitted-profile-v1";
 /// Production is enabled only for the exact frozen profile above.
@@ -195,16 +200,21 @@ impl AgyCapabilityGate {
         let object = parse_qualification_object(bytes).ok_or(AgyAdmissionGateError::Malformed)?;
         let exact = object.get("schema").and_then(Value::as_str)
             == Some(AGY_ADMITTED_PROFILE_SCHEMA)
-            && object.get("version").and_then(Value::as_str) == Some(AGY_ADMITTED_VERSION)
+            && object
+                .get("version")
+                .and_then(Value::as_str)
+                .and_then(title_contract_profile)
+                .is_some()
             && object.get("backend").and_then(Value::as_str) == Some("title_callback")
             && object.len() == 3;
         if !exact {
             return Err(AgyAdmissionGateError::NoSupportedAdmittedProfileVersion);
         }
-        Ok(AgyAdmittedProfile {
-            version: AgyVersion::from_parts(1, 1, 19),
-            source: AgyBackendSource::TitleCallback,
-        })
+        object
+            .get("version")
+            .and_then(Value::as_str)
+            .and_then(title_contract_profile)
+            .ok_or(AgyAdmissionGateError::NoSupportedAdmittedProfileVersion)
     }
 
     /// Projects normalized data only when an unforgeable admitted token exists.
@@ -276,7 +286,7 @@ impl AgyTitleNormalizer {
         raw: &[u8],
         observed_at: SystemTime,
     ) -> Option<AgyTitleObservation> {
-        if profile.version.as_string() != AGY_ADMITTED_VERSION
+        if title_contract_profile(&profile.version.as_string()).is_none()
             || profile.source != AgyBackendSource::TitleCallback
         {
             return None;
@@ -285,7 +295,8 @@ impl AgyTitleNormalizer {
             return None;
         }
         let object = parse_qualification_object(raw)?;
-        if object.get("version").and_then(Value::as_str) != Some(AGY_ADMITTED_VERSION) {
+        let version = profile.version.as_string();
+        if object.get("version").and_then(Value::as_str) != Some(version.as_str()) {
             return None;
         }
         let phase = match object.get("agent_state").and_then(Value::as_str) {
@@ -315,7 +326,7 @@ impl AgyTitleNormalizer {
             });
         let provider = AgentProvider::new(AGY_PROVIDER_ID).ok()?;
         let session = AgentSessionKey::new(provider, session_sha256.clone()).ok()?;
-        let source = EvidenceSource::new("agy-title-callback", AGY_ADMITTED_VERSION).ok()?;
+        let source = EvidenceSource::new("agy-title-callback", &version).ok()?;
         let tie_break = EvidenceTieBreak::new(format!("title-{event_sequence:020}")).ok()?;
         let evidence = AgentEvidence::new(
             session,
@@ -349,7 +360,10 @@ pub enum AgyTitleDispatchOutcome {
     DegradedWorkspaceIdentity,
     DegradedRootWorkspaceAnchor,
     DegradedStateRoot,
+    DegradedSettings,
 }
+
+const AGY_SETTINGS_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
 
 const AGY_ROOT_ANCHOR_SCHEMA: &str = "tabbeacon-agy-root-workspace-anchor-v1";
 const AGY_ROOT_ANCHOR_DIRECTORY: &str = "agy-root-workspace-anchor-v1";
@@ -461,7 +475,7 @@ impl AgyRootAnchorStore {
             .read(true)
             .write(true)
             .open(lock_path)?;
-        lock.lock()?;
+        try_lock_file_with_budget(&lock, Duration::from_millis(100))?;
         let path = self
             .directory
             .join(format!("session-{session_sha256}.json"));
@@ -543,7 +557,6 @@ pub struct AgyProductionTitleResponse {
 /// One-shot Agy title callback through normalizer, core, root anchor, and policy.
 #[derive(Debug, Clone)]
 pub struct AgyTitleRuntime {
-    profile: AgyAdmittedProfile,
     state_root: PathBuf,
     identity_resolver: WorkspaceIdentityResolver,
     root_anchors: AgyRootAnchorStore,
@@ -556,7 +569,6 @@ impl AgyTitleRuntime {
     pub fn new(state_root: impl Into<PathBuf>, settings: PresentationSettings) -> Self {
         let state_root = state_root.into();
         Self {
-            profile: frozen_profile(),
             state_root: state_root.clone(),
             identity_resolver: WorkspaceIdentityResolver::new(&state_root),
             root_anchors: AgyRootAnchorStore::new(&state_root),
@@ -573,18 +585,73 @@ impl AgyTitleRuntime {
         let Ok(state_root) = StableAliasRegistry::default_state_root() else {
             return fallback_title(AgyTitleDispatchOutcome::DegradedStateRoot);
         };
-        let settings = PresentationSettingsStore::from_environment().map_or_else(
-            |_| PresentationSettings::default(),
-            |store| store.load_or_default(),
-        );
+        let Ok(store) = PresentationSettingsStore::from_environment() else {
+            return fallback_title(AgyTitleDispatchOutcome::DegradedSettings);
+        };
+        let Ok(resolved) = store.resolve_provider_read_only(
+            CliTarget::Agy,
+            PresentationCapabilities::AGY_TITLE_ONLY,
+            ApplicationStatus::Unproven,
+        ) else {
+            return fallback_title(AgyTitleDispatchOutcome::DegradedSettings);
+        };
+        let settings = resolved.effective;
         let runtime = Self::new(&state_root, settings);
         runtime.dispatch_to(raw, SystemTime::now())
+    }
+
+    /// Handles the installed title callback while holding the presentation
+    /// writer lock through the final protocol flush. A preference committed
+    /// after this callback starts cannot be overtaken by its old title.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error only if the callback output sink fails. Settings
+    /// and state failures return the provider-native fallback title.
+    pub fn dispatch_system_to(
+        raw: &[u8],
+        sink: &mut impl Write,
+    ) -> io::Result<AgyTitleDispatchOutcome> {
+        let Ok(state_root) = StableAliasRegistry::default_state_root() else {
+            write_callback_title(sink, "Agy")?;
+            return Ok(AgyTitleDispatchOutcome::DegradedStateRoot);
+        };
+        let Ok(store) = PresentationSettingsStore::from_environment() else {
+            write_callback_title(sink, "Agy")?;
+            return Ok(AgyTitleDispatchOutcome::DegradedSettings);
+        };
+        let mut output_started = false;
+        let result = store.with_runtime_lock_bounded(AGY_SETTINGS_LOCK_BUDGET, || {
+            let resolved = store
+                .resolve_provider_read_only(
+                    CliTarget::Agy,
+                    PresentationCapabilities::AGY_TITLE_ONLY,
+                    ApplicationStatus::Unproven,
+                )
+                .map_err(io::Error::other)?;
+            let response =
+                Self::new(&state_root, resolved.effective).dispatch_to(raw, SystemTime::now());
+            output_started = true;
+            write_callback_title(sink, &response.title)?;
+            Ok(response.outcome)
+        });
+        match result {
+            Ok(outcome) => Ok(outcome),
+            Err(error) if output_started => Err(error),
+            Err(_) => {
+                write_callback_title(sink, "Agy")?;
+                Ok(AgyTitleDispatchOutcome::DegradedSettings)
+            }
+        }
     }
 
     /// Handles a callback with deterministic runtime dependencies.
     #[must_use]
     pub fn dispatch_to(&self, raw: &[u8], observed_at: SystemTime) -> AgyProductionTitleResponse {
-        let Some(normalized) = AgyTitleNormalizer::normalize(self.profile, raw, observed_at) else {
+        let profile = title_contract_from_payload(raw);
+        let Some(normalized) =
+            profile.and_then(|profile| AgyTitleNormalizer::normalize(profile, raw, observed_at))
+        else {
             record_callback_diagnostics(&self.state_root, raw, false, observed_at);
             return fallback_title(AgyTitleDispatchOutcome::DegradedInput);
         };
@@ -602,7 +669,10 @@ impl AgyTitleRuntime {
         ) {
             Ok(Some(selection)) => selection,
             Ok(None) => {
-                let Ok(workspace) = self.identity_resolver.resolve(&normalized.project_root) else {
+                let Ok(workspace) = self
+                    .identity_resolver
+                    .resolve_runtime_bounded(&normalized.project_root)
+                else {
                     record_callback_diagnostics(&self.state_root, raw, false, observed_at);
                     return fallback_title(AgyTitleDispatchOutcome::DegradedWorkspaceIdentity);
                 };
@@ -629,7 +699,7 @@ impl AgyTitleRuntime {
         let registry = ProviderRegistry::codex_observation(None, true, false, false)
             .with_agy_readiness(AgyReadinessProjection {
                 state: AgyIntegrationReadiness::SupportedConfigured,
-                version: Some(AGY_ADMITTED_VERSION.to_owned()),
+                version: profile.map(|profile| profile.version.as_string()),
                 qualification_available: true,
                 qualification_observations_available: true,
                 production_enabled: true,
@@ -684,11 +754,41 @@ fn fallback_title(outcome: AgyTitleDispatchOutcome) -> AgyProductionTitleRespons
     }
 }
 
+fn write_callback_title(sink: &mut impl Write, title: &str) -> io::Result<()> {
+    sink.write_all(title.as_bytes())?;
+    sink.write_all(b"\n")?;
+    sink.flush()
+}
+
+#[cfg(test)]
 const fn frozen_profile() -> AgyAdmittedProfile {
     AgyAdmittedProfile {
         version: AgyVersion::from_parts(1, 1, 19),
         source: AgyBackendSource::TitleCallback,
     }
+}
+
+fn title_contract_profile(version: &str) -> Option<AgyAdmittedProfile> {
+    let version = match version {
+        AGY_ADMITTED_VERSION => AgyVersion::from_parts(1, 1, 19),
+        AGY_TITLE_CONTRACT_V127 => AgyVersion::from_parts(1, 2, 7),
+        _ => return None,
+    };
+    Some(AgyAdmittedProfile {
+        version,
+        source: AgyBackendSource::TitleCallback,
+    })
+}
+
+fn title_contract_from_payload(raw: &[u8]) -> Option<AgyAdmittedProfile> {
+    if raw.len() > MAX_AGY_QUALIFICATION_INPUT_BYTES {
+        return None;
+    }
+    let object = parse_qualification_object(raw)?;
+    object
+        .get("version")
+        .and_then(Value::as_str)
+        .and_then(title_contract_profile)
 }
 
 fn record_callback_diagnostics(
@@ -937,7 +1037,7 @@ impl AgyProductionSetup {
             return readiness(AgyIntegrationReadiness::KnownUnadmitted, None, false);
         };
         let version = version.as_string();
-        if version != AGY_ADMITTED_VERSION {
+        if title_contract_profile(&version).is_none() {
             return readiness(
                 AgyIntegrationReadiness::UnsupportedVersion,
                 Some(version),
@@ -952,11 +1052,16 @@ impl AgyProductionSetup {
                 false,
             ),
             Ok(Some(manifest)) => match self.current_matches_owned(&manifest) {
-                Ok(true) if manifest.schema == AGY_SETUP_MANIFEST_SCHEMA => readiness(
-                    AgyIntegrationReadiness::SupportedConfigured,
-                    Some(version),
-                    true,
-                ),
+                Ok(true)
+                    if manifest.schema == AGY_SETUP_MANIFEST_SCHEMA
+                        && manifest.admitted_version == version =>
+                {
+                    readiness(
+                        AgyIntegrationReadiness::SupportedConfigured,
+                        Some(version),
+                        true,
+                    )
+                }
                 Ok(true | false) | Err(_) => readiness(
                     AgyIntegrationReadiness::ConfigurationDrift,
                     Some(version),
@@ -971,6 +1076,41 @@ impl AgyProductionSetup {
         }
     }
 
+    /// Reconciles only `TabBeacon`'s owned title callback with the selected
+    /// presentation mode. Native mode never installs a callback.
+    ///
+    /// # Errors
+    ///
+    /// Refuses an unproved owner or any configuration drift.
+    pub fn reconcile_title_ownership(
+        &self,
+        own_title: bool,
+    ) -> Result<AgyProductionSetupOutcome, AgyProductionSetupError> {
+        if own_title {
+            self.setup()
+        } else {
+            self.uninstall()
+        }
+    }
+
+    /// Reconciles a previously owned callback without installing a new one.
+    /// A settings reset may remove an override, but it does not authorize a
+    /// first Agy integration installation.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unsupported versions, ownership drift, and unsafe writes.
+    pub fn reconcile_title_ownership_if_owned(
+        &self,
+        own_title: bool,
+    ) -> Result<AgyProductionSetupOutcome, AgyProductionSetupError> {
+        if own_title {
+            self.setup_with_existing_requirement(true)
+        } else {
+            self.uninstall()
+        }
+    }
+
     /// Installs the smallest supported user-global title callback mutation.
     ///
     /// # Errors
@@ -978,11 +1118,31 @@ impl AgyProductionSetup {
     /// Refuses unsupported versions, foreign title owners, malformed input,
     /// ownership-state drift, and any pre-write byte drift.
     pub fn setup(&self) -> Result<AgyProductionSetupOutcome, AgyProductionSetupError> {
-        self.require_admitted_version()?;
+        self.setup_with_existing_requirement(false)
+    }
+
+    fn setup_with_existing_requirement(
+        &self,
+        existing_only: bool,
+    ) -> Result<AgyProductionSetupOutcome, AgyProductionSetupError> {
+        let mut admitted_version = None;
+        if !existing_only {
+            admitted_version = Some(self.require_admitted_version()?);
+        }
         self.validate_paths()?;
         let _lock = SetupLock::acquire(&self.state_root)?;
         self.validate_paths()?;
-        if let Some(manifest) = self.read_manifest()? {
+        let manifest = self.read_manifest()?;
+        if existing_only {
+            if manifest.is_none() {
+                return Ok(AgyProductionSetupOutcome::NotInstalled);
+            }
+            admitted_version = Some(self.require_admitted_version()?);
+        }
+        if let Some(manifest) = manifest {
+            if admitted_version.as_deref() != Some(manifest.admitted_version.as_str()) {
+                return Err(AgyProductionSetupError::ConfigurationDrift);
+            }
             let current = fs::read(&self.config_path)
                 .map_err(|_| AgyProductionSetupError::ConfigurationDrift)?;
             if self
@@ -1018,7 +1178,7 @@ impl AgyProductionSetup {
         let backup = before.clone().unwrap_or_default();
         let manifest = AgySetupManifest {
             schema: AGY_SETUP_MANIFEST_SCHEMA.to_owned(),
-            admitted_version: AGY_ADMITTED_VERSION.to_owned(),
+            admitted_version: admitted_version.ok_or(AgyProductionSetupError::ProbeUnavailable)?,
             original_present: before.is_some(),
             original_sha256: sha256_hex(&backup),
             applied_sha256: sha256_hex(&candidate),
@@ -1094,10 +1254,10 @@ impl AgyProductionSetup {
         Ok(AgyProductionSetupOutcome::Removed)
     }
 
-    fn require_admitted_version(&self) -> Result<(), AgyProductionSetupError> {
-        let version = self.probe_version()?;
-        if version.as_string() == AGY_ADMITTED_VERSION {
-            Ok(())
+    fn require_admitted_version(&self) -> Result<String, AgyProductionSetupError> {
+        let version = self.probe_version()?.as_string();
+        if title_contract_profile(&version).is_some() {
+            Ok(version)
         } else {
             Err(AgyProductionSetupError::UnsupportedVersion)
         }
@@ -1187,7 +1347,7 @@ impl AgyProductionSetup {
             .map_err(|_| AgyProductionSetupError::OwnershipStateInvalid)?;
         let upgraded = AgySetupManifest {
             schema: AGY_SETUP_MANIFEST_SCHEMA.to_owned(),
-            admitted_version: AGY_ADMITTED_VERSION.to_owned(),
+            admitted_version: manifest.admitted_version.clone(),
             original_present: manifest.original_present,
             original_sha256: manifest.original_sha256.clone(),
             applied_sha256: sha256_hex(&candidate),
@@ -1237,7 +1397,7 @@ impl AgyProductionSetup {
     ) -> Result<Option<Map<String, Value>>, AgyProductionSetupError> {
         if (manifest.schema != AGY_SETUP_MANIFEST_SCHEMA
             && manifest.schema != AGY_SETUP_MANIFEST_SCHEMA_V1)
-            || manifest.admitted_version != AGY_ADMITTED_VERSION
+            || title_contract_profile(&manifest.admitted_version).is_none()
         {
             return Err(AgyProductionSetupError::OwnershipStateInvalid);
         }
@@ -1850,6 +2010,127 @@ mod tests {
     };
 
     #[test]
+    fn exact_127_profile_matches_payload_and_rejects_adjacent_versions() {
+        let profile = AgyCapabilityGate::admit_profile(
+            br#"{"schema":"tabbeacon-agy-admitted-profile-v1","version":"1.2.7","backend":"title_callback"}"#,
+        )
+        .expect("observed exact 1.2.7 title contract");
+        let root = temp_root("127-profile");
+        let mut payload = json!({
+            "version": "1.2.7", "agent_state": "working",
+            "conversation_id": "fixture-private-session",
+            "workspace": {"current_dir": root, "project_dir": root}
+        });
+        let normalize = |value: &serde_json::Value| {
+            AgyTitleNormalizer::normalize(
+                profile,
+                &serde_json::to_vec(value).unwrap(),
+                SystemTime::now(),
+            )
+        };
+        assert!(normalize(&payload).is_some());
+        for version in ["1.1.19", "1.2.6", "1.2.8", "2.0.0"] {
+            payload["version"] = version.into();
+            assert!(normalize(&payload).is_none());
+        }
+        payload["version"] = "1.2.7".into();
+        payload["conversation_id"] = serde_json::Value::Null;
+        assert!(
+            normalize(&payload).is_none(),
+            "real startup without identity stays fail safe"
+        );
+        for version in ["1.2.6", "1.2.8", "2.0.0"] {
+            let document = json!({"schema": AGY_ADMITTED_PROFILE_SCHEMA, "version": version, "backend": "title_callback"});
+            assert!(
+                AgyCapabilityGate::admit_profile(&serde_json::to_vec(&document).unwrap()).is_err()
+            );
+        }
+        // Pure normalization does not create this workspace or persist content.
+    }
+
+    #[test]
+    fn owned_manifest_refuses_live_version_changes_without_writes() {
+        for (installed, current) in [("1.1.19", "1.2.7"), ("1.2.7", "1.1.19")] {
+            let root = temp_root("version-drift");
+            let config = root.join("settings.json");
+            let executable = root.join("tabbeacon.exe");
+            fs::create_dir_all(&root).unwrap();
+            fs::write(&executable, b"synthetic product fixture, not Agy").unwrap();
+            fs::write(&config, b"{\"unrelated\":true}\n").unwrap();
+            let mut setup =
+                AgyProductionSetup::new(&config, root.join("state"), &executable, "agy");
+            setup.version_override = super::AgyVersion::parse(installed);
+            assert_eq!(setup.setup(), Ok(AgyProductionSetupOutcome::Installed));
+            let before = fs::read(&config).unwrap();
+            let manifest = fs::read(setup.manifest_path()).unwrap();
+            setup.version_override = super::AgyVersion::parse(current);
+            assert_eq!(
+                setup.inspect().state,
+                AgyIntegrationReadiness::ConfigurationDrift
+            );
+            assert_eq!(
+                setup.setup(),
+                Err(AgyProductionSetupError::ConfigurationDrift)
+            );
+            assert_eq!(
+                setup.reconcile_title_ownership_if_owned(true),
+                Err(AgyProductionSetupError::ConfigurationDrift)
+            );
+            assert_eq!(fs::read(&config).unwrap(), before);
+            assert_eq!(fs::read(setup.manifest_path()).unwrap(), manifest);
+            // Removal still proves ownership and restores without requiring a version downgrade.
+            assert_eq!(setup.uninstall(), Ok(AgyProductionSetupOutcome::Removed));
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn exact_127_setup_reconcile_native_and_restore_preserve_foreign_bytes() {
+        let root = temp_root("127-setup");
+        let config = root.join("home/.gemini/antigravity-cli/settings.json");
+        let executable = root.join("tabbeacon.exe");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let original = b"{\n  \"model\":\"fixture-model\",\"auth\":{\"unrelated\":true},\"hooks\":{\"foreign\":true}\n}\n";
+        fs::write(&config, original).unwrap();
+        fs::write(&executable, b"synthetic product fixture, not Agy").unwrap();
+        let mut setup = AgyProductionSetup::new(&config, root.join("state"), &executable, "agy");
+        setup.version_override = super::AgyVersion::parse("1.2.7");
+        assert_eq!(setup.setup(), Ok(AgyProductionSetupOutcome::Installed));
+        let installed = fs::read(&config).unwrap();
+        assert_eq!(
+            setup.setup(),
+            Ok(AgyProductionSetupOutcome::AlreadyConfigured)
+        );
+        assert_eq!(fs::read(&config).unwrap(), installed);
+        assert_eq!(
+            setup.inspect().state,
+            AgyIntegrationReadiness::SupportedConfigured
+        );
+        let manifest = setup.read_manifest().unwrap().unwrap();
+        assert_eq!(manifest.admitted_version, "1.2.7");
+        assert_eq!(
+            setup.reconcile_title_ownership(false),
+            Ok(AgyProductionSetupOutcome::Removed)
+        );
+        assert_eq!(fs::read(&config).unwrap(), original);
+        assert_eq!(
+            setup.reconcile_title_ownership(true),
+            Ok(AgyProductionSetupOutcome::Installed)
+        );
+        let mut drift: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+        drift["title"]["command"] = "foreign-command".into();
+        let changed = serde_json::to_vec(&drift).unwrap();
+        fs::write(&config, &changed).unwrap();
+        assert_eq!(
+            setup.uninstall(),
+            Err(AgyProductionSetupError::ConfigurationDrift)
+        );
+        assert_eq!(fs::read(&config).unwrap(), changed);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn capability_gate_admits_only_the_exact_frozen_profile() {
         for document in [
             br"{}".as_slice(),
@@ -2160,6 +2441,36 @@ mod tests {
     }
 
     #[test]
+    fn reset_reconciliation_never_installs_an_absent_agy_callback() {
+        let root = temp_root("reset-existing-only");
+        let config = root.join("home/.gemini/antigravity-cli/settings.json");
+        let state = root.join("state");
+        let executable = root.join("tabbeacon.exe");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, br#"{"foreign":true}"#).unwrap();
+        fs::write(&executable, b"fixture executable").unwrap();
+        let setup =
+            AgyProductionSetup::new(&config, &state, &executable, "agy").with_admitted_version();
+        let original = fs::read(&config).unwrap();
+        assert_eq!(
+            setup.reconcile_title_ownership_if_owned(true),
+            Ok(AgyProductionSetupOutcome::NotInstalled)
+        );
+        assert_eq!(fs::read(&config).unwrap(), original);
+        assert!(!setup.manifest_path().exists());
+        assert_eq!(setup.setup(), Ok(AgyProductionSetupOutcome::Installed));
+        assert_eq!(
+            setup.reconcile_title_ownership_if_owned(true),
+            Ok(AgyProductionSetupOutcome::AlreadyConfigured)
+        );
+        assert_eq!(
+            setup.reconcile_title_ownership_if_owned(false),
+            Ok(AgyProductionSetupOutcome::Removed)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn production_setup_preserves_unrelated_values_and_restores_exact_bytes() {
         let root = temp_root("setup");
         let config = root.join("home/.gemini/antigravity-cli/settings.json");
@@ -2205,6 +2516,47 @@ mod tests {
         assert_eq!(fs::read(&config).expect("restored"), original);
         assert_eq!(
             setup.uninstall(),
+            Ok(AgyProductionSetupOutcome::NotInstalled)
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn native_reconciliation_never_installs_and_releases_only_owned_callback() {
+        let root = temp_root("native-reconcile");
+        let config = root.join("home/.gemini/antigravity-cli/settings.json");
+        let state = root.join("state");
+        let executable = root.join("tabbeacon.exe");
+        fs::create_dir_all(config.parent().expect("parent")).expect("config parent");
+        fs::write(&executable, b"fixture executable").expect("executable");
+        fs::write(&config, br#"{"foreign":1}"#).expect("original");
+        let setup =
+            AgyProductionSetup::new(&config, &state, &executable, "agy").with_admitted_version();
+        assert_eq!(
+            setup.reconcile_title_ownership(false),
+            Ok(AgyProductionSetupOutcome::NotInstalled)
+        );
+        assert_eq!(fs::read(&config).expect("untouched"), br#"{"foreign":1}"#);
+        assert_eq!(
+            setup.reconcile_title_ownership(true),
+            Ok(AgyProductionSetupOutcome::Installed)
+        );
+        let mut changed: Value =
+            serde_json::from_slice(&fs::read(&config).expect("owned")).expect("owned json");
+        changed["other"] = json!("preserved");
+        fs::write(&config, serde_json::to_vec(&changed).expect("changed"))
+            .expect("write unrelated change");
+        assert_eq!(
+            setup.reconcile_title_ownership(false),
+            Ok(AgyProductionSetupOutcome::Removed)
+        );
+        let released: Value =
+            serde_json::from_slice(&fs::read(&config).expect("released")).expect("released json");
+        assert!(released.get("title").is_none());
+        assert_eq!(released["foreign"], 1);
+        assert_eq!(released["other"], "preserved");
+        assert_eq!(
+            setup.reconcile_title_ownership(false),
             Ok(AgyProductionSetupOutcome::NotInstalled)
         );
         fs::remove_dir_all(root).expect("cleanup");

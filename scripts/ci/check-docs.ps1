@@ -41,6 +41,10 @@ function Test-RelativeMarkdownLinks {
             if ($target -match '^(https?:|mailto:|#)') {
                 continue
             }
+            if ($target -match 'terminology\.md#(?<fragment>[^\s]+)$') {
+                $glossaryContent = Get-Content -LiteralPath (Join-Path $repositoryRoot 'docs/terminology.md') -Raw -Encoding UTF8
+                Assert-Docs ($glossaryContent.Contains(('id="{0}"' -f $Matches['fragment']))) "$path links to a missing glossary anchor: $target"
+            }
             $targetPath = $target.Split('#', 2)[0]
             if ([string]::IsNullOrWhiteSpace($targetPath)) {
                 continue
@@ -68,6 +72,7 @@ $requiredFiles = @(
     'docs/configuration.md',
     'docs/coding-agent-support.md',
     'docs/troubleshooting.md',
+    'docs/terminology.md',
     'docs/faq.md',
     'docs/design/product-principles.md',
     'docs/design/visual-language.md',
@@ -77,6 +82,8 @@ $requiredFiles = @(
     'docs/development/release-process.md',
     'docs/v0.7.3-release-notes.md',
     'docs/v0.7.3-upgrade.md',
+    'docs/v0.8.0-release-notes.md',
+    'docs/v0.8.0-upgrade.md',
     'CONTRIBUTING.md',
     'SECURITY.md'
 )
@@ -85,6 +92,26 @@ $requiredFiles += $trainDocPaths
 foreach ($path in $requiredFiles) {
     [void](Get-RequiredContent $path)
 }
+
+$glossary = Get-RequiredContent 'docs/terminology.md'
+$termRows = [regex]::Matches($glossary, '(?m)^\| <a id="(?<anchor>tb-t\d{2})"></a>(?<id>TB-T\d{2}) \| (?<english>[^|]+) \| (?<chinese>[^|]+) \| (?<definition>[^|]+) \|$')
+$termIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+$termNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+foreach ($row in $termRows) {
+    $id = $row.Groups['id'].Value
+    Assert-Docs ($termIds.Add($id)) "duplicate glossary ID: $id"
+    Assert-Docs ($row.Groups['anchor'].Value -eq $id.ToLowerInvariant()) "glossary ID $id has a mismatched anchor"
+    $english = $row.Groups['english'].Value.Trim()
+    $chinese = $row.Groups['chinese'].Value.Trim()
+    $definition = $row.Groups['definition'].Value.Trim()
+    Assert-Docs ($termNames.Add($english)) "duplicate glossary English term: $english"
+    Assert-Docs (-not [string]::IsNullOrWhiteSpace($chinese)) "missing Chinese term for $id"
+    Assert-Docs ($definition.Contains(' / ')) "missing bilingual definition for $id"
+}
+foreach ($required in @('Provider', 'CLI', 'Session', 'Turn', 'Workspace', 'Title', 'Tab Color', 'Activity', 'Progress', 'Ownership', 'Native', 'Off', 'Capability', 'Evidence', 'Hook Trust', 'Ready', 'ResultReady', 'Warning', 'Interrupted', 'Failed', 'Inheritance', 'Override', 'Saved configuration', 'Installed integration', 'Effective settings')) {
+    Assert-Docs ($termNames.Contains($required)) "missing required glossary term: $required"
+}
+Assert-Docs ($termRows.Count -eq 25) "expected 25 glossary entries; found $($termRows.Count)"
 
 $englishReadme = Get-RequiredContent 'README.md'
 $chineseReadme = Get-RequiredContent 'README.zh-CN.md'
@@ -227,24 +254,29 @@ foreach ($path in $currentFacingPaths) {
     Assert-Docs ($content -notmatch '(?i)TabBeacon\s+0\.6\.0\s+(supports|is|includes)') "$path contains stale v0.6.0 current-product wording"
 }
 
-$currentReleaseProofs = @(
-    @{ Path = 'README.md'; Pattern = 'Current public release:\s+\*\*v0\.7\.3\*\*' },
-    @{ Path = 'README.zh-CN.md'; Pattern = '\u5f53\u524d\u516c\u5f00\u7248\u672c\uff1a\*\*v0\.7\.3\*\*' },
-    @{ Path = 'SECURITY.md'; Pattern = 'current published release is \*\*v0\.7\.3\*\*' },
-    @{ Path = 'docs/README.md'; Pattern = 'Current public release:\s+\*\*v0\.7\.3\*\*' },
-    @{ Path = 'docs/getting-started.md'; Pattern = 'current public release is \*\*v0\.7\.3\*\*' },
-    @{ Path = 'docs/development/release-process.md'; Pattern = 'current public release is \*\*v0\.7\.3\*\*' },
-    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.7\.3' },
-    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'CURRENT_PUBLIC_RELEASE=v0\.7\.3' }
+# Candidate metadata is source truth; publication requires external receipts.
+# Never require source documentation to assert that publication already happened.
+$candidateScopeProofs = @(
+    @{ Path = 'README.md'; Pattern = 'v0\.8\.0 release candidate' },
+    @{ Path = 'README.zh-CN.md'; Pattern = 'v0\.8\.0 \u53d1\u5e03\u5019\u9009' },
+    @{ Path = 'SECURITY.md'; Pattern = 'v0\.8\.0 is a release candidate' },
+    @{ Path = 'docs/README.md'; Pattern = 'v0\.8\.0 release candidate' },
+    @{ Path = 'docs/getting-started.md'; Pattern = 'v0\.8\.0 release candidate' },
+    @{ Path = 'docs/development/release-process.md'; Pattern = 'v0\.8\.0 release candidate' },
+    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'LAST_VERIFIED_PUBLIC_RELEASE=v0\.7\.3' },
+    @{ Path = 'dev_governance_files/DEVELOPMENT_PAUSE.md'; Pattern = 'LAST_VERIFIED_PUBLIC_RELEASE=v0\.7\.3' },
+    @{ Path = 'docs/v0.8.0-release-notes.md'; Pattern = 'When v0\.8\.0 is published' },
+    @{ Path = 'docs/v0.8.0-upgrade.md'; Pattern = 'When v0\.8\.0 is published' }
 )
-foreach ($proof in $currentReleaseProofs) {
+foreach ($proof in $candidateScopeProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw -Encoding UTF8
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not declare v0.7.3 as the current public release"
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not separate candidate scope from publication"
+    Assert-Docs ($content -notmatch '(?i)(current\s+(public|published)\s+release[^\n]*|CURRENT_PUBLIC_RELEASE=|\u5f53\u524d\u516c\u5f00\u7248\u672c[^\n]*)v?0\.8\.0') "$($proof.Path) prematurely asserts v0.8.0 publication"
 }
 
 $releaseProofs = @(
-    @{ Path = 'Cargo.toml'; Pattern = '(?m)^version = "0\.7\.3"$' },
-    @{ Path = 'Cargo.lock'; Pattern = '(?ms)name = "tabbeacon"\r?\nversion = "0\.7\.3"' },
+    @{ Path = 'Cargo.toml'; Pattern = '(?m)^version = "0\.8\.0"$' },
+    @{ Path = 'Cargo.lock'; Pattern = '(?ms)name = "tabbeacon"\r?\nversion = "0\.8\.0"' },
     @{ Path = 'CHANGELOG.md'; Pattern = '## \[0\.7\.3\] - 2026-09-01' },
     @{ Path = 'docs/v0.7.3-release-notes.md'; Pattern = '# TabBeacon v0\.7\.3' },
     @{ Path = 'docs/v0.7.3-upgrade.md'; Pattern = '# Upgrade from v0\.7\.2 to v0\.7\.3' },
@@ -252,17 +284,17 @@ $releaseProofs = @(
 )
 foreach ($proof in $releaseProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw -Encoding UTF8
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not preserve the v0.7.3 release contract"
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not preserve the public v0.7.3 record and v0.8.0 candidate metadata"
 }
 
 $releaseTargetProofs = @(
-    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_TARGET=v0\.7\.3' },
+    @{ Path = 'dev_governance_files/ROADMAP.md'; Pattern = 'CURRENT_PUBLIC_TARGET=v0\.8\.0' },
     @{ Path = 'docs/v0.7.3-release-notes.md'; Pattern = '# TabBeacon v0\.7\.3' },
     @{ Path = 'docs/v0.7.2-release-notes.md'; Pattern = '# TabBeacon v0\.7\.2' }
 )
 foreach ($proof in $releaseTargetProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not identify the current or immediately prior release record"
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not identify the target or immediately prior release record"
 }
 
 # The Owner-approved v0.8.0 admission supersedes the dogfood-only pause.
@@ -297,6 +329,15 @@ foreach ($path in @(
 }
 $roadmap = Get-RequiredContent 'dev_governance_files/ROADMAP_V08.md'
 $matrix = Get-RequiredContent 'dev_governance_files/V080_ACCEPTANCE_MATRIX.md'
+foreach ($status in @(
+    'AGY_READY_VISIBLE_L4=UNPROVEN',
+    'SAME_TAB_HANDOFF_L4=NOT_EXECUTED_OWNER_STOP',
+    'AGY_PRESERVE_NATIVE_L4=NOT_EXECUTED_OWNER_STOP',
+    'ATTENDED_FOLLOWUP_REQUIREMENT=NOT_REQUIRED_FOR_V080_PUBLIC_SCOPE'
+)) {
+    Assert-Docs ($matrix.Contains($status)) "acceptance matrix loses reconciled evidence boundary: $status"
+}
+Assert-Docs ($matrix -notmatch '(?m)^(AGY_READY_VISIBLE_L4|SAME_TAB_HANDOFF_L4|AGY_PRESERVE_NATIVE_L4)=PASS\b') 'unexecuted/unproven attended evidence cannot become PASS'
 foreach ($package in @(
     @{ Prefix = 'P'; Count = 8 },
     @{ Prefix = 'C'; Count = 7 },

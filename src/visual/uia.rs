@@ -10,6 +10,7 @@ use uiautomation::{
     UIAutomation, UIElement,
     actions::Window,
     controls::WindowControl,
+    patterns::UISelectionItemPattern,
     types::{ControlType, Rect},
 };
 use windows::Win32::UI::WindowsAndMessaging::IsWindow;
@@ -79,6 +80,19 @@ pub enum OwnedTabActivation {
 }
 
 impl OwnedTabTitleReader {
+    /// Checks that the exact correlated tab is currently selected for capture.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when UIA cannot expose or read the selection pattern.
+    pub fn is_selected(&self) -> VisualResult<bool> {
+        self.tab
+            .get_pattern::<UISelectionItemPattern>()
+            .map_err(platform_error)?
+            .is_selected()
+            .map_err(platform_error)
+    }
+
     /// Samples the exact already-correlated tab on a bounded monotonic
     /// timeline, reducing each raw title to a non-sensitive classification.
     ///
@@ -385,49 +399,125 @@ impl WindowsUiaLocator {
         expected_titles: &[String],
     ) -> VisualResult<OwnedTabActivation> {
         let (window, tab) = owned_window_and_tab_any(run_id, expected_titles)?;
-        let mut dump = uia_dump(&window, &tab, None)?;
-        let control = match WindowControl::try_from(window.clone()) {
-            Ok(control) => control,
-            Err(error) => {
-                return Ok(OwnedTabActivation::Refused {
-                    dump,
-                    detail: platform_error(error).to_string(),
-                });
+        activate_resolved_window_tab(window, tab)
+    }
+
+    /// Resolves the one sibling of an immutable, HWND-bound fixture anchor.
+    /// The sibling's mutable title is asserted after correlation, not used as
+    /// the ownership authority. This admits a provider-native title without a
+    /// run token while refusing extra tabs or a changed exact window.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a missing or ambiguous anchor, HWND drift, extra tabs, or UIA
+    /// activation failure.
+    pub fn locate_and_activate_exact_anchor_sibling(
+        &self,
+        anchor_title: &str,
+        expected_hwnd: isize,
+    ) -> VisualResult<OwnedTabActivation> {
+        let (observation, window) = exact_anchor_window(anchor_title)?;
+        if observation.anchor_tab_match_count != 1
+            || observation.target_window_match_count != 1
+            || observation.native_window_id != Some(expected_hwnd)
+        {
+            return Err(VisualError::Platform(
+                "exact fixture anchor/HWND no longer identifies one window".to_owned(),
+            ));
+        }
+        let window = window.ok_or_else(|| {
+            VisualError::Platform("exact fixture ancestor window vanished".to_owned())
+        })?;
+        let automation = UIAutomation::new().map_err(platform_error)?;
+        let tabs = automation
+            .create_matcher()
+            .from_ref(&window)
+            .depth(12)
+            .control_type(ControlType::TabItem)
+            .timeout(0)
+            .find_all()
+            .map_err(platform_error)?;
+        if tabs.len() != 2 {
+            return Err(VisualError::Platform(
+                "exact fixture window does not contain one anchor and one sibling".to_owned(),
+            ));
+        }
+        let mut sibling = None;
+        let mut anchor_count = 0;
+        for tab in tabs {
+            if tab.get_name().map_err(platform_error)? == anchor_title {
+                anchor_count += 1;
+            } else {
+                sibling = Some(tab);
             }
-        };
-        let set_foreground = match control.set_foregrand() {
-            Ok(value) => value,
-            Err(error) => {
-                return Ok(OwnedTabActivation::Refused {
-                    dump,
-                    detail: platform_error(error).to_string(),
-                });
-            }
-        };
-        if let Err(error) = window.set_focus() {
+        }
+        if anchor_count != 1 {
+            return Err(VisualError::Platform(
+                "exact fixture anchor cardinality changed during sibling lookup".to_owned(),
+            ));
+        }
+        let sibling = sibling.ok_or_else(|| {
+            VisualError::Platform("exact fixture sibling tab vanished".to_owned())
+        })?;
+        let selection = sibling
+            .get_pattern::<UISelectionItemPattern>()
+            .map_err(platform_error)?;
+        selection.select().map_err(platform_error)?;
+        if !selection.is_selected().map_err(platform_error)? {
+            return Err(VisualError::Platform(
+                "exact fixture sibling tab did not become selected".to_owned(),
+            ));
+        }
+        activate_resolved_window_tab(window, sibling)
+    }
+}
+
+fn activate_resolved_window_tab(
+    window: UIElement,
+    tab: UIElement,
+) -> VisualResult<OwnedTabActivation> {
+    let mut dump = uia_dump(&window, &tab, None)?;
+    let control = match WindowControl::try_from(window.clone()) {
+        Ok(control) => control,
+        Err(error) => {
             return Ok(OwnedTabActivation::Refused {
                 dump,
                 detail: platform_error(error).to_string(),
             });
         }
-        let activation = WindowActivation {
-            set_foreground,
-            set_focus: true,
-        };
-        dump.activation = Some(activation);
-        if !set_foreground {
+    };
+    let set_foreground = match control.set_foregrand() {
+        Ok(value) => value,
+        Err(error) => {
             return Ok(OwnedTabActivation::Refused {
                 dump,
-                detail: "Windows did not accept foreground activation for the owned fixture window"
-                    .to_owned(),
+                detail: platform_error(error).to_string(),
             });
         }
-        Ok(OwnedTabActivation::Activated {
+    };
+    if let Err(error) = window.set_focus() {
+        return Ok(OwnedTabActivation::Refused {
             dump,
-            title_reader: OwnedTabTitleReader { tab },
-            window_reader: OwnedWindowTabReader { window },
-        })
+            detail: platform_error(error).to_string(),
+        });
     }
+    let activation = WindowActivation {
+        set_foreground,
+        set_focus: true,
+    };
+    dump.activation = Some(activation);
+    if !set_foreground {
+        return Ok(OwnedTabActivation::Refused {
+            dump,
+            detail: "Windows did not accept foreground activation for the owned fixture window"
+                .to_owned(),
+        });
+    }
+    Ok(OwnedTabActivation::Activated {
+        dump,
+        title_reader: OwnedTabTitleReader { tab },
+        window_reader: OwnedWindowTabReader { window },
+    })
 }
 
 impl TargetLocator for WindowsUiaLocator {

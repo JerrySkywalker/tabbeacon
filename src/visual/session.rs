@@ -9,6 +9,7 @@ use std::{
 
 use sha2::{Digest, Sha256};
 
+use super::wt_lifecycle::validated_window_id_for_prepared;
 use super::{
     FixtureReplay, TemporaryWindowProductDisposition, TemporaryWindowsTerminalAcquisition,
     TemporaryWindowsTerminalCleanupReceipt, TemporaryWindowsTerminalPreparedRun, VisualError,
@@ -37,6 +38,16 @@ pub struct TerminalTestSession {
 }
 
 impl TerminalTestSession {
+    /// Returns the immutable HWND only when this session's prepared identity
+    /// still matches its validated ownership record.
+    ///
+    /// # Errors
+    ///
+    /// Refuses unreadable, malformed, or mismatched ownership evidence.
+    pub fn exact_owned_hwnd(&self) -> VisualResult<isize> {
+        validated_window_id_for_prepared(&self.prepared_lifecycle, &self.ownership_path)
+    }
+
     /// Closes only this exact-owned window and writes the separate cleanup
     /// receipt without changing the caller's primary disposition.
     ///
@@ -132,9 +143,10 @@ impl TerminalTestSessionLauncher {
         replay: &FixtureReplay,
         run_id: &str,
         evidence_root: &Path,
+        phase_signal: Option<&Path>,
     ) -> VisualResult<TerminalTestSession> {
         let hold_millis = fixture_hold_millis(replay.case.expects_title_animation);
-        let arguments = [
+        let mut arguments = vec![
             "emit".to_owned(),
             "--fixture".to_owned(),
             replay.case.fixture_name.clone(),
@@ -143,6 +155,10 @@ impl TerminalTestSessionLauncher {
             "--hold-ms".to_owned(),
             hold_millis.to_string(),
         ];
+        if let Some(path) = phase_signal {
+            arguments.push("--phase-signal".to_owned());
+            arguments.push(path.display().to_string());
+        }
         self.launch_program(
             fixture_executable,
             run_id,
@@ -296,6 +312,7 @@ impl TerminalTestSessionLauncher {
             &window_name,
             std::process::id(),
         )?;
+        record_launch_stage(evidence_root, "prepared")?;
         let position = format!(
             "{},{}",
             self.requested_position.0, self.requested_position.1
@@ -306,6 +323,7 @@ impl TerminalTestSessionLauncher {
         // Observe an early dispatcher failure when one is available, but do
         // not wait for (or terminate) the launcher. Exact anchor registration
         // remains the authority that proves the resulting terminal window.
+        record_launch_stage(evidence_root, "dispatch")?;
         let launch_result = Command::new("wt.exe")
             .args(["-w", &window_name, "--pos", &position, "--size", &size])
             .arg("new-tab")
@@ -333,6 +351,7 @@ impl TerminalTestSessionLauncher {
                 observe_windows_terminal_dispatch(&mut launcher, "exact-owned fixture")
             });
         let launch_error = launch_result.err().map(|error| error.to_string());
+        record_launch_stage(evidence_root, "registration")?;
         let acquisition = complete_temporary_windows_terminal_acquisition(
             &WindowsUiaLocator,
             &prepared_lifecycle,
@@ -351,6 +370,7 @@ impl TerminalTestSessionLauncher {
                 )));
             }
         };
+        record_launch_stage(evidence_root, "registered")?;
         Ok(TerminalTestSession {
             run_id: run_id.to_owned(),
             window_name,
@@ -361,6 +381,18 @@ impl TerminalTestSessionLauncher {
             prepared_lifecycle,
         })
     }
+}
+
+fn record_launch_stage(root: &Path, stage: &str) -> VisualResult<()> {
+    // Fixed harness phases only; no window text, provider payload or Owner data.
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    std::fs::write(
+        root.join("fixture-launch-stage.json"),
+        format!("{{\"stage\":\"{stage}\",\"unix_ms\":{timestamp}}}"),
+    )?;
+    Ok(())
 }
 
 fn observe_windows_terminal_dispatch(launcher: &mut Child, context: &str) -> VisualResult<()> {

@@ -62,3 +62,12 @@ version, and owned configuration drift. Sessions stores only a bounded hashed
 provider observation and never launches a worker merely to make Agy visible.
 Agy root anchors live in a provider-specific namespace, retain only hashes and
 the safe shared alias, and record later workspace mismatch without rebinding.
+
+## v0.8.0 bounded extension — 2026-09-29
+
+Owner-authorized exact 1.2.7 title-contract re-admission uses this same adapter,
+capabilities and ownership rules. Native signed 1.2.7 startup callbacks established
+the configuration/command/structured-input subset; missing startup identity remains
+fail safe. Candidate regression and isolated configuration proof are distinct from
+the still-required real authenticated title/preserve-native L4. Historical 1.1.19
+admission remains valid; no version ordering or arbitrary range grants support.

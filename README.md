@@ -15,6 +15,8 @@
 
 <p align="center"><a href="https://github.com/JerrySkywalker/tabbeacon/releases">Releases</a> · <a href="https://crates.io/crates/tabbeacon">crates.io</a> · <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/README.md">Documentation</a> · <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/LICENSE">MIT License</a></p>
 
+English/Chinese product terms: [TabBeacon terminology](docs/terminology.md).
+
 <!-- tabbeacon:critical-invariants install=cargo-install-tabbeacon setup=tabbeacon-setup codex=codex agy=agy providers=codex-agy claude=deferred opencode=deferred trust=manual fail-open=true privacy=content-minimal -->
 
 <p align="center">
@@ -23,12 +25,13 @@
 
 <p align="center"><sub>Real Windows Terminal rendering from TabBeacon's deterministic presentation fixture; no live Codex or Agy model conversation.</sub></p>
 
-## Supported Coding Agents
+## v0.8.0 Coding Agent Scope
 
 | Coding Agent | Status | Daily command | Compatibility policy |
 | --- | --- | --- | --- |
 | Codex CLI | Production | `codex` | Capability-based; a version string is diagnostic only. |
-| Agy CLI | Production | `agy` | Exact admitted profile: Agy 1.1.19. |
+| Agy CLI | Bounded title support | `agy` | Exact 1.1.19/1.2.7 contracts; 1.2.7 real Working/noninterference proved, Ready and native switching not L4-qualified. |
+| Cursor Agent | Production | `agent` | Owned project Hooks; strict color-only or preserve-native, with Cursor's native title. |
 
 ### Deferred integrations
 
@@ -77,11 +80,10 @@ The production visual backend is title-first and intentionally compact:
 
 ## Quick Start
 
-Current public release: **v0.7.3**. The Owner-approved
-[v0.8.0 Goal Train](dev_governance_files/ROADMAP_V08.md) resumes bounded development
-of independent CLI presentation, Cursor color-only integration, Codex abnormal-state
-recovery, and bilingual terminology. These planned features are not yet included
-in the published v0.7.3 binary; all four will be qualified for one v0.8.0 release.
+The v0.8.0 release candidate adds independent CLI
+presentation, Cursor color-only integration, supported structured Codex state,
+and [English/Chinese terminology](docs/terminology.md). Read the
+[release notes](docs/v0.8.0-release-notes.md) for exact provider boundaries.
 
 Install the public CLI, run the guided setup, then launch Codex as usual:
 
@@ -102,10 +104,10 @@ agy
 ```
 
 Exact release verification remains separate from the normal user path. To
-verify the published v0.7.3 crate, pin both the version and lockfile:
+verify the v0.8.0 crate when it is published, pin both the version and lockfile:
 
 ```powershell
-cargo install tabbeacon --version 0.7.3 --locked
+cargo install tabbeacon --version 0.8.0 --locked
 ```
 
 > [!TIP]
@@ -116,12 +118,12 @@ cargo install tabbeacon --version 0.7.3 --locked
 ## Upgrade
 
 For a Cargo-installed copy, the short sequence is **version → preflight →
-install → doctor**:
+install → doctor**. When v0.8.0 is published, use:
 
 ```powershell
 tabbeacon --version
 tabbeacon upgrade-preflight
-cargo install tabbeacon --version 0.7.3 --locked --force
+cargo install tabbeacon --version 0.8.0 --locked --force
 tabbeacon --version
 tabbeacon doctor
 ```
@@ -139,31 +141,28 @@ If a process is reported as unowned or ambiguous, do **not** terminate it by
 image name; let the owning coding-agent session exit normally and retry the
 preflight.
 
-v0.7.3 does not require `tabbeacon setup` merely because the package was
-upgraded. If `tabbeacon doctor` specifically reports that the managed Codex
-integration needs reconciliation, run:
+After the v0.8.0 upgrade, reconcile an existing managed Codex integration
+without granting Hook trust automatically:
 
 ```powershell
 tabbeacon setup codex
 ```
 
 Then review any changed Hook definitions manually. TabBeacon never grants Hook
-trust automatically. See the [v0.7.3 upgrade guide](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/v0.7.3-upgrade.md)
+trust automatically. See the [v0.8.0 upgrade guide](docs/v0.8.0-upgrade.md)
 for the full ownership boundary.
 
 > [!NOTE]
-> The published v0.7.3 lockfile can make Cargo warn that the transitive
-> `chacha20 0.10.1` package is yanked. The post-release audit distinguishes
-> that registry yank from a security advisory; dependency maintenance is
-> tracked in [Issue #114](https://github.com/JerrySkywalker/tabbeacon/issues/114).
-> Keep `--locked` when reproducing or upgrading to the published v0.7.3 graph.
+> The prior v0.7.3 lockfile may warn about yanked `chacha20 0.10.1`.
+> v0.8.0 uses a different locked graph; keep `--locked` when reproducing it.
+> Dependency maintenance remains tracked in [Issue #114](https://github.com/JerrySkywalker/tabbeacon/issues/114).
 
 ## Compatibility
 
 TabBeacon targets Windows Terminal on Windows. Codex support is derived from
 locally observed required capabilities, not from a version ordering rule. Agy
-support is intentionally narrower: only the exact admitted 1.1.19 profile is
-production-supported. Unavailable or unproven evidence fails open instead of
+support is intentionally narrower: only exact 1.1.19 and 1.2.7 title profiles
+are admitted; 1.2.13 is not. Unavailable or unproven evidence fails open instead of
 being guessed into a compatible state.
 
 ## How It Works

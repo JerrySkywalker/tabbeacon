@@ -4,11 +4,10 @@ This is the English-canonical documentation for TabBeacon. The project landing
 pages are available in [English](../README.md) and [Simplified Chinese](../README.zh-CN.md);
 technical guides remain English-canonical.
 
-Current public release: **v0.7.3**. The Owner-approved
-[v0.8.0 Goal Train](../dev_governance_files/ROADMAP_V08.md) admits bounded development
-of independent CLI presentation, Cursor color-only integration, Codex abnormal-state
-recovery, and bilingual terminology. These are planned features, not claims about
-the published v0.7.3 binary.
+This source describes the **v0.8.0 release candidate**. See the
+[release notes](v0.8.0-release-notes.md) and [upgrade guide](v0.8.0-upgrade.md)
+for exact provider scope and known limitations. The v0.8.0 Goal Train remains
+the authority for this bounded release scope; source preparation does not prove publication.
 
 ## Start here
 
@@ -16,6 +15,8 @@ the published v0.7.3 binary.
   literal provider commands.
 - [Configuration](configuration.md) — presentation preferences, workspace
   aliases, and portable settings.
+- [English/Chinese terminology](terminology.md) — stable definitions for the
+  v0.8.0 development train.
 - [Supported coding agents](coding-agent-support.md) — current provider and
   capability boundaries.
 - [Troubleshooting](troubleshooting.md) — safe diagnosis before any repair.

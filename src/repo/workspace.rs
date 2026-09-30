@@ -1,6 +1,7 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use sha2::{Digest, Sha256};
@@ -17,6 +18,7 @@ use super::{
 
 const MAX_CUSTOM_ALIAS_DISPLAY_WIDTH: usize = 20;
 const MAX_CUSTOM_ALIAS_GRAPHEMES: usize = 20;
+const RUNTIME_REGISTRY_LOCK_BUDGET: Duration = Duration::from_millis(100);
 
 /// The local evidence class that produced a workspace identity.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,8 +289,25 @@ impl WorkspaceIdentityResolver {
         &self,
         cwd: impl AsRef<Path>,
     ) -> Result<ResolvedWorkspaceIdentity, RepositoryIdentityError> {
-        let facts = self.workspace_facts(cwd.as_ref())?;
-        self.registry.with_exclusive_lock(|registry| {
+        self.resolve_with_registry_budget(cwd.as_ref(), None)
+    }
+
+    /// Resolves a Hook workspace without waiting indefinitely for another
+    /// process's alias registration while the Hook holds config.lock.
+    pub(crate) fn resolve_runtime_bounded(
+        &self,
+        cwd: impl AsRef<Path>,
+    ) -> Result<ResolvedWorkspaceIdentity, RepositoryIdentityError> {
+        self.resolve_with_registry_budget(cwd.as_ref(), Some(RUNTIME_REGISTRY_LOCK_BUDGET))
+    }
+
+    fn resolve_with_registry_budget(
+        &self,
+        cwd: &Path,
+        budget: Option<Duration>,
+    ) -> Result<ResolvedWorkspaceIdentity, RepositoryIdentityError> {
+        let facts = self.workspace_facts(cwd)?;
+        let operation = |registry: &StableAliasRegistry| {
             let preferences = self.preference_snapshot_as_repository_error()?;
             let reserved = preferences.preferences().override_aliases();
             let assignment = registry.resolve_assignment_locked(
@@ -313,7 +332,12 @@ impl WorkspaceIdentityResolver {
                 git_common_dir: facts.git_common_dir.clone(),
                 kind: facts.kind,
             })
-        })
+        };
+        if let Some(budget) = budget {
+            self.registry.with_exclusive_lock_bounded(budget, operation)
+        } else {
+            self.registry.with_exclusive_lock(operation)
+        }
     }
 
     /// Resolves only a privacy-preserving canonical-workspace fingerprint.
@@ -766,11 +790,40 @@ fn platform_home_directory() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use std::{
-        env, fs,
+        env, fs, io,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{WorkspaceIdentityResolver, WorkspaceKind};
+    use crate::repo::RepositoryIdentityError;
+
+    #[test]
+    fn runtime_registry_wait_is_bounded_without_changing_ordinary_resolution() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        let workspace = root.path().join("workspace");
+        fs::create_dir_all(&state).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        let held = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(state.join("registry.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        let resolver = WorkspaceIdentityResolver::with_home_directory(&state, None);
+        let refused = resolver.resolve_runtime_bounded(&workspace).unwrap_err();
+        assert!(matches!(
+            refused,
+            RepositoryIdentityError::Io(ref error) if error.kind() == io::ErrorKind::WouldBlock
+        ));
+        fs::File::unlock(&held).unwrap();
+        assert_eq!(
+            resolver.resolve(&workspace).unwrap().kind,
+            WorkspaceKind::Directory
+        );
+    }
 
     #[test]
     fn remote_git_workspace_resolves_without_launching_git_when_local_metadata_is_complete() {

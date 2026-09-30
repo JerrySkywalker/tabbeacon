@@ -23,9 +23,10 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     core::{Attention, Health, Phase},
+    lock_budget::try_lock_file_with_budget,
     presentation::{
         PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleStatus,
-        WindowsTerminalCapabilities, WindowsTerminalRenderer,
+        WindowsTerminalCapabilities, WindowsTerminalRenderer, owned_channel_release_bytes,
     },
     providers::visual_identity::ProviderVisualIdentity,
     repo::RepositoryAlias,
@@ -328,7 +329,7 @@ pub(crate) fn record_provider_session_observation(
         .read(true)
         .write(true)
         .open(lock_path)?;
-    lock.lock()?;
+    try_lock_file_with_budget(&lock, Duration::from_millis(100))?;
     let path = directory.join(format!("session-{session_sha256}.json"));
     reject_symbolic_link(&path)?;
     let newer_exists = fs::read(&path)
@@ -799,6 +800,9 @@ fn is_safe_worker_provider(provider: &str) -> bool {
 pub(crate) enum ActivityRender {
     /// Coordination is unavailable, so the Hook uses its static fail-open path.
     UncoordinatedFull,
+    /// A synchronous Hook could not establish lease ordering before its
+    /// budget; it must emit nothing rather than write stale output.
+    DegradedBusy,
     /// The Hook owns the complete static action.
     Full,
     /// A live worker owns title frames; the Hook owns other channels.
@@ -848,6 +852,9 @@ const fn already_active_worker_render() -> ActivityRender {
 #[derive(Debug, Clone)]
 enum ActivityExecution {
     Disabled,
+    // The production Hook could not establish a terminal-bound lease. It may
+    // still render non-color legacy decoration, but cannot own shared color.
+    UnboundSystem,
     System {
         executable: PathBuf,
         owner_sha256: String,
@@ -869,6 +876,29 @@ impl ActivityCoordinator {
         Self {
             store: ActivityLeaseStore::new(state_root),
             execution: ActivityExecution::Disabled,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn unbound_system(state_root: impl Into<PathBuf>) -> Self {
+        Self {
+            store: ActivityLeaseStore::new(state_root),
+            execution: ActivityExecution::UnboundSystem,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_system_binding(
+        state_root: impl Into<PathBuf>,
+        executable: PathBuf,
+    ) -> Self {
+        Self {
+            store: ActivityLeaseStore::new(state_root),
+            execution: ActivityExecution::System {
+                executable,
+                owner_sha256: "d".repeat(64),
+                terminal_binding_sha256: "c".repeat(64),
+            },
         }
     }
 
@@ -987,6 +1017,9 @@ impl ActivityCoordinator {
                 Ok(Some(LeaseTransition::Published { .. } | LeaseTransition::Stopped { .. })) => {
                     unreachable!("existing runtime refresh only returns stale or active")
                 }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    return (ActivityRender::DegradedBusy, timing);
+                }
                 Err(_) => return (ActivityRender::UncoordinatedFull, timing),
             }
             // A long-lived worker must never map the package-installed CLI.
@@ -1005,8 +1038,12 @@ impl ActivityCoordinator {
                 now,
             );
             timing.runtime_image_preparation = Some(runtime_image_started.elapsed().as_millis());
-            let Ok((runtime_image, transition)) = published else {
-                return (ActivityRender::UncoordinatedFull, timing);
+            let (runtime_image, transition) = match published {
+                Ok(published) => published,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    return (ActivityRender::DegradedBusy, timing);
+                }
+                Err(_) => return (ActivityRender::UncoordinatedFull, timing),
             };
             match transition {
                 LeaseTransition::Stale => (ActivityRender::Suppress, timing),
@@ -1058,8 +1095,12 @@ impl ActivityCoordinator {
                 .store
                 .publish_stopped(&key, event_sequence, owner_sha256, now);
             timing.stop_cleanup = Some(stop_cleanup_started.elapsed().as_millis());
-            let Ok(transition) = stopped else {
-                return (ActivityRender::UncoordinatedFull, timing);
+            let transition = match stopped {
+                Ok(transition) => transition,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    return (ActivityRender::DegradedBusy, timing);
+                }
+                Err(_) => return (ActivityRender::UncoordinatedFull, timing),
             };
             match transition {
                 LeaseTransition::Stale => (ActivityRender::Suppress, timing),
@@ -1085,17 +1126,38 @@ impl ActivityCoordinator {
         event_sequence: u64,
         render: ActivityRender,
         bytes: &[u8],
+        desired_channels: OwnedTerminalChannels,
+        strict_channel_policy: bool,
         sink: &mut impl Write,
     ) -> io::Result<()> {
         match render {
+            ActivityRender::DegradedBusy => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "activity lease order could not be established",
+            )),
             ActivityRender::Suppress => Ok(()),
             ActivityRender::UncoordinatedFull => {
-                sink.write_all(bytes)?;
+                if strict_channel_policy {
+                    // A strict provider preference needs the exact session
+                    // lease before it may acquire terminal output ownership.
+                    return Ok(());
+                }
+                let safe_bytes = if matches!(self.execution, ActivityExecution::Disabled) {
+                    bytes
+                } else {
+                    // Every degraded production Hook lacks an authoritative
+                    // activity write order, even if its terminal is bound.
+                    // It cannot claim or reset the shared color channel.
+                    // Explicit injected runtimes keep their test byte sink.
+                    crate::terminal_color::without_generated_color(bytes)
+                };
+                sink.write_all(safe_bytes)?;
                 sink.flush()
             }
             ActivityRender::Full | ActivityRender::WithoutTitle => {
                 let ActivityExecution::System {
                     terminal_binding_sha256,
+                    owner_sha256,
                     ..
                 } = &self.execution
                 else {
@@ -1110,13 +1172,65 @@ impl ActivityCoordinator {
                 // The lease lock orders the final one-shot write against every
                 // competing Hook transition. A delayed event that admitted
                 // before a newer event cannot write after the newer lease.
-                self.store.with_lock(|| {
-                    let current = self.store.load(key.digest())?;
-                    if current.as_ref().is_some_and(|lease| {
-                        lease.generation == generation && lease.event_sequence == event_sequence
-                    }) {
-                        sink.write_all(bytes)?;
-                        sink.flush()?;
+                self.store.with_lock_bounded(|| {
+                    let Some(mut current) = self.store.load(key.digest())? else {
+                        return Ok(());
+                    };
+                    if current.generation == generation
+                        && current.event_sequence == event_sequence
+                        && current.session_sha256 == session_sha256
+                        && current.terminal_binding_sha256 == *terminal_binding_sha256
+                        && current.owner_sha256 == *owner_sha256
+                    {
+                        crate::terminal_color::TerminalColorStore::new(
+                            &self.store.state_root(),
+                            terminal_binding_sha256,
+                        )?
+                        .with_lock(|color_owner| {
+                            // The shared record is the final authority for a
+                            // color reset across Cursor and Codex on one tab.
+                            let color_release_admitted = if desired_channels.color {
+                                color_owner.begin_write()?;
+                                false
+                            } else {
+                                color_owner.revoke_if_owned("codex", session_sha256)?
+                            };
+                            let release = OwnedTerminalChannels {
+                                color: strict_channel_policy
+                                    && current.owned_channels.color
+                                    && !desired_channels.color
+                                    && color_release_admitted,
+                                progress: strict_channel_policy
+                                    && current.owned_channels.progress
+                                    && !desired_channels.progress,
+                            };
+                            // Revoke local release authority before terminal I/O.
+                            if current.owned_channels.color && !desired_channels.color
+                                || release.progress
+                            {
+                                current.owned_channels.color = false;
+                                current.owned_channels.progress &= !release.progress;
+                                self.store.write(&current)?;
+                            }
+                            let release_bytes =
+                                owned_channel_release_bytes(release.color, release.progress);
+                            sink.write_all(&release_bytes)?;
+                            let safe_bytes = if desired_channels.color || color_release_admitted {
+                                bytes
+                            } else {
+                                crate::terminal_color::without_generated_color(bytes)
+                            };
+                            sink.write_all(safe_bytes)?;
+                            sink.flush()?;
+                            if desired_channels.color {
+                                color_owner.confirm_write("codex", session_sha256)?;
+                            }
+                            if current.owned_channels != desired_channels {
+                                current.owned_channels = desired_channels;
+                                self.store.write(&current)?;
+                            }
+                            Ok(())
+                        })?;
                     }
                     Ok(())
                 })
@@ -1392,8 +1506,18 @@ struct WorkerLease {
     runtime_image_sha256: Option<String>,
     active: bool,
     presentation: Option<WorkerPresentation>,
+    /// Only channels actually written by this exact session and terminal
+    /// binding are eligible for a later strict-native release.
+    #[serde(default)]
+    owned_channels: OwnedTerminalChannels,
     updated_unix_ms: u64,
     expires_unix_ms: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OwnedTerminalChannels {
+    pub(crate) color: bool,
+    pub(crate) progress: bool,
 }
 
 impl WorkerLease {
@@ -1544,7 +1668,7 @@ impl ActivityLeaseStore {
         // This lock is the atomic ownership boundary for a runtime image:
         // another Hook cannot publish an active lease between collection's
         // proven lease scan and a stale image deletion.
-        self.with_lock(|| {
+        self.with_lock_bounded(|| {
             let runtime_image = runtime_store.publish(executable)?;
             let transition = self.publish_active_locked(
                 key,
@@ -1574,7 +1698,7 @@ impl ActivityLeaseStore {
         now: u64,
     ) -> io::Result<Option<LeaseTransition>> {
         let expires_unix_ms = now.saturating_add(presentation.lease_ttl_ms());
-        self.with_lock(|| {
+        self.with_lock_bounded(|| {
             let Some(mut current) = self.load(key.digest())? else {
                 return Ok(None);
             };
@@ -1658,6 +1782,12 @@ impl ActivityLeaseStore {
             runtime_image_sha256: runtime_image_sha256.map(str::to_owned),
             active: true,
             presentation: Some(presentation.clone()),
+            owned_channels: current
+                .as_ref()
+                .filter(|lease| lease.owner_sha256 == owner_sha256)
+                .map_or(OwnedTerminalChannels::default(), |lease| {
+                    lease.owned_channels
+                }),
             updated_unix_ms: now,
             expires_unix_ms,
         };
@@ -1676,7 +1806,7 @@ impl ActivityLeaseStore {
         owner_sha256: &str,
         now: u64,
     ) -> io::Result<LeaseTransition> {
-        self.with_lock(|| {
+        self.with_lock_bounded(|| {
             let current = self.load(key.digest())?;
             if current
                 .as_ref()
@@ -1708,6 +1838,12 @@ impl ActivityLeaseStore {
                 runtime_image_sha256: None,
                 active: false,
                 presentation: None,
+                owned_channels: current
+                    .as_ref()
+                    .filter(|lease| lease.owner_sha256 == owner_sha256)
+                    .map_or(OwnedTerminalChannels::default(), |lease| {
+                        lease.owned_channels
+                    }),
                 updated_unix_ms: now,
                 expires_unix_ms: now,
             };
@@ -1897,6 +2033,21 @@ impl ActivityLeaseStore {
     }
 
     fn with_lock<T>(&self, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        self.with_lock_inner(None, operation)
+    }
+
+    /// Only one-shot Hook paths use the short budget. Workers and cleanup
+    /// observers retain their original wait so ordinary contention cannot
+    /// silently stop an otherwise live animation lease.
+    fn with_lock_bounded<T>(&self, operation: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        self.with_lock_inner(Some(Duration::from_millis(100)), operation)
+    }
+
+    fn with_lock_inner<T>(
+        &self,
+        budget: Option<Duration>,
+        operation: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
         reject_symbolic_link(&self.directory)?;
         fs::create_dir_all(&self.directory)?;
         let lock_path = self.directory.join(LOCK_FILE);
@@ -1907,7 +2058,11 @@ impl ActivityLeaseStore {
             .read(true)
             .write(true)
             .open(lock_path)?;
-        lock.lock()?;
+        if let Some(budget) = budget {
+            try_lock_file_with_budget(&lock, budget)?;
+        } else {
+            lock.lock()?;
+        }
         let result = operation();
         File::unlock(&lock)?;
         result
@@ -3029,6 +3184,7 @@ fn open_owned_console(probe_enabled: bool) -> io::Result<Box<dyn Write>> {
 mod tests {
     use std::{
         fs,
+        io::{self, Write},
         path::PathBuf,
         process::{Command, Stdio},
         time::{Duration, Instant, SystemTime},
@@ -3036,12 +3192,12 @@ mod tests {
 
     use super::{
         ActivityCoordinator, ActivityExecution, ActivityLeaseHealth, ActivityLeaseStore,
-        ActivityRender, CleanupObserverAction, LeaseTransition, PublishedWorkerStartup,
-        SESSIONS_SCHEMA_VERSION, STATIC_ATTENTION_LEASE_TTL_MS, SessionWorkspaceObservability,
-        TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation, WorkerProcessLiveness,
-        already_active_worker_render, append_windows_argument, cleanup_identity_recheck_due,
-        cleanup_observer_action, cleanup_observer_poll_ms, command_output_with_timeout,
-        inspect_activity_leases_read_only, inspect_sessions_read_only,
+        ActivityRender, CleanupObserverAction, LeaseTransition, OwnedTerminalChannels,
+        PublishedWorkerStartup, SESSIONS_SCHEMA_VERSION, STATIC_ATTENTION_LEASE_TTL_MS,
+        SessionWorkspaceObservability, TARGET_FRAME_INTERVAL_MS, WorkerKey, WorkerPresentation,
+        WorkerProcessLiveness, already_active_worker_render, append_windows_argument,
+        cleanup_identity_recheck_due, cleanup_observer_action, cleanup_observer_poll_ms,
+        command_output_with_timeout, inspect_activity_leases_read_only, inspect_sessions_read_only,
         next_animation_frame_deadline, normalized_windows_path, persistent_worker_presentation,
         record_provider_session_observation, start_published_worker, system_powershell_path,
         tasklist_output_reports_absence,
@@ -3049,10 +3205,17 @@ mod tests {
     use crate::{
         core::{Attention, Health, Phase},
         presentation::{
-            PresentationAction, PresentationPolicy, SemanticPresentationInput, TitleStatus,
-            WindowsTerminalCapabilities, WindowsTerminalRenderer,
+            PresentationAction, PresentationPolicy, SemanticPresentationInput, TabColor,
+            TitleStatus, WindowsTerminalCapabilities, WindowsTerminalRenderer,
+            strict_color_only_bytes,
         },
-        providers::visual_identity::ProviderVisualIdentity,
+        presentation_policy::{
+            ApplicationStatus, PresentationCapabilities, PresentationMode, PresentationOverride,
+            resolve_presentation,
+        },
+        providers::{
+            cursor::normalize_hook, cursor_color, visual_identity::ProviderVisualIdentity,
+        },
         settings::{
             ActivityMode, PresentationSettings, PresentationTheme, SpinnerPreset, TabColorMode,
             TitleMode,
@@ -3938,6 +4101,8 @@ mod tests {
                 21,
                 ActivityRender::WithoutTitle,
                 b"stale",
+                OwnedTerminalChannels::default(),
+                false,
                 &mut stale_output,
             )
             .expect("stale write is suppressed without error");
@@ -3952,10 +4117,680 @@ mod tests {
                 22,
                 ActivityRender::WithoutTitle,
                 b"current",
+                OwnedTerminalChannels::default(),
+                false,
                 &mut current_output,
             )
             .expect("current write succeeds");
         assert_eq!(current_output, b"current");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One ordered ownership scenario spans acquisition, restart, release, and stale delivery.
+    fn strict_native_releases_only_recorded_channels_for_the_exact_session() {
+        let root = TestRoot::new("owned-output-release");
+        let store = ActivityLeaseStore::new(&root.0);
+        let execution = ActivityExecution::System {
+            executable: root.0.join("unused.exe"),
+            owner_sha256: digest('d'),
+            terminal_binding_sha256: digest('c'),
+        };
+        let first = key(1, 'a', 'c');
+        let foreign = key(1, 'e', 'c');
+        let owned = OwnedTerminalChannels {
+            color: true,
+            progress: true,
+        };
+        let mut coordinator = ActivityCoordinator {
+            store: store.clone(),
+            execution: execution.clone(),
+        };
+
+        store
+            .publish_stopped(&first, 1, &digest('d'), 1_000)
+            .expect("first session admits a one-shot event");
+        let mut never_owned = Vec::new();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                1,
+                ActivityRender::Full,
+                b"",
+                OwnedTerminalChannels::default(),
+                true,
+                &mut never_owned,
+            )
+            .expect("native from an untouched state is inert");
+        assert!(never_owned.is_empty());
+
+        store
+            .publish_active(&first, 2, &digest('d'), &presentation(), 1_100)
+            .expect("owned activity event admits");
+        let mut acquired = Vec::new();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                2,
+                ActivityRender::Full,
+                b"owned-output",
+                owned,
+                true,
+                &mut acquired,
+            )
+            .expect("owned output records after a successful write");
+        assert_eq!(acquired, b"owned-output");
+
+        // A new Hook process reads the durable session/terminal ledger.
+        coordinator = ActivityCoordinator {
+            store: store.clone(),
+            execution,
+        };
+        store
+            .publish_stopped(&foreign, 1, &digest('d'), 1_150)
+            .expect("foreign session admits");
+        let mut foreign_output = Vec::new();
+        coordinator
+            .write_rendered(
+                &digest('e'),
+                Some(&digest('b')),
+                1,
+                1,
+                ActivityRender::Full,
+                b"",
+                OwnedTerminalChannels::default(),
+                true,
+                &mut foreign_output,
+            )
+            .expect("foreign session remains inert");
+        assert!(foreign_output.is_empty());
+
+        let second = key(2, 'a', 'c');
+        let stopped = store
+            .publish_stopped(&second, 3, &digest('d'), 1_200)
+            .expect("new generation revokes old activity");
+        assert!(matches!(
+            stopped,
+            LeaseTransition::Stopped {
+                predecessor: Some(_)
+            }
+        ));
+        let mut released = Vec::new();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                2,
+                3,
+                ActivityRender::Full,
+                b"",
+                OwnedTerminalChannels::default(),
+                true,
+                &mut released,
+            )
+            .expect("recorded channels release");
+        assert!(released.windows(8).any(|part| part == b"]9;4;0;0"));
+        assert!(released.windows(8).any(|part| part == b"]104;264"));
+        assert!(!released.windows(3).any(|part| part == b"]0;"));
+
+        let mut late = Vec::new();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                2,
+                ActivityRender::Full,
+                b"late",
+                owned,
+                true,
+                &mut late,
+            )
+            .expect("superseded event is suppressed");
+        assert!(late.is_empty());
+        assert_eq!(
+            store.load(second.digest()).unwrap().unwrap().owned_channels,
+            OwnedTerminalChannels::default()
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One ordered sink proves both same-terminal handoff directions.
+    fn cursor_and_codex_cannot_reset_each_others_newer_same_terminal_color() {
+        assert_eq!(
+            crate::terminal_color::binding_from_identity("wt-session-测试"),
+            super::framed_digest(&["wt-session-测试"]),
+            "Cursor and Codex must address the same shared color record",
+        );
+        let root = TestRoot::new("shared-terminal-color");
+        fs::create_dir_all(root.0.join("cursor-route-v1")).unwrap();
+        let route_terminal = digest('e');
+        let color_terminal = digest('c');
+        let store = ActivityLeaseStore::new(&root.0);
+        let coordinator = ActivityCoordinator {
+            store: store.clone(),
+            execution: ActivityExecution::System {
+                executable: root.0.join("unused.exe"),
+                owner_sha256: digest('d'),
+                terminal_binding_sha256: color_terminal.clone(),
+            },
+        };
+        let codex_key = key(1, 'a', 'c');
+        let mode = |value| {
+            resolve_presentation(
+                PresentationSettings::default(),
+                PresentationOverride::default().with_mode(value),
+                PresentationCapabilities::CURSOR_COLOR_ONLY,
+                ApplicationStatus::Unproven,
+            )
+        };
+        let color = mode(PresentationMode::ColorOnly);
+        let native = mode(PresentationMode::PreserveNative);
+        let cursor_event = |name: &str, session: &str, generation: Option<&str>| {
+            let mut input = serde_json::json!({"hook_event_name": name, "session_id": session});
+            if let Some(generation) = generation {
+                input["generation_id"] = generation.into();
+            }
+            normalize_hook(input.to_string().as_bytes())
+                .unwrap()
+                .unwrap()
+        };
+        let cursor_write = |event, resolved, sink: &mut Vec<u8>| {
+            cursor_color::apply_admitted(
+                &root.0,
+                &route_terminal,
+                &color_terminal,
+                &event,
+                resolved,
+                sink,
+            )
+            .unwrap()
+        };
+        let mut output = Vec::new();
+        assert!(!cursor_write(
+            cursor_event("sessionStart", "cursor-a", None),
+            &color,
+            &mut output
+        ));
+        assert!(cursor_write(
+            cursor_event("beforeSubmitPrompt", "cursor-a", Some("g1")),
+            &color,
+            &mut output
+        ));
+        assert!(output.starts_with(b"\x1b]4;264;rgb:"));
+        store
+            .publish_stopped(&codex_key, 1, &digest('d'), 1_000)
+            .unwrap();
+        let codex_color = strict_color_only_bytes(TabColor::Working, PresentationTheme::MutedDark);
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                1,
+                ActivityRender::Full,
+                &codex_color,
+                OwnedTerminalChannels {
+                    color: true,
+                    progress: false,
+                },
+                true,
+                &mut output,
+            )
+            .unwrap();
+        let before_late_end = output.len();
+        assert!(!cursor_write(
+            cursor_event("sessionEnd", "cursor-a", None),
+            &color,
+            &mut output
+        ));
+        assert_eq!(
+            output.len(),
+            before_late_end,
+            "old Cursor end cannot reset Codex color"
+        );
+
+        assert!(!cursor_write(
+            cursor_event("sessionStart", "cursor-b", None),
+            &native,
+            &mut output
+        ));
+        assert!(cursor_write(
+            cursor_event("beforeSubmitPrompt", "cursor-b", Some("g1")),
+            &color,
+            &mut output
+        ));
+        store
+            .publish_stopped(&codex_key, 2, &digest('d'), 1_100)
+            .unwrap();
+        let before_late_codex = output.len();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                2,
+                ActivityRender::Full,
+                b"\x1b]104;264\x1b\\",
+                OwnedTerminalChannels::default(),
+                true,
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(
+            output.len(),
+            before_late_codex,
+            "old Codex native release cannot reset Cursor color"
+        );
+        assert!(cursor_write(
+            cursor_event("sessionEnd", "cursor-b", None),
+            &color,
+            &mut output
+        ));
+        assert_eq!(&output[before_late_codex..], b"\x1b]104;264\x1b\\");
+    }
+
+    #[test]
+    fn strict_channels_do_not_acquire_output_without_an_exact_terminal_lease() {
+        let root = TestRoot::new("strict-no-binding");
+        let coordinator = ActivityCoordinator::disabled(&root.0);
+        let mut output = Vec::new();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                1,
+                ActivityRender::UncoordinatedFull,
+                b"would-own-color",
+                OwnedTerminalChannels {
+                    color: true,
+                    progress: false,
+                },
+                true,
+                &mut output,
+            )
+            .expect("lack of binding remains fail-open");
+        assert!(output.is_empty());
+    }
+
+    #[test]
+    fn uncoordinated_legacy_hook_cannot_write_unclaimed_frame_color() {
+        let root = TestRoot::new("uncoordinated-color");
+        let coordinator = ActivityCoordinator::unbound_system(&root.0);
+        let mut output = Vec::new();
+        let bytes = b"\x1b]0;owned-title\x1b\\\x1b]4;264;rgb:11/22/33\x1b\\";
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                1,
+                ActivityRender::UncoordinatedFull,
+                bytes,
+                OwnedTerminalChannels {
+                    color: true,
+                    progress: false,
+                },
+                false,
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(output, b"\x1b]0;owned-title\x1b\\");
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One shared sink covers forced activity failure and Cursor's subsequent owned release.
+    fn bound_codex_activity_failure_cannot_overwrite_cursor_owned_color() {
+        let root = TestRoot::new("bound-activity-failure-color");
+        fs::create_dir_all(root.0.join("cursor-route-v1")).unwrap();
+        let terminal = digest('c');
+        let cursor_route_terminal = digest('e');
+        let cursor_mode = resolve_presentation(
+            PresentationSettings::default(),
+            PresentationOverride::default().with_mode(PresentationMode::ColorOnly),
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        );
+        let cursor_event = |name: &str, generation: Option<&str>| {
+            let mut input =
+                serde_json::json!({"hook_event_name": name, "session_id": "cursor-failure"});
+            if let Some(generation) = generation {
+                input["generation_id"] = generation.into();
+            }
+            normalize_hook(input.to_string().as_bytes())
+                .unwrap()
+                .unwrap()
+        };
+        let cursor_write = |event, sink: &mut Vec<u8>| {
+            cursor_color::apply_admitted(
+                &root.0,
+                &cursor_route_terminal,
+                &terminal,
+                &event,
+                &cursor_mode,
+                sink,
+            )
+            .unwrap()
+        };
+        let mut output = Vec::new();
+        assert!(!cursor_write(
+            cursor_event("sessionStart", None),
+            &mut output
+        ));
+        assert!(cursor_write(
+            cursor_event("beforeSubmitPrompt", Some("g1")),
+            &mut output
+        ));
+        let cursor_color_len = output.len();
+        let store = ActivityLeaseStore::new(&root.0);
+        fs::write(&store.directory, b"owned test failure blocker").unwrap();
+        let coordinator = ActivityCoordinator {
+            store,
+            execution: ActivityExecution::System {
+                executable: root.0.join("unused.exe"),
+                owner_sha256: digest('d'),
+                terminal_binding_sha256: terminal.clone(),
+            },
+        };
+        let action = PresentationPolicy::resolve(SemanticPresentationInput::new(
+            Phase::Working,
+            Attention::None,
+            Health::Normal,
+            "OWH",
+        ));
+        let settings = PresentationSettings::default();
+        let (render, _) = coordinator.reconcile_with_workspace_observability(
+            &digest('a'),
+            Some(&digest('b')),
+            1,
+            1,
+            "codex",
+            "OWH",
+            &action,
+            settings,
+            SessionWorkspaceObservability::default(),
+            true,
+        );
+        assert_eq!(render, ActivityRender::UncoordinatedFull);
+        let bytes = WindowsTerminalRenderer::with_settings(
+            WindowsTerminalCapabilities::new(true),
+            settings,
+        )
+        .render(&action);
+        assert!(bytes.windows(b"]4;264".len()).any(|part| part == b"]4;264"));
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                1,
+                render,
+                &bytes,
+                OwnedTerminalChannels {
+                    color: true,
+                    progress: true,
+                },
+                false,
+                &mut output,
+            )
+            .unwrap();
+        let degraded_bytes = &output[cursor_color_len..];
+        assert!(
+            !degraded_bytes
+                .windows(b"]4;264".len())
+                .any(|part| part == b"]4;264")
+        );
+        assert!(
+            !degraded_bytes
+                .windows(b"]104;264".len())
+                .any(|part| part == b"]104;264")
+        );
+        let before_end = output.len();
+        assert!(cursor_write(cursor_event("sessionEnd", None), &mut output));
+        assert_eq!(&output[before_end..], b"\x1b]104;264\x1b\\");
+    }
+
+    #[test]
+    fn busy_hook_lease_suppresses_stale_output_while_worker_wait_remains_intact() {
+        let root = TestRoot::new("busy-hook-lease");
+        let store = ActivityLeaseStore::new(&root.0);
+        fs::create_dir_all(&store.directory).unwrap();
+        let held = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(store.directory.join("activity-worker.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        let coordinator = ActivityCoordinator {
+            store: store.clone(),
+            execution: ActivityExecution::System {
+                executable: root.0.join("unused.exe"),
+                owner_sha256: digest('d'),
+                terminal_binding_sha256: digest('c'),
+            },
+        };
+        let action = PresentationPolicy::resolve(SemanticPresentationInput::new(
+            Phase::Working,
+            Attention::None,
+            Health::Normal,
+            "OWH",
+        ));
+        let (render, _) = coordinator.reconcile_with_workspace_observability(
+            &digest('a'),
+            Some(&digest('b')),
+            1,
+            1,
+            "codex",
+            "OWH",
+            &action,
+            PresentationSettings::default(),
+            SessionWorkspaceObservability::default(),
+            true,
+        );
+        assert_eq!(render, ActivityRender::DegradedBusy);
+        let mut output = Vec::new();
+        let refusal = coordinator.write_rendered(
+            &digest('a'),
+            Some(&digest('b')),
+            1,
+            1,
+            render,
+            b"stale-title-and-color",
+            OwnedTerminalChannels::default(),
+            false,
+            &mut output,
+        );
+        assert_eq!(refusal.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert!(output.is_empty());
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker_store = store.clone();
+        let worker = std::thread::spawn(move || {
+            done_tx.send(worker_store.with_lock(|| Ok(()))).unwrap();
+        });
+        assert!(done_rx.recv_timeout(Duration::from_millis(150)).is_err());
+        fs::File::unlock(&held).unwrap();
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .is_ok()
+        );
+        worker.join().unwrap();
+
+        // Reconciliation can succeed before another Hook takes this lock.
+        // Final output still has to fail closed without writing a stale frame.
+        let key = key(1, 'a', 'c');
+        store.publish_stopped(&key, 2, &digest('d'), 1_000).unwrap();
+        held.lock().unwrap();
+        let mut final_output = Vec::new();
+        let refusal = coordinator.write_rendered(
+            &digest('a'),
+            Some(&digest('b')),
+            1,
+            2,
+            ActivityRender::Full,
+            b"stale-final-frame",
+            OwnedTerminalChannels {
+                color: true,
+                progress: false,
+            },
+            true,
+            &mut final_output,
+        );
+        assert_eq!(refusal.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+        assert!(final_output.is_empty());
+        fs::File::unlock(&held).unwrap();
+        assert_eq!(
+            store.load(key.digest()).unwrap().unwrap().owned_channels,
+            OwnedTerminalChannels::default()
+        );
+    }
+
+    #[test]
+    fn cleanup_of_an_active_worker_waits_for_lease_contention() {
+        let root = TestRoot::new("cleanup-lock-wait");
+        let store = ActivityLeaseStore::new(&root.0);
+        let key = key(1, 'a', 'c');
+        let LeaseTransition::Published { lease, .. } = store
+            .publish_active(&key, 1, &digest('d'), &presentation(), 1_000)
+            .unwrap()
+        else {
+            panic!("active fixture did not publish");
+        };
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(store.directory.join("activity-worker.lock"))
+            .unwrap();
+        held.lock().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let cleanup_store = store.clone();
+        let cleanup = std::thread::spawn(move || {
+            done_tx
+                .send(cleanup_store.deactivate_observed_worker(&lease, 1_100))
+                .unwrap();
+        });
+        assert!(done_rx.recv_timeout(Duration::from_millis(150)).is_err());
+        assert!(store.load(key.digest()).unwrap().unwrap().active);
+        fs::File::unlock(&held).unwrap();
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap()
+        );
+        cleanup.join().unwrap();
+        assert!(!store.load(key.digest()).unwrap().unwrap().active);
+    }
+
+    #[test]
+    fn failed_owned_release_cannot_authorize_a_later_reset() {
+        struct RejectWrites;
+        impl Write for RejectWrites {
+            fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+                Err(io::Error::other("owned test sink refused output"))
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let root = TestRoot::new("release-sink-error");
+        let store = ActivityLeaseStore::new(&root.0);
+        let coordinator = ActivityCoordinator {
+            store: store.clone(),
+            execution: ActivityExecution::System {
+                executable: root.0.join("unused.exe"),
+                owner_sha256: digest('d'),
+                terminal_binding_sha256: digest('c'),
+            },
+        };
+        let key = key(1, 'a', 'c');
+        let color = OwnedTerminalChannels {
+            color: true,
+            progress: false,
+        };
+        store.publish_stopped(&key, 1, &digest('d'), 1_000).unwrap();
+        assert!(
+            coordinator
+                .write_rendered(
+                    &digest('a'),
+                    Some(&digest('b')),
+                    1,
+                    1,
+                    ActivityRender::Full,
+                    b"color",
+                    color,
+                    true,
+                    &mut RejectWrites,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store.load(key.digest()).unwrap().unwrap().owned_channels,
+            OwnedTerminalChannels::default(),
+            "failed acquisition never grants future reset authority"
+        );
+
+        store.publish_stopped(&key, 2, &digest('d'), 1_100).unwrap();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                2,
+                ActivityRender::Full,
+                b"color",
+                color,
+                true,
+                &mut Vec::new(),
+            )
+            .unwrap();
+        store.publish_stopped(&key, 3, &digest('d'), 1_200).unwrap();
+        assert!(
+            coordinator
+                .write_rendered(
+                    &digest('a'),
+                    Some(&digest('b')),
+                    1,
+                    3,
+                    ActivityRender::Full,
+                    b"",
+                    OwnedTerminalChannels::default(),
+                    true,
+                    &mut RejectWrites,
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store.load(key.digest()).unwrap().unwrap().owned_channels,
+            OwnedTerminalChannels::default(),
+            "failed release cannot reset a future foreign color"
+        );
+        store.publish_stopped(&key, 4, &digest('d'), 1_300).unwrap();
+        let mut later = Vec::new();
+        coordinator
+            .write_rendered(
+                &digest('a'),
+                Some(&digest('b')),
+                1,
+                4,
+                ActivityRender::Full,
+                b"",
+                OwnedTerminalChannels::default(),
+                true,
+                &mut later,
+            )
+            .unwrap();
+        assert!(later.is_empty());
     }
 
     #[test]

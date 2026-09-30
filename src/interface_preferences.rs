@@ -219,6 +219,9 @@ pub struct InterfacePreferencesSnapshot {
 }
 
 impl InterfacePreferencesSnapshot {
+    pub(crate) fn recovery_contents(&self) -> Option<&[u8]> {
+        self.contents.as_deref()
+    }
     /// Effective typed preferences at the snapshot point.
     #[must_use]
     pub const fn preferences(&self) -> InterfacePreferences {
@@ -398,6 +401,45 @@ impl InterfacePreferencesStore {
         })
     }
 
+    pub(crate) fn render_replacement_bytes(
+        snapshot: &InterfacePreferencesSnapshot,
+        replacement: InterfacePreferences,
+    ) -> Result<Vec<u8>, InterfacePreferencesError> {
+        let mut document = match snapshot.contents.as_deref() {
+            Some(bytes) => std::str::from_utf8(bytes)
+                .map_err(|_| InterfacePreferencesError::Malformed)?
+                .parse::<DocumentMut>()
+                .map_err(|_| InterfacePreferencesError::Malformed)?,
+            None => DocumentMut::new(),
+        };
+        write_preferences(&mut document, replacement)?;
+        Ok(document.to_string().into_bytes())
+    }
+
+    pub(crate) fn recover_import_bytes_if_unchanged(
+        &self,
+        planned: &[u8],
+        original: Option<&[u8]>,
+    ) -> Result<bool, InterfacePreferencesError> {
+        if let Some(bytes) = original {
+            preferences_from_bytes(bytes)?;
+        }
+        self.with_lock(|| {
+            let current = self.snapshot_unlocked()?;
+            if current.contents.as_deref() == original {
+                return Ok(true);
+            }
+            if current.contents.as_deref() != Some(planned) {
+                return Ok(false);
+            }
+            match original {
+                Some(bytes) => atomic_write(&self.path, bytes)?,
+                None => fs::remove_file(&self.path)?,
+            }
+            Ok(self.snapshot_unlocked()?.contents.as_deref() == original)
+        })
+    }
+
     /// Restores an original snapshot only when the prior write remains exact.
     ///
     /// # Errors
@@ -457,15 +499,7 @@ impl InterfacePreferencesStore {
         snapshot: &InterfacePreferencesSnapshot,
         preferences: InterfacePreferences,
     ) -> Result<InterfacePreferencesWriteReceipt, InterfacePreferencesError> {
-        let mut document = match snapshot.contents.as_deref() {
-            Some(bytes) => std::str::from_utf8(bytes)
-                .map_err(|_| InterfacePreferencesError::Malformed)?
-                .parse::<DocumentMut>()
-                .map_err(|_| InterfacePreferencesError::Malformed)?,
-            None => DocumentMut::new(),
-        };
-        write_preferences(&mut document, preferences)?;
-        let contents = document.to_string().into_bytes();
+        let contents = Self::render_replacement_bytes(snapshot, preferences)?;
         atomic_write(&self.path, &contents)?;
         Ok(InterfacePreferencesWriteReceipt { contents })
     }

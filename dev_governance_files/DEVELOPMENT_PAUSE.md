@@ -1,12 +1,13 @@
-# Development scope — v0.8.0 admitted after v0.7.3
+# Historical v0.8.0 development admission after v0.7.3
 
 The historical filename is retained for existing links. The Owner's 2026-09-26
-approval, effective when the admission documentation PR merges, resumes bounded
-feature development under [ROADMAP_V08.md](ROADMAP_V08.md). This is a plan admission,
-not a claim that local implementation, qualification, or publication has occurred.
+approval, effective when the admission documentation PR merged, resumed bounded
+feature development under [ROADMAP_V08.md](ROADMAP_V08.md). The fields below
+preserve the original admission decision. Current external Owner authority and
+exact-candidate confirmation govern publication, not the candidate version text.
 
 ```text
-CURRENT_PUBLIC_RELEASE=v0.7.3
+LAST_VERIFIED_PUBLIC_RELEASE=v0.7.3
 CURRENT_DEVELOPMENT_TARGET=v0.8.0
 V073_IMPLEMENTATION=COMPLETE
 ACTIVE_FEATURE_DEVELOPMENT=V080_ADMITTED
@@ -15,8 +16,8 @@ ACTIVE_GOAL_ID=TB-V080-MULTICLI-TRUSTED-STATE-TRAIN-001
 ROADMAP_V08_CREATED=true
 V08_OPTIONS_STATUS=HISTORICAL_NON_AUTHORITATIVE
 NEXT_RECOMMENDED_GOAL=V080_G00_RESUME_AUDIT_THEN_CONTINUOUS_IMPLEMENTATION
-PUBLIC_RELEASE_AUTHORIZED=false
-OWNER_PRODUCTION_MUTATION_AUTHORIZED=false
+PUBLIC_RELEASE_AUTHORIZED=true_conditional_after_G06
+OWNER_PRODUCTION_MUTATION_AUTHORIZED=true_bounded_official_channel_cutover
 ```
 
 ## Active scope and authority

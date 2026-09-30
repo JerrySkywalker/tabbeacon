@@ -5,10 +5,13 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::lock_budget::try_lock_file_with_budget;
 
 use super::{
     ADAPTIVE_NAMING_POLICY_ID, AdaptiveNamingPolicy, CanonicalRepositoryIdentity, RepositoryAlias,
@@ -325,11 +328,34 @@ impl StableAliasRegistry {
         &self,
         operation: impl FnOnce(&Self) -> Result<T, RepositoryIdentityError>,
     ) -> Result<T, RepositoryIdentityError> {
+        self.with_exclusive_lock_inner(None, operation)
+    }
+
+    /// Bounds only the synchronous Hook path while it holds a provider
+    /// preference lock. Ordinary alias registration retains its existing
+    /// process-safe wait rather than failing legitimate first-use races.
+    pub(crate) fn with_exclusive_lock_bounded<T>(
+        &self,
+        budget: Duration,
+        operation: impl FnOnce(&Self) -> Result<T, RepositoryIdentityError>,
+    ) -> Result<T, RepositoryIdentityError> {
+        self.with_exclusive_lock_inner(Some(budget), operation)
+    }
+
+    fn with_exclusive_lock_inner<T>(
+        &self,
+        budget: Option<Duration>,
+        operation: impl FnOnce(&Self) -> Result<T, RepositoryIdentityError>,
+    ) -> Result<T, RepositoryIdentityError> {
         self.ensure_safe_root_for_mutation()?;
         fs::create_dir_all(&self.root)?;
         self.reject_root_symlink()?;
         let lock = self.open_lock()?;
-        lock.lock()?;
+        if let Some(budget) = budget {
+            try_lock_file_with_budget(&lock, budget)?;
+        } else {
+            lock.lock()?;
+        }
         let result = operation(self);
         File::unlock(&lock)?;
         result

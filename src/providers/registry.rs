@@ -6,7 +6,7 @@
 //! exact Agy 1.1.19 uses its G64-admitted structured title callback. Other Agy
 //! versions remain known but unadmitted.
 
-use std::fmt;
+use std::{env, fmt};
 
 use serde::Serialize;
 
@@ -17,6 +17,7 @@ use crate::{
         AGY_PROVIDER_ID, AgyCapability, AgyCapabilityAvailability, AgyCapabilityProfile, AgyVersion,
     },
     providers::agy_backend::{AgyIntegrationReadiness, AgyProductionSetup, AgyReadinessProjection},
+    providers::cursor_integration::{CursorHookIntegration, CursorHookState},
     providers::visual_identity::ProviderVisualIdentity,
     settings::ProviderBadgePolicy,
 };
@@ -299,6 +300,84 @@ pub struct ProviderIntegrationSnapshot {
 }
 
 impl ProviderIntegrationSnapshot {
+    fn from_cursor_candidate(state: Option<CursorHookState>) -> Self {
+        let installed = state == Some(CursorHookState::Installed);
+        let hooks = if installed {
+            ProviderHookState::Available
+        } else {
+            ProviderHookState::Unavailable
+        };
+        Self {
+            id: ProviderId("cursor".to_owned()),
+            label: "Cursor",
+            // No bounded local executable/version probe is wired to this
+            // projection yet. An installed project Hook is not CLI admission.
+            available: false,
+            installed,
+            version: None,
+            admission: ProviderAdmissionState::Unadmitted,
+            configuration_state: match state {
+                Some(CursorHookState::Installed) => "installed_unproven",
+                Some(CursorHookState::NotInstalled) => "not_installed",
+                Some(CursorHookState::Partial | CursorHookState::Drift) => "configuration_drift",
+                None => "inspection_unavailable",
+            },
+            observation_backend: "cursor-project-hooks-candidate",
+            hooks,
+            capability_profile: ProviderCapabilityProfile {
+                capabilities: vec![
+                    capability(
+                        ProviderCapability::Phase,
+                        CapabilityAvailability::Unavailable,
+                        "product_l4_unproven",
+                    ),
+                    capability(
+                        ProviderCapability::Attention,
+                        CapabilityAvailability::Unavailable,
+                        "product_l4_unproven",
+                    ),
+                    capability(
+                        ProviderCapability::Health,
+                        CapabilityAvailability::Unavailable,
+                        "product_l4_unproven",
+                    ),
+                    capability(
+                        ProviderCapability::SessionIdentity,
+                        CapabilityAvailability::Unavailable,
+                        "product_l4_unproven",
+                    ),
+                    capability(
+                        ProviderCapability::TitleOutput,
+                        CapabilityAvailability::Unsupported,
+                        "native_title_preserved",
+                    ),
+                    capability(
+                        ProviderCapability::WindowsTerminalPresentation,
+                        CapabilityAvailability::Unavailable,
+                        "safe_color_output_unproven",
+                    ),
+                    capability(
+                        ProviderCapability::HookInspection,
+                        if installed {
+                            CapabilityAvailability::Proven
+                        } else {
+                            CapabilityAvailability::Unavailable
+                        },
+                        "exact_project_declaration",
+                    ),
+                ],
+            },
+            title_participation: CapabilityAvailability::Unsupported,
+            manual_actions: vec![ProviderManualAction::OwnerPresentQualification],
+            readiness: ProviderReadiness {
+                qualification_available: true,
+                qualification_observations_available: false,
+                production_enabled: false,
+            },
+            title_badge: "",
+        }
+    }
+
     fn from_codex_probe(probe: ProviderProbe) -> Self {
         let admission = if probe.profile_supported {
             ProviderAdmissionState::Admitted
@@ -615,9 +694,24 @@ impl ProviderRegistry {
             report.integration.installed,
             hooks.availability == HookInventoryAvailability::Available,
         );
-        AgyProductionSetup::from_environment().map_or(registry.clone(), |setup| {
-            registry.with_agy_readiness(setup.inspect())
-        })
+        let mut registry = AgyProductionSetup::from_environment()
+            .map_or(registry.clone(), |setup| {
+                registry.with_agy_readiness(setup.inspect())
+            });
+        let cursor_state = env::current_dir()
+            .and_then(|workspace| {
+                env::current_exe().and_then(|executable| {
+                    CursorHookIntegration::new(&workspace, &executable)
+                        .and_then(|integration| integration.check())
+                })
+            })
+            .ok();
+        registry
+            .providers
+            .push(ProviderIntegrationSnapshot::from_cursor_candidate(
+                cursor_state,
+            ));
+        registry
     }
 
     /// Builds the Codex observation plus an initially-unadmitted Agy catalog row.
@@ -765,11 +859,34 @@ impl Default for ProviderRegistry {
 mod tests {
     use super::{
         CapabilityAvailability, ProviderAdmissionState, ProviderCapability, ProviderId,
-        ProviderRegistry,
+        ProviderIntegrationSnapshot, ProviderRegistry,
     };
     use crate::providers::agy::{AgyCapabilityProfile, AgyVersionDiagnostic};
     use crate::providers::agy_backend::{AgyIntegrationReadiness, AgyReadinessProjection};
+    use crate::providers::cursor_integration::CursorHookState;
     use crate::settings::ProviderBadgePolicy;
+
+    #[test]
+    fn cursor_project_declaration_never_grants_color_or_production_admission() {
+        let cursor =
+            ProviderIntegrationSnapshot::from_cursor_candidate(Some(CursorHookState::Installed));
+        assert_eq!(cursor.id.as_str(), "cursor");
+        assert!(cursor.installed);
+        assert_eq!(cursor.admission, ProviderAdmissionState::Unadmitted);
+        assert!(!cursor.readiness.production_enabled);
+        assert_eq!(cursor.configuration_state, "installed_unproven");
+        let color = cursor
+            .capability_profile
+            .capabilities
+            .iter()
+            .find(|entry| entry.capability == ProviderCapability::WindowsTerminalPresentation)
+            .unwrap();
+        assert_eq!(color.availability, CapabilityAvailability::Unavailable);
+        assert_eq!(
+            cursor.title_participation,
+            CapabilityAvailability::Unsupported
+        );
+    }
 
     #[test]
     fn production_registry_is_codex_only_but_exposes_unadmitted_agy_readiness() {

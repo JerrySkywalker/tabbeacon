@@ -411,6 +411,54 @@ fn native_and_off_channels_clear_owned_terminal_state_without_emitting_title() {
 }
 
 #[test]
+fn explicit_color_only_emits_color_without_title_or_progress() {
+    use tabbeacon::presentation_policy::{
+        ApplicationStatus, PresentationCapabilities, PresentationMode, PresentationOverride,
+        resolve_presentation,
+    };
+    let settings = resolve_presentation(
+        PresentationSettings::default(),
+        PresentationOverride::default().with_mode(PresentationMode::ColorOnly),
+        PresentationCapabilities::CODEX,
+        ApplicationStatus::Unproven,
+    )
+    .effective;
+    let renderer =
+        WindowsTerminalRenderer::with_settings(WindowsTerminalCapabilities::new(true), settings);
+    let output = String::from_utf8(renderer.render(&resolve(
+        Phase::Working,
+        Attention::None,
+        Health::Normal,
+    )))
+    .unwrap();
+    assert!(!output.contains("]0;"), "title must remain native");
+    assert!(!output.contains("]9;4;"), "no progress writes");
+    assert!(output.contains("rgb:"), "color channel remains managed");
+}
+
+#[test]
+fn explicit_preserve_native_emits_no_continuing_presentation_bytes() {
+    use tabbeacon::presentation_policy::{
+        ApplicationStatus, PresentationCapabilities, PresentationMode, PresentationOverride,
+        resolve_presentation,
+    };
+    let settings = resolve_presentation(
+        PresentationSettings::default(),
+        PresentationOverride::default().with_mode(PresentationMode::PreserveNative),
+        PresentationCapabilities::CODEX,
+        ApplicationStatus::Unproven,
+    )
+    .effective;
+    let renderer =
+        WindowsTerminalRenderer::with_settings(WindowsTerminalCapabilities::new(true), settings);
+    assert!(
+        renderer
+            .render(&resolve(Phase::Working, Attention::None, Health::Normal))
+            .is_empty()
+    );
+}
+
+#[test]
 fn both_mode_combines_title_frame_zero_with_the_native_progress_ring() {
     let settings = PresentationSettings::default().with_activity(ActivityMode::Both);
     let terminal_renderer =
