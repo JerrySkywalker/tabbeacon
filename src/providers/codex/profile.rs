@@ -392,7 +392,11 @@ const COMMAND_HOOKS_V1_PROFILE: CodexHookProfile = CodexHookProfile {
     compact_aware: true,
     timeout: HookTimeoutSemantics {
         synchronous_required: true,
-        declaration_timeout_seconds: 1,
+        // Windows shell + verified image/worker startup can exceed one second
+        // even after the original console is recovered. The v0.8.1 paired and
+        // cold/warm observations prove delivery below this bounded deadline;
+        // MCP's separate contract and non-Windows commands remain unchanged.
+        declaration_timeout_seconds: if cfg!(windows) { 2 } else { 1 },
         maximum_timeout_seconds: 3,
         timeout_blocks_operation: false,
     },

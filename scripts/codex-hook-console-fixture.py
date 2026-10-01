@@ -110,7 +110,9 @@ try:
     hooks=json.loads((Path(env['CODEX_HOME'])/'hooks.json').read_text(encoding='utf-8'))
     declarations=hooks['hooks']
     command=declarations['UserPromptSubmit'][0]['hooks'][0]['commandWindows']
-    (outroot/'declaration.json').write_text(json.dumps({'commandWindows':command,'timeout':declarations['UserPromptSubmit'][0]['hooks'][0]['timeout']}),encoding='utf-8')
+    hook_deadline=declarations['UserPromptSubmit'][0]['hooks'][0]['timeout']
+    if hook_deadline not in (1,2): raise ValueError('Unknown admitted command deadline')
+    (outroot/'declaration.json').write_text(json.dumps({'commandWindows':command,'timeout':hook_deadline}),encoding='utf-8')
     samples=int(os.environ.get('TB_CONSOLE_FIXTURE_SAMPLES','4'))
     cold_samples=int(os.environ.get('TB_CONSOLE_FIXTURE_COLD_SAMPLES','0'))
     concurrency=int(os.environ.get('TB_CONSOLE_FIXTURE_CONCURRENCY','0'))
@@ -128,13 +130,13 @@ try:
     control_payload=json.dumps({'hook_event_name':'UserPromptSubmit','session_id':'fixture-paired-session','turn_id':'fixture-paired-turn','cwd':str(outroot)}).encode()
     control_env_sha256=hashlib.sha256(json.dumps(env,sort_keys=True).encode()).hexdigest()
     for label,flags in [('A_old_console',0),('B_01592_no_console',0x08000000)]:
-        facts=run(invocation(command),flags,control_payload)
+        facts=run(invocation(command),flags,control_payload,hook_deadline)
         facts.update(mode=label,timing=marker.read_text().strip() if marker.exists() else None,
             environment_sha256=control_env_sha256,stdin_sha256=hashlib.sha256(control_payload).hexdigest())
         if marker.exists(): marker.rename(outroot/(label+'-paired-timing.txt'))
         end=declarations['SessionEnd'][0]['hooks'][0]['commandWindows']
         endpayload=json.dumps({'hook_event_name':'SessionEnd','session_id':'fixture-paired-session','cwd':str(outroot)}).encode()
-        facts['session_end']=run(invocation(end),flags,endpayload,5)
+        facts['session_end']=run(invocation(end),flags,endpayload,declarations['SessionEnd'][0]['hooks'][0]['timeout'])
         if marker.exists(): marker.rename(outroot/(label+'-paired-end-timing.txt'))
         paired.append(facts)
         k.TerminateJobObject(job,0)
@@ -171,7 +173,7 @@ try:
             env['TABBEACON_HOOK_TIMING_FILE']=str(marker)
             session='fixture-session' if os.getenv('TB_OWNED_NATIVE_PARENT') else label+str(sample)
             payload=json.dumps({'hook_event_name':'UserPromptSubmit','session_id':session,'turn_id':label+str(sample),'cwd':str(outroot)}).encode()
-            facts=run(invocation(command),flags,payload)
+            facts=run(invocation(command),flags,payload,hook_deadline)
             facts.update(mode=label,sample=sample,cold_state=sample<cold_samples,console=console,hook_ingress_reached=marker.exists(),
                          cold_setup=cold_setup,
                          timing=marker.read_text().strip() if marker.exists() else None)
@@ -183,14 +185,14 @@ try:
                     env['TABBEACON_HOOK_TIMING_FILE']=str(event_marker)
                     event_command=declarations[event][0]['hooks'][0]['commandWindows']
                     data=json.dumps({'hook_event_name':event,'session_id':session,'turn_id':label+str(sample),'cwd':str(outroot),'tool_name':'fixture-no-content'}).encode()
-                    event_facts=run(invocation(event_command),flags,data)
+                    event_facts=run(invocation(event_command),flags,data,declarations[event][0]['hooks'][0]['timeout'])
                     event_facts.update(event=event,timing=event_marker.read_text().strip() if event_marker.exists() else None)
                     facts['lifecycle'].append(event_facts)
             # Exact generated SessionEnd command, no content, isolated state.
             end=declarations['SessionEnd'][0]['hooks'][0]['commandWindows']
             env['TABBEACON_HOOK_TIMING_FILE']=str(outroot/(label+f'-{sample}-end-timing.txt'))
             endpayload=json.dumps({'hook_event_name':'SessionEnd','session_id':session,'cwd':str(outroot)}).encode()
-            facts['session_end']=run(invocation(end),flags,endpayload,5)
+            facts['session_end']=run(invocation(end),flags,endpayload,declarations['SessionEnd'][0]['hooks'][0]['timeout'])
         if concurrency:
             # Different turns in one session/terminal: exercise the production
             # ownership locks and generation gate without global state writes.
@@ -201,18 +203,19 @@ try:
             env['TABBEACON_HOOK_TIMING_DIRECTORY']=str(timing_directory)
             def concurrent_call(index):
                 data=json.dumps({'hook_event_name':'UserPromptSubmit','session_id':session,'turn_id':label+f'-concurrent-{index}','cwd':str(outroot)}).encode()
-                return run(invocation(command),flags,data)
+                return run(invocation(command),flags,data,hook_deadline)
             with ThreadPoolExecutor(max_workers=concurrency) as executor:
                 concurrent=list(executor.map(concurrent_call,range(concurrency)))
             env.pop('TABBEACON_HOOK_TIMING_DIRECTORY',None)
             results.append({'mode':label,'concurrency':concurrency,'calls':concurrent,
                             'timing':[p.read_text().strip() for p in sorted(timing_directory.glob('*.txt'))]})
             env['TABBEACON_HOOK_TIMING_FILE']=str(outroot/(label+'-concurrent-end.txt'))
-            run(invocation(end),flags,endpayload,5)
+            run(invocation(end),flags,endpayload,declarations['SessionEnd'][0]['hooks'][0]['timeout'])
     leases=[json.loads(path.read_text()) for path in outroot.rglob('lease-*.json')]
     active_leases=sum(bool(lease.get('active')) for lease in leases)
     (outroot/'receipt.json').write_text(json.dumps({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),
         'private_console':True,'shell':shell,'command':'actual generated commandWindows',
+        'hook_deadline_seconds':hook_deadline,
         'stdio':'three redirected pipes; concurrent input/output with EOF deadline',
         'environment':'same isolated allowlisted session snapshot for A/B; no credentials or probe seam',
         'job':'suspend -> assign -> resume; exact-owned tree cleanup',

@@ -510,7 +510,10 @@ source-audited one-second timeout and has no `async` field; normal lifecycle
 events remain on that connected MCP channel with no shell process. Its sole
 SessionEnd command Hook is `async=false` with a one-second timeout and runs one
 fail-open command process per session. The 0.147 command fallback remains
-`async=false` with a one-second timeout. Neither transport returns a Codex
+`async=false`. In v0.8.1, Windows command profiles use a two-second timeout
+after console recovery and bounded startup-tail qualification; non-Windows
+commands retain one second. See [the compatibility candidate](v0.8.1-codex-console-hotfix.md).
+Neither transport returns a Codex
 block decision for TabBeacon failures; decoration may be lost, but Codex
 continues.
 

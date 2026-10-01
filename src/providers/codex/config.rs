@@ -2614,6 +2614,21 @@ impl CodexIntegration {
             .any(|profile| {
                 owned_command_hooks_for_profile(&manifest.executable, profile)
                     .is_ok_and(|expected| expected == manifest.hooks)
+                    // Preserve the complete exact v0.8.0 one-second command
+                    // predecessor as known ownership/runtime evidence. This
+                    // does not make it current or authorize repair/trust;
+                    // setup must still locate every exact manifest group.
+                    || owned_command_hooks_for_events(
+                        &manifest.executable,
+                        &profile
+                            .lifecycle_events()
+                            .iter()
+                            .map(|event| event.as_str())
+                            .collect::<Vec<_>>(),
+                        1,
+                        false,
+                    )
+                    .is_ok_and(|expected| expected == manifest.hooks)
             }),
         }
     }

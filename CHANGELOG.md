@@ -9,7 +9,8 @@ All notable changes to TabBeacon will be documented here.
   inherited terminal binding and existing console membership. Preserve redirected
   protocol handles; detach only the Hook after rendering and worker launch.
 - Separate Doctor's isolated command-ingress proof from unproven real provider
-  terminal delivery. Retain the one-second declaration and manual Hook trust.
+  terminal delivery. After valid-route tail measurements, give Windows command
+  Hooks a two-second deadline; retain non-Windows/MCP contracts and manual trust.
 - Add an owned console regression and a content-minimal old/new launcher fixture.
   Real Codex 0.159.2 TUI acceptance and publication remain separate Owner gates.
 
