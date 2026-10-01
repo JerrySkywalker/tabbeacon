@@ -82,7 +82,8 @@ def invocation(command):
     if shell=='Pwsh7':
         pwsh=shutil.which('pwsh.exe')
         if not pwsh: raise RuntimeError('Pwsh7 unavailable')
-        return [pwsh,'-NoLogo','-NoProfile','-Command',command]
+        # Official shell::derive_exec_args(command, false), no extra flags.
+        return [pwsh,'-NoProfile','-Command',command]
     return f'"{env.get("COMSPEC","cmd.exe")}" /C "{command}"'
 
 def run(command,flags,payload=None,deadline=1):
@@ -157,12 +158,15 @@ try:
             cold_setup=None
             if sample<cold_samples:
                 appdata=outroot/(label+f'-cold-{sample}-appdata');appdata.mkdir()
+                codex_home=outroot/(label+f'-cold-{sample}-codex-home');codex_home.mkdir()
                 env['LOCALAPPDATA']=str(appdata)
+                env['CODEX_HOME']=str(codex_home)
                 cold_setup=run([str(binary),'setup','codex','--plain'],0,None,60)
                 if cold_setup['timeout'] or cold_setup['exit']!=0:
                     raise RuntimeError('cold install precondition failed')
             else:
                 env['LOCALAPPDATA']=str(outroot/'appdata')
+                env['CODEX_HOME']=str(outroot/'codex-home')
             marker=outroot/(label+f'-{sample}-timing.txt')
             env['TABBEACON_HOOK_TIMING_FILE']=str(marker)
             session='fixture-session' if os.getenv('TB_OWNED_NATIVE_PARENT') else label+str(sample)
@@ -218,5 +222,10 @@ try:
         'owned_cleanup':'SessionEnd first; final exact-owned JobObject termination/close in finally',
         'paired_control':paired,
         'results':results},indent=2),encoding='utf-8')
+except Exception as error:
+    # Content-minimal fixture failures, never raw protocol stdout or payload.
+    (outroot/'fixture-failure.json').write_text(json.dumps({'exception_class':type(error).__name__,
+        'phase':'fixture execution/setup/owned cleanup','owned_cleanup':'exact JobObject finally'}))
+    raise
 finally:
     k.TerminateJobObject(job,0); k.CloseHandle(job); k.FreeConsole()

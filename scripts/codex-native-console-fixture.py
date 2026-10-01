@@ -43,7 +43,8 @@ try:
     childenv=dict(env);childenv['TB_OWNED_NATIVE_PARENT']=str(p.pid)
     request(2,'process/start',{'processId':'tabbeacon-fixture','argv':[sys.executable,str(Path(__file__).with_name('codex-hook-console-fixture.py')),binary,out],
         'cwd':root.as_uri(),'env':childenv,'tty':False,'pipeStdin':False,'arg0':None})
-    deadline=time.monotonic()+300
+    # Full cold-install/setup + Hook/SessionEnd samples remain owned and bounded.
+    deadline=time.monotonic()+900
     while time.monotonic()<deadline:
         r=request(3,'process/read',{'processId':'tabbeacon-fixture','afterSeq':None,'maxBytes':4096,'waitMs':500})
         if r['exited']:
