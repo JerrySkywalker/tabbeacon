@@ -150,11 +150,17 @@ try:
         run([sys.executable,__file__,'--inspect',str(metric)],flags,None,5)
         console=json.loads(metric.read_text())
         for sample in range(cold_samples+samples):
-            # Fresh user-local state makes image preparation and first-session
-            # workspace anchoring cold without evicting global caches.
+            # Fresh install state and first-session anchoring, with the actual
+            # setup precondition (verified immutable runtime image) established
+            # outside the Hook SLA, exactly as production setup does. Earlier
+            # unprewarmed-state stress receipts are retained separately.
+            cold_setup=None
             if sample<cold_samples:
                 appdata=outroot/(label+f'-cold-{sample}-appdata');appdata.mkdir()
                 env['LOCALAPPDATA']=str(appdata)
+                cold_setup=run([str(binary),'setup','codex','--plain'],0,None,60)
+                if cold_setup['timeout'] or cold_setup['exit']!=0:
+                    raise RuntimeError('cold install precondition failed')
             else:
                 env['LOCALAPPDATA']=str(outroot/'appdata')
             marker=outroot/(label+f'-{sample}-timing.txt')
@@ -163,6 +169,7 @@ try:
             payload=json.dumps({'hook_event_name':'UserPromptSubmit','session_id':session,'turn_id':label+str(sample),'cwd':str(outroot)}).encode()
             facts=run(invocation(command),flags,payload)
             facts.update(mode=label,sample=sample,cold_state=sample<cold_samples,console=console,hook_ingress_reached=marker.exists(),
+                         cold_setup=cold_setup,
                          timing=marker.read_text().strip() if marker.exists() else None)
             results.append(facts)
             if sample==cold_samples+samples-1:
