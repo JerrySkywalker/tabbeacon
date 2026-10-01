@@ -88,12 +88,14 @@ mod windows_route {
         fn acquire_expected(session_id: &str, expected: Option<PathBuf>) -> io::Result<Self> {
             let stdio = unsafe {
                 [
-                    GetStdHandle(STD_INPUT_HANDLE),
-                    GetStdHandle(STD_OUTPUT_HANDLE),
-                    GetStdHandle(STD_ERROR_HANDLE),
+                    GetStdHandle(STD_INPUT_HANDLE).map_err(io::Error::other)?,
+                    GetStdHandle(STD_OUTPUT_HANDLE).map_err(io::Error::other)?,
+                    GetStdHandle(STD_ERROR_HANDLE).map_err(io::Error::other)?,
                 ]
+            };
+            if stdio.iter().any(|handle| handle.is_invalid()) {
+                return Err(unavailable());
             }
-            .map(Result::unwrap_or_default);
             let unchanged = Self {
                 attached: false,
                 stdio,
@@ -429,6 +431,30 @@ mod windows_route {
                     GetStdHandle(STD_ERROR_HANDLE).unwrap(),
                 ]
             };
+            // A genuine Win32 handle-query failure must be rejected before
+            // changing association, rather than becoming a fabricated null slot.
+            unsafe {
+                windows::Win32::System::Console::SetStdHandle(
+                    STD_OUTPUT_HANDLE,
+                    windows::Win32::Foundation::INVALID_HANDLE_VALUE,
+                )
+                .unwrap();
+            }
+            let failed_capture = ConsoleRouteGuard::acquire_expected(
+                "owned-test-session",
+                Some(env::current_exe().unwrap()),
+            );
+            let rejected_before_detach = failed_capture.is_err()
+                && console_contains(std::process::id())
+                && !console_contains(host);
+            drop(failed_capture);
+            unsafe {
+                windows::Win32::System::Console::SetStdHandle(STD_OUTPUT_HANDLE, stdio[1]).unwrap();
+            }
+            assert!(
+                rejected_before_detach,
+                "failed stdio capture must preserve console association and standard-handle slots"
+            );
             if env::var("TB_CONSOLE_ROUTE_TEST_INVALID").unwrap() == "1" {
                 assert!(
                     ConsoleRouteGuard::acquire_expected(

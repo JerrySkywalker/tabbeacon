@@ -115,6 +115,36 @@ try:
     concurrency=int(os.environ.get('TB_CONSOLE_FIXTURE_CONCURRENCY','0'))
     if not 1<=samples<=200 or not 0<=cold_samples<=50 or not 0<=concurrency<=4:
         raise ValueError('Fixture sample bounds exceeded')
+    # Strict paired control: same command, exact environment/stdin, timing path
+    # and initial appdata bytes. Preserve each run's state as evidence, restore
+    # a pristine copy at the SAME absolute path, then change only creation flags.
+    state=Path(env['LOCALAPPDATA'])
+    pristine=outroot/'paired-pristine-appdata'
+    shutil.copytree(state,pristine)
+    paired=[]
+    marker=outroot/'paired-timing.txt'
+    env['TABBEACON_HOOK_TIMING_FILE']=str(marker)
+    control_payload=json.dumps({'hook_event_name':'UserPromptSubmit','session_id':'fixture-paired-session','turn_id':'fixture-paired-turn','cwd':str(outroot)}).encode()
+    control_env_sha256=hashlib.sha256(json.dumps(env,sort_keys=True).encode()).hexdigest()
+    for label,flags in [('A_old_console',0),('B_01592_no_console',0x08000000)]:
+        facts=run(invocation(command),flags,control_payload)
+        facts.update(mode=label,timing=marker.read_text().strip() if marker.exists() else None,
+            environment_sha256=control_env_sha256,stdin_sha256=hashlib.sha256(control_payload).hexdigest())
+        if marker.exists(): marker.rename(outroot/(label+'-paired-timing.txt'))
+        end=declarations['SessionEnd'][0]['hooks'][0]['commandWindows']
+        endpayload=json.dumps({'hook_event_name':'SessionEnd','session_id':'fixture-paired-session','cwd':str(outroot)}).encode()
+        facts['session_end']=run(invocation(end),flags,endpayload,5)
+        if marker.exists(): marker.rename(outroot/(label+'-paired-end-timing.txt'))
+        paired.append(facts)
+        k.TerminateJobObject(job,0)
+        archive=outroot/(label+'-paired-appdata')
+        # Verify both resolved targets before the owned directory move. This
+        # preserves evidence and never deletes a worktree/source/evidence root.
+        if not state.resolve().is_relative_to(outroot) or not archive.resolve().is_relative_to(outroot):
+            raise RuntimeError('owned fixture state escaped artifact root')
+        if archive.exists(): raise RuntimeError('paired state archive already exists')
+        state.rename(archive)
+        shutil.copytree(pristine,state)
     for label,flags in [('A_old_console',0),('B_01592_no_console',0x08000000)]:
         metric=outroot/(label+'-console.json')
         run([sys.executable,__file__,'--inspect',str(metric)],flags,None,5)
@@ -151,7 +181,7 @@ try:
             endpayload=json.dumps({'hook_event_name':'SessionEnd','session_id':session,'cwd':str(outroot)}).encode()
             facts['session_end']=run(invocation(end),flags,endpayload,5)
         if concurrency:
-            # Different sessions/turns in one terminal: exercise the production
+            # Different turns in one session/terminal: exercise the production
             # ownership locks and generation gate without global state writes.
             # Fixed environment is not changed while these calls run.
             env['LOCALAPPDATA']=str(outroot/'appdata')
@@ -179,6 +209,7 @@ try:
         'native_parent_attribution':'actual installed Codex stdio-only test ancestor; NOT real provider Hook delivery',
         'terminal_content_scraped':False,'active_leases_after_session_end':active_leases,
         'owned_cleanup':'SessionEnd first; final exact-owned JobObject termination/close in finally',
+        'paired_control':paired,
         'results':results},indent=2),encoding='utf-8')
 finally:
     k.TerminateJobObject(job,0); k.CloseHandle(job); k.FreeConsole()
