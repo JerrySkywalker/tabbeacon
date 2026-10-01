@@ -49,15 +49,6 @@ const ADMITTED_HOOK_EVENTS: [&str; 11] = [
     "SubagentStop",
     "Stop",
 ];
-const LEGACY_HOOK_EVENTS: [&str; 7] = [
-    "SessionStart",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PermissionRequest",
-    "PostToolUse",
-    "Stop",
-    "SessionEnd",
-];
 
 #[cfg(windows)]
 const WINDOWS_HOOK_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -857,7 +848,6 @@ fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
 }
 
 fn replace_manifest_owned_declarations_with_legacy(hooks: &mut Value, manifest: &mut Value) {
-    let legacy_command = r#""C:\\legacy\\tabbeacon.exe" hook codex || exit /b 0"#;
     let current_owned = manifest["hooks"]
         .as_array()
         .expect("manifest owned hooks are an array")
@@ -869,13 +859,6 @@ fn replace_manifest_owned_declarations_with_legacy(hooks: &mut Value, manifest: 
             .expect("owned event name")
             .to_owned();
         let prior_group = owned["group"].clone();
-        if !LEGACY_HOOK_EVENTS.contains(&event.as_str()) {
-            hooks["hooks"]
-                .as_object_mut()
-                .expect("hooks object")
-                .remove(&event);
-            continue;
-        }
         let live_group = hooks["hooks"][&event]
             .as_array_mut()
             .expect("event groups are an array")
@@ -883,8 +866,9 @@ fn replace_manifest_owned_declarations_with_legacy(hooks: &mut Value, manifest: 
             .find(|group| **group == prior_group)
             .expect("owned group is present in hooks");
         for group in [live_group, &mut owned["group"]] {
-            group["hooks"][0]["command"] = json!(legacy_command);
-            group["hooks"][0]["commandWindows"] = json!(legacy_command);
+            // Exact v0.8.0 predecessor. An arbitrary command whose path
+            // disagrees with the manifest is not ownership evidence.
+            group["hooks"][0]["timeout"] = json!(1);
         }
         legacy_owned.push(owned);
     }
@@ -2292,7 +2276,7 @@ fn unrecognized_owned_mcp_manifest_is_refused_without_mutating_targets() {
     let manifest_before = fs::read(&manifest_path).expect("manifest snapshot reads");
     assert!(matches!(
         integration.setup(),
-        Err(CodexIntegrationError::StaleOwnedHook)
+        Err(CodexIntegrationError::OwnershipManifest)
     ));
     assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
     assert_eq!(
@@ -2340,7 +2324,7 @@ fn mcp_hook_manifest_without_owned_server_is_refused_without_mutating_targets() 
     let manifest_before = fs::read(&manifest_path).expect("manifest snapshot reads");
     assert!(matches!(
         integration.setup(),
-        Err(CodexIntegrationError::StaleOwnedHook)
+        Err(CodexIntegrationError::OwnershipManifest)
     ));
     assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
     assert_eq!(
@@ -3442,7 +3426,7 @@ fn repair_and_runtime_continuity_reject_a_manifest_with_incoherent_executable() 
 
     assert!(matches!(
         integration.repair(false, None),
-        Err(CodexIntegrationError::StaleOwnedHook)
+        Err(CodexIntegrationError::OwnershipManifest)
     ));
     assert_eq!(
         integration.doctor().runtime_continuity(),
@@ -5056,6 +5040,7 @@ fn relocated_executable_refuses_an_unsafe_recorded_manifest_target() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn setup_upgrades_exact_owned_declarations_without_duplicates_or_baseline_loss() {
     let root = TestRoot::new("owned-upgrade");
@@ -5268,6 +5253,51 @@ fn setup_and_uninstall_are_safe_for_absent_files_and_modified_ownership() {
         Err(CodexIntegrationError::ModifiedOwnedHook)
     ));
     assert!(codex_home.join("config.toml").is_file());
+}
+
+#[test]
+fn setup_and_uninstall_refuse_joint_manifest_and_live_command_tampering() {
+    let root = TestRoot::new("joint-manifest-live-tampering");
+    let integration = test_integration(&root);
+    integration.setup().unwrap();
+    let home = root.child("codex-home");
+    let hooks_path = home.join("hooks.json");
+    let config_path = home.join("config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    let mut hooks: Value = serde_json::from_slice(&fs::read(&hooks_path).unwrap()).unwrap();
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let owned = manifest["hooks"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|declaration| declaration["event"] == "Stop")
+        .unwrap();
+    let previous = owned["group"].clone();
+    let group = hooks["hooks"]["Stop"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|group| **group == previous)
+        .unwrap();
+    group["hooks"][0]["command"] = json!("arbitrary-owner-command");
+    group["hooks"][0]["commandWindows"] = json!("arbitrary-owner-command");
+    owned["group"] = group.clone();
+    fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let before = [&hooks_path, &config_path, &manifest_path].map(|path| fs::read(path).unwrap());
+    assert!(matches!(
+        integration.setup(),
+        Err(CodexIntegrationError::OwnershipManifest)
+    ));
+    assert!(matches!(
+        integration.uninstall(),
+        Err(CodexIntegrationError::OwnershipManifest)
+    ));
+    let after = [&hooks_path, &config_path, &manifest_path].map(|path| fs::read(path).unwrap());
+    assert_eq!(
+        before, after,
+        "ambiguous state must not authorize any target write"
+    );
 }
 
 #[test]

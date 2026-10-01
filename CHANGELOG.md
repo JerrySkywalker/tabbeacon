@@ -12,6 +12,8 @@ All notable changes to TabBeacon will be documented here.
   terminal delivery. After valid-route tail measurements, give Windows command
   Hooks a two-second deadline; retain non-Windows/MCP contracts and manual trust.
 - Add an owned console regression and a content-minimal old/new launcher fixture.
+  Require known complete declarations before setup/uninstall configuration writes,
+  including rejection of jointly edited manifest and live commands.
   Real Codex 0.159.2 TUI acceptance and publication remain separate Owner gates.
 
 ## [0.8.0] - Release contents (publication date recorded externally)

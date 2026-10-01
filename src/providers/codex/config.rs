@@ -2569,6 +2569,9 @@ impl CodexIntegration {
         }
         self.validate_backup_record("hooks", &manifest.hooks_backup)?;
         self.validate_backup_record("config", &manifest.config_backup)?;
+        if !Self::manifest_has_known_owned_declarations(manifest) {
+            return Err(CodexIntegrationError::OwnershipManifest);
+        }
         Ok(())
     }
 
