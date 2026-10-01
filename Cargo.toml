@@ -1,6 +1,6 @@
 [package]
 name = "tabbeacon"
-version = "0.8.0"
+version = "0.8.1"
 edition = "2024"
 rust-version = "1.97.1"
 license = "MIT"
@@ -27,6 +27,7 @@ include = [
     ".github/workflows/visual-ci.yml",
     ".github/workflows/release-dangling-symlink.yml",
     "docs/codex-hooks.md",
+    "docs/v0.8.1-codex-console-hotfix.md",
     "docs/agy-setup.md",
     "docs/adr/0015-agy-1-1-19-production-profile.md",
     "docs/assets/brand/tabbeacon-logo.svg",

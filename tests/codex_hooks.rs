@@ -49,15 +49,6 @@ const ADMITTED_HOOK_EVENTS: [&str; 11] = [
     "SubagentStop",
     "Stop",
 ];
-const LEGACY_HOOK_EVENTS: [&str; 7] = [
-    "SessionStart",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PermissionRequest",
-    "PostToolUse",
-    "Stop",
-    "SessionEnd",
-];
 
 #[cfg(windows)]
 const WINDOWS_HOOK_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -298,7 +289,10 @@ fn install_exact_existing_hybrid(integration: &CodexIntegration, root: &TestRoot
     .expect("hybrid manifest write");
 }
 
-fn exact_hybrid_declarations(session_end: Value) -> Vec<Value> {
+fn exact_hybrid_declarations(mut session_end: Value) -> Vec<Value> {
+    // The historical MCP hybrid keeps its independent one-second command
+    // SessionEnd contract even when Windows command-only profiles change.
+    session_end["group"]["hooks"][0]["timeout"] = json!(1);
     let mut declarations = [
         ("PreToolUse", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
         ("PermissionRequest", json!({"turn_id":"${turn_id}"})),
@@ -854,7 +848,6 @@ fn install_current_codex_trust_state(codex_home: &Path) -> Vec<String> {
 }
 
 fn replace_manifest_owned_declarations_with_legacy(hooks: &mut Value, manifest: &mut Value) {
-    let legacy_command = r#""C:\\legacy\\tabbeacon.exe" hook codex || exit /b 0"#;
     let current_owned = manifest["hooks"]
         .as_array()
         .expect("manifest owned hooks are an array")
@@ -866,13 +859,6 @@ fn replace_manifest_owned_declarations_with_legacy(hooks: &mut Value, manifest: 
             .expect("owned event name")
             .to_owned();
         let prior_group = owned["group"].clone();
-        if !LEGACY_HOOK_EVENTS.contains(&event.as_str()) {
-            hooks["hooks"]
-                .as_object_mut()
-                .expect("hooks object")
-                .remove(&event);
-            continue;
-        }
         let live_group = hooks["hooks"][&event]
             .as_array_mut()
             .expect("event groups are an array")
@@ -880,8 +866,9 @@ fn replace_manifest_owned_declarations_with_legacy(hooks: &mut Value, manifest: 
             .find(|group| **group == prior_group)
             .expect("owned group is present in hooks");
         for group in [live_group, &mut owned["group"]] {
-            group["hooks"][0]["command"] = json!(legacy_command);
-            group["hooks"][0]["commandWindows"] = json!(legacy_command);
+            // Exact v0.8.0 predecessor. An arbitrary command whose path
+            // disagrees with the manifest is not ownership evidence.
+            group["hooks"][0]["timeout"] = json!(1);
         }
         legacy_owned.push(owned);
     }
@@ -1381,7 +1368,10 @@ fn bounded_capability_contracts_are_explicit_and_version_independent() {
             .subagent_identity_required_for_subagent_lifecycle()
     );
     assert!(profile.timeout().synchronous_required());
-    assert_eq!(profile.timeout().declaration_timeout_seconds(), 1);
+    assert_eq!(
+        profile.timeout().declaration_timeout_seconds(),
+        if cfg!(windows) { 2 } else { 1 }
+    );
     assert_eq!(profile.timeout().maximum_timeout_seconds(), 3);
     assert!(!profile.timeout().timeout_blocks_operation());
     assert!(profile.terminal_title_ownership().codex_owns_by_default());
@@ -1400,7 +1390,10 @@ fn bounded_capability_contracts_are_explicit_and_version_independent() {
     assert_eq!(profile_149.id(), "codex-hooks-mcp-hybrid-v1");
     assert_eq!(profile_149.lifecycle_events(), profile.lifecycle_events());
     assert_eq!(profile_149.identity(), profile.identity());
-    assert_eq!(profile_149.timeout(), profile.timeout());
+    assert_eq!(profile_149.timeout().declaration_timeout_seconds(), 1);
+    assert_eq!(profile_149.timeout().maximum_timeout_seconds(), 3);
+    assert!(profile_149.timeout().synchronous_required());
+    assert!(!profile_149.timeout().timeout_blocks_operation());
     assert!(!profile.uses_mcp_hook_transport());
     assert!(profile_149.uses_mcp_hook_transport());
     assert_eq!(profile.wire_shape(), profile_149.wire_shape());
@@ -2283,7 +2276,7 @@ fn unrecognized_owned_mcp_manifest_is_refused_without_mutating_targets() {
     let manifest_before = fs::read(&manifest_path).expect("manifest snapshot reads");
     assert!(matches!(
         integration.setup(),
-        Err(CodexIntegrationError::StaleOwnedHook)
+        Err(CodexIntegrationError::OwnershipManifest)
     ));
     assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
     assert_eq!(
@@ -2331,7 +2324,7 @@ fn mcp_hook_manifest_without_owned_server_is_refused_without_mutating_targets() 
     let manifest_before = fs::read(&manifest_path).expect("manifest snapshot reads");
     assert!(matches!(
         integration.setup(),
-        Err(CodexIntegrationError::StaleOwnedHook)
+        Err(CodexIntegrationError::OwnershipManifest)
     ));
     assert_eq!(fs::read(&hooks_path).expect("hooks reread"), hooks_before);
     assert_eq!(
@@ -3199,7 +3192,7 @@ fn repair_v2_blocks_a_modified_partial_owned_group() {
     let mut hooks: Value =
         serde_json::from_slice(&fs::read(&hooks_path).expect("installed hooks read"))
             .expect("installed hooks parse");
-    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["timeout"] = json!(2);
+    hooks["hooks"]["PreToolUse"][1]["hooks"][0]["timeout"] = json!(3);
     fs::write(
         &hooks_path,
         serde_json::to_vec_pretty(&hooks).expect("modified partial group serialize"),
@@ -3433,7 +3426,7 @@ fn repair_and_runtime_continuity_reject_a_manifest_with_incoherent_executable() 
 
     assert!(matches!(
         integration.repair(false, None),
-        Err(CodexIntegrationError::StaleOwnedHook)
+        Err(CodexIntegrationError::OwnershipManifest)
     ));
     assert_eq!(
         integration.doctor().runtime_continuity(),
@@ -5047,6 +5040,7 @@ fn relocated_executable_refuses_an_unsafe_recorded_manifest_target() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn setup_upgrades_exact_owned_declarations_without_duplicates_or_baseline_loss() {
     let root = TestRoot::new("owned-upgrade");
@@ -5139,6 +5133,96 @@ fn setup_upgrades_exact_owned_declarations_without_duplicates_or_baseline_loss()
     assert_eq!(uninstalled_hooks["hooks"]["Stop"], json!([unrelated_stop]));
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_timeout_upgrade_preserves_predecessor_ownership_and_requires_review() {
+    let root = TestRoot::new("windows-timeout-predecessor");
+    let home = root.child("codex-home");
+    fs::create_dir_all(&home).unwrap();
+    let foreign = json!({"hooks":[{"type":"command","command":"owner-stop","timeout":7}]});
+    fs::write(
+        home.join("hooks.json"),
+        serde_json::to_vec(&json!({"hooks":{"Stop":[foreign.clone()]}})).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        home.join("config.toml"),
+        "[mcp_servers.owner]\ncommand = 'owner-mcp'\n",
+    )
+    .unwrap();
+    let integration = test_integration(&root);
+    integration.setup().unwrap();
+    let manifest_path = root.child("state/integration-v1.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let backups = (
+        manifest["hooks_backup"].clone(),
+        manifest["config_backup"].clone(),
+    );
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(home.join("hooks.json")).unwrap()).unwrap();
+    // Exact previous declarations and their manifest, not a similar-looking
+    // unowned Hook. Native trust is simulated only in this disposable fixture.
+    for declaration in manifest["hooks"].as_array_mut().unwrap() {
+        let event = declaration["event"].as_str().unwrap().to_owned();
+        let previous = declaration["group"].clone();
+        let group = hooks["hooks"][&event]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|group| **group == previous)
+            .unwrap();
+        group["hooks"][0]["timeout"] = json!(1);
+        declaration["group"] = group.clone();
+    }
+    fs::write(home.join("hooks.json"), serde_json::to_vec(&hooks).unwrap()).unwrap();
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    install_current_codex_trust_state(&home);
+    let trusted = fs::read_to_string(home.join("config.toml"))
+        .unwrap()
+        .parse::<DocumentMut>()
+        .unwrap();
+    let trust_before = trusted["hooks"]["state"].to_string();
+    let old = integration.doctor();
+    assert!(
+        old.checks()
+            .iter()
+            .any(|check| { check.id() == "hooks.trust" && check.status() == DoctorStatus::Pass })
+    );
+    assert!(old.checks().iter().any(|check| {
+        check.id() == "hooks.currentness" && check.status() == DoctorStatus::Fail
+    }));
+    assert_eq!(integration.setup().unwrap(), SetupOutcome::Upgraded);
+    let current: Value =
+        serde_json::from_slice(&fs::read(home.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(current["hooks"]["Stop"][0], foreign);
+    assert_eq!(owned_current_windows_handler_count(&current), 11);
+    for event in ADMITTED_HOOK_EVENTS {
+        let groups = current["hooks"][event].as_array().unwrap();
+        let owned = groups
+            .iter()
+            .find(|group| group["hooks"][0]["timeout"] == 2)
+            .unwrap();
+        assert_eq!(owned["hooks"][0]["async"], false);
+    }
+    let current_manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    assert_eq!(current_manifest["hooks_backup"], backups.0);
+    assert_eq!(current_manifest["config_backup"], backups.1);
+    let config = fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(config.contains("owner-mcp"));
+    let updated = config.parse::<DocumentMut>().unwrap();
+    assert_eq!(updated["hooks"]["state"].to_string(), trust_before);
+    assert!(integration.doctor().checks().iter().any(|check| {
+        check.id() == "hooks.trust"
+            && check.status() == DoctorStatus::Fail
+            && check.summary().contains("STALE_OR_CHANGED")
+    }));
+    assert_eq!(integration.uninstall().unwrap(), UninstallOutcome::Removed);
+    let restored: Value =
+        serde_json::from_slice(&fs::read(home.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(restored, json!({"hooks":{"Stop":[foreign]}}));
+}
+
 #[test]
 fn setup_and_uninstall_are_safe_for_absent_files_and_modified_ownership() {
     let root = TestRoot::new("ownership");
@@ -5154,7 +5238,7 @@ fn setup_and_uninstall_are_safe_for_absent_files_and_modified_ownership() {
     let mut hooks: Value =
         serde_json::from_slice(&fs::read(codex_home.join("hooks.json")).expect("hooks read"))
             .expect("hooks parse");
-    hooks["hooks"]["Stop"][0]["hooks"][0]["timeout"] = json!(2);
+    hooks["hooks"]["Stop"][0]["hooks"][0]["timeout"] = json!(3);
     fs::write(
         codex_home.join("hooks.json"),
         serde_json::to_vec_pretty(&hooks).expect("mutated hooks serialize"),
@@ -5169,6 +5253,51 @@ fn setup_and_uninstall_are_safe_for_absent_files_and_modified_ownership() {
         Err(CodexIntegrationError::ModifiedOwnedHook)
     ));
     assert!(codex_home.join("config.toml").is_file());
+}
+
+#[test]
+fn setup_and_uninstall_refuse_joint_manifest_and_live_command_tampering() {
+    let root = TestRoot::new("joint-manifest-live-tampering");
+    let integration = test_integration(&root);
+    integration.setup().unwrap();
+    let home = root.child("codex-home");
+    let hooks_path = home.join("hooks.json");
+    let config_path = home.join("config.toml");
+    let manifest_path = root.child("state/integration-v1.json");
+    let mut hooks: Value = serde_json::from_slice(&fs::read(&hooks_path).unwrap()).unwrap();
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let owned = manifest["hooks"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|declaration| declaration["event"] == "Stop")
+        .unwrap();
+    let previous = owned["group"].clone();
+    let group = hooks["hooks"]["Stop"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|group| **group == previous)
+        .unwrap();
+    group["hooks"][0]["command"] = json!("arbitrary-owner-command");
+    group["hooks"][0]["commandWindows"] = json!("arbitrary-owner-command");
+    owned["group"] = group.clone();
+    fs::write(&hooks_path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let before = [&hooks_path, &config_path, &manifest_path].map(|path| fs::read(path).unwrap());
+    assert!(matches!(
+        integration.setup(),
+        Err(CodexIntegrationError::OwnershipManifest)
+    ));
+    assert!(matches!(
+        integration.uninstall(),
+        Err(CodexIntegrationError::OwnershipManifest)
+    ));
+    let after = [&hooks_path, &config_path, &manifest_path].map(|path| fs::read(path).unwrap());
+    assert_eq!(
+        before, after,
+        "ambiguous state must not authorize any target write"
+    );
 }
 
 #[test]
@@ -5353,7 +5482,7 @@ fn hook_inventory_is_exact_redacted_and_distinguishes_trust_from_declaration_dri
             .contains("secret-token")
     );
 
-    hooks["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = json!(2);
+    hooks["hooks"]["PreToolUse"][0]["hooks"][0]["timeout"] = json!(3);
     fs::write(
         &hooks_path,
         serde_json::to_vec_pretty(&hooks).expect("modified hooks serialize"),
@@ -5471,7 +5600,10 @@ fn missing_managed_binary_is_diagnosed_without_claiming_direct_command_fail_open
             .expect("hooks parse");
     for event in ADMITTED_HOOK_EVENTS {
         assert_eq!(hooks["hooks"][event][0]["hooks"][0]["async"], false);
-        assert_eq!(hooks["hooks"][event][0]["hooks"][0]["timeout"], 1);
+        assert_eq!(
+            hooks["hooks"][event][0]["hooks"][0]["timeout"],
+            if cfg!(windows) { 2 } else { 1 }
+        );
         let command = hooks["hooks"][event][0]["hooks"][0]["commandWindows"]
             .as_str()
             .expect("Windows command is a string");
@@ -5644,7 +5776,11 @@ fn static_doctor_requires_a_bounded_probe_or_reports_unqualified_environment() {
         "runtime probe checks: {:?}",
         probed_report.checks()
     );
-    assert_eq!(probed_report.overall(), DoctorStatus::Pass);
+    assert_eq!(
+        probed_report.check_status("hooks.provider-terminal-route"),
+        Some(DoctorStatus::Warning)
+    );
+    assert_eq!(probed_report.overall(), DoctorStatus::Warning);
 }
 
 #[cfg(windows)]

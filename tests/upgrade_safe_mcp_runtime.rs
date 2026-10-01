@@ -261,7 +261,10 @@ fn exact_hybrid_config(config_path: &Path, command: &str) -> String {
     config.to_string()
 }
 
-fn exact_hybrid_declarations(session_end: Value) -> Vec<Value> {
+fn exact_hybrid_declarations(mut session_end: Value) -> Vec<Value> {
+    // This is the exact historical MCP fixture, whose command SessionEnd
+    // remains one second independently of Windows command-only profiles.
+    session_end["group"]["hooks"][0]["timeout"] = json!(1);
     let mut declarations = [
         ("PreToolUse", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
         ("PermissionRequest", json!({"turn_id":"${turn_id}"})),

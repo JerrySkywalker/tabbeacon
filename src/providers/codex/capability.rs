@@ -400,6 +400,41 @@ fn resolve_default_program() -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// Native console identity for the PATH-selected Codex installation. The npm
+/// layout is fixed by the official launcher; no wrapper parsing or scanning.
+#[cfg(windows)]
+pub(super) fn native_console_program() -> Option<PathBuf> {
+    let entry = resolve_default_program()?;
+    if entry
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("exe"))
+    {
+        return entry.canonicalize().ok();
+    }
+    let root = entry
+        .parent()?
+        .join("node_modules")
+        .join("@openai")
+        .join("codex");
+    let (package, target) = if cfg!(target_arch = "aarch64") {
+        ("codex-win32-arm64", "aarch64-pc-windows-msvc")
+    } else {
+        ("codex-win32-x64", "x86_64-pc-windows-msvc")
+    };
+    let candidate = root
+        .join("node_modules")
+        .join("@openai")
+        .join(package)
+        .join("vendor")
+        .join(target)
+        .join("bin")
+        .join("codex.exe");
+    candidate
+        .is_file()
+        .then(|| candidate.canonicalize().ok())
+        .flatten()
+}
+
 fn read_cache(path: &Path) -> Option<CapabilityCacheRecord> {
     serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
