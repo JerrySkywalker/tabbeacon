@@ -93,7 +93,7 @@ mod windows_route {
                     GetStdHandle(STD_ERROR_HANDLE).map_err(io::Error::other)?,
                 ]
             };
-            if stdio.iter().any(|handle| handle.is_invalid()) {
+            if stdio.iter().any(HANDLE::is_invalid) {
                 return Err(unavailable());
             }
             let unchanged = Self {
