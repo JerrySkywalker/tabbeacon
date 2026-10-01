@@ -6,6 +6,7 @@
 mod anchor;
 mod capability;
 mod config;
+mod console_route;
 mod generation;
 mod mcp;
 mod profile;

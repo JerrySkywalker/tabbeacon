@@ -87,7 +87,12 @@ matching declarations and trust state do not prove that Codex can execute the
 transport. For 0.149 it separately reports `mcp.terminal-binding`; the owned
 MCP declaration must forward exactly `WT_SESSION` before presentation can be
 healthy. `tabbeacon doctor --probe-hook-runtime` runs one manifest-exact
-representative declaration in isolated temporary `LOCALAPPDATA`. Its 0.149
+representative declaration in isolated temporary `LOCALAPPDATA`. Command ingress
+can report `COMMAND_EXECUTION_PROVEN`; `hooks.provider-terminal-route` still
+reports `REAL_PROVIDER_TERMINAL_ROUTE_UNPROVEN`. The overall Doctor remains a
+warning because isolated COMSPEC execution and the NUL-backed worker probe do
+not prove native provider presentation. Real delivery requires separate attended
+evidence; Doctor does not infer it from a release number. Its 0.149
 path mirrors the cleared Codex local-stdio environment, adds only the owned
 terminal binding, then separately proves MCP initialize, Working activity, two
 distinct spinner writes at the worker cadence, and Stop supersession without a

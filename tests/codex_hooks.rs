@@ -5644,7 +5644,11 @@ fn static_doctor_requires_a_bounded_probe_or_reports_unqualified_environment() {
         "runtime probe checks: {:?}",
         probed_report.checks()
     );
-    assert_eq!(probed_report.overall(), DoctorStatus::Pass);
+    assert_eq!(
+        probed_report.check_status("hooks.provider-terminal-route"),
+        Some(DoctorStatus::Warning)
+    );
+    assert_eq!(probed_report.overall(), DoctorStatus::Warning);
 }
 
 #[cfg(windows)]

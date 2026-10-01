@@ -1135,6 +1135,13 @@ impl CodexIntegration {
         for check in runtime_checks {
             report.replace_check(check);
         }
+        // This isolated probe uses a different launcher/terminal environment.
+        // Successful command ingress (or a NUL-backed hybrid worker) cannot
+        // certify real provider terminal delivery. Never aggregate it into PASS.
+        report.replace_check(warning(
+            "hooks.provider-terminal-route",
+            "REAL_PROVIDER_TERMINAL_ROUTE_UNPROVEN: isolated command execution does not prove the native provider console, presentation, or real delivery; attended provider qualification is separate",
+        ));
         if hybrid_transport && !hybrid_claims_present {
             report.replace_check(fail(
                 "hooks.mcp-event-transport",
@@ -1239,7 +1246,7 @@ impl CodexIntegration {
         match outcome {
             RuntimeProbeOutcome::Pass => vec![pass(
                 "hooks.runtime-probe",
-                "RUNTIME_PROBE_PASS: representative owned Hook executed through the bounded COMSPEC fallback",
+                "COMMAND_EXECUTION_PROVEN: representative owned Hook ingress executed through isolated COMSPEC; real provider terminal delivery is not proved",
             )],
             RuntimeProbeOutcome::McpHybrid {
                 mcp_event,
