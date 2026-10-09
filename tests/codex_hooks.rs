@@ -53,7 +53,9 @@ const ADMITTED_HOOK_EVENTS: [&str; 11] = [
 #[cfg(windows)]
 const WINDOWS_HOOK_STAGE_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(windows)]
-const WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT: Duration = Duration::from_millis(900);
+// Historical sub-one-second performance target, not the current Windows
+// command declaration deadline. The release gate reads the generated timeout.
+const WINDOWS_LEGACY_ONE_SECOND_PERFORMANCE_BUDGET: Duration = Duration::from_millis(900);
 #[cfg(windows)]
 static WINDOWS_HOOK_SHELL_SERIALIZER: Mutex<()> = Mutex::new(());
 const WINDOWS_HOOK_COMMAND_SUFFIX: &str = " hook codex";
@@ -5877,7 +5879,7 @@ fn real_windows_hook_shell_stages_are_independently_bounded_or_unqualified() {
 
 #[cfg(windows)]
 #[test]
-fn anchored_production_hook_is_bounded_or_reports_unqualified_environment() {
+fn anchored_legacy_one_second_performance_target_or_reports_unqualified_environment() {
     let root = TestRoot::new("anchored-production-hook-sla");
     let executable = PathBuf::from(env!("CARGO_BIN_EXE_tabbeacon"));
     let workspace = root.child("workspace");
@@ -5890,7 +5892,7 @@ fn anchored_production_hook_is_bounded_or_reports_unqualified_environment() {
         "anchored-production-hook-sla",
         &executable,
         &local_app_data,
-        WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
+        WINDOWS_LEGACY_ONE_SECOND_PERFORMANCE_BUDGET,
     ) {
         return;
     }
@@ -5922,7 +5924,7 @@ fn anchored_production_hook_is_bounded_or_reports_unqualified_environment() {
         &executable,
         &prompt,
         &local_app_data,
-        WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
+        WINDOWS_LEGACY_ONE_SECOND_PERFORMANCE_BUDGET,
     )
     .is_none()
     {
@@ -5941,29 +5943,36 @@ fn anchored_production_hook_is_bounded_or_reports_unqualified_environment() {
         &executable,
         &post_tool,
         &local_app_data,
-        WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
+        WINDOWS_LEGACY_ONE_SECOND_PERFORMANCE_BUDGET,
     ) else {
         return;
     };
     assert!(
-        elapsed < WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
-        "ordinary production Hook must remain below the one-second declaration, elapsed={elapsed:?}"
+        elapsed < WINDOWS_LEGACY_ONE_SECOND_PERFORMANCE_BUDGET,
+        "historical sub-one-second performance target, not the current Windows two-second declaration, elapsed={elapsed:?}"
     );
 }
 
 #[cfg(windows)]
 #[test]
-fn anchored_default_windows_hook_is_bounded_or_reports_unqualified_environment() {
+#[ignore = "release-only declared-timeout measurement; run explicitly with --release --ignored"]
+#[allow(clippy::assertions_on_constants)] // Explicit debug invocation must fail at runtime.
+fn anchored_default_windows_hook_declaration_finishes_within_the_declared_timeout() {
     // The system coordinator publishes a content-bound worker image. Debug
     // test binaries are deliberately much larger than the distributed release
     // CLI, so the enforceable production SLA belongs to the explicit release
     // CI stage below rather than a misleading debug-artifact threshold.
-    if cfg!(debug_assertions) {
-        eprintln!("release-only Codex Hook SLA gate");
-        return;
-    }
+    assert!(!cfg!(debug_assertions), "Release SLA requires --release");
     let root = TestRoot::new("anchored-default-shell-hook-declaration-sla");
     let (_executable, _generic_command, command) = fast_real_windows_hook_command(&root);
+    let hooks: Value =
+        serde_json::from_slice(&fs::read(root.child("codex-home/hooks.json")).expect("hooks read"))
+            .expect("hooks parse");
+    let timeout_seconds = hooks["hooks"]["PostToolUse"][0]["hooks"][0]["timeout"]
+        .as_u64()
+        .expect("generated declaration has an integer timeout");
+    assert_eq!(timeout_seconds, 2, "Windows command declaration contract");
+    let declared_timeout = Duration::from_secs(timeout_seconds);
     let workspace = root.child("workspace");
     let local_app_data = root.child("isolated-local-app-data");
     init_repo(
@@ -5975,17 +5984,18 @@ fn anchored_default_windows_hook_is_bounded_or_reports_unqualified_environment()
     let mut start = hook_payload("SessionStart", "performance-shell-session", &workspace);
     start["source"] = Value::String("startup".to_owned());
     let start = serde_json::to_vec(&start).expect("start payload serializes");
-    if !shell_environment_is_qualified(
-        "anchored-default-shell-hook-sla",
-        CodexWindowsHookShell::ComspecFallback,
-        &start,
-        false,
-        Some(&local_app_data),
-        Some(terminal_session),
-        WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
-    ) {
-        return;
-    }
+    assert!(
+        shell_environment_is_qualified(
+            "anchored-default-shell-hook-sla",
+            CodexWindowsHookShell::ComspecFallback,
+            &start,
+            false,
+            Some(&local_app_data),
+            Some(terminal_session),
+            declared_timeout,
+        ),
+        "Release SLA is UNPROVEN: shell environment is unqualified; no valid measurement executed"
+    );
     let start_output = run_codex_windows_hook_with_shell_and_terminal(
         CodexWindowsHookShell::ComspecFallback,
         &command,
@@ -6008,6 +6018,7 @@ fn anchored_default_windows_hook_is_bounded_or_reports_unqualified_environment()
         &workspace,
     ))
     .expect("post-tool payload serializes");
+    let started = Instant::now();
     let output = run_codex_windows_hook_with_shell_and_terminal(
         CodexWindowsHookShell::ComspecFallback,
         &command,
@@ -6015,12 +6026,22 @@ fn anchored_default_windows_hook_is_bounded_or_reports_unqualified_environment()
         false,
         Some(&local_app_data),
         Some(terminal_session),
-        WINDOWS_PRODUCTION_HOOK_SLA_TIMEOUT,
+        declared_timeout,
     );
+    let elapsed = started.elapsed();
     assert!(
         output.status.success(),
         "anchored default Windows declaration failed: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty() && output.stderr.is_empty());
+    assert!(
+        elapsed < declared_timeout,
+        "declared SLA exceeded: {elapsed:?}"
+    );
+    eprintln!(
+        "CODEX_WINDOWS_DECLARED_SLA=MEASURED TIMEOUT_SECONDS={timeout_seconds} ELAPSED_MS={} SCOPE=ANCHORED_COMSPEC_NOT_REAL_PROVIDER",
+        elapsed.as_millis()
     );
 }
 
