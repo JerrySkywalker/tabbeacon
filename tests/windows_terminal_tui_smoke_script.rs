@@ -120,7 +120,8 @@ fn smoke_completion_is_durable_bounded_and_owner_correlated() {
 
 #[test]
 fn fixture_capability_probe_uses_the_same_local_contract_as_the_codex_adapter() {
-    let fixture = repository_source("src/bin/tabbeacon-terminal-smoke-fixture.rs");
+    let fixture =
+        repository_source("src/bin/tabbeacon-terminal-smoke-fixture.rs").replace("\r\n", "\n");
     let adapter = repository_source("src/providers/codex/config.rs");
     assert!(
         fixture.contains("FIXTURE_CODEX_FEATURES_ARGUMENTS")
@@ -128,7 +129,9 @@ fn fixture_capability_probe_uses_the_same_local_contract_as_the_codex_adapter() 
         "the fixture must emulate the local capability commands"
     );
     assert!(
-        fixture.contains(".with_codex_program(executable)"),
+        fixture.contains(".with_codex_program(codex_program)")
+            && fixture
+                .contains("#[cfg(not(test))]\n        let codex_program = executable.clone();"),
         "the real adapter proof must use the owned fixture executable"
     );
     assert!(
