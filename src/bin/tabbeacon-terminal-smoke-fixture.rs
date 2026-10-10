@@ -42,6 +42,30 @@ fn fixture_hook_inventory() -> Result<HookInventory, String> {
         .map_err(|_| "owned fixture Hook document could not be written".to_owned())?;
         let executable = env::current_exe()
             .map_err(|_| "fixture executable could not be resolved".to_owned())?;
+        #[cfg(not(test))]
+        let codex_program = executable.clone();
+        #[cfg(test)]
+        let codex_program = {
+            // A Rust unit-test runner cannot serve the fixture's protocol.
+            // Compile the existing isolated probe, never the Owner provider.
+            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/codex_version_probe.rs");
+            let program = root.join(if cfg!(windows) {
+                "codex-probe.exe"
+            } else {
+                "codex-probe"
+            });
+            let output = std::process::Command::new("rustc")
+                .arg(source)
+                .arg("-o")
+                .arg(&program)
+                .output()
+                .map_err(|_| "isolated capability probe compilation failed".to_owned())?;
+            if !output.status.success() {
+                return Err("isolated capability probe compilation failed".to_owned());
+            }
+            program
+        };
         let integration = CodexIntegration::new(
             root.join("codex-home"),
             root.join("state"),
@@ -51,7 +75,7 @@ fn fixture_hook_inventory() -> Result<HookInventory, String> {
         // never probes an Owner Codex installation during visual acceptance;
         // a missing durable fixture receipt remains unproven rather than
         // authorizing external process termination.
-        .with_codex_program(executable);
+        .with_codex_program(codex_program);
         integration
             .setup_with_title_ownership(false)
             .map_err(|_| "isolated readable Hook setup failed".to_owned())?;
