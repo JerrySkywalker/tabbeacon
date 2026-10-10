@@ -759,7 +759,10 @@ impl CodexIntegration {
         ) else {
             return false;
         };
-        if manifest.hooks != expected {
+        if manifest.hooks != expected
+            && !(is_recognized_unnamed_command_manifest(&manifest)
+                && manifest.hooks.iter().any(|hook| hook.event == "Interrupt"))
+        {
             return false;
         }
         let (Ok(hooks), Ok(config)) = (
@@ -1327,7 +1330,9 @@ impl CodexIntegration {
                 };
                 let matching_declaration = manifest.as_ref().and_then(|manifest| {
                     manifest.hooks.iter().find(|declaration| {
-                        declaration.event == *event && declaration.group == *group
+                        declaration.event == *event
+                            && declaration.group == *group
+                            && groups.iter().filter(|live| *live == group).count() == 1
                     })
                 });
                 if matching_declaration.is_some() {
@@ -1355,7 +1360,7 @@ impl CodexIntegration {
                                 declaration,
                                 runtime_continuity,
                             );
-                            entries.push(HookInventoryEntry::new(
+                            let mut entry = HookInventoryEntry::new(
                                 "codex",
                                 inventory_event_id(event),
                                 HookOwner::TabBeacon,
@@ -1366,7 +1371,14 @@ impl CodexIntegration {
                                 inventory_handler_kind(handler),
                                 inventory_timeout(handler),
                                 normalized_hook_hash(declaration),
-                            ));
+                            );
+                            if HOOK_EVENTS.contains(&event.as_str())
+                                && handler.get("statusMessage").and_then(Value::as_str)
+                                    == Some(format!("TabBeacon · {event}").as_str())
+                            {
+                                entry.readable_name = Some(format!("TabBeacon · {event}"));
+                            }
+                            entries.push(entry);
                             continue;
                         } else if contains_tabbeacon_like_group(group) {
                             (
@@ -1472,6 +1484,16 @@ impl CodexIntegration {
                 self.prepare_worker_runtime_image()?;
                 let plan = self.legacy_mcp_migration_plan(tabbeacon_owns_title, profile)?;
                 self.apply_legacy_mcp_migration(&plan)?;
+                return Ok(SetupOutcome::Upgraded);
+            }
+            if is_recognized_unnamed_command_manifest(&manifest) {
+                self.prepare_worker_runtime_image()?;
+                let plan = self.named_command_migration_plan()?;
+                self.apply_legacy_mcp_migration(&plan)?;
+                // Metadata migration preserves the title baseline and trust
+                // bytes. Any separately requested title transition uses the
+                // existing ownership checks after the migration has committed.
+                self.setup_locked(tabbeacon_owns_title, profile)?;
                 return Ok(SetupOutcome::Upgraded);
             }
             let mut config_changed =
@@ -1653,6 +1675,7 @@ impl CodexIntegration {
             hooks_before,
             config_before,
             manifest_before,
+            config_absent: false,
             third_party_groups_preserved: preserved.third_party_groups,
             postinstall_third_party_groups_preserved: preserved.postinstall_third_party_groups,
         })
@@ -1662,6 +1685,51 @@ impl CodexIntegration {
     /// lock. Each member is protected by a private before-image and an owned
     /// digest journal so an interrupted write is recovered before later setup
     /// or repair touches the target again.
+    fn named_command_migration_plan(&self) -> Result<McpMigrationPlan, CodexIntegrationError> {
+        let hooks_before = read_required_safe_bytes(&self.hooks_path())?;
+        let config_bytes = read_optional_bytes(&self.config_path())?;
+        let config_before = config_bytes.clone().unwrap_or_default();
+        let manifest_before = read_required_safe_bytes(&self.manifest_path())?;
+        let mut manifest: IntegrationManifest = serde_json::from_slice(&manifest_before)
+            .map_err(|_| CodexIntegrationError::OwnershipManifest)?;
+        self.validate_manifest_scope(&manifest)?;
+        if !is_recognized_unnamed_command_manifest(&manifest) {
+            return Err(CodexIntegrationError::StaleOwnedHook);
+        }
+        let mut hooks = parse_existing_hooks_bytes(&hooks_before)?;
+        validate_known_hook_wire_shape(&hooks)?;
+        let locations = locate_owned_hooks(&hooks, &manifest.hooks)
+            .map_err(|_| CodexIntegrationError::ModifiedOwnedHook)?;
+        let config = parse_config_bytes(config_bytes.as_deref())?;
+        Self::validate_title_ownership(&manifest, &config)?;
+        let preserved = self.missing_repairable_owned_hooks(&hooks, &manifest)?;
+        if !preserved.missing.is_empty() {
+            return Err(CodexIntegrationError::ModifiedOwnedHook);
+        }
+        let desired = with_readable_hook_names(manifest.hooks.clone());
+        // Replace in place: trust keys and foreign group positions remain
+        // unchanged. Old trusted hashes deliberately become stale.
+        for old in &manifest.hooks {
+            let replacement = desired
+                .iter()
+                .find(|hook| hook.event == old.event)
+                .ok_or(CodexIntegrationError::StaleOwnedHook)?;
+            hooks["hooks"][&old.event][locations[&old.event]] = replacement.group.clone();
+        }
+        manifest.hooks = desired;
+        Ok(McpMigrationPlan {
+            hooks_after: serialize_hooks(&hooks)?,
+            config_after: config_before.clone(),
+            manifest_after: serialize_manifest(&manifest)?,
+            hooks_before,
+            config_before,
+            manifest_before,
+            config_absent: config_bytes.is_none(),
+            third_party_groups_preserved: preserved.third_party_groups,
+            postinstall_third_party_groups_preserved: preserved.postinstall_third_party_groups,
+        })
+    }
+
     fn apply_legacy_mcp_migration(
         &self,
         plan: &McpMigrationPlan,
@@ -1763,6 +1831,7 @@ impl CodexIntegration {
                 before_digest: sha256_digest(before),
                 after_digest: sha256_digest(after),
                 snapshot_path: Some(snapshot_path),
+                absent: name == "config" && plan.config_absent,
             })
         })
         .collect::<Result<Vec<_>, io::Error>>()?;
@@ -1782,11 +1851,18 @@ impl CodexIntegration {
     ) -> Result<(), CodexIntegrationError> {
         if member.before_digest != sha256_digest(before)
             || member.after_digest != sha256_digest(after)
-            || read_required_safe_bytes(&member.path)? != before
+            || migration_member_bytes(member)? != before
         {
             return Err(CodexIntegrationError::ConcurrentTargetDrift);
         }
-        write_if_unchanged(&member.path, before, after)
+        if member.absent {
+            if !before.is_empty() || !after.is_empty() {
+                return Err(CodexIntegrationError::MigrationRecoveryBlocked);
+            }
+            Ok(())
+        } else {
+            write_if_unchanged(&member.path, before, after)
+        }
     }
 
     fn recover_incomplete_mcp_migration(&self) -> Result<(), CodexIntegrationError> {
@@ -1824,7 +1900,7 @@ impl CodexIntegration {
         let digests = journal
             .members
             .iter()
-            .map(|member| read_required_safe_bytes(&member.path).map(|bytes| sha256_digest(&bytes)))
+            .map(|member| migration_member_bytes(member).map(|bytes| sha256_digest(&bytes)))
             .collect::<Result<Vec<_>, _>>()?;
         if journal.phase == McpMigrationPhase::ManifestWritten
             && journal
@@ -1855,7 +1931,7 @@ impl CodexIntegration {
                 .as_deref()
                 .ok_or(CodexIntegrationError::MigrationRecoveryBlocked)?;
             let before = read_required_safe_bytes(snapshot)?;
-            let current = read_required_safe_bytes(&member.path)?;
+            let current = migration_member_bytes(member)?;
             if current != before {
                 write_if_unchanged(&member.path, &current, &before)?;
             }
@@ -1899,6 +1975,10 @@ impl CodexIntegration {
                 || member.path != path
                 || !is_sha256_digest(&member.before_digest)
                 || !is_sha256_digest(&member.after_digest)
+                || (member.absent
+                    && (name != "config"
+                        || member.before_digest != sha256_digest(b"")
+                        || member.after_digest != sha256_digest(b"")))
                 || member.snapshot_path.as_deref()
                     != Some(
                         self.mcp_migration_snapshot_root()
@@ -1936,7 +2016,8 @@ impl CodexIntegration {
                 .map_err(|_| CodexIntegrationError::MigrationRecoveryBlocked)?;
         self.validate_manifest_scope(&manifest)
             .map_err(|_| CodexIntegrationError::MigrationRecoveryBlocked)?;
-        if !is_recognized_legacy_mcp_manifest(&manifest)
+        if !(is_recognized_legacy_mcp_manifest(&manifest)
+            || is_recognized_unnamed_command_manifest(&manifest))
             || !Self::manifest_has_known_owned_declarations(&manifest)
         {
             return Err(CodexIntegrationError::MigrationRecoveryBlocked);
@@ -1975,7 +2056,7 @@ impl CodexIntegration {
         after: bool,
     ) -> Result<(), CodexIntegrationError> {
         for member in &journal.members {
-            let bytes = read_required_safe_bytes(&member.path)
+            let bytes = migration_member_bytes(member)
                 .map_err(|_| CodexIntegrationError::MigrationRecoveryBlocked)?;
             let expected = if after {
                 &member.after_digest
@@ -2631,7 +2712,10 @@ impl CodexIntegration {
                         1,
                         false,
                     )
-                    .is_ok_and(|expected| expected == manifest.hooks)
+                    .is_ok_and(|expected| expected == manifest.hooks
+                        || with_readable_hook_names(expected) == manifest.hooks)
+                    || historical_command_hooks_for_profile(&manifest.executable, profile)
+                        .is_ok_and(|expected| expected == manifest.hooks)
             }),
         }
     }
@@ -2987,6 +3071,20 @@ struct McpMigrationMember {
     before_digest: String,
     after_digest: String,
     snapshot_path: Option<PathBuf>,
+    #[serde(default)]
+    absent: bool,
+}
+
+fn migration_member_bytes(member: &McpMigrationMember) -> Result<Vec<u8>, CodexIntegrationError> {
+    if member.absent {
+        reject_symbolic_link(&member.path)?;
+        if read_optional_bytes(&member.path)?.is_some() {
+            return Err(CodexIntegrationError::ConcurrentTargetDrift);
+        }
+        Ok(Vec::new())
+    } else {
+        read_required_safe_bytes(&member.path)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2997,6 +3095,7 @@ struct McpMigrationPlan {
     config_after: Vec<u8>,
     manifest_before: Vec<u8>,
     manifest_after: Vec<u8>,
+    config_absent: bool,
     third_party_groups_preserved: usize,
     postinstall_third_party_groups_preserved: usize,
 }
@@ -3209,7 +3308,52 @@ fn owned_command_hooks(
     owned_command_hooks_for_events(executable, &HOOK_EVENTS, timeout_seconds, asynchronous)
 }
 
+fn is_recognized_unnamed_command_manifest(manifest: &IntegrationManifest) -> bool {
+    manifest.mcp_server.is_none()
+        && [
+            CodexHookProfile::command_v1(),
+            CodexHookProfile::command_interrupt_v1(),
+        ]
+        .into_iter()
+        .any(|profile| {
+            historical_command_hooks_for_profile(&manifest.executable, profile)
+                .is_ok_and(|hooks| hooks == manifest.hooks)
+                || owned_command_hooks_for_events(
+                    &manifest.executable,
+                    &profile
+                        .lifecycle_events()
+                        .iter()
+                        .map(|event| event.as_str())
+                        .collect::<Vec<_>>(),
+                    1,
+                    false,
+                )
+                .is_ok_and(|hooks| hooks == manifest.hooks)
+        })
+}
+
 fn owned_command_hooks_for_profile(
+    executable: &Path,
+    profile: CodexHookProfile,
+) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
+    Ok(with_readable_hook_names(
+        historical_command_hooks_for_profile(executable, profile)?,
+    ))
+}
+
+fn with_readable_hook_names(mut hooks: Vec<OwnedHook>) -> Vec<OwnedHook> {
+    for hook in &mut hooks {
+        // Interrupt is retained only for an already-admitted profile; the
+        // eleven existing events alone receive the v0.8.2 readable metadata.
+        if HOOK_EVENTS.contains(&hook.event.as_str()) {
+            hook.group["hooks"][0]["statusMessage"] =
+                Value::String(format!("TabBeacon · {}", hook.event));
+        }
+    }
+    hooks
+}
+
+fn historical_command_hooks_for_profile(
     executable: &Path,
     profile: CodexHookProfile,
 ) -> Result<Vec<OwnedHook>, CodexIntegrationError> {
@@ -5111,7 +5255,7 @@ fn trusted_hash<'a>(config: &'a DocumentMut, key: &str) -> Option<&'a str> {
 
 fn normalized_hook_hash(declaration: &OwnedHook) -> String {
     let handler = &declaration.group["hooks"][0];
-    let normalized_handler = match handler.get("type").and_then(Value::as_str) {
+    let mut normalized_handler = match handler.get("type").and_then(Value::as_str) {
         Some("command") => json!({
             "type": "command",
             "command": handler["commandWindows"],
@@ -5127,6 +5271,13 @@ fn normalized_hook_hash(declaration: &OwnedHook) -> String {
         }),
         Some(_) | None => Value::Null,
     };
+    // Pinned Codex normalization preserves this optional handler field.
+    // Historical absence must stay absent rather than serialize as null.
+    if let Some(message) = handler.get("statusMessage")
+        && let Some(object) = normalized_handler.as_object_mut()
+    {
+        object.insert("statusMessage".to_owned(), message.clone());
+    }
     let normalized = json!({
         "event_name": event_key_label(&declaration.event),
         "hooks": [normalized_handler]
@@ -5711,6 +5862,181 @@ mod tests {
             };
             assert_eq!(normalized_hook_hash(&declaration), hash, "event={event}");
         }
+    }
+
+    #[test]
+    fn names_hash_matches_pinned_codex_01620_status_message_identity() {
+        // Codex c1382380 hooks/engine/discovery.rs hook_hash flattens
+        // MatcherGroup, selects commandWindows and preserves statusMessage;
+        // config/fingerprint.rs hashes recursively sorted UTF-8 JSON.
+        let declaration = OwnedHook {
+            event: "Stop".to_owned(),
+            group: json!({"hooks": [{"type": "command",
+                "command": "unused generic command",
+                "commandWindows": r#""C:\tabbeacon-fixture\target\debug\tabbeacon.exe" hook codex || exit /b 0"#,
+                "timeout": 1, "async": false, "statusMessage": "TabBeacon · Stop"}]}),
+        };
+        assert_eq!(
+            normalized_hook_hash(&declaration),
+            "sha256:1704eec01a050db81788221e3f00c730ebab2bec393838686d623fe64f651702"
+        );
+        for profile in [
+            CodexHookProfile::command_v1(),
+            CodexHookProfile::command_interrupt_v1(),
+        ] {
+            let old = super::historical_command_hooks_for_profile(
+                Path::new(r"C:\TabBeacon\tabbeacon.exe"),
+                profile,
+            )
+            .unwrap();
+            let new = super::owned_command_hooks_for_profile(
+                Path::new(r"C:\TabBeacon\tabbeacon.exe"),
+                profile,
+            )
+            .unwrap();
+            assert_eq!(old.len(), new.len());
+            assert_eq!(
+                new.iter()
+                    .filter(|hook| hook.group["hooks"][0].get("statusMessage").is_some())
+                    .count(),
+                11
+            );
+            for (old, new) in old.iter().zip(&new) {
+                let mut comparable = new.clone();
+                comparable.group["hooks"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("statusMessage");
+                assert_eq!(*old, comparable);
+                if old.event != "Interrupt" {
+                    assert_ne!(normalized_hook_hash(old), normalized_hook_hash(new));
+                }
+            }
+        }
+    }
+
+    fn names_migration_fixture(
+        absent_config: bool,
+    ) -> (std::path::PathBuf, CodexIntegration, McpMigrationPlan) {
+        let (root, integration, _) = interrupted_legacy_mcp_migration_fixture();
+        let mut manifest = integration.load_manifest().unwrap().unwrap();
+        manifest.mcp_server = None;
+        manifest.title_owned = false;
+        manifest.hooks = super::historical_command_hooks_for_profile(
+            &manifest.executable,
+            CodexHookProfile::command_v1(),
+        )
+        .unwrap();
+        let mut hooks = json!({"hooks": {}});
+        append_owned_hooks(&mut hooks, &manifest.hooks).unwrap();
+        fs::write(integration.hooks_path(), serialize_hooks(&hooks).unwrap()).unwrap();
+        integration.write_manifest(&manifest).unwrap();
+        if absent_config {
+            fs::remove_file(integration.config_path()).unwrap();
+        } else {
+            fs::write(
+                integration.config_path(),
+                b"# user trust stays byte exact\n",
+            )
+            .unwrap();
+        }
+        let plan = integration.named_command_migration_plan().unwrap();
+        (root, integration, plan)
+    }
+
+    #[test]
+    fn names_transaction_preserves_complete_one_second_interrupt_predecessor() {
+        let (root, integration, _) = names_migration_fixture(false);
+        let mut manifest = integration.load_manifest().unwrap().unwrap();
+        let events = CodexHookProfile::command_interrupt_v1()
+            .lifecycle_events()
+            .iter()
+            .map(|event| event.as_str())
+            .collect::<Vec<_>>();
+        manifest.hooks =
+            super::owned_command_hooks_for_events(&manifest.executable, &events, 1, false).unwrap();
+        let before = manifest.clone();
+        let mut hooks = json!({"hooks": {}});
+        append_owned_hooks(&mut hooks, &manifest.hooks).unwrap();
+        fs::write(integration.hooks_path(), serialize_hooks(&hooks).unwrap()).unwrap();
+        integration.write_manifest(&manifest).unwrap();
+        let plan = integration.named_command_migration_plan().unwrap();
+        let named: super::IntegrationManifest =
+            serde_json::from_slice(&plan.manifest_after).unwrap();
+        assert!(CodexIntegration::manifest_has_known_owned_declarations(
+            &named
+        ));
+        assert_eq!(named.executable, before.executable);
+        assert_eq!(named.hooks.len(), 12);
+        assert_eq!(plan.config_before, plan.config_after);
+        for (old, new) in before.hooks.iter().zip(named.hooks) {
+            let mut metadata_only = new.clone();
+            metadata_only.group["hooks"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("statusMessage");
+            assert_eq!(*old, metadata_only);
+            if old.event == "Interrupt" {
+                assert_eq!(*old, new);
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn names_transaction_rolls_back_partial_writes_preserves_absence_and_refuses_drift() {
+        for absent in [false, true] {
+            for written in 0..=3 {
+                let (root, integration, plan) = names_migration_fixture(absent);
+                let mut journal = integration.begin_mcp_migration(&plan).unwrap();
+                let phases = [
+                    super::McpMigrationPhase::Prepared,
+                    super::McpMigrationPhase::HooksWritten,
+                    super::McpMigrationPhase::ConfigWritten,
+                    super::McpMigrationPhase::ManifestWritten,
+                ];
+                for (member, (before, after)) in journal
+                    .members
+                    .iter()
+                    .zip([
+                        (&plan.hooks_before, &plan.hooks_after),
+                        (&plan.config_before, &plan.config_after),
+                        (&plan.manifest_before, &plan.manifest_after),
+                    ])
+                    .take(written)
+                {
+                    CodexIntegration::write_mcp_migration_member(member, before, after).unwrap();
+                }
+                journal.phase = phases[written];
+                integration.write_mcp_migration_journal(&journal).unwrap();
+                integration.recover_incomplete_mcp_migration().unwrap();
+                assert_eq!(
+                    fs::read(integration.hooks_path()).unwrap(),
+                    if written == 3 {
+                        &plan.hooks_after
+                    } else {
+                        &plan.hooks_before
+                    }
+                    .clone()
+                );
+                assert_eq!(integration.config_path().exists(), !absent);
+                assert!(!integration.mcp_migration_journal_path().exists());
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+        let (root, integration, plan) = names_migration_fixture(true);
+        integration.begin_mcp_migration(&plan).unwrap();
+        fs::write(integration.config_path(), b"foreign concurrent write").unwrap();
+        assert!(integration.recover_incomplete_mcp_migration().is_err());
+        assert_eq!(
+            fs::read(integration.config_path()).unwrap(),
+            b"foreign concurrent write"
+        );
+        assert_eq!(
+            fs::read(integration.hooks_path()).unwrap(),
+            plan.hooks_before
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

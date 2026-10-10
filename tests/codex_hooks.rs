@@ -295,6 +295,10 @@ fn exact_hybrid_declarations(mut session_end: Value) -> Vec<Value> {
     // The historical MCP hybrid keeps its independent one-second command
     // SessionEnd contract even when Windows command-only profiles change.
     session_end["group"]["hooks"][0]["timeout"] = json!(1);
+    session_end["group"]["hooks"][0]
+        .as_object_mut()
+        .expect("historical SessionEnd handler is an object")
+        .remove("statusMessage");
     let mut declarations = [
         ("PreToolUse", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
         ("PermissionRequest", json!({"turn_id":"${turn_id}"})),
@@ -760,7 +764,7 @@ fn canonical_json(value: &Value) -> Value {
 
 fn normalized_codex_hash(event: &str, group: &Value) -> String {
     let handler = &group["hooks"][0];
-    let normalized_handler = match handler["type"].as_str() {
+    let mut normalized_handler = match handler["type"].as_str() {
         Some("command") => json!({
             "type": "command",
             "command": handler["commandWindows"],
@@ -776,6 +780,9 @@ fn normalized_codex_hash(event: &str, group: &Value) -> String {
         }),
         other => panic!("unsupported owned Hook handler type: {other:?}"),
     };
+    if let Some(message) = handler.get("statusMessage") {
+        normalized_handler["statusMessage"] = message.clone();
+    }
     let normalized = json!({
         "event_name": codex_event_key(event),
         "hooks": [normalized_handler]
@@ -868,6 +875,10 @@ fn replace_manifest_owned_declarations_with_legacy(hooks: &mut Value, manifest: 
             .find(|group| **group == prior_group)
             .expect("owned group is present in hooks");
         for group in [live_group, &mut owned["group"]] {
+            group["hooks"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("statusMessage");
             // Exact v0.8.0 predecessor. An arbitrary command whose path
             // disagrees with the manifest is not ownership evidence.
             group["hooks"][0]["timeout"] = json!(1);
@@ -5133,6 +5144,145 @@ fn setup_upgrades_exact_owned_declarations_without_duplicates_or_baseline_loss()
     )
     .expect("uninstalled hooks parse");
     assert_eq!(uninstalled_hooks["hooks"]["Stop"], json!([unrelated_stop]));
+}
+
+#[test]
+fn names_inventory_refuses_duplicate_exact_owned_groups() {
+    let root = TestRoot::new("names-duplicate");
+    let integration = test_integration(&root);
+    integration.setup().unwrap();
+    let path = root.child("codex-home/hooks.json");
+    let mut hooks: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let stop = hooks["hooks"]["Stop"][0].clone();
+    hooks["hooks"]["Stop"].as_array_mut().unwrap().push(stop);
+    fs::write(&path, serde_json::to_vec(&hooks).unwrap()).unwrap();
+    let before = fs::read(&path).unwrap();
+    let inventory = integration.hook_inventory();
+    let stop = inventory
+        .entries
+        .iter()
+        .filter(|entry| entry.event == "stop")
+        .collect::<Vec<_>>();
+    assert!(!stop.is_empty());
+    assert!(
+        stop.iter()
+            .all(|entry| entry.owner != HookOwner::TabBeacon && entry.readable_name.is_none())
+    );
+    assert!(integration.setup().is_err());
+    assert_eq!(fs::read(&path).unwrap(), before);
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One migration keeps the before/after ownership and trust invariants together.
+fn names_migration_preserves_commands_foreign_positions_trust_and_backups() {
+    let root = TestRoot::new("v082-names");
+    let integration = test_integration(&root);
+    let home = root.child("codex-home");
+    fs::create_dir_all(&home).unwrap();
+    let foreign = json!({"hooks": [{"type": "command", "command": "foreign-owner", "statusMessage": "private arbitrary name"}]});
+    fs::write(
+        home.join("hooks.json"),
+        serde_json::to_vec(&json!({"hooks": {"Stop": [foreign.clone()]}})).unwrap(),
+    )
+    .unwrap();
+    integration.setup().unwrap();
+    let manifest_path = root.child("state/integration-v1.json");
+    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    let baseline = manifest.clone();
+    let mut hooks: Value =
+        serde_json::from_slice(&fs::read(home.join("hooks.json")).unwrap()).unwrap();
+    for owned in manifest["hooks"].as_array_mut().unwrap() {
+        let event = owned["event"].as_str().unwrap().to_owned();
+        let original = owned["group"].clone();
+        owned["group"]["hooks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("statusMessage");
+        let live = hooks["hooks"][&event]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|group| **group == original)
+            .unwrap();
+        *live = owned["group"].clone();
+    }
+    fs::write(home.join("hooks.json"), serde_json::to_vec(&hooks).unwrap()).unwrap();
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    install_current_codex_trust_state(&home);
+    let config_before = fs::read(home.join("config.toml")).unwrap();
+    let old_hashes = integration
+        .hook_inventory()
+        .entries
+        .iter()
+        .filter(|entry| entry.owner == HookOwner::TabBeacon)
+        .map(|entry| entry.fingerprint.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(integration.setup().unwrap(), SetupOutcome::Upgraded);
+    assert_eq!(fs::read(home.join("config.toml")).unwrap(), config_before);
+    let current: Value =
+        serde_json::from_slice(&fs::read(home.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(current["hooks"]["Stop"][0], foreign);
+    let current_manifest: Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    for field in ["hooks_backup", "config_backup", "prior_title"] {
+        assert_eq!(current_manifest[field], baseline[field]);
+    }
+    for event in ADMITTED_HOOK_EVENTS {
+        let old = manifest["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|owned| owned["event"] == event)
+            .unwrap();
+        let new = current_manifest["hooks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|owned| owned["event"] == event)
+            .unwrap();
+        assert_eq!(
+            new["group"]["hooks"][0]["statusMessage"],
+            format!("TabBeacon · {event}")
+        );
+        let mut without_name = new["group"].clone();
+        without_name["hooks"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("statusMessage");
+        assert_eq!(without_name, old["group"]);
+    }
+    let inventory = integration.hook_inventory();
+    let owned = inventory
+        .entries
+        .iter()
+        .filter(|entry| entry.owner == HookOwner::TabBeacon)
+        .collect::<Vec<_>>();
+    assert_eq!(owned.len(), 11);
+    assert!(owned.iter().all(|entry| entry.readable_name.is_some()
+        && entry.trust_state == HookTrustState::HashStaleOrChanged
+        && !old_hashes.contains(&entry.fingerprint)));
+    assert!(
+        inventory
+            .entries
+            .iter()
+            .filter(|entry| entry.owner != HookOwner::TabBeacon)
+            .all(|entry| entry.readable_name.is_none())
+    );
+    assert!(
+        !serde_json::to_string(&inventory)
+            .unwrap()
+            .contains("private arbitrary name")
+    );
+    let hooks_before = fs::read(home.join("hooks.json")).unwrap();
+    let manifest_before = fs::read(&manifest_path).unwrap();
+    assert_eq!(integration.setup().unwrap(), SetupOutcome::AlreadyInstalled);
+    assert_eq!(fs::read(home.join("hooks.json")).unwrap(), hooks_before);
+    assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
+    assert_eq!(fs::read(home.join("config.toml")).unwrap(), config_before);
+    integration.uninstall().unwrap();
+    let remaining: Value =
+        serde_json::from_slice(&fs::read(home.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(remaining["hooks"]["Stop"], json!([foreign]));
 }
 
 #[cfg(windows)]

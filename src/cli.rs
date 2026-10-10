@@ -536,7 +536,7 @@ mod upgrade_preflight_tests {
 }
 
 /// Doctor-specific observational flags.
-#[derive(Clone, Copy, Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct DoctorArgs {
     #[command(flatten)]
     pub output: OutputArgs,
@@ -546,6 +546,15 @@ pub struct DoctorArgs {
     /// Execute one exact owned Hook declaration with isolated temporary state.
     #[arg(long)]
     pub probe_hook_runtime: bool,
+    /// Show provider/mode/capability evidence without changing runtime modes.
+    #[arg(long)]
+    pub matrix: bool,
+    /// Filter registered provider evidence (display only).
+    #[arg(long, requires = "matrix")]
+    pub provider: Option<String>,
+    /// Filter a queried topology; does not observe or select the running mode.
+    #[arg(long, requires = "matrix", value_enum)]
+    pub execution_mode: Option<crate::doctor_matrix::ExecutionMode>,
 }
 
 /// Arguments for the package-upgrade preflight.

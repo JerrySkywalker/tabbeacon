@@ -22,6 +22,188 @@ const DEFAULT_WIDTH: usize = 80;
 const MIN_WIDTH: usize = 24;
 const MAX_STATUS_ISSUES: usize = 3;
 
+/// One localized text projection shared by the CLI and existing TUI screens.
+#[must_use]
+pub fn matrix_text(
+    matrix: &crate::doctor_matrix::DoctorMatrix,
+    locale: ResolvedLocale,
+    details: bool,
+) -> String {
+    let (heading, observed, history, scope, source, action) = match locale {
+        ResolvedLocale::EnUs => (
+            "Mode evidence (read-only query)",
+            "observed mode",
+            "Historical evidence only",
+            "scope",
+            "source",
+            "Next",
+        ),
+        ResolvedLocale::ZhCn => (
+            "执行模式证据（只读查询）",
+            "实际观测模式",
+            "仅历史证据",
+            "范围",
+            "来源",
+            "下一步",
+        ),
+    };
+    let mut lines = vec![heading.to_owned()];
+    for row in &matrix.rows {
+        lines.push(format!(
+            "{} / {} · {observed}={}",
+            row.provider,
+            row.execution_mode.as_str(),
+            row.observed_execution_mode.as_str()
+        ));
+        for fact in &row.evidence {
+            let label = matrix_capability_label(fact.capability, locale);
+            lines.push(format!(
+                "  {label}: {} [{scope}: {}]",
+                fact.verdict.as_str(),
+                fact.scope
+            ));
+            if details {
+                lines.push(format!("  {source}: {}", fact.source));
+                lines.push(format!("  {}", matrix_reason(fact, locale)));
+            }
+        }
+        if details {
+            let safe_action = match (locale, row.provider.as_str()) {
+                (ResolvedLocale::ZhCn, "codex") => {
+                    "检查 doctor 与 /hooks，由 Owner 审核新哈希；历史非 Daemon 证明仅适用于 --no-daemon，原生 Daemon 等待上游能力。"
+                }
+                (ResolvedLocale::ZhCn, _) => {
+                    "检查已注册能力与准入；在获得 Owner 的模式证据前，不宣称当前终端显示已通过。"
+                }
+                (ResolvedLocale::EnUs, _) => row.safe_action,
+            };
+            lines.push(format!("  {action}: {safe_action}"));
+        }
+    }
+    for row in &matrix.historical_evidence {
+        lines.push(format!(
+            "{history}: {} {} v{} [{}]",
+            row.provider,
+            row.execution_mode.as_str(),
+            row.provider_version,
+            row.scope
+        ));
+        for fact in &row.capabilities {
+            lines.push(format!(
+                "  {}: {}",
+                matrix_capability_label(fact.capability, locale),
+                fact.verdict.as_str()
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+fn matrix_capability_label(capability: &str, locale: ResolvedLocale) -> &str {
+    match (locale, capability) {
+        (ResolvedLocale::ZhCn, "declarations") => "声明",
+        (ResolvedLocale::ZhCn, "trust") => "信任",
+        (ResolvedLocale::ZhCn, "provider_delivery") => "真实提供方交付",
+        (ResolvedLocale::ZhCn, "execution_mode") => "执行模式",
+        (ResolvedLocale::ZhCn, "terminal_binding") => "当前视图终端绑定",
+        (ResolvedLocale::ZhCn, "presentation_route") => "显示通路",
+        (ResolvedLocale::ZhCn, "owner_visual") => "Owner 可见效果",
+        _ => capability,
+    }
+}
+
+fn matrix_reason(fact: &crate::doctor_matrix::MatrixEvidence, locale: ResolvedLocale) -> &str {
+    if locale == ResolvedLocale::EnUs {
+        return fact.reason;
+    }
+    match fact.scope {
+        "pinned_upstream_contract" => {
+            "共享 Daemon 缺少可信当前视图终端通路；真实交付及现场失败分支仍未证实。"
+        }
+        "static_inspection" => "静态声明与信任状态不能证明真实交付或当前终端可见效果。",
+        _ => "缺少当前模式及视图证据；版本、默认设置、环境和隔离探针均不足以证明。",
+    }
+}
+
+/// Compact details retain source, scope and safe action in a narrow TUI.
+#[must_use]
+pub fn matrix_tui_text(
+    matrix: &crate::doctor_matrix::DoctorMatrix,
+    locale: ResolvedLocale,
+) -> String {
+    let mut lines = Vec::new();
+    for row in &matrix.rows {
+        lines.push(format!(
+            "{} / {} · observed_mode={}",
+            row.provider,
+            row.execution_mode.as_str(),
+            row.observed_execution_mode.as_str()
+        ));
+        let safe_action = match locale {
+            ResolvedLocale::EnUs => format!("Read-only · Next: {}", row.safe_action),
+            ResolvedLocale::ZhCn if row.provider == "codex" =>
+                "只读 · 下一步：doctor 与 /hooks；Owner 手动审核新哈希。历史无 Daemon 证据仅限 --no-daemon；原生 Daemon 等待上游能力。".to_owned(),
+            ResolvedLocale::ZhCn =>
+                "只读 · 下一步：查看已登记能力和准入；用 Owner 模式证据确认后才可声称真实显示。".to_owned(),
+        };
+        for fact in row
+            .evidence
+            .iter()
+            .filter(|fact| matches!(fact.capability, "terminal_binding" | "presentation_route"))
+            .chain(row.evidence.iter().filter(|fact| {
+                !matches!(fact.capability, "terminal_binding" | "presentation_route")
+            }))
+        {
+            lines.push(format!(
+                "{}: {} [{}]",
+                matrix_capability_label(fact.capability, locale),
+                fact.verdict.as_str(),
+                fact.scope
+            ));
+        }
+        if let Some(binding) = row
+            .evidence
+            .iter()
+            .find(|fact| fact.capability == "terminal_binding")
+        {
+            lines.push(format!("source / 来源: {}", binding.source));
+            lines.push(matrix_reason(binding, locale).to_owned());
+        }
+        lines.push(safe_action);
+    }
+    for row in &matrix.historical_evidence {
+        lines.push(format!(
+            "History / 历史: {} {} v{} [{}]",
+            row.provider,
+            row.execution_mode.as_str(),
+            row.provider_version,
+            row.scope
+        ));
+    }
+    lines.join("\n")
+}
+
+/// Width-aware Human rendering uses the existing renderer and color policy.
+#[must_use]
+pub fn render_human_matrix(
+    matrix: &crate::doctor_matrix::DoctorMatrix,
+    locale: ResolvedLocale,
+    width: usize,
+) -> Vec<HumanLine> {
+    let section =
+        matrix_text(matrix, locale, true)
+            .lines()
+            .fold(HumanSection::new(None), |section, line| {
+                section.with_message(HumanMessage::plain(
+                    HumanText::literal(line),
+                    HumanTone::Dim,
+                ))
+            });
+    HumanRenderer::new(locale, normalize_width(width)).render(
+        &HumanDocument::new(HumanText::literal("Doctor matrix"), None).with_section(section),
+    )
+}
+
 /// Returns the current text width without entering a terminal UI mode.
 #[must_use]
 pub fn terminal_width() -> usize {

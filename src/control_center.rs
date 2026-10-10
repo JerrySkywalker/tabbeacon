@@ -214,6 +214,8 @@ pub struct ControlCenterRefresh {
     pub hooks: HookInventory,
     /// Registered provider capability and admission projections.
     pub integrations: ProviderRegistry,
+    /// Mode-scoped evidence from the same read-only diagnostic pass.
+    pub doctor_matrix: crate::doctor_matrix::DoctorMatrix,
     /// Read-only safe provenance behind a potential title.
     pub title_explanation: TitleExplanation,
 }
@@ -307,6 +309,10 @@ pub struct ControlCenterApp {
     sessions: Option<SessionsOverview>,
     hooks: HookInventory,
     integrations: ProviderRegistry,
+    doctor_matrix: crate::doctor_matrix::DoctorMatrix,
+    diagnostic_provider: CliTarget,
+    diagnostic_mode: crate::doctor_matrix::ExecutionMode,
+    details_scroll: u16,
     title_explanation: TitleExplanation,
     current_workspace_override: Option<String>,
     workspace_draft: Option<String>,
@@ -350,6 +356,12 @@ impl ControlCenterApp {
             sessions: None,
             hooks: HookInventory::default(),
             integrations: ProviderRegistry::default(),
+            doctor_matrix: crate::doctor_matrix::DoctorMatrix::from_registry(
+                &ProviderRegistry::default(),
+            ),
+            diagnostic_provider: CliTarget::Codex,
+            diagnostic_mode: crate::doctor_matrix::ExecutionMode::Unknown,
+            details_scroll: 0,
             title_explanation: TitleExplanation::default(),
             current_workspace_override: None,
             workspace_draft: None,
@@ -394,6 +406,7 @@ impl ControlCenterApp {
     /// Supplies the registered, read-only provider integration projection.
     #[must_use]
     pub fn with_integrations(mut self, integrations: ProviderRegistry) -> Self {
+        self.doctor_matrix = crate::doctor_matrix::DoctorMatrix::from_registry(&integrations);
         self.integrations = integrations;
         self
     }
@@ -500,6 +513,7 @@ impl ControlCenterApp {
         self.provider_capabilities = refresh.provider_capabilities;
         self.hooks = refresh.hooks;
         self.integrations = refresh.integrations;
+        self.doctor_matrix = refresh.doctor_matrix;
         self.title_explanation = refresh.title_explanation;
         if let Some(workspace) = refresh.workspace {
             let override_alias = workspace
@@ -594,6 +608,9 @@ impl ControlCenterApp {
                 _ => {}
             }
         }
+        if self.handle_diagnostic_query_key(key) || self.handle_details_scroll_key(key) {
+            return ControlCenterCommand::None;
+        }
         if self.screen == Screen::Integration {
             match key {
                 KeyCode::Char('1') => self.select_provider(CliTarget::Codex),
@@ -635,6 +652,68 @@ impl ControlCenterApp {
             _ => {}
         }
         ControlCenterCommand::None
+    }
+
+    fn handle_diagnostic_query_key(&mut self, key: KeyCode) -> bool {
+        if self.screen == Screen::Diagnostics {
+            let provider = match key {
+                KeyCode::Char('1') => Some(CliTarget::Codex),
+                KeyCode::Char('2') => Some(CliTarget::Agy),
+                KeyCode::Char('3') => Some(CliTarget::Cursor),
+                _ => None,
+            };
+            if let Some(provider) = provider
+                && self.diagnostic_provider != provider
+            {
+                self.diagnostic_provider = provider;
+                self.diagnostic_mode = crate::doctor_matrix::ExecutionMode::Unknown;
+            }
+            if key == KeyCode::Char('m') {
+                let modes = [
+                    crate::doctor_matrix::ExecutionMode::Unknown,
+                    if self.diagnostic_provider == CliTarget::Codex {
+                        crate::doctor_matrix::ExecutionMode::Embedded
+                    } else {
+                        crate::doctor_matrix::ExecutionMode::Direct
+                    },
+                    crate::doctor_matrix::ExecutionMode::SharedDaemon,
+                ];
+                let index = modes
+                    .iter()
+                    .position(|mode| *mode == self.diagnostic_mode)
+                    .unwrap_or(0);
+                self.diagnostic_mode = modes[(index + 1) % modes.len()];
+            }
+            if matches!(key, KeyCode::Char('1' | '2' | '3' | 'm')) {
+                self.details_scroll = 0;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn handle_details_scroll_key(&mut self, key: KeyCode) -> bool {
+        if matches!(
+            self.screen,
+            Screen::Integration | Screen::Diagnostics | Screen::Hooks
+        ) {
+            match key {
+                KeyCode::PageDown => {
+                    self.details_scroll = self.details_scroll.saturating_add(8);
+                    return true;
+                }
+                KeyCode::PageUp => {
+                    self.details_scroll = self.details_scroll.saturating_sub(8);
+                    return true;
+                }
+                KeyCode::Home => {
+                    self.details_scroll = 0;
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn select_provider(&mut self, provider: CliTarget) {
@@ -881,6 +960,7 @@ impl ControlCenterApp {
         let mut navigation = TopLevelNavigation::new(self.screen);
         if navigation.move_by(&Screen::ALL, offset) {
             self.screen = navigation.current();
+            self.details_scroll = 0;
         }
     }
 
@@ -1228,6 +1308,8 @@ where
 #[allow(clippy::struct_excessive_bools)] // Receipt fields stay independently auditable.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalSmokeReport {
+    /// Existing Diagnostics rendered a blocked mode with healthy static state.
+    pub doctor_matrix_exercised: bool,
     /// The fixture rendered the required live Control Center screens in order.
     pub screens_visited: usize,
     /// A bounded operational refresh was merged without persistence authority.
@@ -1299,6 +1381,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         sessions: SessionsOverview::default(),
         hooks: app.hooks.clone(),
         integrations: app.integrations.clone(),
+        doctor_matrix: app.doctor_matrix.clone(),
         title_explanation: TitleExplanation::default(),
     };
     app.merge_refresh(refresh);
@@ -1408,6 +1491,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
             integrations_visited,
             "fixture did not render the admitted provider capability projection",
         )?;
+        capture_smoke_ui("integrations", &app)?;
 
         let _ = app.handle_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         let help_overlay_exercised = app.overlay_open();
@@ -1432,6 +1516,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(app.screen() == Screen::Hooks, "fixture did not reach Hooks")?;
         draw(&mut session, &app)?;
+        capture_smoke_ui("hooks", &app)?;
         let hook_inventory_visited = true;
 
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -1439,7 +1524,21 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
             app.screen() == Screen::Diagnostics,
             "fixture did not reach Diagnostics",
         )?;
+        let _ = app.handle_key(KeyCode::Char('m'));
+        let _ = app.handle_key(KeyCode::Char('m'));
+        let doctor_matrix_exercised = app.snapshot.issues.is_empty()
+            && diagnostics_lines(&app).contains("blocked_upstream")
+            && !app.dirty();
+        invariant(
+            doctor_matrix_exercised,
+            "fixture did not prove healthy-static blocked-daemon evidence",
+        )?;
         draw(&mut session, &app)?;
+        capture_smoke_ui("diagnostics-en", &app)?;
+        app.base_locale = ResolvedLocale::ZhCn;
+        draw(&mut session, &app)?;
+        capture_smoke_ui("diagnostics-zh", &app)?;
+        app.base_locale = original_locale;
 
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(
@@ -1501,6 +1600,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         )?;
 
         Ok(TerminalSmokeReport {
+            doctor_matrix_exercised,
             screens_visited: 8,
             live_refresh_merged,
             workspace_and_sessions_visited,
@@ -1525,6 +1625,45 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
 }
 
 /// Central owner of raw mode, alternate screen, drawing, and restoration.
+#[cfg(feature = "terminal-smoke-fixture")]
+fn capture_smoke_ui(label: &str, _app: &ControlCenterApp) -> io::Result<()> {
+    #[cfg(windows)]
+    if let (Some(title), Some(root)) = (
+        std::env::var_os("TABBEACON_TUI_SMOKE_CAPTURE_TITLE"),
+        std::env::var_os("TABBEACON_TUI_SMOKE_CAPTURE_ROOT"),
+    ) {
+        use crate::visual::{CaptureBackend, TargetLocator};
+        let title = title.to_string_lossy();
+        let run_id = title
+            .strip_prefix("TB-WT-ANCHOR-")
+            .ok_or_else(|| io::Error::other("capture requires the owned smoke anchor"))?;
+        let dump = crate::visual::WindowsUiaLocator
+            .locate(run_id, &title)
+            .map_err(io::Error::other)?;
+        let target = crate::visual::OwnedWindowCaptureTarget::new(
+            dump.native_window_id
+                .ok_or_else(|| io::Error::other("owned capture HWND unavailable"))?,
+            dump.window_bounds
+                .ok_or_else(|| io::Error::other("owned capture bounds unavailable"))?,
+        )
+        .map_err(io::Error::other)?;
+        let frame = crate::visual::PrintWindowCaptureBackend
+            .capture(&target)
+            .map_err(io::Error::other)?;
+        let writer =
+            crate::visual::EvidenceWriter::create(root, label).map_err(io::Error::other)?;
+        writer
+            .write_png("screen", &frame)
+            .map_err(io::Error::other)?;
+        writer
+            .write_integrity_manifest()
+            .map_err(io::Error::other)?;
+    }
+    #[cfg(not(windows))]
+    let _ = label;
+    Ok(())
+}
+
 struct TerminalSession {
     terminal: ratatui::Terminal<CrosstermBackend<io::Stdout>>,
     guard: TerminalGuard<CrosstermTerminalLifecycle>,
@@ -1804,7 +1943,7 @@ fn content(app: &ControlCenterApp) -> Paragraph<'static> {
     if app.overlay.is_open() {
         return Paragraph::new(overlay_lines(app));
     }
-    Paragraph::new(match app.screen {
+    let paragraph = Paragraph::new(match app.screen {
         Screen::Overview => overview_lines(app),
         Screen::Appearance => appearance_lines(app),
         Screen::Workspace => workspace_lines(app),
@@ -1814,7 +1953,17 @@ fn content(app: &ControlCenterApp) -> Paragraph<'static> {
         Screen::Diagnostics => diagnostics_lines(app),
         Screen::Interface => interface_lines(app),
         Screen::Preview => preview_lines(app),
-    })
+    });
+    if matches!(
+        app.screen,
+        Screen::Integration | Screen::Diagnostics | Screen::Hooks
+    ) {
+        paragraph
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .scroll((app.details_scroll, 0))
+    } else {
+        paragraph
+    }
 }
 
 fn overlay_lines(app: &ControlCenterApp) -> String {
@@ -2258,7 +2407,30 @@ fn interface_lines(app: &ControlCenterApp) -> String {
     )
 }
 
+fn integration_mode_summary(app: &ControlCenterApp) -> String {
+    app.doctor_matrix
+        .rows
+        .iter()
+        .filter(|row| row.provider == app.selected_provider.as_str())
+        .map(|row| {
+            let binding = row
+                .evidence
+                .iter()
+                .find(|fact| fact.capability == "terminal_binding")
+                .map_or("unproven", |fact| fact.verdict.as_str());
+            format!(
+                "{} / {}: terminal_binding={binding} · observed_mode={}",
+                row.provider,
+                row.execution_mode.as_str(),
+                row.observed_execution_mode.as_str()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn integration_lines(app: &ControlCenterApp) -> String {
+    let mode_summary = integration_mode_summary(app);
     let integrations = app.integrations
         .providers
         .iter()
@@ -2344,20 +2516,26 @@ fn integration_lines(app: &ControlCenterApp) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "Provider preferences / 提供方偏好\n1 Codex · 2 Agy · 3 Cursor · ←/→ mode · r inherit · v preview\nSelected / 已选: {} · {}\n{provider_preferences}\nSaved preference is not live application; old output may remain until the next owned event or the old tab closes / 已保存偏好不代表当前会话生效，旧输出可能保留至下次自有事件或旧标签关闭\n\n{integrations}",
+        "Mode evidence / 执行模式证据\n{mode_summary}\nDiagnostics: 1/2/3 provider · m execution mode / 诊断页：1/2/3 提供方 · m 执行模式\n\nProvider preferences / 提供方偏好\n1 Codex · 2 Agy · 3 Cursor · ←/→ mode · r inherit · v preview\nSelected / 已选: {} · {}\n{provider_preferences}\nSaved preference is not live application; old output may remain until the next owned event or the old tab closes / 已保存偏好不代表当前会话生效，旧输出可能保留至下次自有事件或旧标签关闭\n\n{integrations}",
         app.selected_provider.as_str(),
         provider_mode_label(app.selected_provider_mode),
     )
 }
 
 fn hooks_lines(app: &ControlCenterApp) -> String {
-    app.hooks.human_table(app.locale())
+    app.hooks.tui_table(app.locale())
 }
 
 fn diagnostics_lines(app: &ControlCenterApp) -> String {
+    let matrix = app.doctor_matrix.filtered(
+        Some(app.diagnostic_provider.as_str()),
+        Some(app.diagnostic_mode),
+    );
+    let matrix_text = crate::human_diagnostics::matrix_tui_text(&matrix, app.locale());
+    let controls = "1 Codex · 2 Agy · 3 Cursor · m mode / 执行模式 · PgUp/PgDn scroll / 滚动";
     if app.snapshot.issues.is_empty() {
         return format!(
-            "✓ {}\n\n{}",
+            "{controls}\n{matrix_text}\n\n✓ {} (static / 静态)\n\n{}",
             catalog(app.locale(), HumanMessageKey::Healthy),
             catalog(app.locale(), HumanMessageKey::NoAutomatedAction)
         );
@@ -2416,11 +2594,11 @@ fn diagnostics_lines(app: &ControlCenterApp) -> String {
         .any(|plan| plan.safety == ActionSafety::PreviewableSafeRepair)
     {
         format!(
-            "{issues}\n\n{}",
+            "{issues}\n\n{}\n\n{controls}\n{matrix_text}",
             catalog(app.locale(), HumanMessageKey::RepairPreviewHint)
         )
     } else {
-        issues
+        format!("{issues}\n\n{controls}\n{matrix_text}")
     }
 }
 
@@ -2645,6 +2823,61 @@ mod tests {
     }
 
     #[test]
+    fn matrix_tui_healthy_static_exposes_blocked_daemon_without_staging_changes() {
+        let mut app = app().with_integrations(ProviderRegistry::codex_observation(
+            Some("0.162.0"),
+            true,
+            true,
+            true,
+        ));
+        app.screen = Screen::Diagnostics;
+        let before = app.current();
+        app.selected_provider_mode = Some(PresentationMode::ColorOnly);
+        app.handle_key(KeyCode::Char('m'));
+        app.handle_key(KeyCode::Char('m'));
+        assert_eq!(
+            app.diagnostic_mode,
+            crate::doctor_matrix::ExecutionMode::SharedDaemon
+        );
+        let text = super::diagnostics_lines(&app);
+        assert!(text.contains("blocked_upstream"));
+        assert!(text.contains("pinned_upstream_contract"));
+        assert!(text.contains("source / 来源"));
+        assert!(text.contains("/hooks"));
+        assert!(!app.dirty());
+        assert_eq!(app.current(), before);
+        app.handle_key(KeyCode::Char('2'));
+        assert_eq!(app.selected_provider, CliTarget::Codex);
+        assert_eq!(
+            app.selected_provider_mode,
+            Some(PresentationMode::ColorOnly)
+        );
+        assert_eq!(
+            app.diagnostic_mode,
+            crate::doctor_matrix::ExecutionMode::Unknown
+        );
+        assert!(!super::diagnostics_lines(&app).contains("blocked_upstream"));
+        assert_eq!(Screen::ALL.len(), 9);
+        for locale in [ResolvedLocale::EnUs, ResolvedLocale::ZhCn] {
+            app.base_locale = locale;
+            app.diagnostic_mode = crate::doctor_matrix::ExecutionMode::Unknown;
+            app.handle_key(KeyCode::Char('1'));
+            app.handle_key(KeyCode::Char('m'));
+            app.handle_key(KeyCode::Char('m'));
+            for width in [40, 100] {
+                let mut terminal = Terminal::new(TestBackend::new(width, 32)).unwrap();
+                terminal
+                    .draw(|frame| super::render_with_no_color(frame, &app, true))
+                    .unwrap();
+                let rendered = format!("{:?}", terminal.backend().buffer());
+                assert!(rendered.contains("shared_daemon"));
+                assert!(rendered.contains("blocked_upstream"));
+                assert!(!rendered.contains('\u{1b}'));
+            }
+        }
+    }
+
+    #[test]
     fn integration_screen_reports_provider_preference_without_claiming_live_application() {
         use crate::presentation_policy::{
             ApplicationStatus, PresentationCapabilities, PresentationMode, PresentationOverride,
@@ -2792,6 +3025,9 @@ mod tests {
             sessions: SessionsOverview::default(),
             hooks: HookInventory::default(),
             integrations: ProviderRegistry::default(),
+            doctor_matrix: crate::doctor_matrix::DoctorMatrix::from_registry(
+                &ProviderRegistry::default(),
+            ),
             title_explanation: TitleExplanation::default(),
         }
     }
@@ -2904,6 +3140,9 @@ mod tests {
             hooks: HookInventory::default(),
             integrations: ProviderRegistry::default(),
             title_explanation: TitleExplanation::default(),
+            doctor_matrix: crate::doctor_matrix::DoctorMatrix::from_registry(
+                &ProviderRegistry::default(),
+            ),
         });
         app.screen = Screen::Sessions;
         let mut terminal = Terminal::new(TestBackend::new(100, 20)).expect("test terminal starts");

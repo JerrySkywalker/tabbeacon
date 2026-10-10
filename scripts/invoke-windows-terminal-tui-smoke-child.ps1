@@ -18,7 +18,8 @@ param(
     [ValidatePattern('^[A-F0-9]{64}$')]
     [string]$BinarySha256,
     [Parameter(Mandatory = $true)]
-    [string]$RunId
+    [string]$RunId,
+    [string]$CaptureWindowTitle = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -43,6 +44,10 @@ function Write-AtomicLines {
 }
 
 $env:TABBEACON_TUI_SMOKE_RESULT_PATH = $FixtureResultPath
+if ($CaptureWindowTitle) {
+    $env:TABBEACON_TUI_SMOKE_CAPTURE_TITLE = $CaptureWindowTitle
+    $env:TABBEACON_TUI_SMOKE_CAPTURE_ROOT = Split-Path -Parent $FixtureResultPath
+}
 & $BinaryPath
 $fixtureExitCode = $LASTEXITCODE
 $fixtureResultPresent = Test-Path -LiteralPath $FixtureResultPath

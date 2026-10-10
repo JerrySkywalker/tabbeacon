@@ -1,5 +1,21 @@
 # Troubleshooting
 
+## Hooks are healthy but the current tab does not update
+
+Use `tabbeacon doctor --matrix --provider codex --execution-mode shared_daemon`
+(or `--json`/`--plain`) to separate static declarations/trust from provider
+delivery, observed mode, current-view binding, route and Owner visual evidence.
+The filter is a read-only query; it does not detect or switch the current mode.
+Shared-daemon terminal binding remains blocked upstream. Historical 0.162.0
+`--no-daemon` proof and isolated runtime probes do not qualify a current daemon
+session. Unknown modes remain unproven, not a fabricated global provider failure.
+
+The v0.8.2 names migration changes normalized trust hashes. The Owner must review
+the eleven readable `TabBeacon · <Event>` handlers normally in native `/hooks`;
+setup does not automatically authorize them. In the existing TUI Diagnostics
+page, `1`/`2`/`3` select the provider and `m` cycles execution-mode evidence.
+Daily configuration, trust and provider mode changes require Owner authority.
+
 Start with observation, not mutation. TabBeacon is fail-open for coding-agent
 use and preserves configuration or processes when ownership is not proven.
 

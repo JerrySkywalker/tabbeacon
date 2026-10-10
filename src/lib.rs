@@ -10,6 +10,7 @@ pub mod convergence;
 pub mod convergence_evidence;
 pub mod core;
 pub mod diagnostics;
+pub mod doctor_matrix;
 pub mod guided_setup;
 pub mod hook_inventory;
 pub mod human_diagnostics;

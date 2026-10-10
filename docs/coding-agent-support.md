@@ -12,6 +12,14 @@ TabBeacon normalizes admitted provider evidence into provider-neutral state. Cap
 
 ## Codex evidence boundary
 
+The v0.8.2 candidate adds `doctor --matrix` to query registered provider,
+execution-mode and evidence boundaries. Eleven readable Hook names require new
+manual `/hooks` review. Codex 0.162.0 historical `--no-daemon` visual acceptance
+does not establish default shared-daemon support: current mode/delivery is
+unproven, and a trusted current-view terminal sink is blocked upstream. Agy and
+Cursor use their existing registered capability/admission; uncharacterized
+direct/daemon modes stay unproven. No new provider admission is implied.
+
 The current observed Codex 0.159.0 command-Hook profile has 11 baseline events. It does not inherit the older 0.157.1 real Interrupt proof. That real Interrupt, recovery, completion and normal exit were accepted under their original version/profile and source/binary pins. In the audited 0.157.1 original-command Hook path, Warning, Failed and the original HTTP 404 class have no authoritative structured signal. They may leave stale tab state; detection is **not PASS**, and [Issue #116](https://github.com/JerrySkywalker/tabbeacon/issues/116) stays **OPEN**. TabBeacon does not infer failure from output text, ANSI or transcripts. Missing or incompatible required capabilities fail safely; a newer version number alone does not deny support.
 
 ## Agy title boundary

@@ -2,6 +2,19 @@
 
 All notable changes to TabBeacon will be documented here.
 
+## [0.8.2] - Unreleased scoped candidate
+
+- Name the eleven existing Codex Hooks `TabBeacon · <Event>` with handler-level
+  `statusMessage`. Preserve commands, events, matcher and timeout semantics;
+  exact complete historical ownership is required for migration. Changed trust
+  hashes require fresh manual native `/hooks` review; trust is never granted by setup.
+- Add read-only `doctor --matrix` with provider and execution-mode filters and
+  shared Human/Plain/JSON evidence. Static declaration/trust health, registered
+  capabilities, current-view evidence and historical no-daemon proof stay separate.
+- Integrate mode evidence and readable owned names into the existing Integrations,
+  Diagnostics and Hooks pages. Native shared-daemon terminal routing remains
+  blocked on upstream capability; no daemon support or publication is claimed.
+
 ## [0.8.1] - Unreleased compatibility hotfix candidate
 
 - Recover the originating native Codex console for Windows command Hooks launched

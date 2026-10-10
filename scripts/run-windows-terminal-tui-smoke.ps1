@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory = $true)]
     [string]$BinaryPath,
+    [string]$LifecycleBinaryPath = '',
     [Parameter(Mandatory = $true)]
     [string]$RepositoryRoot,
     [Parameter(Mandatory = $true)]
@@ -10,6 +11,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$EvidenceDirectory,
     [string]$RunId = 'TB-G61-REAL-WT-SMOKE',
+    [switch]$CaptureUi,
     [ValidateRange(10, 120)]
     [int]$TimeoutSeconds = 60
 )
@@ -64,6 +66,10 @@ function Write-AtomicLines {
 }
 
 $resolvedBinary = (Resolve-Path -LiteralPath $BinaryPath).Path
+$lifecycleBinary = if ($LifecycleBinaryPath) { $LifecycleBinaryPath } else {
+    Join-Path (Split-Path -Parent $resolvedBinary) 'tabbeacon.exe'
+}
+$resolvedLifecycleBinary = (Resolve-Path -LiteralPath $lifecycleBinary).Path
 $resolvedRepository = (Resolve-Path -LiteralPath $RepositoryRoot).Path
 $checkedOutHead = git -C $resolvedRepository rev-parse HEAD
 if ($LASTEXITCODE -ne 0 -or $checkedOutHead -ne $ExpectedHead) {
@@ -96,6 +102,7 @@ foreach ($path in @($sentinelPath, $fixtureResultPath, $completionReceiptPath, $
 }
 
 $binarySha256 = (Get-FileHash -LiteralPath $resolvedBinary -Algorithm SHA256).Hash
+$lifecycleBinarySha256 = (Get-FileHash -LiteralPath $resolvedLifecycleBinary -Algorithm SHA256).Hash
 $script:temporaryWtOwnershipPath = $null
 $script:temporaryWindowCreated = $false
 $script:temporaryWtCleanupReceipt = $null
@@ -118,14 +125,14 @@ function Invoke-ExactOwnedTemporaryWtCleanup {
         return
     }
     try {
-        $cleanupOutput = & $resolvedBinary '__temporary-wt-cleanup-v1' `
+        $cleanupOutput = & $resolvedLifecycleBinary '__temporary-wt-cleanup-v1' `
             $script:temporaryWtOwnershipPath $script:temporaryWtProductDisposition 2>&1
         $cleanupLine = @($cleanupOutput | ForEach-Object { $_.ToString() } |
             Where-Object { $_.TrimStart().StartsWith('{') }) | Select-Object -Last 1
         if ($null -eq $cleanupLine) { throw 'temporary_wt_cleanup_receipt_missing' }
         $script:temporaryWtCleanupReceipt = $cleanupLine | ConvertFrom-Json
         if ($script:temporaryWtCleanupReceipt.temporary_wt_cleanup -ne 'PASS') {
-            $retryOutput = & $resolvedBinary '__temporary-wt-retry-cleanup-v1' `
+            $retryOutput = & $resolvedLifecycleBinary '__temporary-wt-retry-cleanup-v1' `
                 $script:temporaryWtOwnershipPath $PID 2>&1
             $retryLine = @($retryOutput | ForEach-Object { $_.ToString() } |
                 Where-Object { $_.TrimStart().StartsWith('{') }) | Select-Object -Last 1
@@ -152,7 +159,7 @@ trap {
     throw
 }
 
-& $resolvedBinary '__temporary-wt-recover-v1' $resolvedEvidence | Out-Null
+& $resolvedLifecycleBinary '__temporary-wt-recover-v1' $resolvedEvidence | Out-Null
 if ($LASTEXITCODE -ne 0) {
     throw 'Stale exact-owned Windows Terminal recovery refused'
 }
@@ -216,6 +223,9 @@ $arguments = @(
     '-BinarySha256', $binarySha256,
     '-RunId', $RunId
 )
+if ($CaptureUi) {
+    $arguments += @('-CaptureWindowTitle', $windowTitle)
+}
 
 # `wt.exe` is only a one-shot launcher. Completion is established by the
 # receipt written by the owned terminal child, not by launcher lifetime,
@@ -225,7 +235,7 @@ $wtLauncher = Start-Process -FilePath $wtCommand.Source -ArgumentList $arguments
 $script:temporaryWindowCreated = $true
 $wtLauncherProcessId = $wtLauncher.Id
 $wtLauncher.Dispose()
-$registrationOutput = & $resolvedBinary '__temporary-wt-register-v1' `
+$registrationOutput = & $resolvedLifecycleBinary '__temporary-wt-register-v1' `
     $resolvedEvidence $lifecycleRunId $windowTitle $windowRoutingId $PID 2>&1
 if ($LASTEXITCODE -ne 0) {
     throw 'Exact-owned Windows Terminal registration failed'
@@ -397,6 +407,7 @@ $receipt = @(
     "EXPECTED_HEAD=$ExpectedHead"
     "CHECKED_OUT_HEAD=$checkedOutHead"
     "BINARY_SHA256=$binarySha256"
+    "LIFECYCLE_BINARY_SHA256=$lifecycleBinarySha256"
     'SMOKE_METHOD=feature-gated deterministic app events in disposable real wt.exe with atomic child completion receipt'
     "WT_LAUNCHER_PROCESS_ID=$wtLauncherProcessId"
     'WINDOWS_TERMINAL_INTERACTIVE_BOUND_BY=WT_SESSION_AND_TTY'

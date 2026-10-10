@@ -220,11 +220,17 @@ fn dispatch(cli: Cli) -> ExitCode {
             output,
             probe_title,
             probe_hook_runtime,
+            matrix,
+            provider,
+            execution_mode,
         })) => doctor(
             output.mode(),
             probe_title,
             probe_hook_runtime,
             output.language.preference(),
+            matrix,
+            provider.as_deref(),
+            execution_mode,
         ),
         Some(Command::Status(output)) => status(output.mode(), output.language.preference()),
         Some(Command::Sessions(output)) => sessions(output.mode(), output.language.preference()),
@@ -2022,6 +2028,9 @@ fn doctor(
     probe_title: bool,
     probe_hook_runtime: bool,
     language: Option<InterfaceLanguage>,
+    show_matrix: bool,
+    provider: Option<&str>,
+    execution_mode: Option<tabbeacon::doctor_matrix::ExecutionMode>,
 ) -> ExitCode {
     let report = match (probe_title, probe_hook_runtime) {
         (true, true) => collect_operational_diagnostics_with_title_and_hook_runtime_probe(true),
@@ -2030,10 +2039,28 @@ fn doctor(
         (false, false) => collect_operational_diagnostics(),
     };
     let integrations = provider_registry(&report);
+    if provider.is_some_and(|id| {
+        !integrations
+            .providers
+            .iter()
+            .any(|entry| entry.id.as_str() == id)
+    }) {
+        // Do not echo arbitrary user text into terminal output.
+        return management_error(
+            "DOCTOR",
+            &io::Error::new(io::ErrorKind::InvalidInput, "unknown registered provider"),
+        );
+    }
+    let matrix =
+        tabbeacon::doctor_matrix::DoctorMatrix::from_diagnostics(&report.doctor, &integrations)
+            .filtered(provider, execution_mode);
     if output_mode == OutputMode::Json {
         let mut value = serde_json::to_value(&report.doctor).unwrap_or_default();
         if let Some(object) = value.as_object_mut() {
             object.insert("providers".to_owned(), serde_json::json!(integrations));
+            if show_matrix {
+                object.insert("matrix".to_owned(), serde_json::json!(matrix));
+            }
         }
         return match serde_json::to_string(&value) {
             Ok(json) => {
@@ -2052,6 +2079,11 @@ fn doctor(
             println!("{line}");
         }
         print_provider_registry_plain(&integrations);
+        if show_matrix {
+            for line in matrix.plain_lines() {
+                println!("{line}");
+            }
+        }
     } else {
         let snapshot = ManagementSnapshot::from_diagnostics(&report);
         let presentation = human_runtime_presentation(language);
@@ -2065,6 +2097,16 @@ fn doctor(
             presentation.color,
         );
         print_provider_registry_human(&integrations);
+        if show_matrix {
+            print_human_lines(
+                tabbeacon::human_diagnostics::render_human_matrix(
+                    &matrix,
+                    presentation.locale,
+                    terminal_width(),
+                ),
+                presentation.color,
+            );
+        }
     }
     if report.doctor.is_failure() {
         ExitCode::FAILURE
@@ -5450,6 +5492,10 @@ fn collect_control_center_refresh(
         workspace,
         sessions,
         hooks,
+        doctor_matrix: tabbeacon::doctor_matrix::DoctorMatrix::from_diagnostics(
+            &report.doctor,
+            &integrations,
+        ),
         integrations,
         title_explanation,
     })
