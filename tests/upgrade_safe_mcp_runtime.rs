@@ -265,6 +265,10 @@ fn exact_hybrid_declarations(mut session_end: Value) -> Vec<Value> {
     // This is the exact historical MCP fixture, whose command SessionEnd
     // remains one second independently of Windows command-only profiles.
     session_end["group"]["hooks"][0]["timeout"] = json!(1);
+    session_end["group"]["hooks"][0]
+        .as_object_mut()
+        .expect("historical SessionEnd handler is an object")
+        .remove("statusMessage");
     let mut declarations = [
         ("PreToolUse", json!({"cwd":"${cwd}","turn_id":"${turn_id}"})),
         ("PermissionRequest", json!({"turn_id":"${turn_id}"})),
