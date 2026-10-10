@@ -1135,6 +1135,13 @@ impl CodexIntegration {
         for check in runtime_checks {
             report.replace_check(check);
         }
+        // This isolated probe uses a different launcher/terminal environment.
+        // Successful command ingress (or a NUL-backed hybrid worker) cannot
+        // certify real provider terminal delivery. Never aggregate it into PASS.
+        report.replace_check(warning(
+            "hooks.provider-terminal-route",
+            "REAL_PROVIDER_TERMINAL_ROUTE_UNPROVEN: isolated command execution does not prove the native provider console, presentation, or real delivery; attended provider qualification is separate",
+        ));
         if hybrid_transport && !hybrid_claims_present {
             report.replace_check(fail(
                 "hooks.mcp-event-transport",
@@ -1239,7 +1246,7 @@ impl CodexIntegration {
         match outcome {
             RuntimeProbeOutcome::Pass => vec![pass(
                 "hooks.runtime-probe",
-                "RUNTIME_PROBE_PASS: representative owned Hook executed through the bounded COMSPEC fallback",
+                "COMMAND_EXECUTION_PROVEN: representative owned Hook ingress executed through isolated COMSPEC; real provider terminal delivery is not proved",
             )],
             RuntimeProbeOutcome::McpHybrid {
                 mcp_event,
@@ -2562,6 +2569,9 @@ impl CodexIntegration {
         }
         self.validate_backup_record("hooks", &manifest.hooks_backup)?;
         self.validate_backup_record("config", &manifest.config_backup)?;
+        if !Self::manifest_has_known_owned_declarations(manifest) {
+            return Err(CodexIntegrationError::OwnershipManifest);
+        }
         Ok(())
     }
 
@@ -2606,6 +2616,21 @@ impl CodexIntegration {
             .into_iter()
             .any(|profile| {
                 owned_command_hooks_for_profile(&manifest.executable, profile)
+                    .is_ok_and(|expected| expected == manifest.hooks)
+                    // Preserve the complete exact v0.8.0 one-second command
+                    // predecessor as known ownership/runtime evidence. This
+                    // does not make it current or authorize repair/trust;
+                    // setup must still locate every exact manifest group.
+                    || owned_command_hooks_for_events(
+                        &manifest.executable,
+                        &profile
+                            .lifecycle_events()
+                            .iter()
+                            .map(|event| event.as_str())
+                            .collect::<Vec<_>>(),
+                        1,
+                        false,
+                    )
                     .is_ok_and(|expected| expected == manifest.hooks)
             }),
         }

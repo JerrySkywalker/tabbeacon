@@ -275,8 +275,8 @@ foreach ($proof in $candidateScopeProofs) {
 }
 
 $releaseProofs = @(
-    @{ Path = 'Cargo.toml'; Pattern = '(?m)^version = "0\.8\.0"$' },
-    @{ Path = 'Cargo.lock'; Pattern = '(?ms)name = "tabbeacon"\r?\nversion = "0\.8\.0"' },
+    @{ Path = 'Cargo.toml'; Pattern = '(?m)^version = "0\.8\.1"$' },
+    @{ Path = 'Cargo.lock'; Pattern = '(?ms)name = "tabbeacon"\r?\nversion = "0\.8\.1"' },
     @{ Path = 'CHANGELOG.md'; Pattern = '## \[0\.7\.3\] - 2026-09-01' },
     @{ Path = 'docs/v0.7.3-release-notes.md'; Pattern = '# TabBeacon v0\.7\.3' },
     @{ Path = 'docs/v0.7.3-upgrade.md'; Pattern = '# Upgrade from v0\.7\.2 to v0\.7\.3' },
@@ -284,7 +284,7 @@ $releaseProofs = @(
 )
 foreach ($proof in $releaseProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw -Encoding UTF8
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not preserve the public v0.7.3 record and v0.8.0 candidate metadata"
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not preserve historical release records and v0.8.1 candidate metadata"
 }
 
 $releaseTargetProofs = @(

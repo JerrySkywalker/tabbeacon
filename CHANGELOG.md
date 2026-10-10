@@ -2,6 +2,20 @@
 
 All notable changes to TabBeacon will be documented here.
 
+## [0.8.1] - Unreleased compatibility hotfix candidate
+
+- Recover the originating native Codex console for Windows command Hooks launched
+  with `CREATE_NO_WINDOW`, using bounded ancestry, installed-image identity,
+  inherited terminal binding and existing console membership. Preserve redirected
+  protocol handles; detach only the Hook after rendering and worker launch.
+- Separate Doctor's isolated command-ingress proof from unproven real provider
+  terminal delivery. After valid-route tail measurements, give Windows command
+  Hooks a two-second deadline; retain non-Windows/MCP contracts and manual trust.
+- Add an owned console regression and a content-minimal old/new launcher fixture.
+  Require known complete declarations before setup/uninstall configuration writes,
+  including rejection of jointly edited manifest and live commands.
+  Real Codex 0.159.2 TUI acceptance and publication remain separate Owner gates.
+
 ## [0.8.0] - Release contents (publication date recorded externally)
 
 - Added partial per-provider presentation overrides, explicit preview/Apply,

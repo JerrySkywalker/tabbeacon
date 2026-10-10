@@ -80,6 +80,9 @@ pub struct CodexHookRuntime {
     // writer lock that protects public Apply/import. Injected runtimes keep
     // their explicit fixed settings and never touch the owner's config.
     system_settings: Option<PresentationSettingsStore>,
+    // Unqualified terminal delivery still admits generation/cleanup evidence,
+    // but cannot spawn a presentation worker or write control bytes.
+    terminal_route_qualified: bool,
 }
 
 const CODEX_SETTINGS_LOCK_BUDGET: Duration = Duration::from_millis(100);
@@ -121,6 +124,7 @@ impl CodexHookRuntime {
             ),
             activity: ActivityCoordinator::disabled(&state_root),
             system_settings: None,
+            terminal_route_qualified: true,
         }
     }
 
@@ -213,6 +217,24 @@ impl CodexHookRuntime {
             return outcome;
         }
 
+        #[cfg(windows)]
+        let (_console_route, terminal_route_qualified) = {
+            let started = Instant::now();
+            let route = if activity_worker_probe_enabled() || session_end_probe.is_some() {
+                Ok(None)
+            } else if let CodexNormalization::Evidence(event) = &normalized {
+                super::console_route::ConsoleRouteGuard::acquire(event.context().session_id())
+                    .map(Some)
+            } else {
+                Ok(None)
+            };
+            timing.record("console_route", started);
+            match route {
+                Ok(route) => (route, true),
+                Err(_) => (None, false),
+            }
+        };
+
         let started = Instant::now();
         let Ok(state_root) = StableAliasRegistry::default_state_root() else {
             return HookDispatchOutcome::DegradedStateRoot;
@@ -233,20 +255,34 @@ impl CodexHookRuntime {
         runtime.activity = ActivityCoordinator::system(&state_root)
             .unwrap_or_else(|_| ActivityCoordinator::unbound_system(&state_root));
         runtime.system_settings = Some(settings);
+        #[cfg(windows)]
+        {
+            runtime.terminal_route_qualified = terminal_route_qualified;
+        }
         timing.record("runtime_initialization", started);
 
         let started = Instant::now();
-        let Ok(mut console) = open_owned_console() else {
+        let console = if runtime.terminal_route_qualified {
+            open_owned_console(session_end_probe.is_some())
+        } else {
+            Ok(Box::new(UnavailableTerminal) as Box<dyn Write>)
+        };
+        let Ok(mut console) = console else {
             return HookDispatchOutcome::DegradedPresentationOutput;
         };
         timing.record("console_open", started);
-        runtime.dispatch_normalized_with_timing(
+        let outcome = runtime.dispatch_normalized_with_timing(
             normalized,
             observed_at,
             &mut console,
             timing,
             session_end_probe,
-        )
+        );
+        if !runtime.terminal_route_qualified && outcome == HookDispatchOutcome::Applied {
+            HookDispatchOutcome::DegradedPresentationOutput
+        } else {
+            outcome
+        }
     }
 
     /// Handles one hook with deterministic time and an injected byte sink.
@@ -478,7 +514,8 @@ impl CodexHookRuntime {
             &action,
             self.renderer.settings(),
             selection.workspace_observability(),
-            allows_persistent_activity_worker(normalized.context().event()),
+            self.terminal_route_qualified
+                && allows_persistent_activity_worker(normalized.context().event()),
         );
         timing.record("activity_reconciliation", activity_started);
         record_activity_reconciliation_timing(timing, activity_timing);
@@ -687,15 +724,35 @@ const fn allows_persistent_activity_worker(_event: super::CodexHookEvent) -> boo
     true
 }
 
-fn open_owned_console() -> io::Result<Box<dyn Write>> {
+fn open_owned_console(session_end_probe: bool) -> io::Result<Box<dyn Write>> {
     #[cfg(windows)]
-    if activity_worker_probe_enabled() {
+    if activity_worker_probe_enabled() || session_end_probe {
         return fs::OpenOptions::new()
             .write(true)
             .open("NUL")
             .map(|sink| Box::new(sink) as Box<dyn Write>);
     }
+    #[cfg(not(windows))]
+    let _ = session_end_probe;
     crate::console_output::open_owned_console().map(|sink| Box::new(sink) as Box<dyn Write>)
+}
+
+struct UnavailableTerminal;
+
+impl Write for UnavailableTerminal {
+    fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+        Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "provider terminal route unproven",
+        ))
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::NotConnected,
+            "provider terminal route unproven",
+        ))
+    }
 }
 
 #[cfg(windows)]

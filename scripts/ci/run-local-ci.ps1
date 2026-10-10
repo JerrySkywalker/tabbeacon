@@ -53,7 +53,18 @@ Invoke-Checked 'FORMAT' { cargo fmt --all -- --check }
 Invoke-Checked 'CLIPPY' { cargo clippy --all-targets --all-features -- -D warnings }
 Invoke-Checked 'TEST' { cargo test --all-targets --all-features }
 Invoke-Checked 'CODEX PRODUCTION HOOK SLA' {
-    cargo test --release --locked --test codex_hooks anchored_default_windows_hook_declaration_finishes_within_the_one_second_sla -- --exact
+    $SlaOutput = @(cargo test --release --locked --test codex_hooks anchored_default_windows_hook_declaration_finishes_within_the_declared_timeout -- --exact --ignored --nocapture 2>&1)
+    $SlaExitCode = $LASTEXITCODE
+    $SlaOutput | ForEach-Object { Write-Host $_ }
+    if ($SlaExitCode -ne 0) {
+        throw "Release Hook SLA failed with exit code $SlaExitCode."
+    }
+    $SlaText = $SlaOutput -join "`n"
+    if ($SlaText -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;' -or
+        $SlaText -notmatch '(?m)^CODEX_WINDOWS_DECLARED_SLA=MEASURED TIMEOUT_SECONDS=2 ' -or
+        $SlaText -match 'PERFORMANCE_ENVIRONMENT=UNQUALIFIED') {
+        throw 'Release Hook SLA is UNPROVEN: require one executed test and a qualified measurement under the Windows two-second declaration.'
+    }
 }
 Invoke-Checked 'LOCKED BUILD' { cargo build --locked --all-targets }
 Invoke-Checked 'AGY PREADMISSION SCRIPT CONTRACT' { pwsh -NoProfile -File ./scripts/ci/test-agy-preadmission-contract.ps1 }
