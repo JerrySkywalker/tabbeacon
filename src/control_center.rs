@@ -1,33 +1,32 @@
-//! Staged Control Center frontend and bounded Ratatui renderer.
+#[cfg(test)]
+mod adoption_tests;
+mod document;
+mod input;
+#[cfg(test)]
+use crossterm::event::KeyEventKind;
+// Staged Control Center frontend and bounded Ratatui renderer.
 
-use std::{
-    io,
-    time::{Duration, Instant},
-};
+use std::{io, time::Duration};
 
-use crossterm::{
-    cursor::Show,
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     Frame,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Paragraph},
 };
 use terminal_ui_contract::{
-    footer::{FooterAction, FooterState, format_footer},
-    input::{InputKind, admits_input},
-    interaction::{
-        DiscardDecision, OverlayDismissKey, OverlayState as SharedOverlayState, QuitDisposition,
-        SettingsEditor,
-    },
+    interaction::{DiscardDecision, QuitDisposition, SettingsEditor},
     layout::HUMAN_SHELL,
     navigation::TopLevelNavigation,
+    theme::{ColorLevel, NeutralTheme},
+    viewport::{LayoutClass, ResponsivePolicy},
+};
+use terminal_ui_ratatui::{
+    components::{ScrollPane, Sidebar},
+    geometry::{HitMap, HitRegion},
 };
 
 use crate::{
@@ -192,7 +191,7 @@ pub struct ControlCenterDraft {
 /// It deliberately contains only already-approved management, workspace, and
 /// session projections. Collecting it never writes user settings, preferences,
 /// repository state, Hook configuration, or terminal state.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControlCenterRefresh {
     /// Latest read-only Presentation baseline.
     pub presentation: PresentationSettings,
@@ -225,6 +224,8 @@ pub struct ControlCenterRefresh {
 pub enum ControlCenterCommand {
     /// No persistent operation was requested.
     None,
+    /// Submit read-only intent to the single-flight worker.
+    Refresh,
     /// End the interactive session without persisting a draft.
     Quit,
     /// Persist one staged settings draft through the caller-owned operation.
@@ -312,7 +313,11 @@ pub struct ControlCenterApp {
     doctor_matrix: crate::doctor_matrix::DoctorMatrix,
     diagnostic_provider: CliTarget,
     diagnostic_mode: crate::doctor_matrix::ExecutionMode,
-    details_scroll: u16,
+    interaction: std::cell::RefCell<input::Interaction>,
+    snapshot_revision: u64,
+    snapshot_stale: bool,
+    sampled_at: std::time::SystemTime,
+    refresh_status: String,
     title_explanation: TitleExplanation,
     current_workspace_override: Option<String>,
     workspace_draft: Option<String>,
@@ -361,7 +366,11 @@ impl ControlCenterApp {
             ),
             diagnostic_provider: CliTarget::Codex,
             diagnostic_mode: crate::doctor_matrix::ExecutionMode::Unknown,
-            details_scroll: 0,
+            interaction: std::cell::RefCell::new(input::Interaction::default()),
+            snapshot_revision: 0,
+            snapshot_stale: true,
+            sampled_at: std::time::UNIX_EPOCH,
+            refresh_status: "Not loaded / 未采集".into(),
             title_explanation: TitleExplanation::default(),
             current_workspace_override: None,
             workspace_draft: None,
@@ -557,165 +566,6 @@ impl ControlCenterApp {
             || self.workspace_editor.is_some()
     }
 
-    /// Applies one event to staged state and returns a caller-owned action request.
-    pub fn handle_key(&mut self, key: KeyCode) -> ControlCenterCommand {
-        if self.confirm_discard {
-            return self.handle_discard_key(key);
-        }
-        if self.overlay.is_open() {
-            return self.handle_overlay_key(key);
-        }
-        if self.workspace_editor.is_some() {
-            self.handle_workspace_editor_key(key);
-            return ControlCenterCommand::None;
-        }
-        if key == KeyCode::Char('t') {
-            self.overlay = ControlCenterOverlay::TitleExplanation;
-            return ControlCenterCommand::None;
-        }
-        if key == KeyCode::Char('?') {
-            self.overlay = ControlCenterOverlay::Help;
-            return ControlCenterCommand::None;
-        }
-        if self.screen == Screen::Workspace {
-            match key {
-                KeyCode::Char('d' | 'x') => {
-                    self.workspace_draft = None;
-                    self.update_dirty();
-                    return ControlCenterCommand::None;
-                }
-                KeyCode::Char('c') => {
-                    self.workspace_editor = Some(self.workspace_draft.clone().unwrap_or_default());
-                    return ControlCenterCommand::None;
-                }
-                KeyCode::Char('e') => {
-                    self.workspace_explaining = !self.workspace_explaining;
-                    return ControlCenterCommand::None;
-                }
-                KeyCode::Char(candidate @ '1'..='4') => {
-                    if let Some(alias) = self.workspace.as_ref().and_then(|workspace| {
-                        let index = usize::from(candidate as u8 - b'1');
-                        workspace
-                            .candidates()
-                            .get(index)
-                            .map(|item| item.alias().as_str())
-                    }) {
-                        self.workspace_draft = Some(alias.to_owned());
-                        self.update_dirty();
-                    }
-                    return ControlCenterCommand::None;
-                }
-                _ => {}
-            }
-        }
-        if self.handle_diagnostic_query_key(key) || self.handle_details_scroll_key(key) {
-            return ControlCenterCommand::None;
-        }
-        if self.screen == Screen::Integration {
-            match key {
-                KeyCode::Char('1') => self.select_provider(CliTarget::Codex),
-                KeyCode::Char('2') => self.select_provider(CliTarget::Agy),
-                KeyCode::Char('3') => self.select_provider(CliTarget::Cursor),
-                KeyCode::Left => self.cycle_provider_mode(-1),
-                KeyCode::Right => self.cycle_provider_mode(1),
-                KeyCode::Char('r') => self.selected_provider_mode = None,
-                KeyCode::Char('v') => self.open_provider_preview(),
-                _ => {}
-            }
-            if matches!(
-                key,
-                KeyCode::Char('1' | '2' | '3' | 'r' | 'v') | KeyCode::Left | KeyCode::Right
-            ) {
-                return ControlCenterCommand::None;
-            }
-        }
-        match key {
-            KeyCode::Up | KeyCode::Char('k') => self.step(-1),
-            KeyCode::Down | KeyCode::Char('j') => self.step(1),
-            KeyCode::Left => self.change_focused(-1),
-            KeyCode::Right => self.change_focused(1),
-            KeyCode::Enter if self.screen == Screen::Appearance => self.toggle_appearance_focus(),
-            KeyCode::Enter if self.screen == Screen::Interface => self.toggle_interface_focus(),
-            KeyCode::Char('r') => self.revert(),
-            KeyCode::Char('a') => return self.request_apply(),
-            KeyCode::Char('p')
-                if matches!(self.screen, Screen::Integration | Screen::Diagnostics) =>
-            {
-                self.open_previewable_repair();
-            }
-            KeyCode::Char('q') if self.dirty => {
-                self.confirm_discard = matches!(
-                    self.discard_editor.request_quit(true),
-                    QuitDisposition::ConfirmDiscard
-                );
-            }
-            _ => {}
-        }
-        ControlCenterCommand::None
-    }
-
-    fn handle_diagnostic_query_key(&mut self, key: KeyCode) -> bool {
-        if self.screen == Screen::Diagnostics {
-            let provider = match key {
-                KeyCode::Char('1') => Some(CliTarget::Codex),
-                KeyCode::Char('2') => Some(CliTarget::Agy),
-                KeyCode::Char('3') => Some(CliTarget::Cursor),
-                _ => None,
-            };
-            if let Some(provider) = provider
-                && self.diagnostic_provider != provider
-            {
-                self.diagnostic_provider = provider;
-                self.diagnostic_mode = crate::doctor_matrix::ExecutionMode::Unknown;
-            }
-            if key == KeyCode::Char('m') {
-                let modes = [
-                    crate::doctor_matrix::ExecutionMode::Unknown,
-                    if self.diagnostic_provider == CliTarget::Codex {
-                        crate::doctor_matrix::ExecutionMode::Embedded
-                    } else {
-                        crate::doctor_matrix::ExecutionMode::Direct
-                    },
-                    crate::doctor_matrix::ExecutionMode::SharedDaemon,
-                ];
-                let index = modes
-                    .iter()
-                    .position(|mode| *mode == self.diagnostic_mode)
-                    .unwrap_or(0);
-                self.diagnostic_mode = modes[(index + 1) % modes.len()];
-            }
-            if matches!(key, KeyCode::Char('1' | '2' | '3' | 'm')) {
-                self.details_scroll = 0;
-                return true;
-            }
-        }
-        false
-    }
-
-    fn handle_details_scroll_key(&mut self, key: KeyCode) -> bool {
-        if matches!(
-            self.screen,
-            Screen::Integration | Screen::Diagnostics | Screen::Hooks
-        ) {
-            match key {
-                KeyCode::PageDown => {
-                    self.details_scroll = self.details_scroll.saturating_add(8);
-                    return true;
-                }
-                KeyCode::PageUp => {
-                    self.details_scroll = self.details_scroll.saturating_sub(8);
-                    return true;
-                }
-                KeyCode::Home => {
-                    self.details_scroll = 0;
-                    return true;
-                }
-                _ => {}
-            }
-        }
-        false
-    }
-
     fn select_provider(&mut self, provider: CliTarget) {
         if self.selected_provider != provider {
             self.selected_provider = provider;
@@ -760,39 +610,6 @@ impl ControlCenterApp {
         };
     }
 
-    /// Applies a terminal key event, including the interrupt key path.
-    pub fn handle_event(&mut self, key: KeyEvent) -> ControlCenterCommand {
-        let input_kind = match key.kind {
-            KeyEventKind::Press => InputKind::Press,
-            KeyEventKind::Repeat => InputKind::Repeat,
-            KeyEventKind::Release => InputKind::Release,
-        };
-        if !admits_input(input_kind) {
-            return ControlCenterCommand::None;
-        }
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if self.dirty {
-                self.confirm_discard = matches!(
-                    self.discard_editor.request_quit(true),
-                    QuitDisposition::ConfirmDiscard
-                );
-                return ControlCenterCommand::None;
-            }
-            return ControlCenterCommand::Quit;
-        }
-        let overlay_was_open = self.overlay.is_open();
-        let command = self.handle_key(key.code);
-        if key.code == KeyCode::Char('q')
-            && !overlay_was_open
-            && !self.dirty
-            && !self.confirm_discard
-        {
-            ControlCenterCommand::Quit
-        } else {
-            command
-        }
-    }
-
     /// Marks a successfully caller-owned persistence operation as accepted.
     pub fn apply_succeeded(&mut self) {
         self.current = self.draft;
@@ -813,79 +630,6 @@ impl ControlCenterApp {
     /// Completes a caller-owned repair and leaves all drafts untouched.
     pub fn repair_apply_succeeded(&mut self) {
         self.overlay = ControlCenterOverlay::None;
-    }
-
-    fn handle_discard_key(&mut self, key: KeyCode) -> ControlCenterCommand {
-        match key {
-            KeyCode::Char('d') => {
-                if self
-                    .discard_editor
-                    .resolve_discard(DiscardDecision::Discard)
-                {
-                    self.revert();
-                }
-                self.confirm_discard = self.discard_editor.awaiting_discard_confirmation();
-            }
-            KeyCode::Char('k' | 'q') | KeyCode::Esc => {
-                let _ = self.discard_editor.resolve_discard(DiscardDecision::Cancel);
-                self.confirm_discard = self.discard_editor.awaiting_discard_confirmation();
-            }
-            _ => {}
-        }
-        ControlCenterCommand::None
-    }
-
-    fn handle_overlay_key(&mut self, key: KeyCode) -> ControlCenterCommand {
-        match &self.overlay {
-            ControlCenterOverlay::Help => {
-                if let Some(dismiss_key) = help_dismiss_key(key) {
-                    let mut overlay = SharedOverlayState::Help;
-                    if overlay.dismiss_with(dismiss_key) {
-                        self.overlay = ControlCenterOverlay::None;
-                    }
-                }
-            }
-            ControlCenterOverlay::RepairPreview(plan) => match key {
-                KeyCode::Char('a') => {
-                    let action_id = plan.action_id.clone();
-                    self.overlay = ControlCenterOverlay::None;
-                    return ControlCenterCommand::ApplyRepair { action_id };
-                }
-                KeyCode::Esc | KeyCode::Char('p' | 'q') => {
-                    self.overlay = ControlCenterOverlay::None;
-                }
-                _ => {}
-            },
-            ControlCenterOverlay::TitleExplanation => {
-                if matches!(key, KeyCode::Esc | KeyCode::Char('t' | 'q')) {
-                    self.overlay = ControlCenterOverlay::None;
-                }
-            }
-            ControlCenterOverlay::ProviderPreview {
-                provider,
-                expected_global,
-                before,
-                after,
-                ..
-            } => match key {
-                KeyCode::Char('a') => {
-                    let command = ControlCenterCommand::ApplyProvider {
-                        provider: *provider,
-                        expected_global: *expected_global,
-                        before: *before,
-                        after: *after,
-                    };
-                    self.overlay = ControlCenterOverlay::None;
-                    return command;
-                }
-                KeyCode::Esc | KeyCode::Char('q' | 'v') => {
-                    self.overlay = ControlCenterOverlay::None;
-                }
-                _ => {}
-            },
-            ControlCenterOverlay::None => {}
-        }
-        ControlCenterCommand::None
     }
 
     fn open_previewable_repair(&mut self) {
@@ -960,7 +704,14 @@ impl ControlCenterApp {
         let mut navigation = TopLevelNavigation::new(self.screen);
         if navigation.move_by(&Screen::ALL, offset) {
             self.screen = navigation.current();
-            self.details_scroll = 0;
+            let i = self.interaction.get_mut();
+            i.details.home();
+            i.nav.ensure_visible(
+                Screen::ALL
+                    .iter()
+                    .position(|s| *s == self.screen)
+                    .unwrap_or(0),
+            );
         }
     }
 
@@ -1047,30 +798,6 @@ impl ControlCenterApp {
 
     fn settings_or_interface_dirty(&self) -> bool {
         self.draft != self.current || self.interface_draft != self.current_interface
-    }
-
-    fn handle_workspace_editor_key(&mut self, key: KeyCode) {
-        match key {
-            KeyCode::Enter => {
-                let submitted = self.workspace_editor.take().unwrap_or_default();
-                self.workspace_draft = (!submitted.trim().is_empty()).then_some(submitted);
-                self.update_dirty();
-            }
-            KeyCode::Esc => self.workspace_editor = None,
-            KeyCode::Backspace => {
-                if let Some(editor) = self.workspace_editor.as_mut() {
-                    editor.pop();
-                }
-            }
-            KeyCode::Char(character) if !character.is_control() => {
-                if let Some(editor) = self.workspace_editor.as_mut()
-                    && editor.chars().count() < 20
-                {
-                    editor.push(character);
-                }
-            }
-            _ => {}
-        }
     }
 }
 
@@ -1230,24 +957,23 @@ fn cycle<T: Copy + Eq>(values: impl AsRef<[T]>, value: T, offset: isize) -> T {
     values[shifted_index(index, values.len(), offset)]
 }
 
-/// Runs the live TUI, delegating Apply and bounded read-only refresh to the
-/// caller's existing ownership-aware operations.
+/// Runs the shared-input shell with one cooperative read-only worker.
 ///
 /// # Errors
-///
-/// Returns terminal I/O errors or an Apply error after the terminal has been restored.
+/// Returns terminal, persistence or shutdown errors; a shutdown timeout is not proof of worker exit.
+#[allow(clippy::too_many_lines)] // Linear event loop keeps epoch invalidation adjacent to explicit writes.
 pub fn run<F, W, R, P, C>(
     mut app: ControlCenterApp,
     mut apply: F,
     mut apply_workspace: W,
-    mut refresh: R,
+    collector: R,
     mut repair: P,
     mut apply_provider: C,
 ) -> io::Result<()>
 where
     F: FnMut(ControlCenterDraft, ControlCenterDraft) -> io::Result<()>,
     W: FnMut(Option<String>, Option<String>) -> io::Result<()>,
-    R: FnMut() -> io::Result<ControlCenterRefresh>,
+    R: terminal_ui_runtime::refresh::ReadOnlyCollector<(), ControlCenterRefresh>,
     P: FnMut(&str) -> io::Result<()>,
     C: FnMut(
         CliTarget,
@@ -1256,32 +982,104 @@ where
         PresentationOverride,
     ) -> io::Result<()>,
 {
+    use terminal_ui_runtime::{
+        refresh::{RefreshController, RefreshPolicy, RefreshPoll, RequestKind},
+        snapshot::ResourceState,
+    };
+    let mut runtime = RefreshController::spawn(
+        collector,
+        RefreshPolicy {
+            task_timeout: Duration::from_secs(12),
+            poll_interval: CONTROL_CENTER_REFRESH_INTERVAL,
+            stale_after: Duration::from_secs(15),
+        },
+    )
+    .map_err(io::Error::other)?;
+    runtime
+        .request((), RequestKind::Manual)
+        .map_err(io::Error::other)?;
     let mut session = TerminalSession::enter()?;
-    let mut next_refresh = Instant::now() + CONTROL_CENTER_REFRESH_INTERVAL;
-    loop {
-        session.terminal.draw(|frame| render(frame, &app))?;
-        let wait = next_refresh.saturating_duration_since(Instant::now());
-        if !event::poll(wait)? {
-            app.merge_refresh(refresh()?);
-            next_refresh = Instant::now() + CONTROL_CENTER_REFRESH_INTERVAL;
-            continue;
-        }
-        if let Event::Key(key) = event::read()? {
-            let was_confirming = app.confirm_discard();
-            let command = app.handle_event(key);
+    let result = (|| {
+        let mut dirty_frame = true;
+        loop {
+            runtime.tick(()).map_err(io::Error::other)?;
+            let polled = runtime.poll();
+            if let RefreshPoll::Accepted {
+                revision, changed, ..
+            } = polled
+            {
+                if let Some(snapshot) = runtime.state().accepted() {
+                    if changed || app.snapshot_revision == 0 {
+                        app.merge_refresh(snapshot.value().clone());
+                    }
+                    app.snapshot_revision = revision;
+                    app.sampled_at = snapshot.metadata().sampled_at;
+                }
+                dirty_frame |= changed;
+            }
+            let stale = match runtime.state() {
+                ResourceState::Ready(_) => false,
+                ResourceState::Loading { stale, .. } => *stale,
+                _ => true,
+            };
+            if app.snapshot_stale != stale {
+                app.snapshot_stale = stale;
+                dirty_frame = true;
+            }
+            let status = match runtime.state() {
+                ResourceState::Loading {
+                    stale, last_error, ..
+                } => format!(
+                    "Loading / 采集中{}{}",
+                    if *stale { " · Stale" } else { "" },
+                    if last_error.is_some() {
+                        " · last Error"
+                    } else {
+                        ""
+                    }
+                ),
+                ResourceState::Ready(_) => "Observed / 已观测".to_owned(),
+                ResourceState::Stale { .. } => "Stale / 已过期".to_owned(),
+                ResourceState::Error { error, .. } => format!("Error / 错误: {error}"),
+                ResourceState::Empty { snapshot } => if snapshot.is_some() {
+                    "Known empty"
+                } else {
+                    "Not loaded"
+                }
+                .to_owned(),
+            };
+            if status != app.refresh_status {
+                app.refresh_status = status;
+                dirty_frame = true;
+            }
+            if dirty_frame {
+                session.terminal.draw(|frame| render(frame, &app))?;
+                dirty_frame = false;
+            }
+            if !event::poll(Duration::from_millis(20))? {
+                continue;
+            }
+            let event = event::read()?;
+            let mut epoch_changed = false;
+            let before = app.input_view_fingerprint();
+            let resized = matches!(event, Event::Resize(..));
+            let command = app.handle_input(event);
+            dirty_frame |= resized || before != app.input_view_fingerprint();
             match command {
                 ControlCenterCommand::Apply { before, after } => {
                     apply(before, after)?;
                     app.apply_succeeded();
+                    epoch_changed = true;
                 }
                 ControlCenterCommand::ApplyWorkspace { before, after } => {
                     apply_workspace(before, after)?;
                     app.workspace_apply_succeeded();
+                    epoch_changed = true;
                 }
                 ControlCenterCommand::ApplyRepair { action_id } => {
                     repair(&action_id)?;
                     app.repair_apply_succeeded();
-                    app.merge_refresh(refresh()?);
+                    epoch_changed = true;
                 }
                 ControlCenterCommand::ApplyProvider {
                     provider,
@@ -1290,17 +1088,70 @@ where
                     after,
                 } => {
                     apply_provider(provider, expected_global, before, after)?;
-                    app.merge_refresh(refresh()?);
+                    epoch_changed = true;
                 }
                 ControlCenterCommand::Quit => break,
+                ControlCenterCommand::Refresh => {
+                    runtime
+                        .request((), RequestKind::Manual)
+                        .map_err(io::Error::other)?;
+                }
                 ControlCenterCommand::None => {}
             }
-            if was_confirming && key.code == KeyCode::Char('d') && !app.confirm_discard() {
-                break;
+            if epoch_changed {
+                runtime.advance_epoch().map_err(io::Error::other)?;
+                runtime
+                    .request((), RequestKind::Manual)
+                    .map_err(io::Error::other)?;
             }
         }
+        Ok(())
+    })();
+    // Restore terminal even on collector/persistence/I/O failure before actual join.
+    let restored = session.restore();
+    let stopped = runtime
+        .shutdown(Duration::from_secs(3))
+        .map_err(io::Error::other);
+    // A timed-out shutdown is an error, never proof of exit. Controller retains
+    // its worker; Drop still joins. Only qualified cooperative collectors admitted.
+    result.and(restored).and(stopped)
+}
+
+/// Audited product adapter: only read-only capture, no writer/terminal callbacks.
+pub struct BoundedRefreshCollector<F>(pub F);
+impl<F> terminal_ui_runtime::refresh::ReadOnlyCollector<(), ControlCenterRefresh>
+    for BoundedRefreshCollector<F>
+where
+    F: FnMut(&terminal_ui_runtime::refresh::CollectionControl) -> io::Result<ControlCenterRefresh>
+        + Send
+        + 'static,
+{
+    fn collect(
+        &mut self,
+        _: &terminal_ui_runtime::refresh::RefreshRequest<()>,
+        control: &terminal_ui_runtime::refresh::CollectionControl,
+    ) -> Result<
+        terminal_ui_runtime::snapshot::Collected<ControlCenterRefresh>,
+        terminal_ui_runtime::refresh::CollectError,
+    > {
+        control.check()?;
+        let value = (self.0)(control).map_err(|_| {
+            terminal_ui_runtime::refresh::CollectError::Failed(
+                "read-only product observation unavailable".into(),
+            )
+        })?;
+        control.check()?;
+        Ok(terminal_ui_runtime::snapshot::Collected {
+            value,
+            empty: false,
+            metadata: terminal_ui_runtime::snapshot::SnapshotMetadata {
+                source: "product read-only provider/configuration observation".into(),
+                scope: "local declarations/capabilities; current delivery UNPROVEN".into(),
+                sampled_at: std::time::SystemTime::now(),
+                freshness: terminal_ui_runtime::snapshot::Freshness::CurrentObservation,
+            },
+        })
     }
-    session.restore()
 }
 
 /// Result of the feature-gated real-terminal lifecycle fixture.
@@ -1338,6 +1189,8 @@ pub struct TerminalSmokeReport {
     pub interface_apply_staged: bool,
     /// The normal application event handler returned its clean quit command.
     pub clean_quit: bool,
+    /// Synthetic normalized events exercised shared density, refresh intent and pointer focus.
+    pub shared_input_scripted: bool,
 }
 
 /// Runs a deterministic Control Center path through the real Crossterm terminal.
@@ -1385,6 +1238,9 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         title_explanation: TitleExplanation::default(),
     };
     app.merge_refresh(refresh);
+    app.snapshot_revision = 1;
+    app.snapshot_stale = false;
+    app.sampled_at = std::time::SystemTime::now();
     let live_refresh_merged = app.sessions.is_some() && !app.dirty();
     let mut session = TerminalSession::enter()?;
     let result = (|| {
@@ -1397,7 +1253,29 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
             "fixture did not start on Overview",
         )?;
         draw(&mut session, &app)?;
+        let revision = app.ui_document().revision();
+        let before = app.staged_draft();
+        app.handle_key(KeyCode::F(2));
+        draw(&mut session, &app)?;
+        invariant(
+            app.ui_document().revision() == revision && app.staged_draft() == before,
+            "density changed product facts or draft",
+        )?;
+        capture_smoke_ui("overview-raw", &app)?;
+        app.handle_key(KeyCode::F(2));
+        invariant(
+            app.handle_key(KeyCode::F(5)) == ControlCenterCommand::Refresh,
+            "F5 did not remain a read-only intent",
+        )?;
+        draw(&mut session, &app)?;
+        capture_smoke_ui("overview-smart", &app)?;
 
+        if app.appearance_field.is_none()
+            && app.interface_field.is_none()
+            && app.interaction.borrow().focus.current() != Some(&input::nav_path())
+        {
+            let _ = app.handle_key(KeyCode::Tab);
+        }
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(
             app.screen() == Screen::Appearance,
@@ -1417,6 +1295,12 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
 
         let _ = app.handle_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         for _ in 0..5 {
+            if app.appearance_field.is_none()
+                && app.interface_field.is_none()
+                && app.interaction.borrow().focus.current() != Some(&input::nav_path())
+            {
+                let _ = app.handle_key(KeyCode::Tab);
+            }
             let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         }
         let _ = app.handle_event(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
@@ -1434,6 +1318,12 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
             "fixture did not revert the provider badge draft",
         )?;
 
+        if app.appearance_field.is_none()
+            && app.interface_field.is_none()
+            && app.interaction.borrow().focus.current() != Some(&input::nav_path())
+        {
+            let _ = app.handle_key(KeyCode::Tab);
+        }
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(
             app.screen() == Screen::Workspace,
@@ -1441,6 +1331,12 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         )?;
         draw(&mut session, &app)?;
 
+        if app.appearance_field.is_none()
+            && app.interface_field.is_none()
+            && app.interaction.borrow().focus.current() != Some(&input::nav_path())
+        {
+            let _ = app.handle_key(KeyCode::Tab);
+        }
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(
             app.screen() == Screen::Sessions,
@@ -1453,6 +1349,12 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
             "fixture did not retain the refreshed Sessions projection",
         )?;
 
+        if app.appearance_field.is_none()
+            && app.interface_field.is_none()
+            && app.interaction.borrow().focus.current() != Some(&input::nav_path())
+        {
+            let _ = app.handle_key(KeyCode::Tab);
+        }
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(
             app.screen() == Screen::Integration,
@@ -1513,12 +1415,24 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
             "fixture did not dismiss Why this title",
         )?;
 
+        if app.appearance_field.is_none()
+            && app.interface_field.is_none()
+            && app.interaction.borrow().focus.current() != Some(&input::nav_path())
+        {
+            let _ = app.handle_key(KeyCode::Tab);
+        }
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(app.screen() == Screen::Hooks, "fixture did not reach Hooks")?;
         draw(&mut session, &app)?;
         capture_smoke_ui("hooks", &app)?;
         let hook_inventory_visited = true;
 
+        if app.appearance_field.is_none()
+            && app.interface_field.is_none()
+            && app.interaction.borrow().focus.current() != Some(&input::nav_path())
+        {
+            let _ = app.handle_key(KeyCode::Tab);
+        }
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(
             app.screen() == Screen::Diagnostics,
@@ -1535,11 +1449,50 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         )?;
         draw(&mut session, &app)?;
         capture_smoke_ui("diagnostics-en", &app)?;
+        // Events are synthetic: this proves real renderer state, not OS input delivery.
+        let size = session.terminal.size()?;
+        invariant(
+            ResponsivePolicy::default().classify(size.width, size.height) == LayoutClass::Full,
+            "owned shared-input visual fixture requires both visible panes",
+        )?;
+        let keyboard_focus = app.interaction.borrow().focus.current().cloned();
+        let pointer = |kind| {
+            Event::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: HUMAN_SHELL.sidebar_columns + 3,
+                row: HUMAN_SHELL.header_rows + 2,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        app.handle_input(pointer(crossterm::event::MouseEventKind::ScrollDown));
+        invariant(
+            app.interaction.borrow().focus.current() == keyboard_focus.as_ref()
+                && app.interaction.borrow().details.offset() > 0,
+            "hover wheel moved keyboard focus or failed to scroll",
+        )?;
+        app.handle_input(pointer(crossterm::event::MouseEventKind::Down(
+            crossterm::event::MouseButton::Left,
+        )));
+        invariant(
+            app.interaction.borrow().focus.current() == Some(&input::details_path())
+                && !app.dirty(),
+            "click did not acquire details focus safely",
+        )?;
+        draw(&mut session, &app)?;
+        capture_smoke_ui("diagnostics-pointer-focus", &app)?;
+        app.handle_key(KeyCode::Home);
+        let shared_input_scripted = app.ui_document().revision() == revision;
         app.base_locale = ResolvedLocale::ZhCn;
         draw(&mut session, &app)?;
         capture_smoke_ui("diagnostics-zh", &app)?;
         app.base_locale = original_locale;
 
+        if app.appearance_field.is_none()
+            && app.interface_field.is_none()
+            && app.interaction.borrow().focus.current() != Some(&input::nav_path())
+        {
+            let _ = app.handle_key(KeyCode::Tab);
+        }
         let _ = app.handle_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         invariant(
             app.screen() == Screen::Interface,
@@ -1583,8 +1536,38 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
         )?;
         let _ = app.handle_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
 
+        if app.interaction.borrow().focus.current() != Some(&input::nav_path()) {
+            app.handle_key(KeyCode::Tab);
+        }
+        app.handle_key(KeyCode::Down);
+        invariant(
+            app.screen() == Screen::Preview,
+            "fixture did not reach ninth Preview screen",
+        )?;
+        draw(&mut session, &app)?;
+        capture_smoke_ui("preview", &app)?;
+        app.handle_key(KeyCode::Up);
+
+        if app.appearance_field.is_none()
+            && app.interface_field.is_none()
+            && app.interaction.borrow().focus.current() != Some(&input::nav_path())
+        {
+            let _ = app.handle_key(KeyCode::Tab);
+        }
         let _ = app.handle_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        if app.appearance_field.is_none()
+            && app.interface_field.is_none()
+            && app.interaction.borrow().focus.current() != Some(&input::nav_path())
+        {
+            let _ = app.handle_key(KeyCode::Tab);
+        }
         let _ = app.handle_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        if app.appearance_field.is_none()
+            && app.interface_field.is_none()
+            && app.interaction.borrow().focus.current() != Some(&input::nav_path())
+        {
+            let _ = app.handle_key(KeyCode::Tab);
+        }
         let _ = app.handle_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         invariant(
             app.screen() == Screen::Integration,
@@ -1601,7 +1584,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
 
         Ok(TerminalSmokeReport {
             doctor_matrix_exercised,
-            screens_visited: 8,
+            screens_visited: 9,
             live_refresh_merged,
             workspace_and_sessions_visited,
             hook_inventory_visited,
@@ -1615,6 +1598,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
             interface_draft_reverted,
             interface_apply_staged,
             clean_quit,
+            shared_input_scripted,
         })
     })();
     let restore = session.restore();
@@ -1666,19 +1650,23 @@ fn capture_smoke_ui(label: &str, _app: &ControlCenterApp) -> io::Result<()> {
 
 struct TerminalSession {
     terminal: ratatui::Terminal<CrosstermBackend<io::Stdout>>,
-    guard: TerminalGuard<CrosstermTerminalLifecycle>,
+    guard: terminal_ui_ratatui::terminal::TerminalGuard<
+        terminal_ui_ratatui::terminal::CrosstermOps<io::Stdout>,
+    >,
 }
 
 impl TerminalSession {
     fn enter() -> io::Result<Self> {
-        let guard = TerminalGuard::enter(CrosstermTerminalLifecycle)?;
+        use terminal_ui_ratatui::terminal::{CrosstermOps, TerminalGuard};
+        let guard =
+            TerminalGuard::enter(CrosstermOps(io::stdout()), true).map_err(io::Error::other)?;
         let stdout = io::stdout();
         let terminal = ratatui::Terminal::new(CrosstermBackend::new(stdout))?;
         Ok(Self { terminal, guard })
     }
 
     fn restore(&mut self) -> io::Result<()> {
-        self.guard.restore()
+        self.guard.finish().map_err(io::Error::other)
     }
 }
 
@@ -1688,102 +1676,11 @@ impl Drop for TerminalSession {
     }
 }
 
-/// The terminal-state operations that must have one owner and one cleanup path.
-trait TerminalLifecycle {
-    fn enable_raw_mode(&mut self) -> io::Result<()>;
-    fn disable_raw_mode(&mut self) -> io::Result<()>;
-    fn enter_alternate_screen(&mut self) -> io::Result<()>;
-    fn leave_alternate_screen(&mut self) -> io::Result<()>;
-    fn show_cursor(&mut self) -> io::Result<()>;
-}
-
-/// Concrete Windows-terminal lifecycle used only by the Control Center session.
-struct CrosstermTerminalLifecycle;
-
-impl TerminalLifecycle for CrosstermTerminalLifecycle {
-    fn enable_raw_mode(&mut self) -> io::Result<()> {
-        enable_raw_mode()
-    }
-
-    fn disable_raw_mode(&mut self) -> io::Result<()> {
-        disable_raw_mode()
-    }
-
-    fn enter_alternate_screen(&mut self) -> io::Result<()> {
-        execute!(io::stdout(), EnterAlternateScreen)
-    }
-
-    fn leave_alternate_screen(&mut self) -> io::Result<()> {
-        execute!(io::stdout(), LeaveAlternateScreen)
-    }
-
-    fn show_cursor(&mut self) -> io::Result<()> {
-        execute!(io::stdout(), Show)
-    }
-}
-
-/// RAII terminal-state guard that restores every entered state on all exit paths.
-struct TerminalGuard<L: TerminalLifecycle> {
-    lifecycle: L,
-    raw_mode_enabled: bool,
-    alternate_screen_entered: bool,
-    restored: bool,
-}
-
-impl<L: TerminalLifecycle> TerminalGuard<L> {
-    fn enter(lifecycle: L) -> io::Result<Self> {
-        let mut guard = Self {
-            lifecycle,
-            raw_mode_enabled: true,
-            alternate_screen_entered: false,
-            restored: false,
-        };
-        guard.lifecycle.enable_raw_mode()?;
-        // Mark before the command so a partially completed terminal write also
-        // receives a best-effort LeaveAlternateScreen during unwinding.
-        guard.alternate_screen_entered = true;
-        guard.lifecycle.enter_alternate_screen()?;
-        Ok(guard)
-    }
-
-    fn restore(&mut self) -> io::Result<()> {
-        if self.restored {
-            return Ok(());
-        }
-        let mut first_error: Option<io::Error> = None;
-        if self.alternate_screen_entered {
-            match self.lifecycle.leave_alternate_screen() {
-                Ok(()) => self.alternate_screen_entered = false,
-                Err(error) => first_error = Some(error),
-            }
-        }
-        if self.raw_mode_enabled {
-            match self.lifecycle.disable_raw_mode() {
-                Ok(()) => self.raw_mode_enabled = false,
-                Err(error) if first_error.is_none() => first_error = Some(error),
-                Err(_) => {}
-            }
-        }
-        match self.lifecycle.show_cursor() {
-            Err(error) if first_error.is_none() => first_error = Some(error),
-            Ok(()) | Err(_) => {}
-        }
-        self.restored =
-            !self.raw_mode_enabled && !self.alternate_screen_entered && first_error.is_none();
-        first_error.map_or(Ok(()), Err)
-    }
-}
-
-impl<L: TerminalLifecycle> Drop for TerminalGuard<L> {
-    fn drop(&mut self) {
-        let _ = self.restore();
-    }
-}
-
+/// Renders all Control Center screens into the active Ratatui frame.
 const MIN_TERMINAL_WIDTH: u16 = HUMAN_SHELL.minimum_width;
 const MIN_TERMINAL_HEIGHT: u16 = HUMAN_SHELL.minimum_height;
 
-/// Renders all Control Center screens into the active Ratatui frame.
+/// Renders the product shell using shared components.
 pub fn render(frame: &mut Frame, app: &ControlCenterApp) {
     render_with_no_color(frame, app, std::env::var_os("NO_COLOR").is_some());
 }
@@ -1795,6 +1692,10 @@ fn render_with_no_color(frame: &mut Frame, app: &ControlCenterApp, no_color_is_s
     let style = tui_human_style(app.interface_draft.color(), no_color_is_set);
     let area = frame.area();
     if !HUMAN_SHELL.supports(area.width, area.height) {
+        let mut interaction = app.interaction.borrow_mut();
+        interaction.generation = interaction.generation.wrapping_add(1);
+        interaction.hitmap =
+            terminal_ui_ratatui::geometry::HitMap::new(interaction.generation, vec![]);
         frame.render_widget(
             Paragraph::new(format!(
                 "{}\n{}: {MIN_TERMINAL_WIDTH}x{MIN_TERMINAL_HEIGHT}\n{}",
@@ -1828,13 +1729,76 @@ fn render_with_no_color(frame: &mut Frame, app: &ControlCenterApp, no_color_is_s
                 style.add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                " — {}",
-                shared_health_label(app.locale(), app.snapshot.health)
+                " — {} · {} · rev {}",
+                shared_health_label(app.locale(), app.snapshot.health),
+                app.refresh_status,
+                app.snapshot_revision
             )),
         ]))
         .style(style),
         areas[0],
     );
+    let theme = NeutralTheme {
+        color_level: if color_enabled(app.interface_draft.color(), true, no_color_is_set) {
+            ColorLevel::Ansi16
+        } else {
+            ColorLevel::None
+        },
+    };
+    let density = app.interaction.borrow().view.density;
+    let context = app.input_context();
+    let text = if app.confirm_discard {
+        catalog(app.locale(), HumanMessageKey::FooterDiscard).to_owned()
+    } else if app.overlay == ControlCenterOverlay::Help {
+        let i = app.interaction.borrow();
+        let normal_context = {
+            let mut context = context.clone();
+            context.contexts = vec![
+                match app.screen {
+                    Screen::Integration => "integrations",
+                    Screen::Diagnostics => "diagnostics",
+                    Screen::Workspace => "workspace",
+                    _ => "details",
+                }
+                .into(),
+                "global".into(),
+            ];
+            context.capture = terminal_ui_contract::keymap::Capture::Normal;
+            context
+        };
+        format!(
+            "{}\n\n{}",
+            if app.locale() == ResolvedLocale::ZhCn {
+                "Hook 信任始终由人工确认；焦点和滚轮不执行配置更改"
+            } else {
+                "Hook trust requires manual review; focus and scrolling never apply configuration"
+            },
+            i.map
+                .effective_hints(&normal_context)
+                .iter()
+                .map(|h| format!("{} — {}", h.keys, input::hint_label(h, app.locale())))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    } else if app.overlay.is_open() {
+        overlay_lines(app)
+    } else {
+        document::presentation_text(app, density)
+    };
+    let mut i = app.interaction.borrow_mut();
+    let modal = app.overlay.is_open() || app.confirm_discard || app.workspace_editor.is_some();
+    if modal && i.focus.modal_root().is_none() {
+        i.focus.push_modal(input::modal_path());
+        i.overlay.home();
+    }
+    if !modal && i.focus.modal_root().is_some() {
+        i.focus.pop_modal();
+    }
+    let compact =
+        ResponsivePolicy::default().classify(area.width, area.height) == LayoutClass::Compact;
+    if compact && i.generation == 0 && !modal {
+        i.focus.focus(&input::details_path());
+    }
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -1842,93 +1806,147 @@ fn render_with_no_color(frame: &mut Frame, app: &ControlCenterApp, no_color_is_s
             Constraint::Min(20),
         ])
         .split(areas[1]);
-    let nav = Screen::ALL
+    let nav_rect = if compact {
+        if i.focus.current() == Some(&input::nav_path()) {
+            areas[1]
+        } else {
+            ratatui::layout::Rect::default()
+        }
+    } else {
+        body[0]
+    };
+    let details_rect = if compact {
+        if i.focus.current() == Some(&input::nav_path()) && !modal {
+            ratatui::layout::Rect::default()
+        } else {
+            areas[1]
+        }
+    } else {
+        body[1]
+    };
+    i.generation = i.generation.wrapping_add(1);
+    let mut regions = vec![
+        HitRegion {
+            path: input::nav_path(),
+            rect: nav_rect,
+            clip: areas[1],
+            z: 0,
+            enabled: true,
+            focusable: true,
+            scrollable: true,
+        },
+        HitRegion {
+            path: input::details_path(),
+            rect: details_rect,
+            clip: areas[1],
+            z: 0,
+            enabled: true,
+            focusable: true,
+            scrollable: true,
+        },
+    ];
+    if modal {
+        regions.push(HitRegion {
+            path: input::modal_path(),
+            rect: areas[1],
+            clip: areas[1],
+            z: 10,
+            enabled: true,
+            focusable: true,
+            scrollable: true,
+        });
+    }
+    let hitmap = HitMap::new(i.generation, regions);
+    // Compact keeps both logical pane choices to allow Tab to expose the hidden pane.
+    if !compact || modal {
+        hitmap.reconcile_focus(&mut i.focus);
+    } else {
+        i.focus
+            .reconcile(vec![input::nav_path(), input::details_path()]);
+    }
+    i.hitmap = hitmap;
+    let items = Screen::ALL
         .iter()
-        .map(|screen| {
-            ListItem::new(if *screen == app.screen {
-                format!("> {}", screen.localized_title(app.locale()))
-            } else {
-                format!("  {}", screen.localized_title(app.locale()))
-            })
-        })
+        .map(|s| s.localized_title(app.locale()).to_owned())
         .collect::<Vec<_>>();
-    frame.render_widget(
-        List::new(nav).style(style).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(catalog(app.locale(), HumanMessageKey::Sections))
-                .style(style),
-        ),
-        body[0],
-    );
+    let selected = Screen::ALL
+        .iter()
+        .position(|s| *s == app.screen)
+        .unwrap_or(0);
+    if !nav_rect.is_empty() {
+        Sidebar {
+            items: &items.iter().map(String::as_str).collect::<Vec<_>>(),
+            selected,
+            focused: i.focus.current() == Some(&input::nav_path()),
+            theme,
+        }
+        .render(nav_rect, frame.buffer_mut(), &mut i.nav, false);
+    }
     let content_title = app
         .overlay
         .title(app.locale())
-        .unwrap_or_else(|| app.screen.localized_title(app.locale()))
-        .to_owned();
-    frame.render_widget(
-        content(app).style(style).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(content_title)
-                .style(style),
-        ),
-        body[1],
-    );
-    let footer = if app.overlay.is_open() {
-        catalog(app.locale(), HumanMessageKey::OverlayDismiss).to_owned()
-    } else if app.confirm_discard {
-        catalog(app.locale(), HumanMessageKey::FooterDiscard).to_owned()
-    } else if app.has_concurrent_conflict() {
-        catalog(app.locale(), HumanMessageKey::RefreshConflict).to_owned()
-    } else if app.editing() {
-        shared_footer(app.locale(), FooterState::SettingsEdit)
-    } else {
-        let footer = shared_footer(app.locale(), FooterState::NormalNavigation);
-        format!(
-            "{footer}{}",
-            if app.dirty {
-                format!(
-                    "  • {}",
-                    catalog(app.locale(), HumanMessageKey::UnsavedChanges)
-                )
-            } else {
-                String::new()
-            }
-        )
-    };
-    frame.render_widget(Paragraph::new(footer).style(style), areas[2]);
-}
-
-fn help_dismiss_key(key: KeyCode) -> Option<OverlayDismissKey> {
-    match key {
-        KeyCode::Esc => Some(OverlayDismissKey::Escape),
-        KeyCode::Char('?') => Some(OverlayDismissKey::Help),
-        KeyCode::Char('q') => Some(OverlayDismissKey::Quit),
-        _ => None,
+        .unwrap_or_else(|| app.screen.localized_title(app.locale()));
+    let focused = i.focus.current() == Some(&input::details_path()) || modal;
+    if !details_rect.is_empty() {
+        let v = if modal {
+            &mut i.overlay
+        } else {
+            &mut i.details
+        };
+        ScrollPane {
+            title: content_title,
+            text: &text,
+            focused,
+            theme,
+        }
+        .render(details_rect, frame.buffer_mut(), v);
     }
-}
-
-fn shared_footer(locale: ResolvedLocale, state: FooterState) -> String {
-    format_footer(state, |action| match (locale, action) {
-        (ResolvedLocale::EnUs, FooterAction::Navigate) => "navigate",
-        (ResolvedLocale::EnUs, FooterAction::Open) => "edit selected screen",
-        (ResolvedLocale::EnUs, FooterAction::Apply) => "Apply",
-        (ResolvedLocale::EnUs, FooterAction::Revert) => "Revert",
-        (ResolvedLocale::EnUs, FooterAction::Quit) => "Quit",
-        (ResolvedLocale::EnUs, FooterAction::Select) => "select setting",
-        (ResolvedLocale::EnUs, FooterAction::Change) => "change draft",
-        (ResolvedLocale::EnUs, FooterAction::Edit) => "done",
-        (ResolvedLocale::ZhCn, FooterAction::Navigate) => "导航",
-        (ResolvedLocale::ZhCn, FooterAction::Open) => "编辑当前分区",
-        (ResolvedLocale::ZhCn, FooterAction::Apply) => "应用",
-        (ResolvedLocale::ZhCn, FooterAction::Revert) => "还原",
-        (ResolvedLocale::ZhCn, FooterAction::Quit) => "退出",
-        (ResolvedLocale::ZhCn, FooterAction::Select) => "选择设置",
-        (ResolvedLocale::ZhCn, FooterAction::Change) => "调整草稿",
-        (ResolvedLocale::ZhCn, FooterAction::Edit) => "完成",
-        _ => "",
-    })
+    drop(i);
+    let context = app.input_context();
+    let i = app.interaction.borrow();
+    let mut hints = i.map.footer_hints(&context);
+    hints.sort_by_key(|hint| match hint.action_id.as_str() {
+        "ui.view.toggle_density" => 0,
+        "ui.refresh" => 1,
+        "tabbeacon.confirm.apply" => 2,
+        "ui.help" => 3,
+        "ui.cancel" => 4,
+        _ => 5,
+    });
+    let hints = hints
+        .iter()
+        .map(|hint| {
+            format!(
+                "{} {}",
+                hint.keys,
+                if hint.action_id == "ui.view.toggle_density" {
+                    "Smart/Raw".into()
+                } else {
+                    input::hint_label(hint, app.locale())
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let footer = format!(
+        "{}\n{:?}/{:?} · {:?}{}{}{}",
+        hints,
+        i.map.profile,
+        i.mode,
+        i.view.density,
+        if app.has_concurrent_conflict() {
+            " · Conflict / 冲突"
+        } else {
+            ""
+        },
+        if app.dirty {
+            " · Unsaved changes / 未保存"
+        } else {
+            ""
+        },
+        i.keymap_error.as_deref().unwrap_or("")
+    );
+    frame.render_widget(Paragraph::new(footer).style(style), areas[2]);
 }
 
 fn tui_human_style(color: HumanColor, no_color_is_set: bool) -> Style {
@@ -1939,11 +1957,11 @@ fn tui_human_style(color: HumanColor, no_color_is_set: bool) -> Style {
     }
 }
 
-fn content(app: &ControlCenterApp) -> Paragraph<'static> {
+fn legacy_content_text(app: &ControlCenterApp) -> String {
     if app.overlay.is_open() {
-        return Paragraph::new(overlay_lines(app));
+        return overlay_lines(app);
     }
-    let paragraph = Paragraph::new(match app.screen {
+    match app.screen {
         Screen::Overview => overview_lines(app),
         Screen::Appearance => appearance_lines(app),
         Screen::Workspace => workspace_lines(app),
@@ -1953,16 +1971,6 @@ fn content(app: &ControlCenterApp) -> Paragraph<'static> {
         Screen::Diagnostics => diagnostics_lines(app),
         Screen::Interface => interface_lines(app),
         Screen::Preview => preview_lines(app),
-    });
-    if matches!(
-        app.screen,
-        Screen::Integration | Screen::Diagnostics | Screen::Hooks
-    ) {
-        paragraph
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .scroll((app.details_scroll, 0))
-    } else {
-        paragraph
     }
 }
 
@@ -1975,7 +1983,7 @@ fn overlay_lines(app: &ControlCenterApp) -> String {
             resolved,
             ..
         } => format!(
-            "{}\n\nBefore / 原值: {before:?}\nAfter / 草稿: {after:?}\nRequested / 请求: {}/{}/{}\nEffective / 受限生效值: {}/{}/{}\nApplication / 当前会话: {:?}\n\na Apply / 应用 · Esc Cancel / 取消",
+            "{}\n\nBefore / 原值: {before:?}\nAfter / 草稿: {after:?}\nRequested / 请求: {}/{}/{}\nEffective / 受限生效值: {}/{}/{}\nApplication / 当前会话: {:?}\n\nUse the effective footer bindings / 使用页脚当前生效键位",
             provider.as_str(),
             resolved.requested.title().as_str(),
             resolved.requested.tab_color().as_str(),
@@ -2050,7 +2058,7 @@ fn overlay_lines(app: &ControlCenterApp) -> String {
                 catalog(app.locale(), HumanMessageKey::RepairTitleScope),
                 catalog(app.locale(), HumanMessageKey::WhatWillNotChange),
                 catalog(app.locale(), HumanMessageKey::RepairTitlePreserved),
-                catalog(app.locale(), HumanMessageKey::RepairApplyHint),
+                app.effective_hints_text(&app.input_context()),
                 catalog(app.locale(), HumanMessageKey::OverlayDismiss),
             )
         }
@@ -2516,7 +2524,7 @@ fn integration_lines(app: &ControlCenterApp) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "Mode evidence / 执行模式证据\n{mode_summary}\nDiagnostics: 1/2/3 provider · m execution mode / 诊断页：1/2/3 提供方 · m 执行模式\n\nProvider preferences / 提供方偏好\n1 Codex · 2 Agy · 3 Cursor · ←/→ mode · r inherit · v preview\nSelected / 已选: {} · {}\n{provider_preferences}\nSaved preference is not live application; old output may remain until the next owned event or the old tab closes / 已保存偏好不代表当前会话生效，旧输出可能保留至下次自有事件或旧标签关闭\n\n{integrations}",
+        "Mode evidence / 执行模式证据\n{mode_summary}\nUse current page bindings in Help / 通过帮助查看当前页面生效键位\n\nProvider preferences / 提供方偏好\nSelected / 已选: {} · {}\n{provider_preferences}\nSaved preference is not live application; old output may remain until the next owned event or the old tab closes / 已保存偏好不代表当前会话生效，旧输出可能保留至下次自有事件或旧标签关闭\n\n{integrations}",
         app.selected_provider.as_str(),
         provider_mode_label(app.selected_provider_mode),
     )
@@ -2532,7 +2540,7 @@ fn diagnostics_lines(app: &ControlCenterApp) -> String {
         Some(app.diagnostic_mode),
     );
     let matrix_text = crate::human_diagnostics::matrix_tui_text(&matrix, app.locale());
-    let controls = "1 Codex · 2 Agy · 3 Cursor · m mode / 执行模式 · PgUp/PgDn scroll / 滚动";
+    let controls = app.effective_hints_text(&app.input_context());
     if app.snapshot.issues.is_empty() {
         return format!(
             "{controls}\n{matrix_text}\n\n✓ {} (static / 静态)\n\n{}",
@@ -2787,29 +2795,37 @@ mod tests {
         }
     }
 
-    impl TerminalLifecycle for RecordingLifecycle {
-        fn enable_raw_mode(&mut self) -> io::Result<()> {
-            self.record("enable_raw")
-        }
-
-        fn disable_raw_mode(&mut self) -> io::Result<()> {
-            self.record("disable_raw")
-        }
-
-        fn enter_alternate_screen(&mut self) -> io::Result<()> {
-            self.record("enter_alternate")
-        }
-
-        fn leave_alternate_screen(&mut self) -> io::Result<()> {
-            self.record("leave_alternate")
-        }
-
-        fn show_cursor(&mut self) -> io::Result<()> {
-            self.record("show_cursor")
+    use terminal_ui_ratatui::terminal::{TerminalGuard, TerminalOps, TerminalStep};
+    impl TerminalOps for RecordingLifecycle {
+        fn apply(&mut self, step: TerminalStep, enter: bool) -> io::Result<()> {
+            self.record(match (step, enter) {
+                (TerminalStep::Raw, true) => "enable_raw",
+                (TerminalStep::Raw, false) => "disable_raw",
+                (TerminalStep::Alternate, true) => "enter_alternate",
+                (TerminalStep::Alternate, false) => "leave_alternate",
+                (TerminalStep::Cursor, true) => "hide_cursor",
+                (TerminalStep::Cursor, false) => "show_cursor",
+                (TerminalStep::Mouse, true) => "enable_mouse",
+                (TerminalStep::Mouse, false) => "disable_mouse",
+                (TerminalStep::Paste, true) => "enable_paste",
+                (TerminalStep::Paste, false) => "disable_paste",
+            })
         }
     }
+    const FULL_LIFECYCLE: [&str; 10] = [
+        "enable_raw",
+        "enter_alternate",
+        "hide_cursor",
+        "enable_mouse",
+        "enable_paste",
+        "disable_paste",
+        "disable_mouse",
+        "show_cursor",
+        "leave_alternate",
+        "disable_raw",
+    ];
 
-    fn app() -> ControlCenterApp {
+    pub(super) fn app() -> ControlCenterApp {
         ControlCenterApp::new(
             PresentationSettings::default(),
             ManagementSnapshot {
@@ -2820,6 +2836,66 @@ mod tests {
             },
             ManagementOverview::default(),
         )
+    }
+
+    // Exercise the production focused viewport across its entire content.
+    // Narrow/Smart changes retain the original facts even when below the first frame.
+    fn all_viewport_frames(
+        app: &mut ControlCenterApp,
+        width: u16,
+        height: u16,
+        raw: bool,
+    ) -> String {
+        use std::fmt::Write;
+        app.interaction
+            .get_mut()
+            .focus
+            .focus(&input::details_path());
+        app.interaction.get_mut().details.home();
+        app.interaction.get_mut().view.density = if raw {
+            terminal_ui_contract::document::ViewDensity::Raw
+        } else {
+            terminal_ui_contract::document::ViewDensity::Smart
+        };
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut result = String::new();
+        let mut frames = String::new();
+        for _ in 0..1000 {
+            terminal.draw(|f| render(f, app)).unwrap();
+            write!(frames, "{:?}", terminal.backend().buffer()).unwrap();
+            // Inspect visible interior cells rather than Buffer's Debug format:
+            // styling, borders and line boundaries must not split a wrapped word.
+            let compact = terminal_ui_contract::viewport::ResponsivePolicy::default()
+                .classify(width, height)
+                == terminal_ui_contract::viewport::LayoutClass::Compact;
+            let left = if compact {
+                1
+            } else {
+                HUMAN_SHELL.sidebar_columns + 1
+            };
+            let mut rows = vec![];
+            for row in HUMAN_SHELL.header_rows + 1..height - HUMAN_SHELL.footer_rows - 1 {
+                let mut line = String::new();
+                let mut column = left;
+                while column < width - 2 {
+                    let symbol = terminal.backend().buffer()[(column, row)].symbol();
+                    line.push_str(symbol);
+                    column += u16::try_from(unicode_width::UnicodeWidthStr::width(symbol).max(1))
+                        .unwrap();
+                }
+                rows.push(line.trim_end().to_owned());
+            }
+            result.push_str(&rows[0]);
+            let old = app.interaction.borrow().details.offset();
+            app.handle_key(KeyCode::Down);
+            if app.interaction.borrow().details.offset() == old {
+                for row in rows.iter().skip(1) {
+                    result.push_str(row);
+                }
+                return format!("{result}\n{frames}");
+            }
+        }
+        panic!("bounded viewport failed to reach its end");
     }
 
     #[test]
@@ -2869,9 +2945,9 @@ mod tests {
                 terminal
                     .draw(|frame| super::render_with_no_color(frame, &app, true))
                     .unwrap();
-                let rendered = format!("{:?}", terminal.backend().buffer());
+                let rendered = all_viewport_frames(&mut app, width, 32, false);
                 assert!(rendered.contains("shared_daemon"));
-                assert!(rendered.contains("blocked_upstream"));
+                assert!(rendered.contains("blocked_upstream"), "{rendered}");
                 assert!(!rendered.contains('\u{1b}'));
             }
         }
@@ -3005,7 +3081,7 @@ mod tests {
         );
     }
 
-    fn refresh(
+    pub(super) fn refresh(
         presentation: PresentationSettings,
         interface: InterfacePreferences,
     ) -> ControlCenterRefresh {
@@ -3180,7 +3256,7 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &app))
             .expect("Integrations render");
-        let rendered = format!("{:?}", terminal.backend().buffer());
+        let rendered = all_viewport_frames(&mut app, 120, 80, true);
 
         assert!(rendered.contains("集成"));
         assert!(rendered.contains("Codex"));
@@ -3221,8 +3297,8 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &english_app))
             .expect("English Hooks render");
-        let rendered = format!("{:?}", terminal.backend().buffer());
-        assert!(rendered.contains("Provider"));
+        let rendered = all_viewport_frames(&mut english_app, 24, 12, false);
+        assert!(rendered.contains("Provider"), "{rendered}");
         assert!(rendered.contains("PreToolUse"));
         assert!(!rendered.contains("powershell.exe"));
         assert!(!rendered.contains("commandWindows"));
@@ -3250,9 +3326,9 @@ mod tests {
         terminal
             .draw(|frame| render(frame, &chinese_app))
             .expect("Chinese Hooks render");
-        let rendered = format!("{:?}", terminal.backend().buffer());
+        let rendered = all_viewport_frames(&mut chinese_app, 24, 12, false);
         assert!(rendered.contains("提供方"));
-        assert!(rendered.contains("可信"));
+        assert!(rendered.contains("可信"), "{rendered}");
     }
 
     #[test]
@@ -3278,7 +3354,17 @@ mod tests {
         assert!(rendered.contains("TabBeacon 控制中心"));
         assert!(rendered.contains("概览"));
         assert!(rendered.contains("总体状态"));
-        assert!(rendered.contains("↑↓ 导航"));
+        assert!(rendered.contains("F2"));
+        assert!(rendered.contains("F5"));
+        assert!(rendered.contains("只读刷新"));
+        assert!(
+            app.interaction
+                .borrow()
+                .map
+                .effective_hints(&app.input_context())
+                .iter()
+                .any(|h| h.action_id == "ui.move.up" && h.keys == "Up")
+        );
     }
 
     #[test]
@@ -3558,73 +3644,46 @@ mod tests {
     #[test]
     fn terminal_guard_restores_every_terminal_state_on_normal_drop() {
         let lifecycle = RecordingLifecycle::new(None);
-        let calls = Rc::clone(&lifecycle.calls);
+        let calls = lifecycle.calls.clone();
         {
-            let _guard = TerminalGuard::enter(lifecycle).expect("terminal enters");
+            let _guard = TerminalGuard::enter(lifecycle, true).unwrap();
         }
+        assert_eq!(calls.borrow().as_slice(), FULL_LIFECYCLE);
+    }
+    #[test]
+    fn terminal_guard_restores_partial_setup_and_unwind_paths() {
+        let lifecycle = RecordingLifecycle::new(Some("enter_alternate"));
+        let calls = lifecycle.calls.clone();
+        assert!(TerminalGuard::enter(lifecycle, true).is_err());
         assert_eq!(
             calls.borrow().as_slice(),
             [
                 "enable_raw",
                 "enter_alternate",
                 "leave_alternate",
-                "disable_raw",
-                "show_cursor",
+                "disable_raw"
             ]
         );
+        let lifecycle = RecordingLifecycle::new(None);
+        let calls = lifecycle.calls.clone();
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| {
+                let _guard = TerminalGuard::enter(lifecycle, true).unwrap();
+                panic!("controlled event-loop failure");
+            }))
+            .is_err()
+        );
+        assert_eq!(calls.borrow().as_slice(), FULL_LIFECYCLE);
     }
-
-    #[test]
-    fn terminal_guard_restores_partial_setup_and_unwind_paths() {
-        let setup_lifecycle = RecordingLifecycle::new(Some("enter_alternate"));
-        let setup_calls = Rc::clone(&setup_lifecycle.calls);
-        assert!(TerminalGuard::enter(setup_lifecycle).is_err());
-        assert_eq!(
-            setup_calls.borrow().as_slice(),
-            [
-                "enable_raw",
-                "enter_alternate",
-                "leave_alternate",
-                "disable_raw",
-                "show_cursor",
-            ]
-        );
-
-        let unwind_lifecycle = RecordingLifecycle::new(None);
-        let unwind_calls = Rc::clone(&unwind_lifecycle.calls);
-        let unwind = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = TerminalGuard::enter(unwind_lifecycle).expect("terminal enters");
-            panic!("controlled event-loop failure");
-        }));
-        assert!(unwind.is_err());
-        assert_eq!(
-            unwind_calls.borrow().as_slice(),
-            [
-                "enable_raw",
-                "enter_alternate",
-                "leave_alternate",
-                "disable_raw",
-                "show_cursor",
-            ]
-        );
-    }
-
     #[test]
     fn terminal_guard_attempts_all_cleanup_steps_after_a_cleanup_error() {
         let lifecycle = RecordingLifecycle::new(Some("leave_alternate"));
-        let calls = Rc::clone(&lifecycle.calls);
-        let mut guard = TerminalGuard::enter(lifecycle).expect("terminal enters");
-        assert!(guard.restore().is_err());
-        assert_eq!(
-            &calls.borrow()[..5],
-            [
-                "enable_raw",
-                "enter_alternate",
-                "leave_alternate",
-                "disable_raw",
-                "show_cursor",
-            ]
-        );
+        let calls = lifecycle.calls.clone();
+        let mut guard = TerminalGuard::enter(lifecycle, true).unwrap();
+        assert!(guard.finish().is_err());
+        assert_eq!(calls.borrow().as_slice(), FULL_LIFECYCLE);
+        drop(guard);
+        assert_eq!(calls.borrow().last(), Some(&"leave_alternate"));
     }
 
     #[test]
@@ -3654,7 +3713,7 @@ mod tests {
         app.screen = Screen::Diagnostics;
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).expect("test terminal starts");
         terminal.draw(|frame| render(frame, &app)).expect("renders");
-        let rendered = format!("{:?}", terminal.backend().buffer());
+        let rendered = all_viewport_frames(&mut app, 80, 12, false);
         assert!(rendered.contains("Attention"));
         assert!(rendered.contains("Manual action"));
         assert!(rendered.contains("Launch codex"));

@@ -231,7 +231,7 @@ if ($CaptureUi) {
 # receipt written by the owned terminal child, not by launcher lifetime,
 # Windows title discovery, CIM, or PowerShell process queries.
 $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
-$wtLauncher = Start-Process -FilePath $wtCommand.Source -ArgumentList $arguments -PassThru
+$wtLauncher = Start-Process -FilePath $wtCommand.Source -ArgumentList $arguments -WindowStyle Hidden -PassThru
 $script:temporaryWindowCreated = $true
 $wtLauncherProcessId = $wtLauncher.Id
 $wtLauncher.Dispose()
@@ -342,6 +342,7 @@ $titleExplanation = $false
 $localeSwitched = $false
 $interfaceReverted = $false
 $interfaceApplyStaged = $false
+$sharedInputScripted = $false
 if (Test-Path -LiteralPath $fixtureResultPath) {
     $fixtureResult = Get-Content -LiteralPath $fixtureResultPath
     $liveRefresh = $fixtureResult -contains 'TUI_LIVE_REFRESH=true'
@@ -356,13 +357,14 @@ if (Test-Path -LiteralPath $fixtureResultPath) {
     $localeSwitched = $fixtureResult -contains 'TUI_LANGUAGE_LIVE_SWITCH=true'
     $interfaceReverted = $fixtureResult -contains 'TUI_INTERFACE_REVERT=true'
     $interfaceApplyStaged = $fixtureResult -contains 'TUI_INTERFACE_STAGED_APPLY=true'
+    $sharedInputScripted = ($fixtureResult -contains 'TUI_SHARED_INPUT_SCRIPTED=true') -and ($fixtureResult -contains 'SCREENS_VISITED=9')
 }
 
 $passed = $durableCompletionProven -and $sentinelObserved -and $shellUsable -and
     $fixtureExitCode -eq 0 -and $liveRefresh -and $workspaceSessions -and $hookInventory -and
     $hookProviderAdapter -and $integrations -and $providerCapabilityMatrix -and $providerBadgeStaged -and
     $helpOverlay -and $titleExplanation -and $localeSwitched -and
-    $interfaceReverted -and $interfaceApplyStaged
+    $interfaceReverted -and $interfaceApplyStaged -and $sharedInputScripted
 $visualDisposition = if ($passed) {
     'PASS'
 }
@@ -435,6 +437,10 @@ $receipt = @(
     "TUI_LANGUAGE_LIVE_SWITCH=$($localeSwitched.ToString().ToLowerInvariant())"
     "TUI_INTERFACE_REVERT=$($interfaceReverted.ToString().ToLowerInvariant())"
     "TUI_INTERFACE_STAGED_APPLY=$($interfaceApplyStaged.ToString().ToLowerInvariant())"
+    "TUI_SHARED_INPUT_SCRIPTED=$($sharedInputScripted.ToString().ToLowerInvariant())"
+    'INPUT_SOURCE=SYNTHETIC_NORMALIZED_EVENTS'
+    'REAL_TERMINAL_ACCEPTANCE=UNPROVEN'
+    'REAL_TUI_INPUT_TO_FRAME_P95=UNPROVEN'
     "VISUAL_OPERATION_DISPOSITION=$visualDisposition"
     "VISUAL_FAILURE_CLASS=$failureClass"
     "WINDOWS_TERMINAL_TUI_SMOKE=$overallDisposition"

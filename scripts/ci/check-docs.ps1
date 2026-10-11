@@ -275,8 +275,13 @@ foreach ($proof in $candidateScopeProofs) {
 }
 
 $releaseProofs = @(
-    @{ Path = 'Cargo.toml'; Pattern = '(?m)^version = "0\.8\.2"$' },
-    @{ Path = 'Cargo.lock'; Pattern = '(?ms)name = "tabbeacon"\r?\nversion = "0\.8\.2"' },
+    @{ Path = 'Cargo.toml'; Pattern = '(?m)^version = "0\.9\.0"$' },
+    @{ Path = 'Cargo.lock'; Pattern = '(?ms)name = "tabbeacon"\r?\nversion = "0\.9\.0"' },
+    @{ Path = 'CHANGELOG.md'; Pattern = '## \[0\.8\.2\] - Unreleased scoped candidate' },
+    @{ Path = 'CHANGELOG.md'; Pattern = '## \[0\.9\.0\] - Unreleased shared TUI development candidate' },
+    @{ Path = 'docs/v0.9.0-owner-review.md'; Pattern = 'v0\.8\.2 was never formally released' },
+    @{ Path = 'docs/v0.9.0-owner-review.md'; Pattern = 'BLOCKED_UNPUBLISHED_SHARED_DEPENDENCY' },
+    @{ Path = 'docs/v0.9.0-owner-review.md'; Pattern = 'Issue \[#122\] remains its historical scope record|Issue #122 remains its historical scope record' },
     @{ Path = 'docs/v0.8.2-release-notes.md'; Pattern = 'Owner Gate' },
     @{ Path = 'CHANGELOG.md'; Pattern = '## \[0\.7\.3\] - 2026-09-01' },
     @{ Path = 'docs/v0.7.3-release-notes.md'; Pattern = '# TabBeacon v0\.7\.3' },
@@ -285,7 +290,7 @@ $releaseProofs = @(
 )
 foreach ($proof in $releaseProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw -Encoding UTF8
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not preserve historical release records and v0.8.2 candidate metadata"
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not preserve historical release records, unpublished v0.8.2 history and v0.9.0 candidate boundaries"
 }
 
 $releaseTargetProofs = @(

@@ -111,7 +111,11 @@ fn main() -> ExitCode {
 #[allow(clippy::too_many_lines)]
 fn dispatch(cli: Cli) -> ExitCode {
     match cli.command {
-        None | Some(Command::Ui) => ui(),
+        None => ui(tabbeacon::cli::UiKeymap::Standard, None),
+        Some(Command::Ui {
+            keymap,
+            keymap_file,
+        }) => ui(keymap, keymap_file.as_deref()),
         Some(Command::ActivityWorker {
             key_digest,
             generation,
@@ -5380,7 +5384,7 @@ fn completions(shell: clap_complete::Shell) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn ui() -> ExitCode {
+fn ui(keymap: tabbeacon::cli::UiKeymap, keymap_file: Option<&std::path::Path>) -> ExitCode {
     if !is_interactive_terminal() {
         println!("TABBEACON_UI=NON_INTERACTIVE");
         println!("NEXT_ACTION=use tabbeacon status --json or tabbeacon config commands");
@@ -5394,22 +5398,67 @@ fn ui() -> ExitCode {
         Ok(store) => store,
         Err(error) => return management_error("UI", &error),
     };
-    let refresh = match collect_control_center_refresh(&store, &interface_store, true) {
-        Ok(refresh) => refresh,
+    // Only local settings reads precede the first frame; providers run on worker.
+    let presentation = match store.snapshot_read_only() {
+        Ok(snapshot) => snapshot.settings(),
         Err(error) => return management_error("UI", &error),
     };
+    let interface = match interface_store.snapshot_read_only() {
+        Ok(snapshot) => snapshot.preferences(),
+        Err(error) => return management_error("UI", &error),
+    };
+    let collector_store = store.clone();
+    let collector_interface = interface_store.clone();
+    let mut app = tabbeacon::control_center::ControlCenterApp::new(
+        presentation,
+        ManagementSnapshot {
+            health: tabbeacon::management::ManagementHealth::Warning,
+            issues: vec![],
+            recommended_actions: vec![],
+            change_plans: vec![],
+        },
+        tabbeacon::management::ManagementOverview::default(),
+    )
+    .with_interface_preferences(interface)
+    .with_locale(resolve_runtime_locale(None, interface.language()).locale());
+    if let Err(error) = app.set_keymap_profile(match keymap {
+        tabbeacon::cli::UiKeymap::Standard => terminal_ui_contract::keymap::KeymapProfile::Standard,
+        tabbeacon::cli::UiKeymap::Vim => terminal_ui_contract::keymap::KeymapProfile::Vim,
+    }) {
+        return management_error("UI", &error);
+    }
+    if let Some(path) = keymap_file {
+        match std::fs::File::open(path).and_then(|file| {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            file.take(65537).read_to_end(&mut bytes)?;
+            if bytes.len() > 65536 {
+                return Err(io::Error::other("keymap file exceeds 64 KiB"));
+            }
+            String::from_utf8(bytes).map_err(io::Error::other)
+        }) {
+            Ok(text) => {
+                let _ = app.load_keymap_toml(&text);
+            }
+            Err(_) => {
+                let _ = app.load_keymap_toml("invalid keymap file");
+            }
+        }
+    }
     match tabbeacon::control_center::run(
-        tabbeacon::control_center::ControlCenterApp::new(
-            refresh.presentation,
-            refresh.snapshot.clone(),
-            refresh.overview.clone(),
-        )
-        .with_interface_preferences(refresh.interface)
-        .with_locale(resolve_runtime_locale(None, refresh.interface.language()).locale())
-        .with_refresh(refresh),
+        app,
         |before, after| apply_control_center_drafts(&store, &interface_store, before, after),
         apply_control_center_workspace_override,
-        || collect_control_center_refresh(&store, &interface_store, false),
+        tabbeacon::control_center::BoundedRefreshCollector(
+            move |control: &terminal_ui_runtime::refresh::CollectionControl| {
+                collect_control_center_refresh_controlled(
+                    &collector_store,
+                    &collector_interface,
+                    true,
+                    Some(control),
+                )
+            },
+        ),
         apply_control_center_repair,
         |provider, expected_global, before, after| {
             let snapshot = store.snapshot_read_only().map_err(io::Error::other)?;
@@ -5427,19 +5476,91 @@ fn ui() -> ExitCode {
     }
 }
 
+#[cfg(test)]
 fn collect_control_center_refresh(
     settings_store: &PresentationSettingsStore,
     interface_store: &InterfacePreferencesStore,
     include_workspace: bool,
 ) -> io::Result<tabbeacon::control_center::ControlCenterRefresh> {
+    collect_control_center_refresh_controlled(
+        settings_store,
+        interface_store,
+        include_workspace,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_lines)] // One read-only observation feeds all product projections before publication.
+fn collect_control_center_refresh_controlled(
+    settings_store: &PresentationSettingsStore,
+    interface_store: &InterfacePreferencesStore,
+    include_workspace: bool,
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> io::Result<tabbeacon::control_center::ControlCenterRefresh> {
     let settings_snapshot = settings_store
-        .snapshot_read_only()
+        .snapshot_read_only_controlled(control)
         .map_err(io::Error::other)?;
     let presentation = settings_snapshot.settings();
-    let provider_admission = [CliTarget::Codex, CliTarget::Agy, CliTarget::Cursor]
-        .into_iter()
-        .map(|provider| (provider, provider_presentation_admission(provider)))
-        .collect::<Vec<_>>();
+    if let Some(control) = control {
+        control.check().map_err(io::Error::other)?;
+    }
+    let (report, hooks) = match CodexIntegration::from_environment() {
+        Ok(integration) => {
+            let (doctor, hooks) = integration.observe_read_only(control);
+            (
+                tabbeacon::diagnostics::collect_operational_diagnostics_from_codex_controlled(
+                    &doctor, control,
+                ),
+                hooks,
+            )
+        }
+        Err(_) => (
+            tabbeacon::diagnostics::collect_operational_diagnostics_controlled(control),
+            tabbeacon::hook_inventory::HookInventory::default(),
+        ),
+    };
+    if let Some(control) = control {
+        control.check().map_err(io::Error::other)?;
+    }
+    let agy = AgyProductionSetup::from_environment()
+        .ok()
+        .map(|setup| setup.inspect_controlled(control));
+    let cursor = std::env::current_dir()
+        .and_then(|workspace| {
+            std::env::current_exe().and_then(|exe| {
+                CursorHookIntegration::new(&workspace, &exe).and_then(|i| i.check())
+            })
+        })
+        .ok();
+    let cursor_admission = match cursor {
+        Some(CursorHookState::Installed) => (
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        ),
+        Some(CursorHookState::NotInstalled) => (
+            PresentationCapabilities::NONE,
+            ApplicationStatus::NotInstalled,
+        ),
+        Some(CursorHookState::Partial | CursorHookState::Drift) => (
+            PresentationCapabilities::NONE,
+            ApplicationStatus::InstalledUntrusted,
+        ),
+        None => (PresentationCapabilities::NONE, ApplicationStatus::Unproven),
+    };
+    let provider_admission = vec![
+        (
+            CliTarget::Codex,
+            (PresentationCapabilities::CODEX, ApplicationStatus::Unproven),
+        ),
+        (
+            CliTarget::Agy,
+            agy.as_ref().map_or(
+                (PresentationCapabilities::NONE, ApplicationStatus::Unproven),
+                |o| agy_presentation_admission(o.state),
+            ),
+        ),
+        (CliTarget::Cursor, cursor_admission),
+    ];
     let provider_presentation = provider_admission
         .iter()
         .copied()
@@ -5454,24 +5575,23 @@ fn collect_control_center_refresh(
         })
         .collect::<io::Result<Vec<_>>>()?;
     let interface = interface_store
-        .snapshot_read_only()
+        .snapshot_read_only_controlled(control)
         .map_err(io::Error::other)?
         .preferences();
-    let report = collect_operational_diagnostics();
     let workspace = include_workspace
         .then(|| {
             std::env::current_dir().ok().and_then(|cwd| {
                 WorkspaceIdentityResolver::with_default_state_root()
                     .ok()
-                    .and_then(|resolver| resolver.inspect_alias(cwd).ok())
+                    .and_then(|resolver| resolver.inspect_alias_controlled(cwd, control).ok())
             })
         })
         .flatten();
-    let hooks = CodexIntegration::from_environment()
-        .map(|integration| integration.hook_inventory())
-        .unwrap_or_default();
-    let integrations = ProviderRegistry::from_diagnostics(&report, &hooks);
-    let sessions = inspect_system_sessions();
+    let integrations = ProviderRegistry::from_observations(&report, &hooks, agy, cursor);
+    if let Some(control) = control {
+        control.check().map_err(io::Error::other)?;
+    }
+    let sessions = tabbeacon::activity::inspect_system_sessions_controlled(control);
     let title_explanation = TitleExplanation::from_observation(
         &report,
         Some(presentation),

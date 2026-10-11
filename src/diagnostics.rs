@@ -375,7 +375,20 @@ pub fn collect_operational_diagnostics() -> OperationalDiagnostics {
 pub fn collect_operational_diagnostics_with_hook_runtime_probe(
     probe_hook_runtime: bool,
 ) -> OperationalDiagnostics {
-    let (codex, integration, doctor) = collect_codex_diagnostics(probe_hook_runtime);
+    operational_from_codex(collect_codex_diagnostics(probe_hook_runtime))
+}
+
+/// Projects an already collected Doctor without launching another CLI probe.
+#[must_use]
+pub fn collect_operational_diagnostics_from_codex(
+    report: &crate::providers::codex::CodexDoctorReport,
+) -> OperationalDiagnostics {
+    operational_from_codex(codex_diagnostics_from_report(report))
+}
+
+fn operational_from_codex(
+    (codex, integration, doctor): (CodexDiagnostics, IntegrationDiagnostics, DoctorDiagnostics),
+) -> OperationalDiagnostics {
     let activity = inspect_system_activity_leases();
     let (workspace_health, alias_registry_count) = match StableAliasRegistry::default_state_root() {
         Ok(root) => {
@@ -389,6 +402,50 @@ pub fn collect_operational_diagnostics_with_hook_runtime_probe(
     };
     let presentation = collect_presentation_diagnostics();
     let title_policy = WindowsTerminalPolicyStore::from_environment().inspect();
+    let title =
+        TitleAuthorityDiagnostics::passive(integration.title_ownership.as_str(), title_policy);
+    OperationalDiagnostics {
+        schema_version: DIAGNOSTICS_SCHEMA_VERSION,
+        tabbeacon: TabBeaconDiagnostics {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            binary_path: env::current_exe().ok().map(|path| display_path(&path)),
+        },
+        codex,
+        integration,
+        presentation,
+        title: title.clone(),
+        activity: ActivityDiagnostics {
+            observation: "lease_based".to_owned(),
+            worker_state_health: activity.health().as_str().to_owned(),
+            active_leases: activity.active_leases(),
+            stale_leases: activity.stale_leases(),
+            invalid_leases: activity.invalid_leases(),
+        },
+        workspace: WorkspaceDiagnostics {
+            identity_subsystem_health: workspace_health,
+            alias_registry_count,
+        },
+        doctor: doctor.with_title(title),
+    }
+}
+
+fn operational_from_codex_controlled(
+    (codex, integration, doctor): (CodexDiagnostics, IntegrationDiagnostics, DoctorDiagnostics),
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> OperationalDiagnostics {
+    let activity = crate::activity::inspect_system_activity_leases_controlled(control);
+    let (workspace_health, alias_registry_count) = match StableAliasRegistry::default_state_root() {
+        Ok(root) => {
+            let inspection = StableAliasRegistry::new(root).inspect_read_only_controlled(control);
+            (
+                inspection.health().as_str().to_owned(),
+                inspection.assignment_count(),
+            )
+        }
+        Err(_) => ("unavailable".to_owned(), None),
+    };
+    let presentation = collect_presentation_diagnostics_controlled(control);
+    let title_policy = WindowsTerminalPolicyStore::from_environment().inspect_controlled(control);
     let title =
         TitleAuthorityDiagnostics::passive(integration.title_ownership.as_str(), title_policy);
     OperationalDiagnostics {
@@ -469,6 +526,12 @@ fn collect_codex_diagnostics(
     } else {
         integration.doctor()
     };
+    codex_diagnostics_from_report(&report)
+}
+
+fn codex_diagnostics_from_report(
+    report: &crate::providers::codex::CodexDoctorReport,
+) -> (CodexDiagnostics, IntegrationDiagnostics, DoctorDiagnostics) {
     let manifest_status = report.check_status("ownership.manifest");
     let declaration_status = report
         .check_status("hooks.declarations")
@@ -510,7 +573,7 @@ fn collect_codex_diagnostics(
             hook_trust: trust,
             title_ownership,
         },
-        DoctorDiagnostics::from_codex_report(&report),
+        DoctorDiagnostics::from_codex_report(report),
     )
 }
 
@@ -526,6 +589,51 @@ fn collect_presentation_diagnostics() -> PresentationDiagnostics {
         };
     };
     match store.snapshot_read_only() {
+        Ok(snapshot) => presentation_diagnostics(
+            if snapshot.is_absent() {
+                PresentationSettingsSource::Default
+            } else {
+                PresentationSettingsSource::Configured
+            },
+            snapshot.settings(),
+        ),
+        Err(SettingsError::Malformed | SettingsError::SymbolicLinkTarget) => {
+            PresentationDiagnostics {
+                source: PresentationSettingsSource::Invalid,
+                title_mode: None,
+                tab_color_mode: None,
+                activity_mode: None,
+                spinner_preset: None,
+                theme: None,
+            }
+        }
+        Err(SettingsError::StateRootUnavailable | SettingsError::Io(_)) => {
+            PresentationDiagnostics {
+                source: PresentationSettingsSource::Unavailable,
+                title_mode: None,
+                tab_color_mode: None,
+                activity_mode: None,
+                spinner_preset: None,
+                theme: None,
+            }
+        }
+    }
+}
+
+fn collect_presentation_diagnostics_controlled(
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> PresentationDiagnostics {
+    let Ok(store) = PresentationSettingsStore::from_environment() else {
+        return PresentationDiagnostics {
+            source: PresentationSettingsSource::Unavailable,
+            title_mode: None,
+            tab_color_mode: None,
+            activity_mode: None,
+            spinner_preset: None,
+            theme: None,
+        };
+    };
+    match store.snapshot_read_only_controlled(control) {
         Ok(snapshot) => presentation_diagnostics(
             if snapshot.is_absent() {
                 PresentationSettingsSource::Default
@@ -722,6 +830,45 @@ fn display_path(path: &Path) -> String {
 
 fn option_or_unavailable(value: Option<&str>) -> &str {
     value.unwrap_or("unavailable")
+}
+
+/// Projects one Codex observation with bounded, cooperative local diagnostics.
+#[must_use]
+pub fn collect_operational_diagnostics_from_codex_controlled(
+    report: &crate::providers::codex::CodexDoctorReport,
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> OperationalDiagnostics {
+    operational_from_codex_controlled(codex_diagnostics_from_report(report), control)
+}
+
+/// Collects read-only diagnostics with cooperative provider and local observation budgets.
+#[must_use]
+pub fn collect_operational_diagnostics_controlled(
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> OperationalDiagnostics {
+    let facts = match CodexIntegration::from_environment() {
+        Ok(integration) => codex_diagnostics_from_report(&integration.observe_read_only(control).0),
+        Err(_) => (
+            CodexDiagnostics {
+                version: None,
+                hook_profile: None,
+                hook_wire_shape: None,
+                profile_state: "unknown".to_owned(),
+                profile_supported: false,
+                mutation_authority: CodexMutationAuthority::Blocked,
+                runtime_continuity: CodexRuntimeContinuity::Unproven,
+            },
+            IntegrationDiagnostics {
+                installed: false,
+                owned_hook_count: None,
+                declaration_status: DiagnosticStatus::Fail,
+                hook_trust: HookTrustState::Unavailable,
+                title_ownership: TitleOwnershipState::Unavailable,
+            },
+            DoctorDiagnostics::unavailable(),
+        ),
+    };
+    operational_from_codex_controlled(facts, control)
 }
 
 #[cfg(test)]

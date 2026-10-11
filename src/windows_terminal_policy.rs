@@ -440,6 +440,79 @@ impl WindowsTerminalPolicyStore {
         }
     }
 
+    /// Bounded cooperative observation; original transactional paths are retained.
+    ///
+    /// # Errors
+    /// Returns unavailable evidence on path, budget, cancellation or parse failure.
+    #[must_use]
+    pub fn inspect_controlled(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> TitlePolicyDiagnostics {
+        let Ok(resolved) = self.resolve_document() else {
+            return self.diagnose_resolution_failure();
+        };
+        let Ok(document) = JsoncDocument::parse(&resolved.bytes) else {
+            return TitlePolicyDiagnostics {
+                settings_source: SettingsSourceResolution::MalformedOrUnsafe,
+                active_profile_resolution: ActiveProfileResolution::Unavailable,
+                application_title_policy: ApplicationTitlePolicy::MalformedOrUnsafe,
+                policy_source: PolicySource::Unavailable,
+                remediation: TitleRemediationState::Unavailable,
+                remediation_scope: "none",
+            };
+        };
+        let Ok(profile) = resolve_active_profile(&document, self.active_profile_id.as_deref())
+        else {
+            return TitlePolicyDiagnostics {
+                settings_source: SettingsSourceResolution::Resolved(resolved.installation),
+                active_profile_resolution: ActiveProfileResolution::Ambiguous,
+                application_title_policy: ApplicationTitlePolicy::AmbiguousProfile,
+                policy_source: PolicySource::Unavailable,
+                remediation: TitleRemediationState::BlockedAmbiguous,
+                remediation_scope: "none",
+            };
+        };
+        let Ok(effective) = effective_policy(profile.profile, profile.defaults) else {
+            return TitlePolicyDiagnostics {
+                settings_source: SettingsSourceResolution::MalformedOrUnsafe,
+                active_profile_resolution: ActiveProfileResolution::Unavailable,
+                application_title_policy: ApplicationTitlePolicy::MalformedOrUnsafe,
+                policy_source: PolicySource::Unavailable,
+                remediation: TitleRemediationState::Unavailable,
+                remediation_scope: "none",
+            };
+        };
+        let policy = effective.classification();
+        let mut remediation = if policy.is_suppressed() {
+            TitleRemediationState::Available
+        } else {
+            TitleRemediationState::NotNeeded
+        };
+        if remediation == TitleRemediationState::NotNeeded
+            && self.receipt_matches_profile_controlled(
+                resolved.installation,
+                &resolved.bytes,
+                profile.profile,
+                control,
+            )
+        {
+            remediation = TitleRemediationState::AlreadyOwned;
+        }
+        TitlePolicyDiagnostics {
+            settings_source: SettingsSourceResolution::Resolved(resolved.installation),
+            active_profile_resolution: ActiveProfileResolution::Resolved,
+            application_title_policy: policy,
+            policy_source: effective.source,
+            remediation,
+            remediation_scope: if remediation == TitleRemediationState::Available {
+                "active_profile"
+            } else {
+                "none"
+            },
+        }
+    }
+
     /// Applies the smallest sufficient profile-only title-policy repair.
     ///
     /// This is intentionally an explicit operation. It re-reads the exact
@@ -724,6 +797,20 @@ impl WindowsTerminalPolicyStore {
         }
     }
 
+    fn read_receipt_controlled(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<Option<OwnershipReceipt>, PolicyError> {
+        let path = self.receipt_path()?;
+        match crate::provider_observation::read_observation_file(&path, 256 * 1024, control) {
+            Ok(Some(bytes)) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|_| PolicyError::MalformedOrUnsafe),
+            Ok(None) => Ok(None),
+            Err(error) => Err(PolicyError::Io(error)),
+        }
+    }
+
     fn write_receipt(&self, receipt: &OwnershipReceipt) -> Result<(), PolicyError> {
         let bytes = serde_json::to_vec(receipt).map_err(|_| PolicyError::MalformedOrUnsafe)?;
         atomic_write(&self.receipt_path()?, &bytes)?;
@@ -755,6 +842,28 @@ impl WindowsTerminalPolicyStore {
                 )
                 && sha256_hex(profile_bytes(bytes, profile)) == receipt.post_profile_sha256
         })
+    }
+
+    fn receipt_matches_profile_controlled(
+        &self,
+        installation: WindowsTerminalInstallation,
+        bytes: &[u8],
+        profile: &JsonNode,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> bool {
+        self.read_receipt_controlled(control)
+            .ok()
+            .flatten()
+            .is_some_and(|receipt| {
+                receipt.schema_version == 1
+                    && receipt.owned_json_path == "profiles.list[].suppressApplicationTitle"
+                    && receipt.installation == installation
+                    && matches!(
+                        target_bool(profile, "suppressApplicationTitle"),
+                        Ok(Some(false))
+                    )
+                    && sha256_hex(profile_bytes(bytes, profile)) == receipt.post_profile_sha256
+            })
     }
 }
 
@@ -1165,7 +1274,15 @@ fn read_safe_bytes(path: &Path) -> Result<Vec<u8>, PolicyError> {
     if is_unsafe_target(&metadata) {
         return Err(PolicyError::MalformedOrUnsafe);
     }
-    let bytes = fs::read(path)?;
+    let bytes = crate::provider_observation::read_observation_file(path, MAX_SETTINGS_BYTES, None)
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::InvalidData {
+                PolicyError::MalformedOrUnsafe
+            } else {
+                PolicyError::Io(error)
+            }
+        })?
+        .ok_or(PolicyError::Unavailable)?;
     if bytes.len() > MAX_SETTINGS_BYTES {
         return Err(PolicyError::MalformedOrUnsafe);
     }

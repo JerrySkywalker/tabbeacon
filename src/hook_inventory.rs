@@ -424,7 +424,7 @@ impl Default for HookInventory {
     }
 }
 
-fn event_label(event: &str) -> &str {
+pub(crate) fn event_label(event: &str) -> &str {
     match event {
         "pre_tool_use" => "PreToolUse",
         "permission_request" => "PermissionRequest",

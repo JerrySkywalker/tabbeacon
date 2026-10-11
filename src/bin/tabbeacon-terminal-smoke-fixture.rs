@@ -181,8 +181,10 @@ fn main() -> ExitCode {
                     report.interface_apply_staged,
                 );
                 let result = format!(
-                    "{result}TUI_DOCTOR_MATRIX={}\nTUI_READABLE_HOOK_NAMES=true\n",
-                    report.doctor_matrix_exercised
+                    "{result}TUI_DOCTOR_MATRIX={}\nTUI_READABLE_HOOK_NAMES=true\nTUI_SHARED_INPUT_SCRIPTED={}\nSCREENS_VISITED={}\nINPUT_SOURCE=SYNTHETIC_NORMALIZED_EVENTS\nREAL_TERMINAL_ACCEPTANCE=UNPROVEN\nREAL_TUI_INPUT_TO_FRAME_P95=UNPROVEN\n",
+                    report.doctor_matrix_exercised,
+                    report.shared_input_scripted,
+                    report.screens_visited
                 );
                 if let Err(error) = std::fs::write(path, result) {
                     eprintln!("WINDOWS_TERMINAL_TUI_SMOKE=FAIL");
@@ -192,6 +194,7 @@ fn main() -> ExitCode {
             }
             println!("WINDOWS_TERMINAL_TUI_SMOKE=PASS");
             println!("SCREENS_VISITED={}", report.screens_visited);
+            println!("TUI_SHARED_INPUT_SCRIPTED={}", report.shared_input_scripted);
             println!("TUI_LIVE_REFRESH={}", report.live_refresh_merged);
             println!(
                 "TUI_WORKSPACE_SESSIONS={}",

@@ -80,6 +80,11 @@ The production visual backend is title-first and intentionally compact:
 
 ## Quick Start
 
+Development in Draft PR #123 targets [v0.9.0](docs/v0.9.0-owner-review.md),
+absorbing the never-released v0.8.2 Hook Names/Doctor candidate and adopting the
+provisional TUC v0.2.0 shared UI. This does not change public install instructions;
+release, dependency publication and real terminal acceptance require Owner review.
+
 The v0.8.0 release candidate adds independent CLI
 presentation, Cursor color-only integration, supported structured Codex state,
 and [English/Chinese terminology](docs/terminology.md). Read the

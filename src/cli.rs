@@ -11,6 +11,14 @@ use clap_complete::Shell;
 
 use crate::interface_preferences::InterfaceLanguage;
 
+/// Session-only shared input profile.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum UiKeymap {
+    #[default]
+    Standard,
+    Vim,
+}
+
 /// Top-level `TabBeacon` command-line interface.
 #[derive(Debug, Parser)]
 #[command(
@@ -144,8 +152,15 @@ pub enum Command {
     Preview(PreviewArgs),
     /// Emit a shell-completion script to stdout.
     Completions { shell: Shell },
-    /// Reserve the Control Center command without entering a full-screen UI.
-    Ui,
+    /// Open the Control Center with an optional session-only keymap.
+    Ui {
+        /// Shared Standard or Vim profile; never changes saved settings.
+        #[arg(long, value_enum, default_value = "standard")]
+        keymap: UiKeymap,
+        /// Explicit user TOML keymap file; validated read-only, never auto-saved.
+        #[arg(long)]
+        keymap_file: Option<PathBuf>,
+    },
     /// Session-scoped internal activity worker.
     #[command(name = "__activity-worker-v1", hide = true)]
     ActivityWorker {

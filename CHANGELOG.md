@@ -2,6 +2,20 @@
 
 All notable changes to TabBeacon will be documented here.
 
+## [0.9.0] - Unreleased shared TUI development candidate
+
+- Absorb the never-released v0.8.2 Hook Names/Doctor Matrix candidate in Draft
+  PR #123; preserve Issue #122 history and track the new train in Issue #124.
+- Adopt TUC Core 0.2.0, Runtime 0.1.0 and Ratatui Adapter 0.1.0 at an exact Git
+  revision; registry package/install remains blocked on unpublished dependencies.
+- Share one provider observation per refresh, collect off the UI thread and retain
+  immutable snapshots, last-good/error state, single-flight scheduling and epochs.
+- Use shared Standard/Vim/Custom input, pane focus, mouse hit geometry and bounded
+  viewports; F2 Smart/Raw shares the same revision and F5 only requests refresh.
+- Preserve staged editing, CAS and manual Hook trust. Source/synthetic evidence
+  does not qualify real input latency or authorize publication/install/trust.
+  See [Owner review notes](docs/v0.9.0-owner-review.md).
+
 ## [0.8.2] - Unreleased scoped candidate
 
 - Name the eleven existing Codex Hooks `TabBeacon · <Event>` with handler-level

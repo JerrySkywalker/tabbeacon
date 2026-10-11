@@ -210,17 +210,25 @@ impl RepositoryDiscovery {
         args: &[&str],
         allow_no_match: bool,
     ) -> Result<Output, RepositoryIdentityError> {
-        let output = Command::new(&self.git_executable)
-            .arg("-C")
-            .arg(cwd)
-            .args(args)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GCM_INTERACTIVE", "Never")
-            .output()
-            .map_err(|error| RepositoryIdentityError::Git {
-                operation,
-                detail: sanitized_detail(&error.to_string()),
-            })?;
+        let captured = crate::provider_observation::bounded_output(
+            Command::new(&self.git_executable)
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GCM_INTERACTIVE", "Never"),
+            std::time::Duration::from_secs(2),
+            None,
+        )
+        .map_err(|error| RepositoryIdentityError::Git {
+            operation,
+            detail: sanitized_detail(&format!("{error:?}")),
+        })?;
+        let output = Output {
+            status: captured.status,
+            stdout: captured.stdout,
+            stderr: Vec::new(),
+        };
         if output.status.success() || (allow_no_match && output.status.code() == Some(1)) {
             Ok(output)
         } else {

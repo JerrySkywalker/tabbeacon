@@ -204,6 +204,49 @@ impl StableAliasRegistry {
         }
     }
 
+    /// Bounded cooperative observation; original transactional paths are retained.
+    ///
+    /// # Errors
+    /// Returns unavailable evidence on path, budget, cancellation or parse failure.
+    #[must_use]
+    pub fn inspect_read_only_controlled(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> AliasRegistryDiagnostics {
+        match fs::symlink_metadata(&self.root) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                AliasRegistryDiagnostics {
+                    health: AliasRegistryHealth::Unavailable,
+                    assignment_count: None,
+                }
+            }
+            Ok(_) => match self.load_v2_read_only_controlled(control) {
+                Ok(snapshot) => AliasRegistryDiagnostics {
+                    health: AliasRegistryHealth::Healthy,
+                    assignment_count: Some(snapshot.assignments.len()),
+                },
+                Err(RepositoryIdentityError::CorruptRegistry(_)) => AliasRegistryDiagnostics {
+                    health: AliasRegistryHealth::Corrupt,
+                    assignment_count: None,
+                },
+                Err(_) => AliasRegistryDiagnostics {
+                    health: AliasRegistryHealth::Unavailable,
+                    assignment_count: None,
+                },
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                AliasRegistryDiagnostics {
+                    health: AliasRegistryHealth::Absent,
+                    assignment_count: Some(0),
+                }
+            }
+            Err(_) => AliasRegistryDiagnostics {
+                health: AliasRegistryHealth::Unavailable,
+                assignment_count: None,
+            },
+        }
+    }
+
     /// Returns an existing alias or atomically assigns a collision-free one.
     ///
     /// # Errors
@@ -284,6 +327,20 @@ impl StableAliasRegistry {
         Ok(self.load_v2_read_only()?.assignment(identity))
     }
 
+    /// Bounded cooperative observation; original transactional paths are retained.
+    ///
+    /// # Errors
+    /// Returns unavailable evidence on path, budget, cancellation or parse failure.
+    pub fn lookup_assignment_read_only_controlled(
+        &self,
+        identity: &CanonicalRepositoryIdentity,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<Option<RegistryAssignment>, RepositoryIdentityError> {
+        Ok(self
+            .load_v2_read_only_controlled(control)?
+            .assignment(identity))
+    }
+
     /// Returns generated assignments without creating state. This typed API is
     /// intentionally for local alias coordination, never for Human rendering.
     ///
@@ -310,6 +367,27 @@ impl StableAliasRegistry {
         reserved_aliases: &BTreeSet<RepositoryAlias>,
     ) -> Result<Vec<super::AliasCandidate>, RepositoryIdentityError> {
         let snapshot = self.load_v2_read_only()?;
+        let mut used = snapshot.aliases();
+        used.extend(reserved_aliases.iter().cloned());
+        Ok(AdaptiveNamingPolicy::candidates(
+            display_name,
+            identity,
+            &used,
+        ))
+    }
+
+    /// Bounded cooperative observation; original transactional paths are retained.
+    ///
+    /// # Errors
+    /// Returns unavailable evidence on path, budget, cancellation or parse failure.
+    pub fn preview_candidates_read_only_controlled(
+        &self,
+        identity: &CanonicalRepositoryIdentity,
+        display_name: &RepositoryDisplayName,
+        reserved_aliases: &BTreeSet<RepositoryAlias>,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<Vec<super::AliasCandidate>, RepositoryIdentityError> {
+        let snapshot = self.load_v2_read_only_controlled(control)?;
         let mut used = snapshot.aliases();
         used.extend(reserved_aliases.iter().cloned());
         Ok(AdaptiveNamingPolicy::candidates(
@@ -496,6 +574,86 @@ impl StableAliasRegistry {
         }
     }
 
+    fn load_legacy_v1_controlled(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<RegistrySnapshot, RepositoryIdentityError> {
+        let mut valid = Vec::<RegistrySnapshot>::new();
+        let mut published_count = 0_usize;
+        self.ensure_safe_root_for_read()?;
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(RegistrySnapshot::empty());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut total_bytes = 0usize;
+        for (index, entry) in entries.enumerate() {
+            if index >= 4096 {
+                return Err(
+                    std::io::Error::other("registry observation entry budget exceeded").into(),
+                );
+            }
+            if let Some(control) = control {
+                control.check().map_err(std::io::Error::other)?;
+            }
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some((generation, expected_digest)) =
+                parse_snapshot_name(&name, V1_SNAPSHOT_PREFIX)
+            else {
+                continue;
+            };
+            published_count += 1;
+            let bytes = crate::provider_observation::read_observation_file(
+                &entry.path(),
+                256 * 1024,
+                control,
+            )?
+            .ok_or_else(|| std::io::Error::other("registry observation disappeared"))?;
+            total_bytes += bytes.len();
+            if total_bytes > 16 * 1024 * 1024 {
+                return Err(
+                    std::io::Error::other("registry observation byte budget exceeded").into(),
+                );
+            }
+            if hex_sha256(&bytes) != expected_digest {
+                continue;
+            }
+            let Ok(snapshot) = serde_json::from_slice::<RegistrySnapshot>(&bytes) else {
+                continue;
+            };
+            if snapshot.generation != generation || validate_v1_snapshot(&snapshot).is_err() {
+                continue;
+            }
+            valid.push(snapshot);
+        }
+        valid.sort_unstable_by_key(|snapshot| snapshot.generation);
+        if valid
+            .windows(2)
+            .any(|pair| pair[0].generation == pair[1].generation)
+        {
+            return Err(RepositoryIdentityError::CorruptRegistry(
+                "multiple valid snapshots claim one generation".to_owned(),
+            ));
+        }
+        if let Some(snapshot) = valid.pop() {
+            Ok(snapshot)
+        } else if published_count == 0 {
+            Ok(RegistrySnapshot::empty())
+        } else {
+            Err(RepositoryIdentityError::CorruptRegistry(
+                "published snapshots exist but none are valid".to_owned(),
+            ))
+        }
+    }
+
     fn load_or_migrate_v2_locked(&self) -> Result<RegistrySnapshotV2, RepositoryIdentityError> {
         if let Some(mut snapshot) = self.load_v2()? {
             let legacy = match self.load_legacy_v1() {
@@ -538,6 +696,26 @@ impl StableAliasRegistry {
         RegistrySnapshotV2::from_legacy(&legacy)
     }
 
+    fn load_v2_read_only_controlled(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<RegistrySnapshotV2, RepositoryIdentityError> {
+        if let Some(mut snapshot) = self.load_v2_controlled(control)? {
+            let legacy = match self.load_legacy_v1_controlled(control) {
+                Ok(snapshot) => snapshot,
+                Err(RepositoryIdentityError::CorruptRegistry(_)) => return Ok(snapshot),
+                Err(error) => return Err(error),
+            };
+            // An older v0.4/v0.4.1 process may append a v1 generation after
+            // the first v2 migration. Read-only callers must still see that
+            // authoritative legacy history, but must not publish a v2 repair.
+            snapshot.reconcile_legacy_assignments(&legacy)?;
+            return Ok(snapshot);
+        }
+        let legacy = self.load_legacy_v1_controlled(control)?;
+        RegistrySnapshotV2::from_legacy(&legacy)
+    }
+
     fn load_v2(&self) -> Result<Option<RegistrySnapshotV2>, RepositoryIdentityError> {
         let mut valid = Vec::<RegistrySnapshotV2>::new();
         let mut published_count = 0_usize;
@@ -562,6 +740,84 @@ impl StableAliasRegistry {
             };
             published_count += 1;
             let bytes = fs::read(entry.path())?;
+            if hex_sha256(&bytes) != expected_digest {
+                continue;
+            }
+            let Ok(snapshot) = serde_json::from_slice::<RegistrySnapshotV2>(&bytes) else {
+                continue;
+            };
+            if snapshot.generation != generation || validate_v2_snapshot(&snapshot).is_err() {
+                continue;
+            }
+            valid.push(snapshot);
+        }
+        valid.sort_unstable_by_key(|snapshot| snapshot.generation);
+        if valid
+            .windows(2)
+            .any(|pair| pair[0].generation == pair[1].generation)
+        {
+            return Err(RepositoryIdentityError::CorruptRegistry(
+                "multiple valid v2 snapshots claim one generation".to_owned(),
+            ));
+        }
+        if let Some(snapshot) = valid.pop() {
+            Ok(Some(snapshot))
+        } else if published_count == 0 {
+            Ok(None)
+        } else {
+            Err(RepositoryIdentityError::CorruptRegistry(
+                "published v2 snapshots exist but none are valid".to_owned(),
+            ))
+        }
+    }
+
+    fn load_v2_controlled(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<Option<RegistrySnapshotV2>, RepositoryIdentityError> {
+        let mut valid = Vec::<RegistrySnapshotV2>::new();
+        let mut published_count = 0_usize;
+        self.ensure_safe_root_for_read()?;
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut total_bytes = 0usize;
+        for (index, entry) in entries.enumerate() {
+            if index >= 4096 {
+                return Err(
+                    std::io::Error::other("registry observation entry budget exceeded").into(),
+                );
+            }
+            if let Some(control) = control {
+                control.check().map_err(std::io::Error::other)?;
+            }
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some((generation, expected_digest)) =
+                parse_snapshot_name(&name, V2_SNAPSHOT_PREFIX)
+            else {
+                continue;
+            };
+            published_count += 1;
+            let bytes = crate::provider_observation::read_observation_file(
+                &entry.path(),
+                256 * 1024,
+                control,
+            )?
+            .ok_or_else(|| std::io::Error::other("registry observation disappeared"))?;
+            total_bytes += bytes.len();
+            if total_bytes > 16 * 1024 * 1024 {
+                return Err(
+                    std::io::Error::other("registry observation byte budget exceeded").into(),
+                );
+            }
             if hex_sha256(&bytes) != expected_digest {
                 continue;
             }

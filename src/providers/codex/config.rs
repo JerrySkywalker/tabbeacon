@@ -791,8 +791,44 @@ impl CodexIntegration {
     #[must_use]
     #[allow(clippy::too_many_lines)] // Ordered read-only checks are the public doctor contract.
     pub fn doctor(&self) -> CodexDoctorReport {
-        let mut checks = Vec::new();
         let capability_probe = self.probe_codex_capabilities(false);
+        self.doctor_from_probe(&capability_probe)
+    }
+
+    fn read_observation_files(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> CodexObservationFiles {
+        CodexObservationFiles {
+            inventory_safe: ![self.hooks_path(), self.config_path(), self.manifest_path()]
+                .iter()
+                .any(|path| reject_symbolic_link(path).is_err()),
+            manifest: read_observation_bytes(&self.manifest_path(), control)
+                .ok()
+                .flatten()
+                .and_then(|bytes| serde_json::from_slice::<IntegrationManifest>(&bytes).ok())
+                .filter(|manifest| {
+                    manifest.schema == MANIFEST_SCHEMA
+                        && manifest.phase == ManifestPhase::Active
+                        && self.validate_manifest_scope(manifest).is_ok()
+                }),
+            hooks: read_observation_bytes(&self.hooks_path(), control)
+                .and_then(|bytes| bytes.ok_or(CodexIntegrationError::HooksShape))
+                .and_then(|bytes| parse_existing_hooks_bytes(&bytes)),
+            config: read_observation_bytes(&self.config_path(), control)
+                .and_then(|bytes| parse_config_bytes(bytes.as_deref())),
+        }
+    }
+    fn doctor_from_probe(&self, capability_probe: &ProbedCodexProfile) -> CodexDoctorReport {
+        self.doctor_from_observation(capability_probe, &self.read_observation_files(None))
+    }
+    #[allow(clippy::too_many_lines)] // Original doctor semantics consume one round's immutable file observations.
+    fn doctor_from_observation(
+        &self,
+        capability_probe: &ProbedCodexProfile,
+        files: &CodexObservationFiles,
+    ) -> CodexDoctorReport {
+        let mut checks = Vec::new();
         let codex_version = capability_probe.version().map(str::to_owned);
         let compatibility_state = capability_probe.state();
         let capability_profile = compatibility_state.supported_profile();
@@ -801,8 +837,8 @@ impl CodexIntegration {
         } else {
             CodexMutationAuthority::Blocked
         };
-        checks.push(codex_version_check(&capability_probe));
-        checks.push(codex_profile_check(&capability_probe));
+        checks.push(codex_version_check(capability_probe));
+        checks.push(codex_profile_check(capability_probe));
         let executable_present = self.tabbeacon_executable.is_file();
         checks.push(if executable_present {
             pass("tabbeacon.executable", "managed hook executable exists")
@@ -810,11 +846,7 @@ impl CodexIntegration {
             fail("tabbeacon.executable", "managed hook executable is missing")
         });
 
-        let manifest = self
-            .load_manifest()
-            .ok()
-            .flatten()
-            .filter(|manifest| self.validate_manifest_scope(manifest).is_ok());
+        let manifest = &files.manifest;
         let manifest_has_known_owned_declarations = manifest
             .as_ref()
             .is_some_and(Self::manifest_has_known_owned_declarations);
@@ -833,8 +865,8 @@ impl CodexIntegration {
             )
         });
 
-        let hooks = read_hooks_document(&self.hooks_path());
-        let config = read_config_document(&self.config_path());
+        let hooks = &files.hooks;
+        let config = &files.config;
         let known_wire_shape = hooks
             .as_ref()
             .is_ok_and(|hooks| validate_known_hook_wire_shape(hooks).is_ok());
@@ -1287,34 +1319,56 @@ impl CodexIntegration {
     #[must_use]
     #[allow(clippy::too_many_lines)] // The read-only parser keeps ownership and redaction decisions adjacent.
     pub fn hook_inventory(&self) -> HookInventory {
-        if [self.hooks_path(), self.config_path(), self.manifest_path()]
-            .iter()
-            .any(|path| reject_symbolic_link(path).is_err())
-        {
+        self.observe_read_only(None).1
+    }
+
+    /// One capability pass shared by Doctor and command-redacted inventory.
+    /// No runtime Hook execution, cache persistence, setup or trust writes.
+    #[must_use]
+    pub fn observe_read_only(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> (CodexDoctorReport, HookInventory) {
+        let probe = super::capability::probe_controlled(
+            self.codex_program.as_deref(),
+            &self.state_root,
+            false,
+            control,
+        );
+        let files = self.read_observation_files(control);
+        let report = self.doctor_from_observation(&probe, &files);
+        let hooks = self.hook_inventory_from_probe(&probe, &report, &files);
+        (report, hooks)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn hook_inventory_from_probe(
+        &self,
+        probe: &ProbedCodexProfile,
+        report: &CodexDoctorReport,
+        files: &CodexObservationFiles,
+    ) -> HookInventory {
+        if !files.inventory_safe {
             return HookInventory::unavailable();
         }
-        let Ok(hooks) = read_hooks_document(&self.hooks_path()) else {
+        let Ok(hooks) = files.hooks.as_ref() else {
             return HookInventory::unavailable();
         };
-        let Ok(config) = read_config_document(&self.config_path()) else {
+        let Ok(config) = files.config.as_ref() else {
             return HookInventory::unavailable();
         };
-        let manifest = self
-            .load_manifest()
-            .ok()
-            .flatten()
-            .filter(|manifest| self.validate_manifest_scope(manifest).is_ok());
-        let known_wire_shape = validate_known_hook_wire_shape(&hooks).is_ok();
+        let manifest = &files.manifest;
+        let known_wire_shape = validate_known_hook_wire_shape(hooks).is_ok();
         if !known_wire_shape {
             return HookInventory::unavailable();
         }
-        let runtime_continuity = self.doctor().runtime_continuity();
-        let capability_state = self.probe_codex_capabilities(false).state();
+        let runtime_continuity = report.runtime_continuity();
+        let capability_state = probe.state();
         let profile_is_supported = capability_state.is_supported();
         let desired =
             desired_profile_for_manifest(manifest.as_ref(), capability_state.supported_profile())
                 .and_then(|profile| desired_hooks(&self.tabbeacon_executable, profile).ok());
-        let Ok(events) = hooks_events(&hooks) else {
+        let Ok(events) = hooks_events(hooks) else {
             return HookInventory::unavailable();
         };
 
@@ -1347,11 +1401,11 @@ impl CodexIntegration {
                                 group_index,
                                 handler_index,
                             );
-                            let enabled = hook_is_enabled(&config, &state_key);
+                            let enabled = hook_is_enabled(config, &state_key);
                             let trust_state = inventory_trust_state(
                                 known_wire_shape,
                                 enabled,
-                                trusted_hash(&config, &state_key),
+                                trusted_hash(config, &state_key),
                                 declaration,
                             );
                             let currentness = inventory_currentness(
@@ -1399,7 +1453,7 @@ impl CodexIntegration {
                         };
                     let enabled = inventory_event_id(event) != "unsupported"
                         && hook_is_enabled(
-                            &config,
+                            config,
                             &inventory_state_key(
                                 &self.hooks_path(),
                                 event,
@@ -3006,6 +3060,13 @@ struct RepairableOwnedHooks {
     postinstall_third_party_groups: usize,
 }
 
+struct CodexObservationFiles {
+    manifest: Option<IntegrationManifest>,
+    hooks: Result<Value, CodexIntegrationError>,
+    config: Result<DocumentMut, CodexIntegrationError>,
+    inventory_safe: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct IntegrationManifest {
     schema: String,
@@ -4081,6 +4142,35 @@ fn base64_encode(bytes: &[u8]) -> String {
         });
     }
     encoded
+}
+
+/// Observation-only limits do not alter transactional writer input/backup paths.
+fn read_observation_bytes(
+    path: &Path,
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> Result<Option<Vec<u8>>, CodexIntegrationError> {
+    const LIMIT: usize = 256 * 1024;
+    reject_symbolic_link(path)?;
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut bytes = Vec::new();
+    let mut chunk = [0; 8192];
+    loop {
+        if let Some(control) = control {
+            control.check().map_err(io::Error::other)?;
+        }
+        let count = file.read(&mut chunk)?;
+        if count == 0 {
+            return Ok(Some(bytes));
+        }
+        if bytes.len() + count > LIMIT {
+            return Err(io::Error::other("read-only observation exceeds 256 KiB").into());
+        }
+        bytes.extend_from_slice(&chunk[..count]);
+    }
 }
 
 fn read_hooks_document(path: &Path) -> Result<Value, CodexIntegrationError> {

@@ -343,6 +343,125 @@ fn compile_codex_probe(root: &TestRoot) -> PathBuf {
     compile_codex_probe_fixture(root, "codex_version_probe.rs")
 }
 
+#[test]
+fn single_observation_shares_capability_pass_and_preserves_inventory_truth() {
+    let root = TestRoot::new("single-observation");
+    let integration = test_integration_with_codex_fixture(&root, "codex_observation_probe.rs");
+    integration.setup().expect("isolated owned setup");
+    fs::remove_file(root.child("calls.log")).expect("reset fixture count only");
+    let (doctor, inventory) = integration.observe_read_only(None);
+    let calls = fs::read_to_string(root.child("calls.log")).unwrap();
+    assert_eq!(calls.lines().filter(|s| *s == "--version").count(), 1);
+    assert_eq!(calls.lines().filter(|s| *s == "features").count(), 1);
+    assert!(calls.lines().filter(|s| *s == "app-server").count() <= 1);
+    let ordinary = integration.doctor();
+    assert_eq!(doctor.codex_version(), ordinary.codex_version());
+    assert_eq!(doctor.runtime_continuity(), ordinary.runtime_continuity());
+    assert_eq!(
+        doctor.check_status("hooks.currentness"),
+        ordinary.check_status("hooks.currentness")
+    );
+    assert_eq!(inventory, integration.hook_inventory());
+}
+
+#[test]
+fn provider_registry_and_matrix_reuse_codex_agy_cursor_observations_without_cli() {
+    let root = TestRoot::new("provider-observation-projections");
+    let integration = test_integration_with_codex_fixture(&root, "codex_observation_probe.rs");
+    integration.setup().unwrap();
+    fs::remove_file(root.child("calls.log")).unwrap();
+    let (doctor, hooks) = integration.observe_read_only(None);
+    let executable = root.child(if cfg!(windows) {
+        "codex-version-probe.exe"
+    } else {
+        "codex-version-probe"
+    });
+    let agy = tabbeacon::providers::agy_backend::AgyProductionSetup::new(
+        root.child("agy.json"),
+        root.child("agy-state"),
+        &executable,
+        &executable,
+    )
+    .inspect();
+    let workspace = root.child("workspace");
+    fs::create_dir(&workspace).unwrap();
+    let cursor = tabbeacon::providers::cursor_integration::CursorHookIntegration::new(
+        &workspace,
+        &executable,
+    )
+    .unwrap()
+    .check()
+    .unwrap();
+    let before = fs::read_to_string(root.child("calls.log")).unwrap();
+    assert_eq!(
+        before.lines().filter(|line| *line == "--version").count(),
+        2
+    );
+    assert_eq!(before.lines().filter(|line| *line == "features").count(), 1);
+    let report = tabbeacon::diagnostics::collect_operational_diagnostics_from_codex(&doctor);
+    let registry = tabbeacon::providers::registry::ProviderRegistry::from_observations(
+        &report,
+        &hooks,
+        Some(agy),
+        Some(cursor),
+    );
+    let matrix =
+        tabbeacon::doctor_matrix::DoctorMatrix::from_diagnostics(&report.doctor, &registry);
+    assert_eq!(registry.providers.len(), 3);
+    assert!(!matrix.rows.is_empty());
+    assert_eq!(fs::read_to_string(root.child("calls.log")).unwrap(), before);
+}
+
+#[test]
+fn owned_probe_timeout_and_output_limit_are_bounded_failures() {
+    use tabbeacon::provider_observation::{ProbeError, bounded_output};
+    let root = TestRoot::new("bounded-observation");
+    let executable = compile_codex_probe_fixture(&root, "codex_observation_probe.rs");
+    fs::write(root.child("slow"), b"").unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(
+        bounded_output(
+            Command::new(&executable).arg("--version"),
+            Duration::from_millis(100),
+            None
+        )
+        .err(),
+        Some(ProbeError::Timeout)
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+    fs::remove_file(root.child("slow")).unwrap();
+    fs::write(root.child("flood"), b"").unwrap();
+    assert_eq!(
+        bounded_output(
+            Command::new(&executable).arg("--version"),
+            Duration::from_secs(2),
+            None
+        )
+        .err(),
+        Some(ProbeError::OutputLimit)
+    );
+}
+
+#[test]
+fn oversized_observation_is_unavailable_and_preserves_user_bytes() {
+    let root = TestRoot::new("oversized-readonly-observation");
+    let integration = test_integration(&root);
+    integration.setup().unwrap();
+    let config = root.child("codex-home/config.toml");
+    let bytes = format!("# {}\n", "x".repeat(256 * 1024));
+    fs::write(&config, &bytes).unwrap();
+    let (doctor, hooks) = integration.observe_read_only(None);
+    assert_ne!(
+        doctor.check_status("hooks.trust"),
+        Some(tabbeacon::providers::codex::DoctorStatus::Pass)
+    );
+    assert_eq!(
+        hooks.availability,
+        tabbeacon::hook_inventory::HookInventoryAvailability::Unavailable
+    );
+    assert_eq!(fs::read_to_string(config).unwrap(), bytes);
+}
+
 fn compile_codex_probe_fixture(root: &TestRoot, fixture: &str) -> PathBuf {
     let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests")

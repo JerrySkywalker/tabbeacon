@@ -424,6 +424,26 @@ impl WorkspaceIdentityResolver {
             .map_err(|error| WorkspaceAliasError::from_repository_error(&error))
     }
 
+    /// Bounded cooperative observation; original transactional paths are retained.
+    ///
+    /// # Errors
+    /// Returns unavailable evidence on path, budget, cancellation or parse failure.
+    pub fn inspect_alias_controlled(
+        &self,
+        cwd: impl AsRef<Path>,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<WorkspaceAliasInspection, WorkspaceAliasError> {
+        let facts = self
+            .workspace_facts(cwd.as_ref())
+            .map_err(|error| WorkspaceAliasError::from_repository_error(&error))?;
+        let snapshot = self
+            .preferences
+            .snapshot_read_only_controlled(control)
+            .map_err(|_| WorkspaceAliasError::Unavailable)?;
+        self.inspect_from_snapshot_controlled(&facts, snapshot.preferences(), control)
+            .map_err(|error| WorkspaceAliasError::from_repository_error(&error))
+    }
+
     /// Stores one explicit local alias only after a namespace collision check
     /// and a byte-exact conditional preference write.
     ///
@@ -614,6 +634,18 @@ impl WorkspaceIdentityResolver {
         self.inspection_from_parts(facts, assignment, preferences)
     }
 
+    fn inspect_from_snapshot_controlled(
+        &self,
+        facts: &WorkspaceFacts,
+        preferences: &WorkspacePreferences,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<WorkspaceAliasInspection, RepositoryIdentityError> {
+        let assignment = self
+            .registry
+            .lookup_assignment_read_only_controlled(&facts.identity, control)?;
+        self.inspection_from_parts_controlled(facts, assignment, preferences, control)
+    }
+
     fn inspection_from_parts(
         &self,
         facts: &WorkspaceFacts,
@@ -625,6 +657,51 @@ impl WorkspaceIdentityResolver {
             &facts.identity,
             &facts.display_name,
             &reserved,
+        )?;
+        let assigned = assignment.is_some();
+        let (automatic_alias, policy_version) = match assignment {
+            Some(assignment) => (
+                assignment.generated_alias().clone(),
+                assignment.policy_version().to_owned(),
+            ),
+            None => (
+                candidates
+                    .first()
+                    .map(|candidate| candidate.alias().clone())
+                    .ok_or(RepositoryIdentityError::AliasExhausted)?,
+                AdaptiveNamingPolicy::policy_id().to_owned(),
+            ),
+        };
+        let custom_alias = preferences.override_for(&facts.identity);
+        let effective_alias = custom_alias
+            .clone()
+            .unwrap_or_else(|| automatic_alias.clone());
+        Ok(WorkspaceAliasInspection {
+            workspace: facts.display_name.clone(),
+            identity_class: facts.identity_class,
+            automatic_alias,
+            custom_alias,
+            effective_alias,
+            policy_version,
+            assigned,
+            analysis: AdaptiveNamingPolicy::analyze(&facts.display_name),
+            candidates,
+        })
+    }
+
+    fn inspection_from_parts_controlled(
+        &self,
+        facts: &WorkspaceFacts,
+        assignment: Option<super::RegistryAssignment>,
+        preferences: &WorkspacePreferences,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<WorkspaceAliasInspection, RepositoryIdentityError> {
+        let reserved = preferences.override_aliases();
+        let candidates = self.registry.preview_candidates_read_only_controlled(
+            &facts.identity,
+            &facts.display_name,
+            &reserved,
+            control,
         )?;
         let assigned = assignment.is_some();
         let (automatic_alias, policy_version) = match assignment {

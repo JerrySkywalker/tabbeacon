@@ -133,6 +133,61 @@ pub fn probe_direct_agy_version() -> AgyDirectVersionProbe {
     probe_direct_version_command("agy", DIRECT_VERSION_TIMEOUT)
 }
 
+/// Cooperative direct version observation for the read-only TUI worker.
+#[must_use]
+pub fn probe_direct_agy_version_controlled(
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> AgyDirectVersionProbe {
+    let output = crate::provider_observation::bounded_output(
+        Command::new("agy").arg("--version"),
+        Duration::from_secs(2),
+        control,
+    );
+    match output {
+        Ok(output)
+            if output.status.success()
+                && output.stdout.len() as u64 <= MAX_AGY_VERSION_OUTPUT_BYTES =>
+        {
+            let version = std::str::from_utf8(&output.stdout)
+                .ok()
+                .and_then(parse_version_output);
+            AgyDirectVersionProbe {
+                installed: true,
+                outcome: if version.is_some() {
+                    AgyDirectVersionProbeOutcome::Observed
+                } else {
+                    AgyDirectVersionProbeOutcome::Unparseable
+                },
+                version,
+                ..AgyDirectVersionProbe::unavailable(AgyDirectVersionProbeOutcome::Failed)
+            }
+        }
+        Ok(output) => AgyDirectVersionProbe {
+            installed: true,
+            ..AgyDirectVersionProbe::unavailable(
+                if output.stdout.len() as u64 > MAX_AGY_VERSION_OUTPUT_BYTES {
+                    AgyDirectVersionProbeOutcome::OversizedOutput
+                } else {
+                    AgyDirectVersionProbeOutcome::Failed
+                },
+            )
+        },
+        Err(error) => AgyDirectVersionProbe::unavailable(match error {
+            crate::provider_observation::ProbeError::Timeout
+            | crate::provider_observation::ProbeError::Cancelled => {
+                AgyDirectVersionProbeOutcome::TimedOut
+            }
+            crate::provider_observation::ProbeError::OutputLimit => {
+                AgyDirectVersionProbeOutcome::OversizedOutput
+            }
+            crate::provider_observation::ProbeError::Unavailable => {
+                AgyDirectVersionProbeOutcome::NotFound
+            }
+            crate::provider_observation::ProbeError::Io => AgyDirectVersionProbeOutcome::Failed,
+        }),
+    }
+}
+
 fn probe_direct_version_command(command: &str, timeout: Duration) -> AgyDirectVersionProbe {
     let Ok(mut child) = Command::new(command)
         .arg("--version")

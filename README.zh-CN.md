@@ -78,6 +78,10 @@ PTY 主机、终端替代品或后台守护进程。
 
 ## 快速开始
 
+Draft PR #123 的开发候选为 [v0.9.0](docs/v0.9.0-owner-review.md)，吸收从未正式
+发布的 v0.8.2 Hook Names/Doctor 功能并接入 provisional TUC v0.2.0。正式发布、
+共享依赖发布及真实终端验收仍需独立 Owner 授权；公开安装说明保持原发布范围。
+
 v0.8.0 发布候选提供按 CLI 独立呈现、Cursor 严格仅颜色接入、
 已证明的 Codex 结构化状态和[中英文术语](docs/terminology.md)。精确能力与
 已知限制见 [v0.8.0 发布说明](docs/v0.8.0-release-notes.md)。
