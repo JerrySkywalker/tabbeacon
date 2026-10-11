@@ -345,6 +345,39 @@ fn nested_hit_regions_choose_deepest_visible_target_without_writes() {
 }
 
 #[test]
+fn closing_modal_restores_focus_before_next_frame_or_queued_input() {
+    for width in [100, 40] {
+        let mut app = tests::app();
+        app.screen = Screen::Integration;
+        draw(&app, width, 24);
+        if app.interaction.borrow().focus.current() != Some(&input::nav_path()) {
+            app.handle_key(KeyCode::Tab);
+        }
+        draw(&app, width, 24);
+        app.handle_key(KeyCode::Char('?'));
+        draw(&app, width, 24);
+        app.handle_key(KeyCode::Esc);
+        app.handle_key(KeyCode::Char('t'));
+        draw(&app, width, 24);
+        app.handle_key(KeyCode::Esc);
+        assert_eq!(app.interaction.borrow().focus.modal_root(), None);
+        assert_eq!(
+            app.interaction.borrow().focus.current(),
+            Some(&input::nav_path())
+        );
+        // Last committed modal geometry must not reclaim modal focus after dismissal.
+        mouse(&mut app, MouseEventKind::Down(MouseButton::Left), 40, 5);
+        assert_eq!(
+            app.interaction.borrow().focus.current(),
+            Some(&input::nav_path())
+        );
+        app.handle_key(KeyCode::Down);
+        assert_eq!(app.screen(), Screen::Hooks);
+        assert!(!app.dirty());
+    }
+}
+
+#[test]
 fn slow_worker_does_not_block_first_frame_input_or_density_and_preserves_dirty_cas() {
     let mut app = tests::app();
     let snapshot = tests::refresh(app.current(), app.current_interface());

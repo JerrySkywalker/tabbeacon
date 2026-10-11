@@ -27,6 +27,7 @@ pub(super) struct Interaction {
     pub overlay: BoundedViewport,
     pub view: ViewState,
     pub keymap_error: Option<String>,
+    modal_restore_visible: Option<Vec<FocusPath>>,
 }
 impl Clone for Interaction {
     fn clone(&self) -> Self {
@@ -42,6 +43,7 @@ impl Clone for Interaction {
             overlay: self.overlay,
             view: self.view,
             keymap_error: self.keymap_error.clone(),
+            modal_restore_visible: self.modal_restore_visible.clone(),
         }
     }
 }
@@ -70,6 +72,30 @@ impl Default for Interaction {
             overlay: BoundedViewport::default(),
             view: ViewState::default(),
             keymap_error: None,
+            modal_restore_visible: None,
+        }
+    }
+}
+impl Interaction {
+    pub(super) fn sync_modal(&mut self, modal: bool) {
+        let changed = if modal && self.focus.modal_root().is_none() {
+            self.modal_restore_visible = Some(self.focus.visible().to_vec());
+            self.focus.push_modal(modal_path());
+            self.overlay.home();
+            true
+        } else if !modal && self.focus.modal_root().is_some() {
+            if let Some(visible) = self.modal_restore_visible.take() {
+                self.focus.reconcile(visible);
+            }
+            self.focus.pop_modal();
+            true
+        } else {
+            false
+        };
+        if changed {
+            self.resolver.cancel();
+            self.generation = self.generation.wrapping_add(1);
+            self.hitmap = HitMap::new(self.generation, vec![]);
         }
     }
 }
@@ -444,6 +470,9 @@ impl ControlCenterApp {
     /// Unified keyboard/paste/mouse input. Focus transitions never execute actions.
     pub fn handle_input(&mut self, event: Event) -> ControlCenterCommand {
         use terminal_ui_contract::input::InputEvent;
+        let modal =
+            self.confirm_discard || self.overlay.is_open() || self.workspace_editor.is_some();
+        self.interaction.get_mut().sync_modal(modal);
         let normalized = terminal_ui_ratatui::input::normalize(event);
         if let InputEvent::Mouse(mouse) = normalized {
             let modal =
@@ -483,7 +512,7 @@ impl ControlCenterApp {
             let i = self.interaction.get_mut();
             i.resolver.resolve(&i.map, &context, &normalized)
         };
-        match resolution {
+        let command = match resolution {
             Resolution::Intent(intent) => self.execute_intent(intent.action, intent.count),
             Resolution::Text(text) => {
                 if let Some(editor) = self.workspace_editor.as_mut() {
@@ -517,7 +546,11 @@ impl ControlCenterApp {
                 ControlCenterCommand::None
             }
             _ => ControlCenterCommand::None,
-        }
+        };
+        let modal =
+            self.confirm_discard || self.overlay.is_open() || self.workspace_editor.is_some();
+        self.interaction.get_mut().sync_modal(modal);
+        command
     }
     #[allow(clippy::too_many_lines)] // Typed shared intents dispatch to product boundaries without a second key parser.
     fn execute_intent(&mut self, action: Action, count: u32) -> ControlCenterCommand {

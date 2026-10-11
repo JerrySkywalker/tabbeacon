@@ -449,10 +449,11 @@ impl WindowsTerminalPolicyStore {
         &self,
         control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
     ) -> TitlePolicyDiagnostics {
-        let Ok(resolved) = self.resolve_document() else {
-            return self.diagnose_resolution_failure();
+        let resolved = match self.resolve_document_with_control(control, true) {
+            Ok(resolved) => resolved,
+            Err(error) => return Self::diagnose_resolution_error(&error),
         };
-        let Ok(document) = JsoncDocument::parse(&resolved.bytes) else {
+        let Ok(document) = JsoncDocument::parse_with_budget(&resolved.bytes, control, true) else {
             return TitlePolicyDiagnostics {
                 settings_source: SettingsSourceResolution::MalformedOrUnsafe,
                 active_profile_resolution: ActiveProfileResolution::Unavailable,
@@ -705,16 +706,24 @@ impl WindowsTerminalPolicyStore {
     }
 
     fn diagnose_resolution_failure(&self) -> TitlePolicyDiagnostics {
-        let source = match self.resolve_document() {
-            Err(PolicyError::AmbiguousSettingsSource | PolicyError::AmbiguousProfile) => {
+        Self::diagnose_resolution_error(
+            &self
+                .resolve_document()
+                .err()
+                .expect("source resolution failed"),
+        )
+    }
+
+    fn diagnose_resolution_error(error: &PolicyError) -> TitlePolicyDiagnostics {
+        let source = match error {
+            PolicyError::AmbiguousSettingsSource | PolicyError::AmbiguousProfile => {
                 SettingsSourceResolution::Ambiguous
             }
-            Err(PolicyError::NotCurrentTerminal) => SettingsSourceResolution::NotCurrentTerminal,
-            Err(PolicyError::Unavailable) => SettingsSourceResolution::Unavailable,
-            Err(PolicyError::MalformedOrUnsafe | PolicyError::Io(_)) => {
+            PolicyError::NotCurrentTerminal => SettingsSourceResolution::NotCurrentTerminal,
+            PolicyError::Unavailable => SettingsSourceResolution::Unavailable,
+            PolicyError::MalformedOrUnsafe | PolicyError::Io(_) => {
                 SettingsSourceResolution::MalformedOrUnsafe
             }
-            Ok(_) => unreachable!("only called after source resolution failed"),
         };
         let (policy, remediation) = match source {
             SettingsSourceResolution::Ambiguous => (
@@ -745,11 +754,22 @@ impl WindowsTerminalPolicyStore {
     }
 
     fn resolve_document(&self) -> Result<ResolvedDocument, PolicyError> {
+        self.resolve_document_with_control(None, false)
+    }
+
+    fn resolve_document_with_control(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+        bounded: bool,
+    ) -> Result<ResolvedDocument, PolicyError> {
         if !self.terminal_session {
             return Err(PolicyError::NotCurrentTerminal);
         }
         let mut present = Vec::new();
         for candidate in &self.candidates {
+            if let Some(control) = control {
+                control.check().map_err(|_| PolicyError::Unavailable)?;
+            }
             match fs::symlink_metadata(&candidate.path) {
                 Ok(metadata) => {
                     if is_unsafe_target(&metadata) {
@@ -768,7 +788,16 @@ impl WindowsTerminalPolicyStore {
                 Err(PolicyError::AmbiguousSettingsSource)
             };
         };
-        let bytes = read_safe_bytes(&candidate.path)?;
+        let bytes = if bounded {
+            crate::provider_observation::read_observation_file(
+                &candidate.path,
+                MAX_SETTINGS_BYTES,
+                control,
+            )?
+            .ok_or(PolicyError::Unavailable)?
+        } else {
+            read_safe_bytes(&candidate.path)?
+        };
         if bytes.len() > MAX_SETTINGS_BYTES {
             return Err(PolicyError::MalformedOrUnsafe);
         }
@@ -1389,8 +1418,18 @@ struct JsonProperty {
 
 impl JsoncDocument {
     fn parse(bytes: &[u8]) -> Result<Self, PolicyError> {
+        Self::parse_with_budget(bytes, None, false)
+    }
+
+    fn parse_with_budget(
+        bytes: &[u8],
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+        bounded: bool,
+    ) -> Result<Self, PolicyError> {
         let text = std::str::from_utf8(bytes).map_err(|_| PolicyError::MalformedOrUnsafe)?;
         let mut parser = JsoncParser::new(text);
+        parser.control = control;
+        parser.bounded = bounded;
         parser.skip_trivia()?;
         if parser.peek() == Some('\u{feff}') {
             parser.bump();
@@ -1408,14 +1447,39 @@ impl JsoncDocument {
 struct JsoncParser<'a> {
     text: &'a str,
     index: usize,
+    control: Option<&'a terminal_ui_runtime::refresh::CollectionControl>,
+    bounded: bool,
+    depth: usize,
+    nodes: usize,
 }
 
 impl<'a> JsoncParser<'a> {
     const fn new(text: &'a str) -> Self {
-        Self { text, index: 0 }
+        Self {
+            text,
+            index: 0,
+            control: None,
+            bounded: false,
+            depth: 0,
+            nodes: 0,
+        }
     }
 
     fn parse_value(&mut self) -> Result<JsonNode, PolicyError> {
+        if let Some(control) = self.control {
+            control.check().map_err(|_| PolicyError::Unavailable)?;
+        }
+        if self.bounded && (self.depth >= 64 || self.nodes >= 16_384) {
+            return Err(PolicyError::MalformedOrUnsafe);
+        }
+        self.depth += 1;
+        self.nodes += 1;
+        let result = self.parse_value_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_value_inner(&mut self) -> Result<JsonNode, PolicyError> {
         self.skip_trivia()?;
         let start = self.index;
         match self.peek() {
@@ -1922,6 +1986,28 @@ mod tests {
             oversized.inspect().application_title_policy,
             ApplicationTitlePolicy::MalformedOrUnsafe
         );
+    }
+
+    #[test]
+    fn controlled_jsonc_observation_rejects_deep_or_large_trees_without_writes() {
+        for (name, source) in [
+            (
+                "deep-observation",
+                format!("{}0{}", "[".repeat(96), "]".repeat(96)),
+            ),
+            ("wide-observation", format!("[{}0]", "0,".repeat(16_384))),
+        ] {
+            let (store, path) = fixture_store(name, &source);
+            assert_eq!(
+                store.inspect_controlled(None).application_title_policy,
+                ApplicationTitlePolicy::MalformedOrUnsafe
+            );
+            assert_eq!(fs::read(&path).expect("unchanged input"), source.as_bytes());
+            assert!(!store.state_root.as_ref().expect("fixture state").exists());
+        }
+        let source = settings("", "\"suppressApplicationTitle\": true");
+        let (store, _) = fixture_store("bounded-policy-equivalence", &source);
+        assert_eq!(store.inspect_controlled(None), store.inspect());
     }
 
     #[test]

@@ -1239,6 +1239,7 @@ pub fn run_terminal_smoke_fixture(mut app: ControlCenterApp) -> io::Result<Termi
     };
     app.merge_refresh(refresh);
     app.snapshot_revision = 1;
+    app.refresh_status = "Synthetic fixture / 合成观测".into();
     app.snapshot_stale = false;
     app.sampled_at = std::time::SystemTime::now();
     let live_refresh_merged = app.sessions.is_some() && !app.dirty();
@@ -1787,13 +1788,7 @@ fn render_with_no_color(frame: &mut Frame, app: &ControlCenterApp, no_color_is_s
     };
     let mut i = app.interaction.borrow_mut();
     let modal = app.overlay.is_open() || app.confirm_discard || app.workspace_editor.is_some();
-    if modal && i.focus.modal_root().is_none() {
-        i.focus.push_modal(input::modal_path());
-        i.overlay.home();
-    }
-    if !modal && i.focus.modal_root().is_some() {
-        i.focus.pop_modal();
-    }
+    i.sync_modal(modal);
     let compact =
         ResponsivePolicy::default().classify(area.width, area.height) == LayoutClass::Compact;
     if compact && i.generation == 0 && !modal {

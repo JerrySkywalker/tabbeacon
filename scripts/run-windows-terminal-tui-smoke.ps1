@@ -154,9 +154,10 @@ function Invoke-ExactOwnedTemporaryWtCleanup {
 }
 
 trap {
+    $originalFailure = $_
     $script:temporaryWtProductDisposition = 'EXCEPTION'
     Invoke-ExactOwnedTemporaryWtCleanup
-    throw
+    throw $originalFailure
 }
 
 & $resolvedLifecycleBinary '__temporary-wt-recover-v1' $resolvedEvidence | Out-Null
@@ -231,13 +232,15 @@ if ($CaptureUi) {
 # receipt written by the owned terminal child, not by launcher lifetime,
 # Windows title discovery, CIM, or PowerShell process queries.
 $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
-$wtLauncher = Start-Process -FilePath $wtCommand.Source -ArgumentList $arguments -WindowStyle Hidden -PassThru
+# This is the owned interactive visual acceptance window, which must be visible to UIA.
+$wtLauncher = Start-Process -FilePath $wtCommand.Source -ArgumentList $arguments -WindowStyle Normal -PassThru
 $script:temporaryWindowCreated = $true
 $wtLauncherProcessId = $wtLauncher.Id
 $wtLauncher.Dispose()
 $registrationOutput = & $resolvedLifecycleBinary '__temporary-wt-register-v1' `
     $resolvedEvidence $lifecycleRunId $windowTitle $windowRoutingId $PID 2>&1
 if ($LASTEXITCODE -ne 0) {
+    $registrationOutput | Out-String | Write-Output
     throw 'Exact-owned Windows Terminal registration failed'
 }
 $script:temporaryWtOwnershipPath = @($registrationOutput |

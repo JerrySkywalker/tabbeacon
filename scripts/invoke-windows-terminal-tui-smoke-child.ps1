@@ -48,7 +48,7 @@ if ($CaptureWindowTitle) {
     $env:TABBEACON_TUI_SMOKE_CAPTURE_TITLE = $CaptureWindowTitle
     $env:TABBEACON_TUI_SMOKE_CAPTURE_ROOT = Split-Path -Parent $FixtureResultPath
 }
-& $BinaryPath
+& $BinaryPath 2> "$FixtureResultPath.stderr.txt"
 $fixtureExitCode = $LASTEXITCODE
 $fixtureResultPresent = Test-Path -LiteralPath $FixtureResultPath
 
