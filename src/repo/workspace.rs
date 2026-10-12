@@ -434,7 +434,7 @@ impl WorkspaceIdentityResolver {
         control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
     ) -> Result<WorkspaceAliasInspection, WorkspaceAliasError> {
         let facts = self
-            .workspace_facts(cwd.as_ref())
+            .workspace_facts_controlled(cwd.as_ref(), control)
             .map_err(|error| WorkspaceAliasError::from_repository_error(&error))?;
         let snapshot = self
             .preferences
@@ -563,9 +563,26 @@ impl WorkspaceIdentityResolver {
     }
 
     fn workspace_facts(&self, cwd: &Path) -> Result<WorkspaceFacts, RepositoryIdentityError> {
-        match self.discovery.discover_without_root_commits_for_hook(cwd) {
+        self.workspace_facts_controlled(cwd, None)
+    }
+
+    fn workspace_facts_controlled(
+        &self,
+        cwd: &Path,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<WorkspaceFacts, RepositoryIdentityError> {
+        check_workspace_control(control)?;
+        let discovery = if control.is_some() {
+            self.discovery
+                .discover_without_root_commits_for_hook_controlled(cwd, control)
+        } else {
+            self.discovery.discover_without_root_commits_for_hook(cwd)
+        };
+        check_workspace_control(control)?;
+        match discovery {
             Ok(discovered) => {
                 let canonical = canonicalize_repository(&discovered)?;
+                check_workspace_control(control)?;
                 if canonical.identity.as_str().starts_with("remote:") {
                     return Ok(WorkspaceFacts {
                         identity_class: WorkspaceIdentityClass::GitRemote,
@@ -577,8 +594,11 @@ impl WorkspaceIdentityResolver {
                     });
                 }
                 let mut discovered = discovered;
-                discovered.root_commits = self.discovery.discover_root_commits(cwd)?;
+                discovered.root_commits = self
+                    .discovery
+                    .discover_root_commits_controlled(cwd, control)?;
                 let canonical = canonicalize_repository(&discovered)?;
+                check_workspace_control(control)?;
                 Ok(WorkspaceFacts {
                     identity_class: if canonical.identity.as_str().starts_with("remote:") {
                         WorkspaceIdentityClass::GitRemote
@@ -592,7 +612,12 @@ impl WorkspaceIdentityResolver {
                     kind: WorkspaceKind::Git,
                 })
             }
-            Err(RepositoryIdentityError::NotRepository(_)) => self.directory_facts(cwd),
+            Err(RepositoryIdentityError::NotRepository(_)) => {
+                check_workspace_control(control)?;
+                let facts = self.directory_facts(cwd)?;
+                check_workspace_control(control)?;
+                Ok(facts)
+            }
             Err(error) => Err(error),
         }
     }
@@ -743,6 +768,20 @@ impl WorkspaceAliasError {
             _ => Self::Unavailable,
         }
     }
+}
+
+fn check_workspace_control(
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> Result<(), RepositoryIdentityError> {
+    if let Some(control) = control {
+        control.check().map_err(|error| match error {
+            terminal_ui_runtime::refresh::CollectError::Cancelled => {
+                RepositoryIdentityError::Cancelled
+            }
+            _ => RepositoryIdentityError::Timeout,
+        })?;
+    }
+    Ok(())
 }
 
 fn preference_error_as_repository_error(

@@ -191,6 +191,46 @@ impl CursorHookIntegration {
         self.state_for(&value)
     }
 
+    /// Observes the project file with bounded reads and cooperative checkpoints.
+    /// Transactional install/uninstall retain their original read path.
+    ///
+    /// # Errors
+    /// Returns safe read, schema, cancellation or deadline errors.
+    pub fn check_controlled(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> io::Result<CursorHookState> {
+        let check = || control.map_or(Ok(()), |control| control.check().map_err(io::Error::other));
+        check()?;
+        reject_link(&self.directory())?;
+        reject_link(&self.path())?;
+        check()?;
+        let bytes = crate::provider_observation::read_observation_file(
+            &self.path(),
+            MAX_CONFIG_BYTES,
+            control,
+        )?;
+        check()?;
+        let Some(bytes) = bytes else {
+            return Ok(CursorHookState::NotInstalled);
+        };
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid Cursor Hook config")
+        })?;
+        if value.get("version").and_then(Value::as_u64) != Some(1)
+            || !value.get("hooks").is_some_and(Value::is_object)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported Cursor Hook config",
+            ));
+        }
+        check()?;
+        let state = self.state_for(&value)?;
+        check()?;
+        Ok(state)
+    }
+
     /// Reconciles only missing exact-owned entries under a project-local lock.
     ///
     /// # Errors
@@ -338,6 +378,115 @@ fn reject_link(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controlled_observation_preserves_state_and_read_limits() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("tabbeacon.exe");
+        fs::write(&exe, b"synthetic executable").unwrap();
+        let integration = CursorHookIntegration::new(root.path(), &exe).unwrap();
+        assert_eq!(
+            integration.check_controlled(None).unwrap(),
+            CursorHookState::NotInstalled
+        );
+        assert!(!integration.directory().exists());
+        fs::create_dir(integration.directory()).unwrap();
+        fs::write(integration.path(), br#"{"version":1,"hooks":{}}"#).unwrap();
+        assert_eq!(
+            integration.check_controlled(None).unwrap(),
+            integration.check().unwrap()
+        );
+        fs::write(integration.path(), br#"{"version":2,"hooks":{}}"#).unwrap();
+        assert_eq!(
+            integration.check_controlled(None).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        fs::write(integration.path(), vec![b' '; MAX_CONFIG_BYTES + 1]).unwrap();
+        assert_eq!(
+            integration.check_controlled(None).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn controlled_observation_honors_cancellation_and_task_deadline_before_io() {
+        use terminal_ui_runtime::{
+            refresh::{
+                CollectError, CollectionControl, ReadOnlyCollector, RefreshController,
+                RefreshPolicy, RefreshPoll, RefreshRequest, RequestKind,
+            },
+            snapshot::Collected,
+        };
+        struct Observe {
+            integration: CursorHookIntegration,
+            started: std::sync::mpsc::SyncSender<()>,
+        }
+        impl ReadOnlyCollector<(), ()> for Observe {
+            fn collect(
+                &mut self,
+                _: &RefreshRequest<()>,
+                control: &CollectionControl,
+            ) -> Result<Collected<()>, CollectError> {
+                self.started.send(()).unwrap();
+                let expected = control
+                    .wait_for(std::time::Duration::from_secs(2))
+                    .unwrap_err();
+                let error = self
+                    .integration
+                    .check_controlled(Some(control))
+                    .unwrap_err();
+                assert_eq!(
+                    error.get_ref().unwrap().downcast_ref::<CollectError>(),
+                    Some(&expected)
+                );
+                Err(expected)
+            }
+        }
+        for deadline in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let exe = root.path().join("tabbeacon.exe");
+            fs::write(&exe, b"synthetic executable").unwrap();
+            let integration = CursorHookIntegration::new(root.path(), &exe).unwrap();
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let mut runtime = RefreshController::spawn(
+                Observe {
+                    integration,
+                    started: tx,
+                },
+                RefreshPolicy {
+                    task_timeout: std::time::Duration::from_millis(if deadline {
+                        30
+                    } else {
+                        5000
+                    }),
+                    poll_interval: std::time::Duration::from_secs(1),
+                    stale_after: std::time::Duration::from_secs(3),
+                },
+            )
+            .unwrap();
+            runtime.request((), RequestKind::Manual).unwrap();
+            rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap();
+            if deadline {
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(1);
+                loop {
+                    match runtime.poll() {
+                        RefreshPoll::Pending => {
+                            assert!(std::time::Instant::now() < until);
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        RefreshPoll::Failed(error) => {
+                            assert_eq!(error, CollectError::Timeout);
+                            break;
+                        }
+                        other => panic!("unexpected observation outcome: {other:?}"),
+                    }
+                }
+            }
+            runtime.shutdown(std::time::Duration::from_secs(1)).unwrap();
+            assert!(!runtime.worker_owned());
+            assert!(!root.path().join(".cursor").exists());
+        }
+    }
 
     #[test]
     fn exact_entries_preserve_foreign_hooks_and_reconcile_idempotently() {

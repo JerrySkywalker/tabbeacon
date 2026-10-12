@@ -5528,10 +5528,14 @@ fn collect_control_center_refresh_controlled(
     let cursor = std::env::current_dir()
         .and_then(|workspace| {
             std::env::current_exe().and_then(|exe| {
-                CursorHookIntegration::new(&workspace, &exe).and_then(|i| i.check())
+                CursorHookIntegration::new(&workspace, &exe)
+                    .and_then(|i| i.check_controlled(control))
             })
         })
         .ok();
+    if let Some(control) = control {
+        control.check().map_err(io::Error::other)?;
+    }
     let cursor_admission = match cursor {
         Some(CursorHookState::Installed) => (
             PresentationCapabilities::CURSOR_COLOR_ONLY,

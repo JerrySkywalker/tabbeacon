@@ -81,6 +81,12 @@ name = "tabbeacon-terminal-smoke-fixture"
 path = "src/bin/tabbeacon-terminal-smoke-fixture.rs"
 required-features = ["terminal-smoke-fixture"]
 
+[[test]]
+name = "workspace_collection_control"
+path = "tests/workspace_collection_control.rs"
+# The same owned executable speaks the closed Git fixture protocol in its child.
+harness = false
+
 [dependencies]
 atomic-write-file = "0.3.1"
 clap = { version = "4.5.60", features = ["derive"] }

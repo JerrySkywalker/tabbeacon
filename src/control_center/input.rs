@@ -317,8 +317,21 @@ fn keymap(
 ) -> Result<KeymapRegistry, terminal_ui_contract::keymap::KeymapError> {
     // A custom preset determines product count-safe digit bindings as well.
     let profile = if let Some(text) = text {
-        let (actions, bindings, _) = declarations(KeymapProfile::Standard);
-        KeymapRegistry::from_toml(text, actions, bindings)?.profile
+        let document = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| terminal_ui_contract::keymap::KeymapError("invalid keymap TOML".into()))?;
+        match document.get("preset") {
+            None => KeymapProfile::Standard,
+            Some(item) => match item.as_str() {
+                Some("standard") => KeymapProfile::Standard,
+                Some("vim") => KeymapProfile::Vim,
+                _ => {
+                    return Err(terminal_ui_contract::keymap::KeymapError(
+                        "unsupported keymap preset".into(),
+                    ));
+                }
+            },
+        }
     } else {
         profile
     };
@@ -554,6 +567,20 @@ impl ControlCenterApp {
     }
     #[allow(clippy::too_many_lines)] // Typed shared intents dispatch to product boundaries without a second key parser.
     fn execute_intent(&mut self, action: Action, count: u32) -> ControlCenterCommand {
+        // Shared View intent is not permission to run a background product reducer.
+        if (self.overlay.is_open() || self.confirm_discard)
+            && matches!(
+                action,
+                Action::Move(MoveDirection::Left | MoveDirection::Right)
+                    | Action::MoveScreen(_)
+                    | Action::Open
+                    | Action::FocusNext
+                    | Action::FocusPrevious
+                    | Action::EnterInsert
+            )
+        {
+            return ControlCenterCommand::None;
+        }
         let count = isize::try_from(count).unwrap_or(9999);
         match action {
             Action::RequestQuit => {

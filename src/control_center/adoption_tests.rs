@@ -44,6 +44,125 @@ fn policy() -> RefreshPolicy {
     }
 }
 
+#[test]
+fn custom_vim_preset_loads_with_product_bindings() {
+    let mut app = tests::app();
+    app.load_keymap_toml("schema_version=1\npreset='vim'\nnavigation='pane'\n[[bindings]]\ncontext='global'\nkeys=['F6']\naction='ui.refresh'").unwrap();
+    assert_eq!(app.handle_key(KeyCode::F(6)), ControlCenterCommand::Refresh);
+    app.screen = Screen::Diagnostics;
+    app.handle_event(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT));
+    assert_eq!(
+        app.diagnostic_provider,
+        crate::presentation_policy::CliTarget::Agy
+    );
+    app.interaction
+        .get_mut()
+        .focus
+        .focus(&input::details_path());
+    draw(&app, 100, 24);
+    app.handle_key(KeyCode::Char('5'));
+    assert_eq!(
+        app.diagnostic_provider,
+        crate::presentation_policy::CliTarget::Agy
+    );
+    app.handle_key(KeyCode::Char('j'));
+    assert_eq!(app.interaction.borrow().details.offset(), 5);
+    app.handle_key(KeyCode::Char('i'));
+    for key in ['q', 'm', '3'] {
+        assert_eq!(
+            app.handle_key(KeyCode::Char(key)),
+            ControlCenterCommand::None
+        );
+    }
+    assert_eq!(
+        app.diagnostic_provider,
+        crate::presentation_policy::CliTarget::Agy
+    );
+    app.handle_key(KeyCode::Esc);
+}
+
+#[test]
+fn custom_presets_validate_once_and_rejections_retain_the_accepted_map() {
+    for preset in ["standard", "vim"] {
+        let mut app = tests::app();
+        app.load_keymap_toml(&format!("schema_version=1\npreset='{preset}'\n[[bindings]]\ncontext='global'\nkeys=['F6']\naction='ui.refresh'\n[[bindings]]\ncontext='diagnostics'\nkeys=['F7']\naction='tabbeacon.diagnostics.mode'")).unwrap();
+        app.screen = Screen::Diagnostics;
+        let draft = app.staged_draft();
+        assert_eq!(app.handle_key(KeyCode::F(6)), ControlCenterCommand::Refresh);
+        assert_eq!(app.staged_draft(), draft);
+        app.handle_key(KeyCode::F(7));
+        assert_eq!(
+            app.diagnostic_mode,
+            crate::doctor_matrix::ExecutionMode::Embedded
+        );
+        for invalid in [
+            "schema_version=1\npreset='unknown'",
+            "schema_version=1\npreset=7",
+            "schema_version=1\npreset=true",
+            "schema_version=1\npreset=['vim']",
+            "schema_version=1\n[preset]\nname='vim'",
+            "schema_version=1\n[[bindings]",
+            "schema_version=2",
+            "schema_version=1\nexecute='shell'",
+            "schema_version=1\n[[bindings]]\ncontext='global'\nkeys=['Esc']\naction='ui.refresh'",
+            "schema_version=1\n[[bindings]]\ncontext='global'\nmode='insert'\nkeys=['x']\naction='ui.quit'",
+            "schema_version=1\n[[bindings]]\ncontext='help'\nkeys=['F6']\naction='tabbeacon.confirm.apply'",
+            "schema_version=1\n[[bindings]]\ncontext='global'\nkeys=['F6']\naction='tabbeacon.confirm.apply'",
+        ] {
+            assert!(app.load_keymap_toml(invalid).is_err(), "{preset}/{invalid}");
+            assert_eq!(app.handle_key(KeyCode::F(6)), ControlCenterCommand::Refresh);
+            assert_eq!(app.staged_draft(), draft);
+        }
+    }
+}
+
+#[test]
+fn custom_modal_view_intents_preserve_background_draft() {
+    for owner in ["help", "title", "confirm"] {
+        for action in [
+            "ui.move.left",
+            "ui.move.right",
+            "ui.open",
+            "ui.focus.next",
+            "ui.focus.previous",
+            "ui.mode.insert",
+        ] {
+            let mut app = tests::app();
+            app.screen = Screen::Appearance;
+            app.handle_key(KeyCode::Enter);
+            app.handle_key(KeyCode::Right);
+            assert!(app.dirty());
+            app.load_keymap_toml(&format!(
+                "schema_version=1\n[[bindings]]\ncontext='{owner}'\nkeys=['F6']\naction='{action}'"
+            ))
+            .unwrap();
+            match owner {
+                "help" => {
+                    app.handle_key(KeyCode::Char('?'));
+                }
+                "title" => {
+                    app.handle_key(KeyCode::Char('t'));
+                }
+                _ => {
+                    app.handle_key(KeyCode::Char('q'));
+                }
+            }
+            let draft = app.staged_draft();
+            let field = app.appearance_field;
+            let screen = app.screen;
+            assert_eq!(app.handle_key(KeyCode::F(6)), ControlCenterCommand::None);
+            assert_eq!(app.staged_draft(), draft, "{owner}/{action}");
+            assert_eq!(app.appearance_field, field, "{owner}/{action}");
+            assert_eq!(app.screen, screen, "{owner}/{action}");
+            assert_eq!(
+                app.interaction.borrow().mode,
+                InputMode::Normal,
+                "{owner}/{action}"
+            );
+        }
+    }
+}
+
 fn completed(runtime: &mut RefreshController<(), super::ControlCenterRefresh>) -> RefreshPoll {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
