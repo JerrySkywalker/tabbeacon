@@ -1886,7 +1886,8 @@ fn render_with_no_color(frame: &mut Frame, app: &ControlCenterApp, no_color_is_s
             context
         };
         format!(
-            "{}\n\n{}",
+            "{}\n\n{}\n\n{}",
+            catalog(app.locale(), HumanMessageKey::BoundedWriteRisk),
             if app.locale() == ResolvedLocale::ZhCn {
                 "Hook 信任始终由人工确认；焦点和滚轮不执行配置更改"
             } else {
@@ -2915,6 +2916,8 @@ mod tests {
                 assert_eq!(app.staged_draft(), before, "rendering grants no write");
                 app.overlay = ControlCenterOverlay::Help;
                 assert!(overlay_lines(&app).contains(notice));
+                let frames = all_viewport_frames(&mut app, 44, 22, raw);
+                assert!(compact(&frames).contains(&compact(notice)));
                 app.overlay = ControlCenterOverlay::None;
                 app.screen = Screen::Workspace;
                 app.workspace = Some(workspace.clone());
