@@ -785,6 +785,16 @@ fn alias_command(
             language,
         );
     };
+    if matches!(
+        command,
+        Some(AliasCommand::Set { .. } | AliasCommand::Reset)
+    ) {
+        eprint_human_text(
+            HumanTone::Attention,
+            &HumanText::message(HumanMessageKey::BoundedWriteRisk),
+            language,
+        );
+    }
     let result = match command.unwrap_or(AliasCommand::Show) {
         AliasCommand::Show | AliasCommand::Preview | AliasCommand::Explain => {
             resolver.inspect_alias(&cwd)
@@ -3073,6 +3083,11 @@ fn title_policy_inspect(json: bool) -> ExitCode {
 
 /// Applies the explicit, profile-scoped Windows Terminal remediation.
 fn title_policy_repair(json: bool) -> ExitCode {
+    eprint_human_text(
+        HumanTone::Attention,
+        &HumanText::message(HumanMessageKey::BoundedWriteRisk),
+        None,
+    );
     let store = WindowsTerminalPolicyStore::from_environment();
     let policy = store.inspect();
     match store.repair() {
@@ -3096,6 +3111,11 @@ fn title_policy_repair(json: bool) -> ExitCode {
 
 /// Restores only an exact previously-owned policy target.
 fn title_policy_restore(json: bool) -> ExitCode {
+    eprint_human_text(
+        HumanTone::Attention,
+        &HumanText::message(HumanMessageKey::BoundedWriteRisk),
+        None,
+    );
     let store = WindowsTerminalPolicyStore::from_environment();
     let policy = store.inspect();
     match store.restore() {

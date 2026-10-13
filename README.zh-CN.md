@@ -1,3 +1,5 @@
+未发布 v0.9.0：[有界支持合同（简体中文 / English）](docs/v0.9.0-support-contract.md)。支持原 Preview 基准、合作写者和已观察漂移拒绝；不保证外部写者竞争及跨文件崩溃原子性。模糊恢复保留证据并拒绝。具体实现仍待 Owner Review。
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/JerrySkywalker/tabbeacon/9215500cb3b0a9ef183c9c096a4bdde1b749da5b/docs/assets/brand/tabbeacon-logo.svg" width="420" alt="TabBeacon" />
 </p>

@@ -2107,12 +2107,13 @@ fn overlay_lines(app: &ControlCenterApp) -> String {
             resolved.application,
         ),
         ControlCenterOverlay::Help => format!(
-            "{}\n\n{}\n{}\n{}\n{}\nTerminology / 术语: https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/terminology.md\n{}",
+            "{}\n\n{}\n{}\n{}\n{}\n{}\nTerminology / 术语: https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/terminology.md\n{}",
             catalog(app.locale(), HumanMessageKey::HelpNavigation),
             catalog(app.locale(), HumanMessageKey::HelpSettings),
             catalog(app.locale(), HumanMessageKey::HelpWorkspaceSessions),
             catalog(app.locale(), HumanMessageKey::HelpAccessibility),
             catalog(app.locale(), HumanMessageKey::HelpRepair),
+            catalog(app.locale(), HumanMessageKey::BoundedWriteRisk),
             catalog(app.locale(), HumanMessageKey::OverlayDismiss),
         ),
         ControlCenterOverlay::RepairPreview(plan) => {
@@ -2160,7 +2161,8 @@ fn overlay_lines(app: &ControlCenterApp) -> String {
                 },
             );
             format!(
-                "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}\n{}",
+                "{}\n\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}\n{}",
+                catalog(app.locale(), HumanMessageKey::BoundedWriteRisk),
                 catalog(app.locale(), HumanMessageKey::WhatIsWrong),
                 title,
                 catalog(app.locale(), HumanMessageKey::WhyItMatters),
@@ -2431,7 +2433,8 @@ fn workspace_lines(app: &ControlCenterApp) -> String {
         String::new()
     };
     format!(
-        "{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n\n{}:\n{}\n\n{}\n{}\n{}",
+        "{}\n\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n\n{}:\n{}\n\n{}\n{}\n{}",
+        catalog(app.locale(), HumanMessageKey::BoundedWriteRisk),
         catalog(app.locale(), HumanMessageKey::ProjectDisplayHint),
         workspace.workspace().as_str(),
         catalog(app.locale(), HumanMessageKey::AutomaticAlias),
@@ -2882,6 +2885,61 @@ mod tests {
     };
     use crate::management::ManagementHealth;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn bounded_write_risk_survives_locale_density_scroll_and_no_color_without_apply() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace_root = root.path().join("workspace");
+        std::fs::create_dir(&workspace_root).unwrap();
+        let resolver = crate::repo::WorkspaceIdentityResolver::new(root.path().join("state"));
+        let workspace = resolver.inspect_alias(&workspace_root).unwrap();
+        for language in [InterfaceLanguage::EnUs, InterfaceLanguage::ZhCn] {
+            for raw in [false, true] {
+                let mut app = app().with_interface_preferences(
+                    InterfacePreferences::default().with_language(language),
+                );
+                let before = app.staged_draft();
+                let notice = catalog(app.locale(), HumanMessageKey::BoundedWriteRisk);
+                let compact = |text: &str| text.split_whitespace().collect::<String>();
+                app.overlay = ControlCenterOverlay::RepairPreview(Box::new(ChangePlan {
+                    expected_repair: None,
+                    action_id: "terminal.title_policy_repair".into(),
+                    safety: ActionSafety::PreviewableSafeRepair,
+                    proposed_changes: vec![],
+                    protected_state: vec![],
+                    manual_follow_up: vec![],
+                }));
+                assert!(overlay_lines(&app).starts_with(notice));
+                let frames = all_viewport_frames(&mut app, 44, 22, raw);
+                assert!(compact(&frames).contains(&compact(notice)));
+                assert_eq!(app.staged_draft(), before, "rendering grants no write");
+                app.overlay = ControlCenterOverlay::Help;
+                assert!(overlay_lines(&app).contains(notice));
+                app.overlay = ControlCenterOverlay::None;
+                app.screen = Screen::Workspace;
+                app.workspace = Some(workspace.clone());
+                assert!(workspace_lines(&app).starts_with(notice));
+                let frames = all_viewport_frames(&mut app, 44, 22, raw);
+                assert!(compact(&frames).contains(&compact(notice)));
+                let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+                terminal
+                    .draw(|frame| render_with_no_color(frame, &app, true))
+                    .unwrap();
+                assert!(
+                    terminal
+                        .backend()
+                        .buffer()
+                        .content
+                        .iter()
+                        .all(|cell| cell.fg == Color::Reset)
+                );
+                assert_eq!(app.staged_draft(), before);
+                assert!(!notice.contains('\u{1b}'));
+                assert!(!notice.contains("PASS"));
+                assert!(!notice.contains("C:\\"));
+            }
+        }
+    }
 
     #[derive(Clone)]
     struct RecordingLifecycle {

@@ -1711,7 +1711,7 @@ dependencies = [
 [[package]]
 name = "terminal-ui-contract"
 version = "0.2.0"
-source = "git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=6d6337557191fb6f160ea17448096ff77bcf10df#6d6337557191fb6f160ea17448096ff77bcf10df"
+source = "git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=eb16cd91f924c145180b5befcf9f2cacc7a46d84#eb16cd91f924c145180b5befcf9f2cacc7a46d84"
 dependencies = [
  "serde",
  "toml",
@@ -1722,7 +1722,7 @@ dependencies = [
 [[package]]
 name = "terminal-ui-ratatui"
 version = "0.1.0"
-source = "git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=6d6337557191fb6f160ea17448096ff77bcf10df#6d6337557191fb6f160ea17448096ff77bcf10df"
+source = "git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=eb16cd91f924c145180b5befcf9f2cacc7a46d84#eb16cd91f924c145180b5befcf9f2cacc7a46d84"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -1732,7 +1732,7 @@ dependencies = [
 [[package]]
 name = "terminal-ui-runtime"
 version = "0.1.0"
-source = "git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=6d6337557191fb6f160ea17448096ff77bcf10df#6d6337557191fb6f160ea17448096ff77bcf10df"
+source = "git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=eb16cd91f924c145180b5befcf9f2cacc7a46d84#eb16cd91f924c145180b5befcf9f2cacc7a46d84"
 dependencies = [
  "terminal-ui-contract",
 ]

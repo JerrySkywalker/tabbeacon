@@ -1,3 +1,5 @@
+Unreleased v0.9.0: [bounded support contract (English / 简体中文)](docs/v0.9.0-support-contract.md). Preview-bound cooperating writes and observed drift refusal are supported; external-writer races and cross-file crash atomicity are excluded. Ambiguous recovery retains evidence and refuses. Exact implementation remains pending Owner Review.
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/JerrySkywalker/tabbeacon/9215500cb3b0a9ef183c9c096a4bdde1b749da5b/docs/assets/brand/tabbeacon-logo.svg" width="420" alt="TabBeacon" />
 </p>

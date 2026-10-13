@@ -1,3 +1,5 @@
+Current v0.9.0 policy: [Owner-approved bounded support contract v1](v0.9.0-support-contract.md). The two historical strict release requirements below are SUPERSEDED_AS_V090_RELEASE_REQUIREMENT_BY_OWNER_DECISION and UNSUPPORTED_BY_V090_CONTRACT, not TEST_PASS. Historical source/results below remain intact; other gates remain independent.
+
 # Scoped engineering closure
 
 Goal `TUI-PLATFORM-ENGINEERING-CLOSURE-12H-001` continues Draft PR #123.

@@ -328,6 +328,8 @@ pub enum HumanMessageKey {
     OverlayDismiss,
     RepairPreview,
     RepairPreviewHint,
+    /// Bounded writer and recovery limits; fixed text contains no user data.
+    BoundedWriteRisk,
     WhatIsWrong,
     WhyItMatters,
     RecommendedAction,
@@ -1275,6 +1277,9 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         (ResolvedLocale::EnUs, HumanMessageKey::OverlayDismiss) => {
             "Esc closes this overlay without changing drafts."
         }
+        (ResolvedLocale::EnUs, HumanMessageKey::BoundedWriteRisk) => {
+            "Write limits: stop external edits. Observed drift is refused; external races and crashes across files are not atomic. Ambiguous recovery keeps evidence and stops."
+        }
         (ResolvedLocale::EnUs, HumanMessageKey::RepairPreview) => "Repair preview",
         (ResolvedLocale::EnUs, HumanMessageKey::RepairPreviewHint) => {
             "Press p to preview the ownership-scoped repair."
@@ -1802,6 +1807,9 @@ pub const fn catalog(locale: ResolvedLocale, key: HumanMessageKey) -> &'static s
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::OverlayDismiss) => {
             "Esc 会关闭此覆盖层，不会更改草稿。"
+        }
+        (ResolvedLocale::ZhCn, HumanMessageKey::BoundedWriteRisk) => {
+            "写入限制：请停止外部编辑。观察到漂移即拒绝；外部竞争和跨文件崩溃不保证原子性。模糊恢复保留证据并停止。"
         }
         (ResolvedLocale::ZhCn, HumanMessageKey::RepairPreview) => "修复预览",
         (ResolvedLocale::ZhCn, HumanMessageKey::RepairPreviewHint) => {

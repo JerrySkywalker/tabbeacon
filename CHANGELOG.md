@@ -4,6 +4,13 @@ All notable changes to TabBeacon will be documented here.
 
 ## [0.9.0] - Unreleased shared TUI development candidate
 
+- Owner-approved [bounded support contract v1](docs/v0.9.0-support-contract.md):
+  original Preview binding, observed drift refusal, cooperating writers and limited
+  recovery. Arbitrary external-writer CAS and all-or-nothing cross-file crash
+  commits are explicitly unsupported, not test passes. Fixed en-US/zh-CN risk
+  notices precede Repair/Restore and Alias writes; unsafe recovery retains evidence.
+  Exact implementation/API/publication and human/optical qualification remain gates.
+
 - Absorb the never-released v0.8.2 Hook Names/Doctor Matrix candidate in Draft
   PR #123; preserve Issue #122 history and track the new train in Issue #124.
 - Adopt TUC Core 0.2.0, Runtime 0.1.0 and Ratatui Adapter 0.1.0 at an exact Git

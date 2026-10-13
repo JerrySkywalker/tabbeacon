@@ -600,9 +600,15 @@ pub enum UninstallProvider {
 pub enum TitlePolicyCommand {
     /// Inspect without mutating external settings.
     Inspect(JsonArgs),
-    /// Apply the existing explicit ownership-safe repair.
+    /// Apply an ownership-scoped repair; stop external edits.
+    ///
+    /// Observed drift is refused. External writer races and multi-file crash
+    /// atomicity are unsupported; ambiguous recovery retains evidence.
     Repair(JsonArgs),
-    /// Restore only an exact previously-owned repair.
+    /// Restore only an exact previously-owned repair; stop external edits.
+    ///
+    /// Ambiguous recovery refuses and retains evidence. External writer races
+    /// and multi-file crash atomicity are unsupported.
     Restore(JsonArgs),
 }
 
@@ -714,9 +720,15 @@ pub enum AliasCommand {
     Preview,
     /// Explain safe Adaptive Naming v2 inputs and scoring without creating state.
     Explain,
-    /// Persist one explicit device-local workspace alias.
+    /// Persist one explicit device-local alias; stop external edits.
+    ///
+    /// Observed drift is refused. External writer races and multi-file crash
+    /// atomicity are unsupported; recovery can require inspection.
     Set { alias: String },
-    /// Remove only this workspace's explicit device-local alias override.
+    /// Remove only this workspace's explicit alias; stop external edits.
+    ///
+    /// External writer races and multi-file crash atomicity are unsupported;
+    /// observed drift refuses the operation.
     Reset,
 }
 
