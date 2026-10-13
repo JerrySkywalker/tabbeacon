@@ -332,3 +332,28 @@ fn two_cooperating_workspace_writers_have_one_conditional_commit() {
         1
     );
 }
+
+#[test]
+fn workspace_same_bytes_replacement_is_not_an_approved_preview() {
+    let root = owned_root();
+    let cwd = root.path().join("workspace");
+    fs::create_dir(&cwd).unwrap();
+    let path = root.path().join("preferences.json");
+    let resolver =
+        WorkspaceIdentityResolver::with_preference_path(root.path().join("registry"), &path, None);
+    let initial = resolver.inspect_alias(&cwd).unwrap();
+    resolver
+        .set_alias_override_if_unchanged(&cwd, "ALPHA", initial.expected_baseline().unwrap())
+        .unwrap();
+    let preview = resolver.inspect_alias(&cwd).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    fs::rename(&path, root.path().join("prior.json")).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    assert_eq!(
+        resolver
+            .set_alias_override_if_unchanged(&cwd, "BETA", preview.expected_baseline().unwrap())
+            .unwrap_err(),
+        WorkspaceAliasError::Conflict
+    );
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}

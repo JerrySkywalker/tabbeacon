@@ -56,7 +56,6 @@ include = [
     "docs/coding-agent-support.md",
     "docs/cursor-setup.md",
     "docs/terminology.md",
-    "AGENTS.md",
     "dev_governance_files/ROADMAP.md",
     "dev_governance_files/QUALITY_GATES.md",
 ]
@@ -99,9 +98,9 @@ atomic-write-file = "0.3.1"
 clap = { version = "4.5.60", features = ["derive"] }
 clap_complete = "4.5.66"
 crossterm = "0.29.0"
-terminal-ui-contract = { version = "=0.2.0", git = "https://github.com/JerrySkywalker/terminal-ui-contract", rev = "0015380c544e48fbbf7b667e84b2575ba5d93a9e" }
-terminal-ui-runtime = { version = "=0.1.0", git = "https://github.com/JerrySkywalker/terminal-ui-contract", rev = "0015380c544e48fbbf7b667e84b2575ba5d93a9e" }
-terminal-ui-ratatui = { version = "=0.1.0", git = "https://github.com/JerrySkywalker/terminal-ui-contract", rev = "0015380c544e48fbbf7b667e84b2575ba5d93a9e" }
+terminal-ui-contract = { version = "=0.2.0", git = "https://github.com/JerrySkywalker/terminal-ui-contract", rev = "6d6337557191fb6f160ea17448096ff77bcf10df" }
+terminal-ui-runtime = { version = "=0.1.0", git = "https://github.com/JerrySkywalker/terminal-ui-contract", rev = "6d6337557191fb6f160ea17448096ff77bcf10df" }
+terminal-ui-ratatui = { version = "=0.1.0", git = "https://github.com/JerrySkywalker/terminal-ui-contract", rev = "6d6337557191fb6f160ea17448096ff77bcf10df" }
 dialoguer = "0.12.0"
 png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }

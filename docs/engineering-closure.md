@@ -3,7 +3,8 @@
 Goal `TUI-PLATFORM-ENGINEERING-CLOSURE-12H-001` continues Draft PR #123.
 Exact source, binary hashes, actual command exits, trace statistics and remaining
 blockers are recorded in the Goal's `FINAL-RECEIPT.json` and linked reports under
-`C:\Dev\artifacts\terminal-ui-platform-coordination\TUI-PLATFORM-ENGINEERING-CLOSURE-12H-001-20261013-191638-a21ea71f`.
+the artifact identified by `TUI-PLATFORM-ENGINEERING-CLOSURE-12H-001` in the
+[coordination evidence index](https://github.com/JerrySkywalker/terminal-ui-platform-coordination/pull/2).
 This source work authorizes neither merge/publication nor production configuration writes.
 
 Repair plans carry an opaque `TitleRepairBaseline` captured by the product's
@@ -36,6 +37,23 @@ Release blockers for the latter two requirements remain. No `FULL_CAS_PASS`
 or stronger publication claim follows from these scoped tests. A failed real
 settings commit compensates its receipt; a failed receipt recovery is an error,
 and a later ownership mismatch refuses restoration. This is not crash recovery.
+
+## Release risk closure candidate
+
+The release risk closure adds observed Windows volume/file-index and Unix
+device/inode binding to Repair and Workspace Preview. Repair rechecks settings
+after staging its receipt and refuses observed receipt drift before replacing it.
+Compensation and restore cleanup verify receipt bytes and observed identity
+before overwriting/deleting; foreign receipt changes are retained and refused.
+
+Goal-owned process crash tests exercise before-receipt, after-receipt,
+after-settings and restore-settings-before-receipt-removal, plus registry and
+preference commit boundaries. Fresh Preview resumes verified owned cases;
+ambiguous orphan and foreign receipts are retained. Unconditional atomic replace
+still lacks strict foreign-writer CAS and the files still cannot commit together.
+Restart recovery is partial and does not establish cross-file crash atomicity.
+The source review, exact candidate hashes and new receipts are indexed under
+`TUI-V090-RELEASE-RISK-CLOSURE-12H-001`; publication and Owner freeze stay pending.
 
 The Git regression retains all six original budgets/production discovery chains.
 Its marker wait polls the runtime and observes fixture child entry/liveness.

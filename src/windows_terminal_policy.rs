@@ -29,6 +29,8 @@ pub struct TitleRepairBaseline {
     action_id: String,
     document_digest: String,
     receipt_digest: Option<String>,
+    document_identity: crate::file_identity::FileIdentity,
+    receipt_identity: Option<crate::file_identity::FileIdentity>,
 }
 impl fmt::Debug for TitleRepairBaseline {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -568,6 +570,7 @@ impl WindowsTerminalPolicyStore {
             JsoncDocument::parse_with_budget(&resolved.bytes, control, control.is_some())?;
         let profile = resolve_active_profile(&document, self.active_profile_id.as_deref())?;
         let receipt_path = std::path::absolute(self.receipt_path()?).map_err(PolicyError::Io)?;
+        let receipt_identity = crate::file_identity::FileIdentity::optional(&receipt_path)?;
         let receipt_digest = match fs::symlink_metadata(&receipt_path) {
             Ok(metadata) if is_unsafe_target(&metadata) => {
                 return Err(PolicyError::MalformedOrUnsafe);
@@ -596,7 +599,14 @@ impl WindowsTerminalPolicyStore {
         if let Some(control) = control {
             control.check().map_err(|_| PolicyError::Unavailable)?;
         }
+        if crate::file_identity::FileIdentity::optional(&document_path)? != Some(resolved.identity)
+            || crate::file_identity::FileIdentity::optional(&receipt_path)? != receipt_identity
+        {
+            return Err(PolicyError::MalformedOrUnsafe);
+        }
         Ok(TitleRepairBaseline {
+            document_identity: resolved.identity,
+            receipt_identity,
             document_path,
             receipt_path,
             installation: resolved.installation,
@@ -683,6 +693,12 @@ impl WindowsTerminalPolicyStore {
             return Ok(TitleRemediationResult::untouched(state));
         }
 
+        let identity = Some(resolved.identity);
+        if expected.is_some_and(|baseline| Some(baseline.document_identity) != identity) {
+            return Ok(TitleRemediationResult::untouched(
+                TitleRemediationState::BlockedDrift,
+            ));
+        }
         let edit = profile_false_edit(&resolved.bytes, profile.profile)?;
         before_revalidate(&resolved.path);
         let current = read_safe_bytes(&resolved.path)?;
@@ -691,6 +707,38 @@ impl WindowsTerminalPolicyStore {
                 TitleRemediationState::BlockedDrift,
             ));
         }
+        let (updated, receipt) = self.prepare_repair(&resolved, &profile, edit)?;
+        if !self.commit_repair_receipt(
+            &resolved,
+            identity,
+            &updated,
+            &receipt,
+            expected,
+            before_commit,
+        )? {
+            return Ok(TitleRemediationResult::untouched(
+                TitleRemediationState::BlockedDrift,
+            ));
+        }
+        let final_bytes = read_safe_bytes(&resolved.path)?;
+        if final_bytes != updated {
+            return Ok(TitleRemediationResult::untouched(
+                TitleRemediationState::BlockedDrift,
+            ));
+        }
+        Ok(TitleRemediationResult {
+            state: TitleRemediationState::Available,
+            document_modified: true,
+            user_config_preserved: true,
+        })
+    }
+
+    fn prepare_repair(
+        &self,
+        resolved: &ResolvedDocument,
+        profile: &ResolvedProfile<'_>,
+        edit: ByteEdit,
+    ) -> Result<(Vec<u8>, OwnershipReceipt), PolicyError> {
         let inserted_fragment = if edit.prior_target == PriorTargetState::Absent {
             Some(InsertedFragment {
                 offset_in_profile: edit.range.start - profile.profile.start,
@@ -722,48 +770,83 @@ impl WindowsTerminalPolicyStore {
             post_profile_sha256: sha256_hex(profile_bytes(&updated, verified_profile.profile)),
             inserted_fragment,
         };
-        self.commit_repair_receipt(&resolved.path, &updated, &receipt, before_commit)?;
-        let final_bytes = read_safe_bytes(&resolved.path)?;
-        if final_bytes != updated {
-            return Ok(TitleRemediationResult::untouched(
-                TitleRemediationState::BlockedDrift,
-            ));
-        }
-        Ok(TitleRemediationResult {
-            state: TitleRemediationState::Available,
-            document_modified: true,
-            user_config_preserved: true,
-        })
+        Ok((updated, receipt))
     }
 
     fn commit_repair_receipt(
         &self,
-        path: &Path,
+        resolved: &ResolvedDocument,
+        identity: Option<crate::file_identity::FileIdentity>,
         updated: &[u8],
         receipt: &OwnershipReceipt,
+        expected: Option<&TitleRepairBaseline>,
         before_commit: impl FnOnce(&Path),
-    ) -> Result<(), PolicyError> {
+    ) -> Result<bool, PolicyError> {
         let receipt_path = self.receipt_path()?;
         let prior_receipt = match fs::symlink_metadata(&receipt_path) {
             Ok(_) => Some(read_safe_bytes(&receipt_path)?),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(PolicyError::Io(error)),
         };
+        if expected.is_some_and(|baseline| {
+            prior_receipt.as_deref().map(sha256_hex) != baseline.receipt_digest
+                || !crate::file_identity::FileIdentity::optional(&receipt_path)
+                    .is_ok_and(|current| current == baseline.receipt_identity)
+        }) {
+            return Ok(false);
+        }
+        let staged_receipt =
+            serde_json::to_vec(receipt).map_err(|_| PolicyError::MalformedOrUnsafe)?;
         self.write_receipt(receipt)?;
-        before_commit(path);
-        if let Err(error) = atomic_write(path, updated) {
-            let recovered = match prior_receipt {
-                Some(bytes) => atomic_write(&receipt_path, &bytes),
-                None => self.remove_receipt(),
-            };
+        let staged_identity = crate::file_identity::FileIdentity::optional(&receipt_path)?;
+        before_commit(&resolved.path);
+        // A known foreign writer may ignore our lock. Observe again after the receipt
+        // commit, immediately before settings commit; never claim this closes all races.
+        let ready = read_safe_bytes(&resolved.path).is_ok_and(|bytes| bytes == resolved.bytes)
+            && crate::file_identity::FileIdentity::optional(&resolved.path)
+                .is_ok_and(|current| current == identity)
+            && read_safe_bytes(&receipt_path).is_ok_and(|bytes| bytes == staged_receipt)
+            && crate::file_identity::FileIdentity::optional(&receipt_path)
+                .is_ok_and(|current| current == staged_identity);
+        let commit = if ready {
+            atomic_write(&resolved.path, updated)
+        } else {
+            Ok(())
+        };
+        if !ready || commit.is_err() {
+            let recovered = self.compensate_receipt(
+                &receipt_path,
+                &staged_receipt,
+                staged_identity,
+                prior_receipt.as_deref(),
+            );
             if recovered.is_err() {
                 return Err(PolicyError::Io(io::Error::other(
                     "settings commit failed and receipt recovery could not be verified",
                 )));
             }
-            return Err(error);
+            commit?;
+            return Ok(false);
         }
-        Ok(())
+        Ok(true)
+    }
+
+    fn compensate_receipt(
+        &self,
+        path: &Path,
+        staged: &[u8],
+        identity: Option<crate::file_identity::FileIdentity>,
+        prior: Option<&[u8]>,
+    ) -> Result<(), PolicyError> {
+        if read_safe_bytes(path)? != staged
+            || crate::file_identity::FileIdentity::optional(path)? != identity
+        {
+            return Err(PolicyError::MalformedOrUnsafe);
+        }
+        match prior {
+            Some(bytes) => atomic_write(path, bytes),
+            None => self.remove_receipt(),
+        }
     }
 
     /// Restores only an exact `TabBeacon`-owned target that did not drift.
@@ -773,17 +856,40 @@ impl WindowsTerminalPolicyStore {
     /// Returns an error only when bounded settings or owned-receipt storage
     /// cannot be read or written safely. Ambiguity and drift are no-op results.
     pub fn restore(&self) -> Result<TitleRemediationResult, PolicyError> {
+        self.restore_with_before_remove(|| {})
+    }
+
+    fn restore_with_before_remove(
+        &self,
+        before_remove: impl FnOnce(),
+    ) -> Result<TitleRemediationResult, PolicyError> {
+        self.restore_with_probes(|| {}, before_remove)
+    }
+
+    fn restore_with_probes(
+        &self,
+        before_write: impl FnOnce(),
+        before_remove: impl FnOnce(),
+    ) -> Result<TitleRemediationResult, PolicyError> {
         // Repair and restore cooperate on the exact same canonical document lock.
         let first = match self.resolve_document() {
             Ok(resolved) => resolved,
             Err(error) => return Ok(TitleRemediationResult::untouched(error.remediation_state())),
         };
         let _lock = Self::mutation_lock(&first.path)?;
-        let Some(receipt) = self.read_receipt()? else {
-            return Ok(TitleRemediationResult::untouched(
-                TitleRemediationState::NotNeeded,
-            ));
+        let receipt_path = self.receipt_path()?;
+        let receipt_bytes = match read_safe_bytes(&receipt_path) {
+            Ok(bytes) => bytes,
+            Err(PolicyError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(TitleRemediationResult::untouched(
+                    TitleRemediationState::NotNeeded,
+                ));
+            }
+            Err(error) => return Err(error),
         };
+        let receipt: OwnershipReceipt =
+            serde_json::from_slice(&receipt_bytes).map_err(|_| PolicyError::MalformedOrUnsafe)?;
+        let receipt_identity = crate::file_identity::FileIdentity::optional(&receipt_path)?;
         let resolved = match self.resolve_document() {
             Ok(resolved) => resolved,
             Err(error) => return Ok(TitleRemediationResult::untouched(error.remediation_state())),
@@ -846,8 +952,20 @@ impl WindowsTerminalPolicyStore {
         let mut updated = resolved.bytes.clone();
         updated.splice(edit.range, edit.replacement);
         JsoncDocument::parse(&updated)?;
+        before_write();
+        if read_safe_bytes(&resolved.path)? != resolved.bytes
+            || crate::file_identity::FileIdentity::optional(&resolved.path)?
+                != Some(resolved.identity)
+            || read_safe_bytes(&receipt_path)? != receipt_bytes
+            || crate::file_identity::FileIdentity::optional(&receipt_path)? != receipt_identity
+        {
+            return Ok(TitleRemediationResult::untouched(
+                TitleRemediationState::BlockedDrift,
+            ));
+        }
         atomic_write(&resolved.path, &updated)?;
-        self.remove_receipt()?;
+        before_remove();
+        self.compensate_receipt(&receipt_path, &receipt_bytes, receipt_identity, None)?;
         Ok(TitleRemediationResult {
             state: TitleRemediationState::AlreadyOwned,
             document_modified: true,
@@ -938,6 +1056,8 @@ impl WindowsTerminalPolicyStore {
                 Err(PolicyError::AmbiguousSettingsSource)
             };
         };
+        let identity = crate::file_identity::FileIdentity::optional(&candidate.path)?
+            .ok_or(PolicyError::Unavailable)?;
         let bytes = if bounded {
             crate::provider_observation::read_observation_file(
                 &candidate.path,
@@ -951,10 +1071,17 @@ impl WindowsTerminalPolicyStore {
         if bytes.len() > MAX_SETTINGS_BYTES {
             return Err(PolicyError::MalformedOrUnsafe);
         }
+        if crate::file_identity::FileIdentity::optional(&candidate.path)? != Some(identity) {
+            return Err(PolicyError::MalformedOrUnsafe);
+        }
+        if let Some(control) = control {
+            control.check().map_err(|_| PolicyError::Unavailable)?;
+        }
         Ok(ResolvedDocument {
             installation: candidate.installation,
             path: candidate.path.clone(),
             bytes,
+            identity,
         })
     }
 
@@ -991,12 +1118,12 @@ impl WindowsTerminalPolicyStore {
 
     fn read_receipt(&self) -> Result<Option<OwnershipReceipt>, PolicyError> {
         let path = self.receipt_path()?;
-        match fs::read(&path) {
+        match read_safe_bytes(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map(Some)
                 .map_err(|_| PolicyError::MalformedOrUnsafe),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(PolicyError::Io(error)),
+            Err(PolicyError::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
         }
     }
 
@@ -1197,6 +1324,7 @@ struct ResolvedDocument {
     installation: WindowsTerminalInstallation,
     path: PathBuf,
     bytes: Vec<u8>,
+    identity: crate::file_identity::FileIdentity,
 }
 
 fn resolve_active_profile<'a>(
@@ -1881,6 +2009,409 @@ mod tests {
     };
 
     const GUID: &str = "{11111111-1111-1111-1111-111111111111}";
+
+    fn owned_pause(root: &std::path::Path, ticket: &str, stage: &str) {
+        use std::io::Write as _;
+        fs::write(root.join("stage.txt"), format!("{ticket}:{stage}")).unwrap();
+        println!("OWNED_TRANSACTION_STAGE={stage}");
+        std::io::stdout().flush().unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    #[ignore = "only the owning crash parent supplies an authenticated fixture root"]
+    fn owned_transaction_crash_child() {
+        let root = std::path::PathBuf::from(std::env::var_os("TB_TX_CHILD_ROOT").unwrap());
+        let ticket = std::env::var("TB_TX_CHILD_TICKET").unwrap();
+        let stage = std::env::var("TB_TX_CHILD_STAGE").unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("OWNED-TICKET")).unwrap(),
+            ticket
+        );
+        assert_eq!(
+            fs::canonicalize(&root).unwrap(),
+            std::path::PathBuf::from(std::env::var_os("TB_TX_CHILD_CANONICAL").unwrap())
+        );
+        let store = WindowsTerminalPolicyStore::new_for_testing(
+            vec![SettingsCandidate::new(
+                WindowsTerminalInstallation::Stable,
+                root.join("settings.json"),
+            )],
+            root.join("state"),
+            true,
+            Some(GUID.to_owned()),
+        );
+        let expected = store
+            .preview_repair("terminal.title_policy_repair")
+            .unwrap();
+        if stage == "before_receipt" {
+            store
+                .repair_with_commit_probe(
+                    Some(&expected),
+                    |_| owned_pause(&root, &ticket, &stage),
+                    |_| {},
+                )
+                .unwrap();
+        } else if stage == "after_receipt" {
+            store
+                .repair_with_commit_probe(
+                    Some(&expected),
+                    |_| {},
+                    |_| owned_pause(&root, &ticket, &stage),
+                )
+                .unwrap();
+        } else if stage == "after_settings" {
+            assert!(
+                store
+                    .repair_if_unchanged(&expected)
+                    .unwrap()
+                    .document_modified
+            );
+            owned_pause(&root, &ticket, &stage);
+        } else if stage == "after_restore_settings" {
+            assert!(
+                store
+                    .repair_if_unchanged(&expected)
+                    .unwrap()
+                    .document_modified
+            );
+            store
+                .restore_with_before_remove(|| owned_pause(&root, &ticket, &stage))
+                .unwrap();
+        } else {
+            panic!("unadmitted crash stage");
+        }
+    }
+
+    fn kill_owned_repair_child(root: &std::path::Path, ticket: &str, stage: &str) -> u32 {
+        use std::{
+            process::{Command, Stdio},
+            time::{Duration, Instant},
+        };
+        let exe = std::env::current_exe().unwrap();
+        let mut child = Command::new(&exe)
+            .args([
+                "--exact",
+                "windows_terminal_policy::tests::owned_transaction_crash_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("TB_TX_CHILD_ROOT", root)
+            .env("TB_TX_CHILD_CANONICAL", fs::canonicalize(root).unwrap())
+            .env("TB_TX_CHILD_TICKET", ticket)
+            .env("TB_TX_CHILD_STAGE", stage)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let owned_pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let marker = format!("{ticket}:{stage}");
+        let reached = loop {
+            if fs::read_to_string(root.join("stage.txt")).is_ok_and(|value| value == marker) {
+                break true;
+            }
+            if child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        if child.try_wait().unwrap().is_none() {
+            child.kill().unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        fs::write(root.join("process-result.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "executable": exe, "owned_pid": owned_pid, "stage": stage,
+            "exit_code": output.status.code(), "success": output.status.success(),
+            "stdout": String::from_utf8_lossy(&output.stdout), "stderr": String::from_utf8_lossy(&output.stderr),
+            "owned_handle_reaped": true,
+        })).unwrap()).unwrap();
+        assert!(
+            reached,
+            "stage not entered: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains(&format!("OWNED_TRANSACTION_STAGE={stage}"))
+        );
+        assert!(!output.status.success());
+        owned_pid
+    }
+
+    #[test]
+    fn owned_process_crashes_reopen_recover_or_refuse_without_foreign_writes() {
+        for stage in [
+            "before_receipt",
+            "after_receipt",
+            "after_settings",
+            "after_restore_settings",
+        ] {
+            let contents = settings("", "\"suppressApplicationTitle\": true");
+            let root = temporary_root(stage);
+            fs::create_dir_all(&root).unwrap();
+            let ticket = format!("{}-{stage}", root.file_name().unwrap().to_string_lossy());
+            fs::write(root.join("OWNED-TICKET"), &ticket).unwrap();
+            fs::write(root.join("settings.json"), &contents).unwrap();
+            let owned_pid = kill_owned_repair_child(&root, &ticket, stage);
+            let store = WindowsTerminalPolicyStore::new_for_testing(
+                vec![SettingsCandidate::new(
+                    WindowsTerminalInstallation::Stable,
+                    root.join("settings.json"),
+                )],
+                root.join("state"),
+                true,
+                Some(GUID.to_owned()),
+            );
+            let actual = fs::read_to_string(root.join("settings.json")).unwrap();
+            if stage == "after_settings" {
+                assert_ne!(actual, contents);
+                assert!(store.restore().unwrap().document_modified);
+                assert_eq!(
+                    fs::read_to_string(root.join("settings.json")).unwrap(),
+                    contents
+                );
+                assert_eq!(
+                    store.restore().unwrap().state,
+                    TitleRemediationState::NotNeeded
+                );
+            } else if stage == "after_restore_settings" {
+                assert_eq!(actual, contents);
+                for _ in 0..2 {
+                    assert_eq!(
+                        store.restore().unwrap().state,
+                        TitleRemediationState::BlockedDrift
+                    );
+                }
+                assert!(
+                    store.receipt_path().unwrap().exists(),
+                    "unverified orphan receipt must be retained"
+                );
+            } else {
+                assert_eq!(actual, contents);
+                assert!(!store.restore().unwrap().document_modified);
+                let fresh = store
+                    .preview_repair("terminal.title_policy_repair")
+                    .unwrap();
+                assert!(store.repair_if_unchanged(&fresh).unwrap().document_modified);
+                assert!(store.restore().unwrap().document_modified);
+                assert_eq!(
+                    fs::read_to_string(root.join("settings.json")).unwrap(),
+                    contents
+                );
+                assert!(!store.restore().unwrap().document_modified);
+            }
+            println!(
+                "CRASH_STAGE={stage} OWNED_PID={owned_pid} CHILD_REAPED=true ROOT={} REOPEN=VERIFIED CROSS_FILE_ATOMIC=false",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn external_write_after_receipt_must_not_be_overwritten() {
+        let contents = settings("", "\"suppressApplicationTitle\": true");
+        let (store, path) = fixture_store("foreign-after-receipt", &contents);
+        let expected = store
+            .preview_repair("terminal.title_policy_repair")
+            .unwrap();
+        let foreign = format!("{contents}\n ");
+        let result = store.repair_with_commit_probe(
+            Some(&expected),
+            |_| {},
+            |target| {
+                fs::write(target, &foreign).unwrap();
+            },
+        );
+        assert!(!result.is_ok_and(|result| result.document_modified));
+        assert_eq!(fs::read_to_string(&path).unwrap(), foreign);
+        assert!(!store.receipt_path().unwrap().exists());
+    }
+
+    #[test]
+    fn same_bytes_replacement_after_preview_must_be_refused() {
+        let contents = settings("", "\"suppressApplicationTitle\": true");
+        let (store, path) = fixture_store("same-bytes-replacement", &contents);
+        let expected = store
+            .preview_repair("terminal.title_policy_repair")
+            .unwrap();
+        fs::rename(&path, path.with_extension("prior")).unwrap();
+        fs::write(&path, &contents).unwrap();
+        let result = store.repair_if_unchanged(&expected).unwrap();
+        assert_eq!(result.state, TitleRemediationState::BlockedDrift);
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+        assert!(!store.receipt_path().unwrap().exists());
+    }
+
+    #[test]
+    fn receipt_drift_before_its_commit_is_refused_without_rewriting() {
+        let contents = settings("", "\"suppressApplicationTitle\": true");
+        let (store, path) = fixture_store("receipt-before-commit", &contents);
+        let expected = store
+            .preview_repair("terminal.title_policy_repair")
+            .unwrap();
+        let receipt_path = store.receipt_path().unwrap();
+        let foreign = b"{\"foreign\":true}";
+        let result = store
+            .repair_with_commit_probe(
+                Some(&expected),
+                |_| {
+                    fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
+                    fs::write(&receipt_path, foreign).unwrap();
+                },
+                |_| {},
+            )
+            .unwrap();
+        assert_eq!(result.state, TitleRemediationState::BlockedDrift);
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+        assert_eq!(fs::read(&receipt_path).unwrap(), foreign);
+    }
+
+    #[test]
+    fn atomic_replace_primitive_is_not_foreign_writer_cas() {
+        use std::io::Write as _;
+        let contents = settings("", "\"suppressApplicationTitle\": true");
+        let (_, path) = fixture_store("primitive-foreign-gap", &contents);
+        let replacement = contents.replace(": true", ": false");
+        let mut staged = atomic_write_file::AtomicWriteFile::options()
+            .open(&path)
+            .unwrap();
+        staged.write_all(replacement.as_bytes()).unwrap();
+        staged.flush().unwrap();
+        let foreign = format!("{contents}\n ");
+        fs::write(&path, &foreign).unwrap();
+        staged.commit().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), replacement);
+        println!(
+            "ATOMIC_REPLACE_PRIMITIVE=UNCONDITIONAL FOREIGN_BYTES_OVERWRITTEN=true FULL_FOREIGN_CAS=UNPROVEN"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn compensation_must_preserve_a_foreign_receipt() {
+        use std::{cell::RefCell, os::windows::fs::OpenOptionsExt};
+        let contents = settings("", "\"suppressApplicationTitle\": true");
+        let (store, path) = fixture_store("foreign-compensation", &contents);
+        let expected = store
+            .preview_repair("terminal.title_policy_repair")
+            .unwrap();
+        let owned_lock = RefCell::new(None);
+        let receipt_path = store.receipt_path().unwrap();
+        let foreign_receipt = b"{\"foreign\":true}";
+        let result = store.repair_with_commit_probe(
+            Some(&expected),
+            |_| {},
+            |target| {
+                fs::write(&receipt_path, foreign_receipt).unwrap();
+                *owned_lock.borrow_mut() = Some(
+                    fs::OpenOptions::new()
+                        .read(true)
+                        .share_mode(1)
+                        .open(target)
+                        .unwrap(),
+                );
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+        assert_eq!(fs::read(&receipt_path).unwrap(), foreign_receipt);
+        for _ in 0..2 {
+            assert!(store.restore().is_err());
+        }
+        assert_eq!(fs::read(&receipt_path).unwrap(), foreign_receipt);
+    }
+
+    #[test]
+    fn restore_cleanup_must_preserve_a_foreign_receipt() {
+        let contents = settings("", "\"suppressApplicationTitle\": true");
+        let (store, path) = fixture_store("foreign-restore-cleanup", &contents);
+        let expected = store
+            .preview_repair("terminal.title_policy_repair")
+            .unwrap();
+        store.repair_if_unchanged(&expected).unwrap();
+        let receipt_path = store.receipt_path().unwrap();
+        let foreign_receipt = b"{\"foreign\":true}";
+        assert!(
+            store
+                .restore_with_before_remove(|| fs::write(&receipt_path, foreign_receipt).unwrap())
+                .is_err()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+        assert_eq!(fs::read(&receipt_path).unwrap(), foreign_receipt);
+        for _ in 0..2 {
+            assert!(store.restore().is_err());
+        }
+    }
+
+    #[test]
+    fn restore_receipt_drift_before_settings_write_must_refuse_the_write() {
+        let contents = settings("", "\"suppressApplicationTitle\": true");
+        let (store, path) = fixture_store("foreign-before-restore-write", &contents);
+        let expected = store
+            .preview_repair("terminal.title_policy_repair")
+            .unwrap();
+        store.repair_if_unchanged(&expected).unwrap();
+        let before = fs::read(&path).unwrap();
+        let receipt_path = store.receipt_path().unwrap();
+        let foreign = b"{\"foreign\":true}";
+        let result =
+            store.restore_with_probes(|| fs::write(&receipt_path, foreign).unwrap(), || {});
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            before,
+            "stale ownership must not mutate settings"
+        );
+        assert!(!result.is_ok_and(|result| result.document_modified));
+        assert_eq!(fs::read(&receipt_path).unwrap(), foreign);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn real_compensation_failure_retains_receipt_and_fresh_preview_can_resume() {
+        use std::{cell::RefCell, os::windows::fs::OpenOptionsExt};
+        let contents = settings("", "\"suppressApplicationTitle\": true");
+        let (store, path) = fixture_store("compensation-sharing-failure", &contents);
+        let expected = store
+            .preview_repair("terminal.title_policy_repair")
+            .unwrap();
+        let handles = RefCell::new(Vec::new());
+        let receipt_path = store.receipt_path().unwrap();
+        let result = store.repair_with_commit_probe(
+            Some(&expected),
+            |_| {},
+            |target| {
+                for path in [target, receipt_path.as_path()] {
+                    handles.borrow_mut().push(
+                        fs::OpenOptions::new()
+                            .read(true)
+                            .share_mode(1)
+                            .open(path)
+                            .unwrap(),
+                    );
+                }
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+        assert!(receipt_path.exists());
+        drop(handles);
+        for _ in 0..2 {
+            assert_eq!(
+                store.restore().unwrap().state,
+                TitleRemediationState::BlockedDrift
+            );
+        }
+        let fresh = store
+            .preview_repair("terminal.title_policy_repair")
+            .unwrap();
+        assert!(store.repair_if_unchanged(&fresh).unwrap().document_modified);
+        assert!(store.restore().unwrap().document_modified);
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+        assert!(!receipt_path.exists());
+    }
 
     #[cfg(windows)]
     #[test]

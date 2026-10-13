@@ -601,6 +601,15 @@ impl WorkspaceIdentityResolver {
         cwd: &Path,
         expected: Option<&WorkspaceAliasBaseline>,
     ) -> Result<WorkspaceAliasInspection, WorkspaceAliasError> {
+        self.reset_alias_override_with_probe(cwd, expected, || {})
+    }
+
+    fn reset_alias_override_with_probe(
+        &self,
+        cwd: &Path,
+        expected: Option<&WorkspaceAliasBaseline>,
+        before_preferences: impl FnOnce(),
+    ) -> Result<WorkspaceAliasInspection, WorkspaceAliasError> {
         let facts = self
             .workspace_facts(cwd.as_ref())
             .map_err(|error| WorkspaceAliasError::from_repository_error(&error))?;
@@ -639,6 +648,7 @@ impl WorkspaceIdentityResolver {
                 if reset_collision {
                     return Err(RepositoryIdentityError::AliasConflict);
                 }
+                before_preferences();
                 let reset_preferences = if snapshot.preferences().has_override(&facts.identity) {
                     let replacement = snapshot
                         .preferences()
@@ -1038,6 +1048,184 @@ mod tests {
 
     use super::{WorkspaceIdentityResolver, WorkspaceKind};
     use crate::repo::RepositoryIdentityError;
+
+    fn pause_owned_alias(root: &std::path::Path, ticket: &str, stage: &str) {
+        use std::io::Write as _;
+        fs::write(root.join("stage.txt"), format!("{ticket}:{stage}")).unwrap();
+        println!("OWNED_ALIAS_STAGE={stage}");
+        std::io::stdout().flush().unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    #[ignore = "only the owning alias crash parent supplies an authenticated fixture root"]
+    fn owned_alias_crash_child() {
+        let root = std::path::PathBuf::from(env::var_os("TB_ALIAS_CHILD_ROOT").unwrap());
+        let ticket = env::var("TB_ALIAS_CHILD_TICKET").unwrap();
+        let stage = env::var("TB_ALIAS_CHILD_STAGE").unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("OWNED-TICKET")).unwrap(),
+            ticket
+        );
+        assert_eq!(
+            fs::canonicalize(&root).unwrap(),
+            std::path::PathBuf::from(env::var_os("TB_ALIAS_CHILD_CANONICAL").unwrap())
+        );
+        let resolver = WorkspaceIdentityResolver::with_preference_path(
+            root.join("registry"),
+            root.join("preferences.json"),
+            None,
+        );
+        let cwd = root.join("workspace");
+        let preview = resolver.inspect_alias(&cwd).unwrap();
+        if stage == "after_registry" {
+            resolver
+                .reset_alias_override_with_probe(&cwd, preview.expected_baseline(), || {
+                    pause_owned_alias(&root, &ticket, &stage);
+                })
+                .unwrap();
+        } else if stage == "after_preferences" {
+            resolver
+                .reset_alias_override_if_unchanged(&cwd, preview.expected_baseline().unwrap())
+                .unwrap();
+            pause_owned_alias(&root, &ticket, &stage);
+        } else {
+            panic!("unadmitted alias crash stage");
+        }
+    }
+
+    fn kill_owned_alias_child(root: &std::path::Path, ticket: &str, stage: &str) -> u32 {
+        use std::{
+            process::{Command, Stdio},
+            time::{Duration, Instant},
+        };
+        let mut child = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "repo::workspace::tests::owned_alias_crash_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("TB_ALIAS_CHILD_ROOT", root)
+            .env("TB_ALIAS_CHILD_CANONICAL", fs::canonicalize(root).unwrap())
+            .env("TB_ALIAS_CHILD_TICKET", ticket)
+            .env("TB_ALIAS_CHILD_STAGE", stage)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let owned_pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let marker = format!("{ticket}:{stage}");
+        let reached = loop {
+            if fs::read_to_string(root.join("stage.txt")).is_ok_and(|value| value == marker) {
+                break true;
+            }
+            if child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        if child.try_wait().unwrap().is_none() {
+            child.kill().unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        fs::write(root.join("process-result.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "executable": env::current_exe().unwrap(), "owned_pid": owned_pid, "stage": stage,
+            "exit_code": output.status.code(), "success": output.status.success(),
+            "stdout": String::from_utf8_lossy(&output.stdout), "stderr": String::from_utf8_lossy(&output.stderr),
+            "owned_handle_reaped": true,
+        })).unwrap()).unwrap();
+        assert!(
+            reached,
+            "stage not entered: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(&format!("OWNED_ALIAS_STAGE={stage}"))
+        );
+        assert!(!output.status.success());
+        owned_pid
+    }
+
+    #[test]
+    fn owned_alias_crashes_preserve_registry_history_and_require_fresh_preview() {
+        for stage in ["after_registry", "after_preferences"] {
+            let root = env::temp_dir().join(format!(
+                "tb-alias-crash-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(root.join("workspace")).unwrap();
+            let ticket = root.file_name().unwrap().to_string_lossy().into_owned();
+            fs::write(root.join("OWNED-TICKET"), &ticket).unwrap();
+            let resolver = WorkspaceIdentityResolver::with_preference_path(
+                root.join("registry"),
+                root.join("preferences.json"),
+                None,
+            );
+            let cwd = root.join("workspace");
+            let initial = resolver.inspect_alias(&cwd).unwrap();
+            // Seed the explicit preference through its real store while leaving the
+            // generated registry absent, so reset actually commits a new generation.
+            let preference = resolver.preferences.snapshot_read_only().unwrap();
+            let replacement = preference.preferences().clone().with_override(
+                initial.expected_baseline().unwrap().identity.clone(),
+                super::validate_custom_alias("CUSTOM").unwrap(),
+            );
+            resolver
+                .preferences
+                .save_snapshot_if_unchanged(&preference, replacement)
+                .unwrap();
+            let preview = resolver.inspect_alias(&cwd).unwrap();
+            let preference_before = fs::read(root.join("preferences.json")).unwrap();
+            let owned_pid = kill_owned_alias_child(&root, &ticket, stage);
+            let reopened = WorkspaceIdentityResolver::with_preference_path(
+                root.join("registry"),
+                root.join("preferences.json"),
+                None,
+            );
+            let actual = reopened.inspect_alias(&cwd).unwrap();
+            assert!(actual.is_assigned());
+            assert!(
+                reopened
+                    .reset_alias_override_if_unchanged(&cwd, preview.expected_baseline().unwrap())
+                    .is_err()
+            );
+            if stage == "after_registry" {
+                assert_eq!(
+                    fs::read(root.join("preferences.json")).unwrap(),
+                    preference_before
+                );
+                assert!(actual.custom_alias().is_some());
+            } else {
+                assert!(actual.custom_alias().is_none());
+            }
+            reopened
+                .reset_alias_override_if_unchanged(&cwd, actual.expected_baseline().unwrap())
+                .unwrap();
+            let retry = reopened.inspect_alias(&cwd).unwrap();
+            reopened
+                .reset_alias_override_if_unchanged(&cwd, retry.expected_baseline().unwrap())
+                .unwrap();
+            assert!(
+                reopened
+                    .inspect_alias(&cwd)
+                    .unwrap()
+                    .custom_alias()
+                    .is_none()
+            );
+            println!(
+                "ALIAS_CRASH_STAGE={stage} OWNED_PID={owned_pid} CHILD_REAPED=true ROOT={} REOPEN=VERIFIED CROSS_FILE_ATOMIC=false",
+                root.display()
+            );
+        }
+    }
 
     #[test]
     fn runtime_registry_wait_is_bounded_without_changing_ordinary_resolution() {
