@@ -785,10 +785,12 @@ fn alias_command(
             language,
         );
     };
-    if matches!(
-        command,
-        Some(AliasCommand::Set { .. } | AliasCommand::Reset)
-    ) {
+    if output_mode == OutputMode::Human
+        && matches!(
+            command,
+            Some(AliasCommand::Set { .. } | AliasCommand::Reset)
+        )
+    {
         eprint_human_text(
             HumanTone::Attention,
             &HumanText::message(HumanMessageKey::BoundedWriteRisk),
@@ -3083,11 +3085,13 @@ fn title_policy_inspect(json: bool) -> ExitCode {
 
 /// Applies the explicit, profile-scoped Windows Terminal remediation.
 fn title_policy_repair(json: bool) -> ExitCode {
-    eprint_human_text(
-        HumanTone::Attention,
-        &HumanText::message(HumanMessageKey::BoundedWriteRisk),
-        None,
-    );
+    if !json {
+        eprint_human_text(
+            HumanTone::Attention,
+            &HumanText::message(HumanMessageKey::BoundedWriteRisk),
+            None,
+        );
+    }
     let store = WindowsTerminalPolicyStore::from_environment();
     let policy = store.inspect();
     match store.repair() {
@@ -3111,11 +3115,13 @@ fn title_policy_repair(json: bool) -> ExitCode {
 
 /// Restores only an exact previously-owned policy target.
 fn title_policy_restore(json: bool) -> ExitCode {
-    eprint_human_text(
-        HumanTone::Attention,
-        &HumanText::message(HumanMessageKey::BoundedWriteRisk),
-        None,
-    );
+    if !json {
+        eprint_human_text(
+            HumanTone::Attention,
+            &HumanText::message(HumanMessageKey::BoundedWriteRisk),
+            None,
+        );
+    }
     let store = WindowsTerminalPolicyStore::from_environment();
     let policy = store.inspect();
     match store.restore() {

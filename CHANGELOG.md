@@ -7,8 +7,9 @@ All notable changes to TabBeacon will be documented here.
 - Owner-approved [bounded support contract v1](docs/v0.9.0-support-contract.md):
   original Preview binding, observed drift refusal, cooperating writers and limited
   recovery. Arbitrary external-writer CAS and all-or-nothing cross-file crash
-  commits are explicitly unsupported, not test passes. Fixed en-US/zh-CN risk
+  commits are explicitly unsupported, not test passes. Human en-US/zh-CN risk
   notices precede Repair/Restore and Alias writes; unsafe recovery retains evidence.
+  JSON/plain keep their machine transport without localized stderr notices.
   Exact implementation/API/publication and human/optical qualification remain gates.
 
 - Absorb the never-released v0.8.2 Hook Names/Doctor Matrix candidate in Draft
