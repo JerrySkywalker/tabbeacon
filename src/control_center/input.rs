@@ -794,6 +794,7 @@ impl ControlCenterApp {
                 let command = match &self.overlay {
                     ControlCenterOverlay::RepairPreview(plan) => {
                         ControlCenterCommand::ApplyRepair {
+                            expected: plan.expected_repair.clone(),
                             action_id: plan.action_id.clone(),
                         }
                     }

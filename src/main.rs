@@ -5611,7 +5611,20 @@ fn collect_control_center_refresh_controlled(
             .map(|(provider, (capabilities, _))| (provider, capabilities))
             .collect(),
         interface,
-        snapshot: ManagementSnapshot::from_diagnostics(&report),
+        snapshot: {
+            let mut snapshot = ManagementSnapshot::from_diagnostics(&report);
+            let policy = WindowsTerminalPolicyStore::from_environment();
+            for plan in &mut snapshot.change_plans {
+                if plan.action_id == "terminal.title_policy_repair"
+                    && plan.safety == tabbeacon::management::ActionSafety::PreviewableSafeRepair
+                {
+                    plan.expected_repair = policy
+                        .preview_repair_controlled(&plan.action_id, control)
+                        .ok();
+                }
+            }
+            snapshot
+        },
         overview: tabbeacon::management::ManagementOverview::from_diagnostics(&report),
         workspace,
         sessions,
@@ -5726,21 +5739,28 @@ fn apply_control_center_drafts(
 fn apply_control_center_workspace_override(
     before: Option<String>,
     after: Option<String>,
+    expected: Option<tabbeacon::repo::WorkspaceAliasBaseline>,
 ) -> io::Result<()> {
     let resolver =
         WorkspaceIdentityResolver::with_default_state_root().map_err(io::Error::other)?;
     let cwd = std::env::current_dir().map_err(io::Error::other)?;
-    apply_control_center_workspace_override_with(&resolver, &cwd, before, after)
+    let expected = expected.ok_or_else(settings_conflict_error)?;
+    apply_control_center_workspace_override_with(&resolver, &cwd, before, after, &expected)
 }
 
-fn apply_control_center_repair(action_id: &str) -> io::Result<()> {
+fn apply_control_center_repair(
+    action_id: &str,
+    expected: Option<&tabbeacon::windows_terminal_policy::TitleRepairBaseline>,
+) -> io::Result<()> {
     let store = WindowsTerminalPolicyStore::from_environment();
-    apply_control_center_repair_with(&store, action_id)
+    let expected = expected.ok_or_else(settings_conflict_error)?;
+    apply_control_center_repair_with(&store, action_id, expected)
 }
 
 fn apply_control_center_repair_with(
     store: &WindowsTerminalPolicyStore,
     action_id: &str,
+    expected: &tabbeacon::windows_terminal_policy::TitleRepairBaseline,
 ) -> io::Result<()> {
     if action_id != "terminal.title_policy_repair" {
         return Err(io::Error::other(
@@ -5752,7 +5772,9 @@ fn apply_control_center_repair_with(
             "The previewed title-policy repair is no longer available; no change was made",
         ));
     }
-    let result = store.repair().map_err(io::Error::other)?;
+    let result = store
+        .repair_if_unchanged(expected)
+        .map_err(io::Error::other)?;
     if result.state != TitleRemediationState::Available
         || !result.document_modified
         || !result.user_config_preserved
@@ -5775,6 +5797,7 @@ fn apply_control_center_workspace_override_with(
     cwd: &std::path::Path,
     before: Option<String>,
     after: Option<String>,
+    expected: &tabbeacon::repo::WorkspaceAliasBaseline,
 ) -> io::Result<()> {
     let inspection = resolver.inspect_alias(cwd).map_err(io::Error::other)?;
     let observed = inspection
@@ -5785,10 +5808,10 @@ fn apply_control_center_workspace_override_with(
     }
     match after {
         Some(alias) => resolver
-            .set_alias_override(cwd, alias)
+            .set_alias_override_if_unchanged(cwd, &alias, expected)
             .map_err(io::Error::other)?,
         None => resolver
-            .reset_alias_override(cwd)
+            .reset_alias_override_if_unchanged(cwd, expected)
             .map_err(io::Error::other)?,
     };
     Ok(())
@@ -6179,6 +6202,11 @@ mod tests {
                 &first,
                 None,
                 Some("TAKEN".to_owned()),
+                resolver
+                    .inspect_alias(&first)
+                    .unwrap()
+                    .expected_baseline()
+                    .unwrap(),
             )
             .is_err()
         );
@@ -6221,12 +6249,60 @@ mod tests {
             Some("{11111111-1111-1111-1111-111111111111}".to_owned()),
         );
 
-        assert!(apply_control_center_repair_with(&store, "hooks.review_in_codex").is_err());
+        let expected = store
+            .preview_repair("terminal.title_policy_repair")
+            .unwrap();
+        let mut app = tabbeacon::control_center::ControlCenterApp::new(
+            PresentationSettings::default(),
+            ManagementSnapshot {
+                health: tabbeacon::management::ManagementHealth::Warning,
+                issues: vec![],
+                recommended_actions: vec![],
+                change_plans: vec![tabbeacon::management::ChangePlan {
+                    expected_repair: Some(expected.clone()),
+                    action_id: "terminal.title_policy_repair".into(),
+                    safety: tabbeacon::management::ActionSafety::PreviewableSafeRepair,
+                    proposed_changes: vec!["active profile only".into()],
+                    protected_state: vec!["unrelated bytes".into()],
+                    manual_follow_up: vec![],
+                }],
+            },
+            tabbeacon::management::ManagementOverview::default(),
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| tabbeacon::control_center::render(frame, &app))
+            .unwrap();
+        for _ in 0..6 {
+            app.handle_key(crossterm::event::KeyCode::Down);
+        }
+        assert_eq!(app.screen(), tabbeacon::control_center::Screen::Diagnostics);
+        app.handle_key(crossterm::event::KeyCode::Char('p'));
+        let original = fs::read(&path).unwrap();
+        let mut drifted = original.clone();
+        drifted.push(b'\n');
+        fs::write(&path, &drifted).unwrap();
+        let tabbeacon::control_center::ControlCenterCommand::ApplyRepair {
+            action_id,
+            expected: Some(confirmed),
+        } = app.handle_key(crossterm::event::KeyCode::Char('a'))
+        else {
+            panic!("Confirm did not carry its original Preview baseline")
+        };
+        assert_eq!(confirmed, expected);
+        assert!(apply_control_center_repair_with(&store, &action_id, &confirmed).is_err());
+        assert_eq!(fs::read(&path).unwrap(), drifted);
+        fs::write(&path, original).unwrap();
+        assert!(
+            apply_control_center_repair_with(&store, "hooks.review_in_codex", &expected).is_err()
+        );
         assert_eq!(
             store.inspect().remediation,
             TitleRemediationState::Available
         );
-        apply_control_center_repair_with(&store, "terminal.title_policy_repair").unwrap();
+        apply_control_center_repair_with(&store, "terminal.title_policy_repair", &expected)
+            .unwrap();
         assert_eq!(
             store.inspect().remediation,
             TitleRemediationState::AlreadyOwned

@@ -120,6 +120,9 @@ impl AliasRegistryDiagnostics {
 }
 
 impl StableAliasRegistry {
+    pub(crate) fn root_path(&self) -> &Path {
+        &self.root
+    }
     /// Creates a registry rooted at an explicitly injected local directory.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -353,6 +356,14 @@ impl StableAliasRegistry {
     ) -> Result<BTreeMap<CanonicalRepositoryIdentity, RegistryAssignment>, RepositoryIdentityError>
     {
         self.load_v2_read_only()?.assignments()
+    }
+
+    pub(crate) fn assignments_read_only_controlled(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<BTreeMap<CanonicalRepositoryIdentity, RegistryAssignment>, RepositoryIdentityError>
+    {
+        self.load_v2_read_only_controlled(control)?.assignments()
     }
 
     /// Produces bounded v2 candidates without publishing an assignment.

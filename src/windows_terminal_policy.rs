@@ -19,6 +19,23 @@ use sha2::{Digest, Sha256};
 const MAX_SETTINGS_BYTES: usize = 2 * 1024 * 1024;
 const RECEIPT_FILE: &str = "windows-terminal-title-policy-v1.json";
 
+/// Exact product-owned Repair Preview identity and content baseline; not a capability.
+#[derive(Clone, Eq, PartialEq)]
+pub struct TitleRepairBaseline {
+    document_path: PathBuf,
+    receipt_path: PathBuf,
+    installation: WindowsTerminalInstallation,
+    profile_id: String,
+    action_id: String,
+    document_digest: String,
+    receipt_digest: Option<String>,
+}
+impl fmt::Debug for TitleRepairBaseline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("TitleRepairBaseline(<opaque>)")
+    }
+}
+
 /// A supported Windows Terminal settings-document family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -528,10 +545,111 @@ impl WindowsTerminalPolicyStore {
         self.repair_with_before_revalidate(|_| {})
     }
 
+    /// Captures the document, profile, action and receipt baseline without mutation.
+    /// # Errors
+    /// Refuses ambiguous, unavailable or unsafe product-owned paths.
+    pub fn preview_repair(&self, action_id: &str) -> Result<TitleRepairBaseline, PolicyError> {
+        self.preview_repair_controlled(action_id, None)
+    }
+
+    /// Captures the same Preview baseline with the collector's cooperative control.
+    /// # Errors
+    /// Refuses unsafe evidence and observes cancellation between bounded read/parse stages.
+    pub fn preview_repair_controlled(
+        &self,
+        action_id: &str,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<TitleRepairBaseline, PolicyError> {
+        if action_id != "terminal.title_policy_repair" {
+            return Err(PolicyError::MalformedOrUnsafe);
+        }
+        let resolved = self.resolve_document_with_control(control, control.is_some())?;
+        let document =
+            JsoncDocument::parse_with_budget(&resolved.bytes, control, control.is_some())?;
+        let profile = resolve_active_profile(&document, self.active_profile_id.as_deref())?;
+        let receipt_path = std::path::absolute(self.receipt_path()?).map_err(PolicyError::Io)?;
+        let receipt_digest = match fs::symlink_metadata(&receipt_path) {
+            Ok(metadata) if is_unsafe_target(&metadata) => {
+                return Err(PolicyError::MalformedOrUnsafe);
+            }
+            Ok(_) => {
+                let bytes = if control.is_some() {
+                    crate::provider_observation::read_observation_file(
+                        &receipt_path,
+                        256 * 1024,
+                        control,
+                    )
+                    .map_err(PolicyError::Io)?
+                    .ok_or(PolicyError::Unavailable)?
+                } else {
+                    read_safe_bytes(&receipt_path)?
+                };
+                Some(sha256_hex(&bytes))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(PolicyError::Io(error)),
+        };
+        if let Some(control) = control {
+            control.check().map_err(|_| PolicyError::Unavailable)?;
+        }
+        let document_path = fs::canonicalize(&resolved.path).map_err(PolicyError::Io)?;
+        if let Some(control) = control {
+            control.check().map_err(|_| PolicyError::Unavailable)?;
+        }
+        Ok(TitleRepairBaseline {
+            document_path,
+            receipt_path,
+            installation: resolved.installation,
+            profile_id: profile.profile_id.clone(),
+            action_id: action_id.to_owned(),
+            document_digest: sha256_hex(&resolved.bytes),
+            receipt_digest,
+        })
+    }
+
+    /// Writes only against the original confirmed Preview baseline.
+    /// # Errors
+    /// Returns safe storage failures; baseline mismatch is an untouched `BlockedDrift` result.
+    pub fn repair_if_unchanged(
+        &self,
+        expected: &TitleRepairBaseline,
+    ) -> Result<TitleRemediationResult, PolicyError> {
+        self.repair_with_baseline(Some(expected), |_| {})
+    }
+
     fn repair_with_before_revalidate(
         &self,
         before_revalidate: impl FnOnce(&Path),
     ) -> Result<TitleRemediationResult, PolicyError> {
+        self.repair_with_baseline(None, before_revalidate)
+    }
+
+    fn repair_with_baseline(
+        &self,
+        expected: Option<&TitleRepairBaseline>,
+        before_revalidate: impl FnOnce(&Path),
+    ) -> Result<TitleRemediationResult, PolicyError> {
+        self.repair_with_commit_probe(expected, before_revalidate, |_| {})
+    }
+
+    fn repair_with_commit_probe(
+        &self,
+        expected: Option<&TitleRepairBaseline>,
+        before_revalidate: impl FnOnce(&Path),
+        before_commit: impl FnOnce(&Path),
+    ) -> Result<TitleRemediationResult, PolicyError> {
+        let first = match self.resolve_document() {
+            Ok(resolved) => resolved,
+            Err(error) => return Ok(TitleRemediationResult::untouched(error.remediation_state())),
+        };
+        let _lock = Self::mutation_lock(&first.path)?;
+        if let Some(expected) = expected
+            && self.preview_repair(&expected.action_id).as_ref().ok() != Some(expected)
+        {
+            return Ok(TitleRemediationResult::untouched(
+                TitleRemediationState::BlockedDrift,
+            ));
+        }
         let resolved = match self.resolve_document() {
             Ok(resolved) => resolved,
             Err(error) => return Ok(TitleRemediationResult::untouched(error.remediation_state())),
@@ -604,11 +722,7 @@ impl WindowsTerminalPolicyStore {
             post_profile_sha256: sha256_hex(profile_bytes(&updated, verified_profile.profile)),
             inserted_fragment,
         };
-        self.write_receipt(&receipt)?;
-        if let Err(error) = atomic_write(&resolved.path, &updated) {
-            let _ = self.remove_receipt();
-            return Err(error);
-        }
+        self.commit_repair_receipt(&resolved.path, &updated, &receipt, before_commit)?;
         let final_bytes = read_safe_bytes(&resolved.path)?;
         if final_bytes != updated {
             return Ok(TitleRemediationResult::untouched(
@@ -622,6 +736,36 @@ impl WindowsTerminalPolicyStore {
         })
     }
 
+    fn commit_repair_receipt(
+        &self,
+        path: &Path,
+        updated: &[u8],
+        receipt: &OwnershipReceipt,
+        before_commit: impl FnOnce(&Path),
+    ) -> Result<(), PolicyError> {
+        let receipt_path = self.receipt_path()?;
+        let prior_receipt = match fs::symlink_metadata(&receipt_path) {
+            Ok(_) => Some(read_safe_bytes(&receipt_path)?),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(PolicyError::Io(error)),
+        };
+        self.write_receipt(receipt)?;
+        before_commit(path);
+        if let Err(error) = atomic_write(path, updated) {
+            let recovered = match prior_receipt {
+                Some(bytes) => atomic_write(&receipt_path, &bytes),
+                None => self.remove_receipt(),
+            };
+            if recovered.is_err() {
+                return Err(PolicyError::Io(io::Error::other(
+                    "settings commit failed and receipt recovery could not be verified",
+                )));
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Restores only an exact `TabBeacon`-owned target that did not drift.
     ///
     /// # Errors
@@ -629,6 +773,12 @@ impl WindowsTerminalPolicyStore {
     /// Returns an error only when bounded settings or owned-receipt storage
     /// cannot be read or written safely. Ambiguity and drift are no-op results.
     pub fn restore(&self) -> Result<TitleRemediationResult, PolicyError> {
+        // Repair and restore cooperate on the exact same canonical document lock.
+        let first = match self.resolve_document() {
+            Ok(resolved) => resolved,
+            Err(error) => return Ok(TitleRemediationResult::untouched(error.remediation_state())),
+        };
+        let _lock = Self::mutation_lock(&first.path)?;
         let Some(receipt) = self.read_receipt()? else {
             return Ok(TitleRemediationResult::untouched(
                 TitleRemediationState::NotNeeded,
@@ -806,6 +956,30 @@ impl WindowsTerminalPolicyStore {
             path: candidate.path.clone(),
             bytes,
         })
+    }
+
+    fn mutation_lock(path: &Path) -> Result<fs::File, PolicyError> {
+        let canonical = fs::canonicalize(path).map_err(PolicyError::Io)?;
+        let mut lock_path = canonical.as_os_str().to_os_string();
+        lock_path.push(".tabbeacon-policy.lock");
+        let lock_path = PathBuf::from(lock_path);
+        match fs::symlink_metadata(&lock_path) {
+            Ok(metadata) if is_unsafe_target(&metadata) => {
+                return Err(PolicyError::MalformedOrUnsafe);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(PolicyError::Io(error)),
+        }
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .map_err(PolicyError::Io)?;
+        file.lock().map_err(PolicyError::Io)?;
+        Ok(file)
     }
 
     fn receipt_path(&self) -> Result<PathBuf, PolicyError> {
@@ -1707,6 +1881,47 @@ mod tests {
     };
 
     const GUID: &str = "{11111111-1111-1111-1111-111111111111}";
+
+    #[cfg(windows)]
+    #[test]
+    fn preview_commit_failure_uses_real_atomic_writer_and_recovers_receipt() {
+        use std::{cell::RefCell, os::windows::fs::OpenOptionsExt};
+        let contents = settings("", "\"suppressApplicationTitle\": true");
+        let (store, path) = fixture_store("commit-sharing-failure", &contents);
+        let expected = store
+            .preview_repair("terminal.title_policy_repair")
+            .unwrap();
+        let owned_lock = RefCell::new(None);
+        let result = store.repair_with_commit_probe(
+            Some(&expected),
+            |_| {},
+            |target| {
+                // Real OS sharing denial, held across the real AtomicWriteFile commit.
+                *owned_lock.borrow_mut() = Some(
+                    fs::OpenOptions::new()
+                        .read(true)
+                        .share_mode(1)
+                        .open(target)
+                        .unwrap(),
+                );
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), contents);
+        assert!(
+            !store.receipt_path().unwrap().exists(),
+            "failed commit must compensate its newly created receipt"
+        );
+        drop(owned_lock);
+        assert!(
+            store
+                .repair_if_unchanged(&expected)
+                .unwrap()
+                .document_modified
+        );
+        store.restore().unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), contents);
+    }
 
     fn temporary_root(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(

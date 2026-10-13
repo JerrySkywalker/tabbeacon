@@ -2,6 +2,7 @@
 mod adoption_tests;
 mod document;
 mod input;
+mod timing;
 #[cfg(test)]
 use crossterm::event::KeyEventKind;
 // Staged Control Center frontend and bounded Ratatui renderer.
@@ -87,7 +88,6 @@ impl Screen {
         Self::Preview,
     ];
 
-    #[cfg(test)]
     const fn title(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
@@ -246,6 +246,7 @@ pub enum ControlCenterCommand {
     /// caller-owned collision-safe resolver.
     ApplyWorkspace {
         /// Custom alias observed when the workspace screen was opened.
+        expected: Option<crate::repo::WorkspaceAliasBaseline>,
         before: Option<String>,
         /// Explicit custom alias, or `None` to use the generated default.
         after: Option<String>,
@@ -255,6 +256,8 @@ pub enum ControlCenterCommand {
     ApplyRepair {
         /// Stable action identity from the shared management snapshot.
         action_id: String,
+        /// Original Preview baseline, never replaced with a fresh approval at Confirm.
+        expected: Option<crate::windows_terminal_policy::TitleRepairBaseline>,
     },
 }
 
@@ -263,7 +266,7 @@ pub enum ControlCenterCommand {
 enum ControlCenterOverlay {
     None,
     Help,
-    RepairPreview(ChangePlan),
+    RepairPreview(Box<ChangePlan>),
     TitleExplanation,
     ProviderPreview {
         provider: CliTarget,
@@ -294,6 +297,7 @@ impl ControlCenterOverlay {
 #[derive(Clone, Debug)]
 #[allow(clippy::struct_excessive_bools)] // Independent dirty/conflict/interaction safety state is auditable.
 pub struct ControlCenterApp {
+    timing_output: Option<std::path::PathBuf>,
     base_locale: ResolvedLocale,
     screen: Screen,
     snapshot: ManagementSnapshot,
@@ -319,6 +323,7 @@ pub struct ControlCenterApp {
     sampled_at: std::time::SystemTime,
     refresh_status: String,
     title_explanation: TitleExplanation,
+    workspace_baseline: Option<crate::repo::WorkspaceAliasBaseline>,
     current_workspace_override: Option<String>,
     workspace_draft: Option<String>,
     workspace_editor: Option<String>,
@@ -337,6 +342,14 @@ pub struct ControlCenterApp {
 }
 
 impl ControlCenterApp {
+    /// Explicit software sampling, disabled by default. The caller owns the output path.
+    /// Only bounded event-family/state labels are recorded, never key or editor payload.
+    #[must_use]
+    pub fn with_software_timing(mut self, output: std::path::PathBuf) -> Self {
+        self.timing_output = Some(output);
+        self
+    }
+
     /// Creates a staged management frontend from already-collected state.
     #[must_use]
     pub fn new(
@@ -372,6 +385,8 @@ impl ControlCenterApp {
             sampled_at: std::time::UNIX_EPOCH,
             refresh_status: "Not loaded / 未采集".into(),
             title_explanation: TitleExplanation::default(),
+            workspace_baseline: None,
+            timing_output: None,
             current_workspace_override: None,
             workspace_draft: None,
             workspace_editor: None,
@@ -528,11 +543,15 @@ impl ControlCenterApp {
             let override_alias = workspace
                 .custom_alias()
                 .map(|alias| alias.as_str().to_owned());
+            let observed_baseline = workspace.expected_baseline().cloned();
             if self.workspace_draft == self.current_workspace_override {
+                self.workspace_baseline.clone_from(&observed_baseline);
                 self.current_workspace_override = override_alias.clone();
                 self.workspace_draft = override_alias;
                 self.workspace_conflict = false;
-            } else if override_alias != self.current_workspace_override {
+            } else if override_alias != self.current_workspace_override
+                || observed_baseline != self.workspace_baseline
+            {
                 self.current_workspace_override = override_alias;
                 self.workspace_conflict = true;
             }
@@ -640,7 +659,7 @@ impl ControlCenterApp {
             .find(|plan| plan.safety == ActionSafety::PreviewableSafeRepair)
             .cloned()
         {
-            self.overlay = ControlCenterOverlay::RepairPreview(plan);
+            self.overlay = ControlCenterOverlay::RepairPreview(Box::new(plan));
         }
     }
 
@@ -650,6 +669,7 @@ impl ControlCenterApp {
             && !self.has_concurrent_conflict()
         {
             return ControlCenterCommand::ApplyWorkspace {
+                expected: self.workspace_baseline.clone(),
                 before: self.current_workspace_override.clone(),
                 after: self.workspace_draft.clone(),
             };
@@ -669,6 +689,10 @@ impl ControlCenterApp {
         self.interface_draft = self.current_interface;
         self.presentation_conflict = false;
         self.interface_conflict = false;
+        self.workspace_baseline = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.expected_baseline().cloned());
         self.workspace_draft = self.current_workspace_override.clone();
         self.workspace_editor = None;
         self.workspace_conflict = false;
@@ -972,9 +996,13 @@ pub fn run<F, W, R, P, C>(
 ) -> io::Result<()>
 where
     F: FnMut(ControlCenterDraft, ControlCenterDraft) -> io::Result<()>,
-    W: FnMut(Option<String>, Option<String>) -> io::Result<()>,
+    W: FnMut(
+        Option<String>,
+        Option<String>,
+        Option<crate::repo::WorkspaceAliasBaseline>,
+    ) -> io::Result<()>,
     R: terminal_ui_runtime::refresh::ReadOnlyCollector<(), ControlCenterRefresh>,
-    P: FnMut(&str) -> io::Result<()>,
+    P: FnMut(&str, Option<&crate::windows_terminal_policy::TitleRepairBaseline>) -> io::Result<()>,
     C: FnMut(
         CliTarget,
         PresentationSettings,
@@ -986,6 +1014,9 @@ where
         refresh::{RefreshController, RefreshPolicy, RefreshPoll, RequestKind},
         snapshot::ResourceState,
     };
+    let mut timing = app.timing_output.take().map(timing::Trace::new);
+    let mut pending_sample: Option<(usize, String)> = None;
+    let mut state_revision = 0u64;
     let mut runtime = RefreshController::spawn(
         collector,
         RefreshPolicy {
@@ -1053,31 +1084,86 @@ where
                 dirty_frame = true;
             }
             if dirty_frame {
-                session.terminal.draw(|frame| render(frame, &app))?;
+                let submitted = pending_sample.take().map(|(index, fingerprint)| {
+                    (index, fingerprint == app.input_view_fingerprint())
+                });
+                let draw = session.terminal.draw(|frame| render(frame, &app));
+                if let (Some(trace), Some((index, matches))) = (&mut timing, submitted) {
+                    trace.finish_sample(
+                        index,
+                        if draw.is_err() {
+                            timing::Outcome::Error
+                        } else if matches {
+                            timing::Outcome::Paired
+                        } else {
+                            timing::Outcome::Superseded
+                        },
+                    );
+                }
+                draw?;
                 dirty_frame = false;
             }
             if !event::poll(Duration::from_millis(20))? {
                 continue;
             }
             let event = event::read()?;
+            let sample = timing.as_mut().and_then(|trace| {
+                trace.received(match &event {
+                    Event::Key(_) => "key",
+                    Event::Mouse(_) => "mouse",
+                    Event::Resize(..) => "resize",
+                    Event::Paste(_) => "paste",
+                    _ => "other",
+                })
+            });
             let mut epoch_changed = false;
             let before = app.input_view_fingerprint();
             let resized = matches!(event, Event::Resize(..));
             let command = app.handle_input(event);
-            dirty_frame |= resized || before != app.input_view_fingerprint();
+            // Timestamp the reducer return before fingerprint/render bookkeeping.
+            let reducer_returned = timing.as_ref().map(timing::Trace::now);
+            let after_fingerprint = app.input_view_fingerprint();
+            let changed = resized || before != after_fingerprint;
+            dirty_frame |= changed;
+            if let (Some(trace), Some(index), Some(reducer_ns)) =
+                (&mut timing, sample, reducer_returned)
+            {
+                state_revision += u64::from(changed);
+                trace.state(
+                    index,
+                    state_revision,
+                    app.screen.title(),
+                    app.overlay_open(),
+                    changed,
+                    runtime.is_in_flight(),
+                );
+                trace.state_returned_at(index, reducer_ns);
+                if changed
+                    && let Some((prior, _)) = pending_sample.replace((index, after_fingerprint))
+                {
+                    trace.finish_sample(prior, timing::Outcome::Coalesced);
+                }
+            }
             match command {
                 ControlCenterCommand::Apply { before, after } => {
                     apply(before, after)?;
                     app.apply_succeeded();
                     epoch_changed = true;
                 }
-                ControlCenterCommand::ApplyWorkspace { before, after } => {
-                    apply_workspace(before, after)?;
+                ControlCenterCommand::ApplyWorkspace {
+                    before,
+                    after,
+                    expected,
+                } => {
+                    apply_workspace(before, after, expected)?;
                     app.workspace_apply_succeeded();
                     epoch_changed = true;
                 }
-                ControlCenterCommand::ApplyRepair { action_id } => {
-                    repair(&action_id)?;
+                ControlCenterCommand::ApplyRepair {
+                    action_id,
+                    expected,
+                } => {
+                    repair(&action_id, expected.as_ref())?;
                     app.repair_apply_succeeded();
                     epoch_changed = true;
                 }
@@ -1090,7 +1176,16 @@ where
                     apply_provider(provider, expected_global, before, after)?;
                     epoch_changed = true;
                 }
-                ControlCenterCommand::Quit => break,
+                ControlCenterCommand::Quit => {
+                    if let Some(trace) = &mut timing {
+                        if let Some(index) = sample {
+                            trace.finish_sample(index, timing::Outcome::Quit);
+                        }
+                        trace.shutdown("accepted_quit", true);
+                    }
+                    pending_sample = None;
+                    break;
+                }
                 ControlCenterCommand::Refresh => {
                     runtime
                         .request((), RequestKind::Manual)
@@ -1108,13 +1203,36 @@ where
         Ok(())
     })();
     // Restore terminal even on collector/persistence/I/O failure before actual join.
+    if let Some(trace) = &mut timing {
+        if result.is_err() {
+            trace.shutdown("loop_error", false);
+        }
+        if let Some((index, _)) = pending_sample.take() {
+            trace.finish_sample(index, timing::Outcome::Error);
+        }
+        trace.shutdown("restore_started", true);
+    }
     let restored = session.restore();
+    if let Some(trace) = &mut timing {
+        trace.shutdown("restore_returned", restored.is_ok());
+        trace.shutdown("join_started", true);
+    }
     let stopped = runtime
         .shutdown(Duration::from_secs(3))
         .map_err(io::Error::other);
+    if let Some(trace) = &mut timing {
+        trace.shutdown("join_returned", stopped.is_ok() && !runtime.worker_owned());
+        trace.shutdown("drop_started", true);
+    }
+    drop(runtime);
+    drop(session);
+    if let Some(trace) = &mut timing {
+        trace.shutdown("drop_returned", true);
+    }
     // A timed-out shutdown is an error, never proof of exit. Controller retains
     // its worker; Drop still joins. Only qualified cooperative collectors admitted.
-    result.and(restored).and(stopped)
+    let written = timing.map_or(Ok(()), timing::Trace::write);
+    result.and(restored).and(stopped).and(written)
 }
 
 /// Audited product adapter: only read-only capture, no writer/terminal callbacks.
@@ -3158,6 +3276,7 @@ mod tests {
         assert_eq!(
             app.handle_key(KeyCode::Char('a')),
             ControlCenterCommand::ApplyWorkspace {
+                expected: app.workspace_baseline.clone(),
                 before: None,
                 after: Some("TB".to_owned()),
             }
@@ -3877,6 +3996,7 @@ mod tests {
                 ],
                 recommended_actions: vec![title_action.clone()],
                 change_plans: vec![ChangePlan {
+                    expected_repair: None,
                     action_id: title_action.id.clone(),
                     safety: ActionSafety::PreviewableSafeRepair,
                     proposed_changes: vec!["active profile only".to_owned()],
@@ -3902,6 +4022,7 @@ mod tests {
         assert_eq!(
             app.handle_key(KeyCode::Char('a')),
             ControlCenterCommand::ApplyRepair {
+                expected: None,
                 action_id: "terminal.title_policy_repair".to_owned(),
             }
         );

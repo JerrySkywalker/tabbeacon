@@ -128,6 +128,7 @@ impl WorkspacePreferences {
 }
 
 /// Opaque exact-byte snapshot used for optimistic write and restore checks.
+#[derive(Clone, Eq, PartialEq)]
 pub struct WorkspacePreferencesSnapshot {
     preferences: WorkspacePreferences,
     contents: Option<Vec<u8>>,

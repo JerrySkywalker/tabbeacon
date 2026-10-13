@@ -30,6 +30,7 @@ include = [
     "docs/v0.8.1-codex-console-hotfix.md",
     "docs/v0.8.2-release-notes.md",
     "docs/v0.9.0-owner-review.md",
+    "docs/engineering-closure.md",
     "docs/agy-setup.md",
     "docs/adr/0015-agy-1-1-19-production-profile.md",
     "docs/assets/brand/tabbeacon-logo.svg",
@@ -63,6 +64,7 @@ include = [
 [features]
 visual-fixture = []
 terminal-smoke-fixture = []
+engineering-fixture = []
 
 [lib]
 path = "src/lib.rs"
@@ -81,6 +83,11 @@ name = "tabbeacon-terminal-smoke-fixture"
 path = "src/bin/tabbeacon-terminal-smoke-fixture.rs"
 required-features = ["terminal-smoke-fixture"]
 
+[[bin]]
+name = "tabbeacon-engineering-fixture"
+path = "src/bin/tabbeacon-engineering-fixture.rs"
+required-features = ["engineering-fixture"]
+
 [[test]]
 name = "workspace_collection_control"
 path = "tests/workspace_collection_control.rs"
@@ -92,9 +99,9 @@ atomic-write-file = "0.3.1"
 clap = { version = "4.5.60", features = ["derive"] }
 clap_complete = "4.5.66"
 crossterm = "0.29.0"
-terminal-ui-contract = { version = "=0.2.0", git = "https://github.com/JerrySkywalker/terminal-ui-contract", rev = "090ba4e2123339aec2b807853b189bb5e33f7b1f" }
-terminal-ui-runtime = { version = "=0.1.0", git = "https://github.com/JerrySkywalker/terminal-ui-contract", rev = "090ba4e2123339aec2b807853b189bb5e33f7b1f" }
-terminal-ui-ratatui = { version = "=0.1.0", git = "https://github.com/JerrySkywalker/terminal-ui-contract", rev = "090ba4e2123339aec2b807853b189bb5e33f7b1f" }
+terminal-ui-contract = { version = "=0.2.0", git = "https://github.com/JerrySkywalker/terminal-ui-contract", rev = "0015380c544e48fbbf7b667e84b2575ba5d93a9e" }
+terminal-ui-runtime = { version = "=0.1.0", git = "https://github.com/JerrySkywalker/terminal-ui-contract", rev = "0015380c544e48fbbf7b667e84b2575ba5d93a9e" }
+terminal-ui-ratatui = { version = "=0.1.0", git = "https://github.com/JerrySkywalker/terminal-ui-contract", rev = "0015380c544e48fbbf7b667e84b2575ba5d93a9e" }
 dialoguer = "0.12.0"
 png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
