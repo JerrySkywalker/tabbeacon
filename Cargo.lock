@@ -1711,7 +1711,8 @@ dependencies = [
 [[package]]
 name = "terminal-ui-contract"
 version = "0.2.0"
-source = "git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=eb16cd91f924c145180b5befcf9f2cacc7a46d84#eb16cd91f924c145180b5befcf9f2cacc7a46d84"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4b1368bcde38d8a1f7b2a09fbbb7c77d1d8e61f4cbecf1f4499bf16f92e1be90"
 dependencies = [
  "serde",
  "toml",
@@ -1722,7 +1723,8 @@ dependencies = [
 [[package]]
 name = "terminal-ui-ratatui"
 version = "0.1.0"
-source = "git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=eb16cd91f924c145180b5befcf9f2cacc7a46d84#eb16cd91f924c145180b5befcf9f2cacc7a46d84"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de607702eaa5354694ea8b9e684e96c63a7fa83b113096a22ce2cd3175f82b08"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -1732,7 +1734,8 @@ dependencies = [
 [[package]]
 name = "terminal-ui-runtime"
 version = "0.1.0"
-source = "git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=eb16cd91f924c145180b5befcf9f2cacc7a46d84#eb16cd91f924c145180b5befcf9f2cacc7a46d84"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e03f07865e152be07f0402f4ac231a087e89f197f6dc71958997f97038e8de7"
 dependencies = [
  "terminal-ui-contract",
 ]
