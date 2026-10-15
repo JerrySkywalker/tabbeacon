@@ -1,4 +1,4 @@
-Unreleased v0.9.0: [bounded support contract (English / 简体中文)](docs/v0.9.0-support-contract.md). Preview-bound cooperating writes and observed drift refusal are supported; external-writer races and cross-file crash atomicity are excluded. Ambiguous recovery retains evidence and refuses. Exact implementation remains pending Owner Review.
+Unreleased v0.9.0 material candidate: [Owner review](docs/v0.9.0-owner-review.md), [bounded support contract (English / 简体中文)](docs/v0.9.0-support-contract.md), and [v0.8.1 → v0.9.0 upgrade/rollback](docs/v0.9.0-upgrade.md). The bounded engineering baseline was Owner-accepted at `6fb27e3707aa859864873b2feadc81d383ca9749`; this material candidate still requires Owner review and separate release authorization. Human acceptance remains PARTIAL (2 PASS / 18 SKIP); optical P95, actual terminal recovery, DEC private modes, current real Provider and strict OS-stall exit remain UNPROVEN.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/JerrySkywalker/tabbeacon/9215500cb3b0a9ef183c9c096a4bdde1b749da5b/docs/assets/brand/tabbeacon-logo.svg" width="420" alt="TabBeacon" />
@@ -17,7 +17,7 @@ Unreleased v0.9.0: [bounded support contract (English / 简体中文)](docs/v0.9
 
 <p align="center"><a href="https://github.com/JerrySkywalker/tabbeacon/releases">Releases</a> · <a href="https://crates.io/crates/tabbeacon">crates.io</a> · <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/README.md">Documentation</a> · <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/LICENSE">MIT License</a></p>
 
-English/Chinese product terms: [TabBeacon terminology](docs/terminology.md).
+English/Chinese product terms: [TabBeacon terminology](docs/terminology.md). The normal Cargo package includes [简体中文 README](README.zh-CN.md); the absolute language link above also works on crates.io.
 
 <!-- tabbeacon:critical-invariants install=cargo-install-tabbeacon setup=tabbeacon-setup codex=codex agy=agy providers=codex-agy claude=deferred opencode=deferred trust=manual fail-open=true privacy=content-minimal -->
 
@@ -27,7 +27,7 @@ English/Chinese product terms: [TabBeacon terminology](docs/terminology.md).
 
 <p align="center"><sub>Real Windows Terminal rendering from TabBeacon's deterministic presentation fixture; no live Codex or Agy model conversation.</sub></p>
 
-## v0.8.0 Coding Agent Scope
+## Coding Agent Scope
 
 | Coding Agent | Status | Daily command | Compatibility policy |
 | --- | --- | --- | --- |
@@ -82,17 +82,9 @@ The production visual backend is title-first and intentionally compact:
 
 ## Quick Start
 
-Development in Draft PR #123 targets [v0.9.0](docs/v0.9.0-owner-review.md),
-absorbing the never-released v0.8.2 Hook Names/Doctor candidate and adopting the
-provisional TUC v0.2.0 shared UI. This does not change public install instructions;
-release, dependency publication and real terminal acceptance require Owner review.
+The latest verified official release is [v0.8.1](https://github.com/JerrySkywalker/tabbeacon/releases/tag/v0.8.1) as checked on 2026-10-15. v0.8.2 was never formally released. Draft PR #123 prepares v0.9.0 and consumes public crates.io `terminal-ui-contract =0.2.0`, `terminal-ui-runtime =0.1.0`, and `terminal-ui-ratatui =0.1.0`. The shared API is Owner-frozen at `eb16cd91f924c145180b5befcf9f2cacc7a46d84`; package source is separately `206325e2367cda90f8cbe5d418dc7761da5f81bb`. Published dependencies do not make TabBeacon v0.9.0 published or installed.
 
-The v0.8.0 release candidate adds independent CLI
-presentation, Cursor color-only integration, supported structured Codex state,
-and [English/Chinese terminology](docs/terminology.md). Read the
-[release notes](docs/v0.8.0-release-notes.md) for exact provider boundaries.
-
-Install the public CLI, run the guided setup, then launch Codex as usual:
+For the currently published CLI, the normal user path remains:
 
 ```powershell
 cargo install tabbeacon
@@ -100,69 +92,23 @@ tabbeacon setup
 codex
 ```
 
-Review provider Hook trust manually when the supported setup flow asks for it.
-
-For the admitted Agy profile, configure its user-global title callback and keep
-the daily command literal:
+These are user instructions, not commands executed by the material-validation train. Review provider Hook trust manually when setup requires it. A future unpinned install may resolve a newer release; pin the accepted version for release verification:
 
 ```powershell
-tabbeacon setup agy
-agy
+cargo install tabbeacon --version 0.8.1 --locked
 ```
 
-Exact release verification remains separate from the normal user path. To
-verify the v0.8.0 crate when it is published, pin both the version and lockfile:
+For an admitted Agy profile, `tabbeacon setup agy` configures its user-global title callback and daily launch remains `agy`. `tabbeacon setup --quick` visits only missing, stale or action-required setup work; review proposed changes before applying them.
 
-```powershell
-cargo install tabbeacon --version 0.8.0 --locked
-```
+## Upgrade and Rollback
 
-> [!TIP]
-> `tabbeacon setup --quick` visits only missing, stale, or action-required setup
-> work. Review any proposed change before applying it; it does not turn
-> TabBeacon into a launcher.
+Use the official [v0.8.1 → v0.9.0 upgrade and rollback guide](docs/v0.9.0-upgrade.md). It separates source/package/Windows hashes, ownership-qualified preflight, exact approved installation, named Hook reconciliation, manual native trust and actual recovery checks. There is no v0.8.2 installation step. v0.9.0 install commands are future-only until its release objects are accepted, actually public and separately authorized.
 
-## Upgrade
+Binary replacement alone does not roll configuration back. Preserve exact owned before-images, unrelated settings and failed receipts; stop on ambiguous ownership or drift. Never copy old trusted hashes to new Hook definitions. Strong CAS against arbitrary external writers and all-or-nothing cross-file crash commits are explicitly unsupported, not failed requirements reintroduced into this version.
 
-For a Cargo-installed copy, the short sequence is **version → preflight →
-install → doctor**. When v0.8.0 is published, use:
+This candidate's exact package, two raw release build hashes, ZIP and CI are recorded in the Owner evidence receipt. A successful software draw/build is not optical latency or physical-terminal acceptance. No current real Provider, installation, trust or actual production rollback is qualified by material validation.
 
-```powershell
-tabbeacon --version
-tabbeacon upgrade-preflight
-cargo install tabbeacon --version 0.8.0 --locked --force
-tabbeacon --version
-tabbeacon doctor
-```
-
-`upgrade-preflight` is read-only. If it reports that replacement is blocked by
-an exact-owned TabBeacon worker or MCP child, drain only through TabBeacon's
-ownership-aware path and then rerun preflight:
-
-```powershell
-tabbeacon upgrade-preflight --drain
-tabbeacon upgrade-preflight
-```
-
-If a process is reported as unowned or ambiguous, do **not** terminate it by
-image name; let the owning coding-agent session exit normally and retry the
-preflight.
-
-After the v0.8.0 upgrade, reconcile an existing managed Codex integration
-without granting Hook trust automatically:
-
-```powershell
-tabbeacon setup codex
-```
-
-Then review any changed Hook definitions manually. TabBeacon never grants Hook
-trust automatically. See the [v0.8.0 upgrade guide](docs/v0.8.0-upgrade.md)
-for the full ownership boundary.
-
-> [!NOTE]
-> The prior v0.7.3 lockfile may warn about yanked `chacha20 0.10.1`.
-> v0.8.0 uses a different locked graph; keep `--locked` when reproducing it.
-> Dependency maintenance remains tracked in [Issue #114](https://github.com/JerrySkywalker/tabbeacon/issues/114).
+Historical context: the v0.8.0 release candidate introduced independent CLI presentation and Cursor color-only integration; its [release notes](docs/v0.8.0-release-notes.md) remain historical scope records, not current release status.
 
 ## Compatibility
 

@@ -10,12 +10,17 @@ All notable changes to TabBeacon will be documented here.
   commits are explicitly unsupported, not test passes. Human en-US/zh-CN risk
   notices precede Repair/Restore and Alias writes; unsafe recovery retains evidence.
   JSON/plain keep their machine transport without localized stderr notices.
-  Exact implementation/API/publication and human/optical qualification remain gates.
+  The bounded engineering baseline and frozen shared API are Owner-accepted;
+  new material bytes, publication and human/optical qualification remain gates.
 
 - Absorb the never-released v0.8.2 Hook Names/Doctor Matrix candidate in Draft
   PR #123; preserve Issue #122 history and track the new train in Issue #124.
-- Adopt TUC Core 0.2.0, Runtime 0.1.0 and Ratatui Adapter 0.1.0 at an exact Git
-  revision; registry package/install remains blocked on unpublished dependencies.
+- Consume the public crates.io packages Core `terminal-ui-contract =0.2.0`,
+  Runtime `terminal-ui-runtime =0.1.0` and Adapter `terminal-ui-ratatui =0.1.0`;
+  Cargo.lock pins their registry checksums. Frozen API source is
+  `eb16cd91f924c145180b5befcf9f2cacc7a46d84`, distinct from package source
+  `206325e2367cda90f8cbe5d418dc7761da5f81bb`. Historical Git/unpublished status
+  is superseded; TabBeacon publication remains independently unauthorized.
 - Share one provider observation per refresh, collect off the UI thread and retain
   immutable snapshots, last-good/error state, single-flight scheduling and epochs.
 - Use shared Standard/Vim/Custom input, pane focus, mouse hit geometry and bounded
@@ -23,6 +28,36 @@ All notable changes to TabBeacon will be documented here.
 - Preserve staged editing, CAS and manual Hook trust. Source/synthetic evidence
   does not qualify real input latency or authorize publication/install/trust.
   See [Owner review notes](docs/v0.9.0-owner-review.md).
+
+### Release materials / 发行材料
+
+- Include both READMEs in the normal Cargo package; refresh current dependency,
+  API-freeze and version facts and provide the official bilingual
+  [v0.8.1 → v0.9.0 upgrade/rollback guide](docs/v0.9.0-upgrade.md).
+- Configure only the normal Windows MSVC Release binary link with packaged
+  `build.rs` and `/Brepro`.
+  Two independent clean normal Release builds must match their entire raw SHA256;
+  a minimal probe or binary metadata normalization is not acceptance. Exact
+  artifacts and current result belong to the candidate's evidence receipt.
+- Preserve the original24-byte metadata FAIL and both old binaries. Train D
+  remains PARTIAL (O01/O02 Owner PASS,18 SKIP); optical P95, actual terminal
+  recovery, DEC, current real Provider and strict OS-stall exit remain UNPROVEN.
+  The historical700ms failure stays visible, with unresolved cause/stability.
+- Source/package/license/MSRV/CI evidence never grants Ready, merge, tag,
+  publication, installation, Hook trust or real Provider permission.
+
+### 简体中文 v0.9.0
+
+- 接入公开 Registry 的精确 Core0.2.0、Runtime0.1.0、Adapter0.1.0；冻结 API 与包源码
+  身份分开记录，旧 Git/未发布依赖状态仅为历史。TabBeacon0.9.0 仍是未发布候选。
+- 共享异步观察、快照、Standard/Vim/Custom 输入、焦点/鼠标几何及有界视口；保留
+  分阶段编辑、所有权、合作写者条件提交、已观察漂移拒绝和有限恢复，不新增功能。
+- 双语 README 纳入正常包；更新 Owner Review、发行流程及官方081→090升级回滚文档。
+  Windows MSVC `/Brepro` 的完整产物资格以两次独立干净 Release 构建原始哈希一致为准。
+- 原24字节重建 FAIL、700ms 历史失败和真人2 PASS/18 SKIP永久保留。光学 P95、
+  实际终端恢复、DEC、真实 Provider、严格 OS stall仍 UNPROVEN，不把材料通过当作发布批准。
+- 任意外部写者强 CAS、跨文件崩溃原子性为本版明确不支持的非门禁；手工 Hook trust
+  和其他安全/资格门禁保持独立。未安装、未发布、未自动授予信任。
 
 ## [0.8.2] - Unreleased scoped candidate
 
@@ -37,7 +72,7 @@ All notable changes to TabBeacon will be documented here.
   Diagnostics and Hooks pages. Native shared-daemon terminal routing remains
   blocked on upstream capability; no daemon support or publication is claimed.
 
-## [0.8.1] - Unreleased compatibility hotfix candidate
+## [0.8.1] - Official compatibility hotfix (publication recorded externally)
 
 - Recover the originating native Codex console for Windows command Hooks launched
   with `CREATE_NO_WINDOW`, using bounded ancestry, installed-image identity,
@@ -49,7 +84,10 @@ All notable changes to TabBeacon will be documented here.
 - Add an owned console regression and a content-minimal old/new launcher fixture.
   Require known complete declarations before setup/uninstall configuration writes,
   including rejection of jointly edited manifest and live commands.
-  Real Codex 0.159.2 TUI acceptance and publication remain separate Owner gates.
+  Historical candidate requirement: real Codex 0.159.2 TUI acceptance and
+  publication were separate Owner gates. Official v0.8.1 publication and its
+  historical exact-version qualification are recorded in the public release;
+  they do not qualify the current v0.9.0 Provider or physical-terminal claims.
 
 ## [0.8.0] - Release contents (publication date recorded externally)
 

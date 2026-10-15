@@ -7,6 +7,7 @@ license = "MIT"
 description = "Live identity and status beacons for coding-agent tabs in Windows Terminal."
 repository = "https://github.com/JerrySkywalker/tabbeacon"
 readme = "README.md"
+build = "build.rs"
 keywords = ["terminal", "cli", "windows-terminal", "codex", "developer-tools"]
 categories = ["command-line-utilities", "development-tools"]
 publish = ["crates-io"]
@@ -15,6 +16,8 @@ include = [
     "Cargo.lock",
     "LICENSE",
     "README.md",
+    "README.zh-CN.md",
+    "build.rs",
     "CHANGELOG.md",
     "rust-toolchain.toml",
     "rustfmt.toml",
@@ -30,6 +33,8 @@ include = [
     "docs/v0.8.1-codex-console-hotfix.md",
     "docs/v0.8.2-release-notes.md",
     "docs/v0.9.0-owner-review.md",
+    "docs/v0.9.0-upgrade.md",
+    "docs/development/release-process.md",
     "docs/v0.9.0-support-contract.md",
     "docs/engineering-closure.md",
     "docs/agy-setup.md",
