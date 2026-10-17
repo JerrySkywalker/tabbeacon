@@ -1,4 +1,4 @@
-未发布的 v0.9.0 发行材料候选：[Owner Review](docs/v0.9.0-owner-review.md)、[有界支持合同（简体中文 / English）](docs/v0.9.0-support-contract.md)、[v0.8.1 → v0.9.0 升级回滚](docs/v0.9.0-upgrade.md)。Owner 已接受 `6fb27e3707aa859864873b2feadc81d383ca9749` 的有界工程基线；本材料候选仍待 Owner 审查和独立发布授权。真人验收保持 PARTIAL（2 PASS / 18 SKIP）；光学 P95、实际终端恢复、DEC 私有模式、当前真实 Provider 及严格 OS stall 退出仍 UNPROVEN。
+TabBeacon [v0.9.0](https://github.com/JerrySkywalker/tabbeacon/releases/tag/v0.9.0) 已于 2026-10-17 正式发布，包含 [crates.io 0.9.0](https://crates.io/crates/tabbeacon/0.9.0) 和正式 Windows x64 ZIP。Owner 于 2026-10-18 接受限定的发行后 M3 结项及已披露 P6 机器证据缺口，决定不再补测。Train D 仍为 2 PASS / 18 SKIP；这不代表全部真人、光学、终端、Provider 或 OS-stall 保证已通过。[有界支持合同](docs/v0.9.0-support-contract.md) 和发布前 [Owner 材料](docs/v0.9.0-owner-review.md) 保留各自历史证据范围。
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/JerrySkywalker/tabbeacon/9215500cb3b0a9ef183c9c096a4bdde1b749da5b/docs/assets/brand/tabbeacon-logo.svg" width="420" alt="TabBeacon" />
@@ -80,9 +80,9 @@ PTY 主机、终端替代品或后台守护进程。
 
 ## 快速开始
 
-截至 2026-10-15 已核验的最新正式版本为 [v0.8.1](https://github.com/JerrySkywalker/tabbeacon/releases/tag/v0.8.1)，v0.8.2 从未正式发布。Draft PR #123 准备 v0.9.0，精确使用公开 crates.io 的 `terminal-ui-contract =0.2.0`、`terminal-ui-runtime =0.1.0`、`terminal-ui-ratatui =0.1.0`。共享 API 已由 Owner 冻结于 `eb16cd91f924c145180b5befcf9f2cacc7a46d84`；包源码另为 `206325e2367cda90f8cbe5d418dc7761da5f81bb`。共享依赖公开不等于 TabBeacon v0.9.0 已发布或已安装。
+当前正式版本为 [v0.9.0](https://github.com/JerrySkywalker/tabbeacon/releases/tag/v0.9.0)；此前正式版本为 v0.8.1，v0.8.2 从未正式发布。v0.9.0 使用公开 crates.io 的 `terminal-ui-contract =0.2.0`、`terminal-ui-runtime =0.1.0`、`terminal-ui-ratatui =0.1.0`。这部分共享交付已按既定范围完成；后续 cliclack 风格 CLI 扩展属于独立工作。
 
-当前公开 CLI 的普通用户路径仍为：
+Cargo 普通用户安装路径为：
 
 ```powershell
 cargo install tabbeacon
@@ -90,21 +90,23 @@ tabbeacon setup
 codex
 ```
 
-这是用户操作说明，本材料验证列车没有执行这些命令。设置要求时仍须手动审查 Hook 信任。未来不固定版本的安装可能取得更新版本；精确发布验证应固定已接受版本：
+应用前审查配置变更，按原生流程手动审查 Hook 信任。不固定版本的安装可能取得更新版本；需要精确复现时使用已发布版本：
 
 ```powershell
-cargo install tabbeacon --version 0.8.1 --locked
+cargo install tabbeacon --version 0.9.0 --locked
 ```
 
 对于已准入的 Agy 配置，`tabbeacon setup agy` 配置用户全局标题回调，日常启动仍为 `agy`。`tabbeacon setup --quick` 仅处理缺失、过期或需要操作的设置工作；应用前审查变更。
 
 ## 升级与回滚
 
-使用正式的 [v0.8.1 → v0.9.0 升级和回滚指南](docs/v0.9.0-upgrade.md)。指南分别说明源码/包/Windows 哈希、归属明确的预检、精确获准安装、具名 Hook 协调、原生手工信任和实际恢复检查。不经过 v0.8.2。v0.9.0 安装命令仅供未来使用，须先接受精确发布对象、验证真实公开状态并另行取得授权。
+[v0.8.1 → v0.9.0 指南](docs/v0.9.0-upgrade.md) 保留发布前流程及历史状态文字；实际 [v0.9.0 Release](https://github.com/JerrySkywalker/tabbeacon/releases/tag/v0.9.0) 现已公开。Cargo 用户可使用上面的固定版本命令；Windows ZIP 用户应先用同一 Release 的 `SHA256SUMS.txt` 和 `RELEASE-PROVENANCE.json` 核验 ZIP，再替换归属明确的 EXE。不经过 v0.8.2。配置迁移、Hook 协调和原生手工信任仍是需要分别审查所有权的操作。
 
 替换 EXE 不等于配置回滚。保留精确自有 before-image、无关设置和失败回执；归属或漂移有歧义即停止。不得把旧信任哈希复制到新 Hook。对任意外部写者的强 CAS 和跨文件崩溃时全有或全无明确不支持，不重新设为本版门禁。
 
-本候选的精确 Cargo 包、两次 Release 原始构建哈希、ZIP 和 CI 记录在 Owner 证据回执。软件 draw/build 成功不是光学延迟或真人终端验收；材料验证不证明真实 Provider、正式安装、Hook 信任或实际生产回滚。
+发行后限定 M3 验收包括实际完成的正式 ZIP 0.9.0 → 0.8.1 → 0.9.0 二进制、版本、入口及配置保全往返，最终为正式 0.9.0 EXE；不证明 v0.8.1 完整 Provider/Hook 生产功能回滚。P6 Provider/Shell 结果基于 Owner 确认，新的机器 attempt/exit/edit 回执、逐字回复和具体状态转换未留存。
+
+Train D 的 18 SKIP、原因未决的历史 700ms FAIL、旧 24 字节重建 FAIL 均保留。光学 P95/100ms、DEC 私有模式、严格任意 OS-stall 退出仍 UNPROVEN。原生独立审查仍 BLOCKED；公开发行采用另行获 Owner 接受的有界 A+B 替代路径。软件 draw/build 不等于真人或光学证明。仓库文档更新不改变已发布 crate、tag 或 ZIP，包内文档保留原始文字。
 
 历史背景：v0.8.0 发布候选引入按 CLI 独立呈现和 Cursor 仅颜色接入；其[发布说明](docs/v0.8.0-release-notes.md)保留历史范围，不代表当前发布状态。
 
@@ -167,6 +169,8 @@ tabbeacon ui
 - [原生标签图标结论](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/research/WT_NATIVE_ICON_DISPOSITION.md)
 
 ## 贡献
+
+v0.9.0 开发周期已达到 Owner 接受的限定 M3 结项。下一版本从当前 `main` 按 `AGENTS.md` 单独确定范围；历史 Fast Lane Goal 是证据记录，不再作为重放 R0–R3 或 P5–P7 的活跃指令。行政跟踪项在另行获准后记录关闭。本次文档更新不启动下一版本功能或 cliclack 扩展。
 
 欢迎贡献。请从 [CONTRIBUTING.md](https://github.com/JerrySkywalker/tabbeacon/blob/main/CONTRIBUTING.md) 开始，使用聚焦分支，并让精确
 HEAD CI 验证候选提交。提供商配置、进程定位或终端仪器化等高风险变更还有额外的

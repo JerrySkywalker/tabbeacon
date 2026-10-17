@@ -1,4 +1,4 @@
-Unreleased v0.9.0 material candidate: [Owner review](docs/v0.9.0-owner-review.md), [bounded support contract (English / 简体中文)](docs/v0.9.0-support-contract.md), and [v0.8.1 → v0.9.0 upgrade/rollback](docs/v0.9.0-upgrade.md). The bounded engineering baseline was Owner-accepted at `6fb27e3707aa859864873b2feadc81d383ca9749`; this material candidate still requires Owner review and separate release authorization. Human acceptance remains PARTIAL (2 PASS / 18 SKIP); optical P95, actual terminal recovery, DEC private modes, current real Provider and strict OS-stall exit remain UNPROVEN.
+TabBeacon [v0.9.0](https://github.com/JerrySkywalker/tabbeacon/releases/tag/v0.9.0) was released on 2026-10-17, including [crates.io 0.9.0](https://crates.io/crates/tabbeacon/0.9.0) and the official Windows x64 ZIP. Owner accepted the limited post-release M3 closeout on 2026-10-18 with disclosed P6 machine-evidence gaps and no further retest. Train D remains 2 PASS / 18 SKIP; this does not certify all human, optical, terminal, Provider or OS-stall guarantees. [Bounded support](docs/v0.9.0-support-contract.md) and the prepublication [Owner packet](docs/v0.9.0-owner-review.md) retain their historical evidence scope.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/JerrySkywalker/tabbeacon/9215500cb3b0a9ef183c9c096a4bdde1b749da5b/docs/assets/brand/tabbeacon-logo.svg" width="420" alt="TabBeacon" />
@@ -82,9 +82,9 @@ The production visual backend is title-first and intentionally compact:
 
 ## Quick Start
 
-The latest verified official release is [v0.8.1](https://github.com/JerrySkywalker/tabbeacon/releases/tag/v0.8.1) as checked on 2026-10-15. v0.8.2 was never formally released. Draft PR #123 prepares v0.9.0 and consumes public crates.io `terminal-ui-contract =0.2.0`, `terminal-ui-runtime =0.1.0`, and `terminal-ui-ratatui =0.1.0`. The shared API is Owner-frozen at `eb16cd91f924c145180b5befcf9f2cacc7a46d84`; package source is separately `206325e2367cda90f8cbe5d418dc7761da5f81bb`. Published dependencies do not make TabBeacon v0.9.0 published or installed.
+The current official release is [v0.9.0](https://github.com/JerrySkywalker/tabbeacon/releases/tag/v0.9.0); v0.8.1 is the previous official version and v0.8.2 was never released. v0.9.0 uses public crates.io `terminal-ui-contract =0.2.0`, `terminal-ui-runtime =0.1.0`, and `terminal-ui-ratatui =0.1.0`. That shared delivery is complete within its adopted scope; a future cliclack-style CLI extension is separate work.
 
-For the currently published CLI, the normal user path remains:
+The normal Cargo user path is:
 
 ```powershell
 cargo install tabbeacon
@@ -92,21 +92,23 @@ tabbeacon setup
 codex
 ```
 
-These are user instructions, not commands executed by the material-validation train. Review provider Hook trust manually when setup requires it. A future unpinned install may resolve a newer release; pin the accepted version for release verification:
+Review proposed configuration changes and native Hook trust manually. An unpinned install may resolve a newer version; use the exact released version when reproducibility is needed:
 
 ```powershell
-cargo install tabbeacon --version 0.8.1 --locked
+cargo install tabbeacon --version 0.9.0 --locked
 ```
 
 For an admitted Agy profile, `tabbeacon setup agy` configures its user-global title callback and daily launch remains `agy`. `tabbeacon setup --quick` visits only missing, stale or action-required setup work; review proposed changes before applying them.
 
 ## Upgrade and Rollback
 
-Use the official [v0.8.1 → v0.9.0 upgrade and rollback guide](docs/v0.9.0-upgrade.md). It separates source/package/Windows hashes, ownership-qualified preflight, exact approved installation, named Hook reconciliation, manual native trust and actual recovery checks. There is no v0.8.2 installation step. v0.9.0 install commands are future-only until its release objects are accepted, actually public and separately authorized.
+The [v0.8.1 → v0.9.0 guide](docs/v0.9.0-upgrade.md) preserves the prepublication procedure and its historical status wording. The actual [v0.9.0 Release](https://github.com/JerrySkywalker/tabbeacon/releases/tag/v0.9.0) is now public. Cargo installation can use the pinned command above; Windows ZIP users should verify the downloaded ZIP against `SHA256SUMS.txt` and `RELEASE-PROVENANCE.json` from that Release before replacing their owned executable. There is no v0.8.2 installation step. Configuration migration, Hook reconciliation and native manual trust remain distinct operations requiring ownership review.
 
 Binary replacement alone does not roll configuration back. Preserve exact owned before-images, unrelated settings and failed receipts; stop on ambiguous ownership or drift. Never copy old trusted hashes to new Hook definitions. Strong CAS against arbitrary external writers and all-or-nothing cross-file crash commits are explicitly unsupported, not failed requirements reintroduced into this version.
 
-This candidate's exact package, two raw release build hashes, ZIP and CI are recorded in the Owner evidence receipt. A successful software draw/build is not optical latency or physical-terminal acceptance. No current real Provider, installation, trust or actual production rollback is qualified by material validation.
+The limited post-release M3 acceptance includes an actual official-ZIP 0.9.0 → 0.8.1 → 0.9.0 binary/version/entry roundtrip with configuration preservation, ending on the official 0.9.0 EXE. It does not prove full v0.8.1 Provider/Hook production-functional rollback. P6 Provider/Shell outcomes rely on Owner attestation; new machine attempt/exit/edit receipts, the verbatim response and the specific status transition were not retained.
+
+Train D's 18 SKIP, the historical 700 ms failure with unresolved cause and the older 24-byte reproducibility FAIL remain visible. Optical P95/100 ms, DEC private modes and strict arbitrary OS-stall exit remain UNPROVEN. Independent native review remains BLOCKED; the public release used the separately Owner-accepted bounded A+B alternative. A build or software draw is not physical/optical evidence. Repository documentation updates do not alter the already-published crate, tag or ZIP, whose embedded documents retain their original wording.
 
 Historical context: the v0.8.0 release candidate introduced independent CLI presentation and Cursor color-only integration; its [release notes](docs/v0.8.0-release-notes.md) remain historical scope records, not current release status.
 
@@ -176,6 +178,8 @@ for current ownership boundaries.
 - [Native tab-icon disposition](https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/research/WT_NATIVE_ICON_DISPOSITION.md)
 
 ## Contributing
+
+The v0.9.0 development cycle has reached Owner-accepted limited M3 closeout. A next-version change starts from current `main` with its own scope under `AGENTS.md`; historical Fast Lane Goals are evidence records, not an active instruction to replay R0–R3 or P5–P7. Administrative tracker closure is recorded separately when authorized. No next-version feature or cliclack extension is started by this documentation change.
 
 Contributions are welcome. Start with [CONTRIBUTING.md](https://github.com/JerrySkywalker/tabbeacon/blob/main/CONTRIBUTING.md); use a
 focused branch and let exact-head CI validate the candidate. High-risk changes
