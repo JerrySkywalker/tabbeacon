@@ -107,6 +107,7 @@ crossterm = "0.29.0"
 terminal-ui-contract = "=0.2.0"
 terminal-ui-runtime = "=0.1.0"
 terminal-ui-ratatui = "=0.1.0"
+terminal-ui-cliclack = { git = "https://github.com/JerrySkywalker/terminal-ui-contract", rev = "ef8cbe331f796db7a21722c1de60d9f707d93252" }
 dialoguer = "0.12.0"
 png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }
