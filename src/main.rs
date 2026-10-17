@@ -3886,13 +3886,13 @@ mod cliclack_adapter_tests {
 
 impl GuidedInput for CliclackInput {
     fn select(&mut self, prompt: &str, items: &[&str], default: usize) -> Result<usize, String> {
+        use terminal_ui_cliclack::{
+            Choice, ColorLevel, Locale, PromptOutcome, PromptSession, PromptTheme,
+        };
         let localized_items = items
             .iter()
             .map(|item| localize_setup_choice(self.locale, item))
             .collect::<Vec<_>>();
-        use terminal_ui_cliclack::{
-            Choice, ColorLevel, Locale, PromptOutcome, PromptSession, PromptTheme,
-        };
         let choices = localized_items
             .iter()
             .enumerate()
@@ -3908,7 +3908,6 @@ impl GuidedInput for CliclackInput {
             } else {
                 ColorLevel::Ansi16
             },
-            ..PromptTheme::default()
         };
         let mut session = PromptSession::new(theme)
             .map_err(|_| "guided setup requires interactive terminal input".to_owned())?;
