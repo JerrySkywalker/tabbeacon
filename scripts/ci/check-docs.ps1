@@ -278,7 +278,7 @@ $releaseProofs = @(
     @{ Path = 'Cargo.toml'; Pattern = '(?m)^version = "0\.9\.0"$' },
     @{ Path = 'Cargo.lock'; Pattern = '(?ms)name = "tabbeacon"\r?\nversion = "0\.9\.0"' },
     @{ Path = 'CHANGELOG.md'; Pattern = '## \[0\.8\.2\] - Unreleased scoped candidate' },
-    @{ Path = 'CHANGELOG.md'; Pattern = '## \[0\.9\.0\] - Unreleased shared TUI development candidate' },
+    @{ Path = 'CHANGELOG.md'; Pattern = '(?m)^## \[0\.9\.0\] - 2026-10-17\r?$' },
     @{ Path = 'docs/v0.9.0-owner-review.md'; Pattern = 'v0\.8\.2 was never formally released' },
     @{ Path = 'docs/v0.9.0-owner-review.md'; Pattern = 'BLOCKED_UNPUBLISHED_SHARED_DEPENDENCY' },
     @{ Path = 'docs/v0.9.0-owner-review.md'; Pattern = 'Issue \[#122\] remains its historical scope record|Issue #122 remains its historical scope record' },
@@ -290,7 +290,7 @@ $releaseProofs = @(
 )
 foreach ($proof in $releaseProofs) {
     $content = Get-Content -LiteralPath $proof.Path -Raw -Encoding UTF8
-    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not preserve historical release records, unpublished v0.8.2 history and v0.9.0 candidate boundaries"
+    Assert-Docs ($content -match $proof.Pattern) "$($proof.Path) does not preserve historical release records, unpublished v0.8.2 history and the actual v0.9.0 release date"
 }
 
 $releaseTargetProofs = @(

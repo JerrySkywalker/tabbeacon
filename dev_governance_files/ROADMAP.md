@@ -1,5 +1,15 @@
 # TabBeacon Roadmap
 
+## Current cycle status — 2026-10-18
+
+TabBeacon [v0.9.0](https://github.com/JerrySkywalker/tabbeacon/releases/tag/v0.9.0) is released. Owner accepted the limited M3 installed-scope closeout and disclosed P6 machine-evidence gaps, with no further retest. Train D 18 SKIP and historical FAIL/UNPROVEN limits remain; administrative PR/Issue closure is a separate explicit operation.
+
+The established TUC Core0.2.0 / Runtime0.1.0 / Ratatui0.1.0 shared delivery is complete in its adopted scope. Future cliclack-style CLI work belongs to a separate conversation. No feature implementation is started here.
+
+The next TabBeacon development cycle can be scoped independently from current `main` under AGENTS.md and QUALITY_GATES.md. Historical Fast Lane Goals, prepublication gates and the old v0.8.0 train below do not require replay before a new scoped development change. New product, release, install and trust operations still need their applicable authority.
+
+## Historical roadmap through v0.8.0
+
 Roadmap IDs are stable governance identifiers. `X` suffixes denote experimental work that does not block the adjacent production release unless promoted by a later decision.
 
 The Owner-approved [v0.8.0 Goal Train](ROADMAP_V08.md) supplied the release scope.

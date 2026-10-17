@@ -2,7 +2,12 @@
 
 All notable changes to TabBeacon will be documented here.
 
-## [0.9.0] - Unreleased shared TUI development candidate
+## [0.9.0] - 2026-10-17
+
+- Published [v0.9.0](https://github.com/JerrySkywalker/tabbeacon/releases/tag/v0.9.0) and [crate 0.9.0](https://crates.io/crates/tabbeacon/0.9.0) from source `62e1cefac25ffcb71d00a9ea910de803eebb4b58`, including the official Windows x64 ZIP and provenance/checksums. v0.8.1 is the previous official release; v0.8.2 was never released.
+- Owner accepted the limited post-release M3 scope on 2026-10-18 with disclosed P6 machine-evidence gaps and no further retest. The actual ZIP binary/version/entry/config-preservation roundtrip ended on 0.9.0; full 0.8.1 Provider/Hook functional rollback is not qualified. P6 exact response/status-transition and new Provider/Shell machine receipts remain UNPROVEN.
+- Train D remains 2 PASS / 18 SKIP. Historical 700 ms and 24-byte FAIL, optical P95/100 ms, DEC, strict arbitrary OS-stall and independent-native-review limitations remain. No strong foreign-writer CAS or cross-file crash atomicity guarantee is added.
+- This post-release repository documentation correction leaves the published tag, crate and ZIP bytes unchanged, including their original prepublication wording.
 
 - Owner-approved [bounded support contract v1](docs/v0.9.0-support-contract.md):
   original Preview binding, observed drift refusal, cooperating writers and limited
@@ -11,16 +16,16 @@ All notable changes to TabBeacon will be documented here.
   notices precede Repair/Restore and Alias writes; unsafe recovery retains evidence.
   JSON/plain keep their machine transport without localized stderr notices.
   The bounded engineering baseline and frozen shared API are Owner-accepted;
-  new material bytes, publication and human/optical qualification remain gates.
+  the official publication is recorded above, while human/optical evidence keeps its stated limits.
 
-- Absorb the never-released v0.8.2 Hook Names/Doctor Matrix candidate in Draft
+- Absorb the never-released v0.8.2 Hook Names/Doctor Matrix candidate from former
   PR #123; preserve Issue #122 history and track the new train in Issue #124.
 - Consume the public crates.io packages Core `terminal-ui-contract =0.2.0`,
   Runtime `terminal-ui-runtime =0.1.0` and Adapter `terminal-ui-ratatui =0.1.0`;
   Cargo.lock pins their registry checksums. Frozen API source is
   `eb16cd91f924c145180b5befcf9f2cacc7a46d84`, distinct from package source
   `206325e2367cda90f8cbe5d418dc7761da5f81bb`. Historical Git/unpublished status
-  is superseded; TabBeacon publication remains independently unauthorized.
+  is historical; TabBeacon 0.9.0 is now public within its bounded release scope.
 - Share one provider observation per refresh, collect off the UI thread and retain
   immutable snapshots, last-good/error state, single-flight scheduling and epochs.
 - Use shared Standard/Vim/Custom input, pane focus, mouse hit geometry and bounded
@@ -49,7 +54,7 @@ All notable changes to TabBeacon will be documented here.
 ### 简体中文 v0.9.0
 
 - 接入公开 Registry 的精确 Core0.2.0、Runtime0.1.0、Adapter0.1.0；冻结 API 与包源码
-  身份分开记录，旧 Git/未发布依赖状态仅为历史。TabBeacon0.9.0 仍是未发布候选。
+  身份分开记录，旧 Git/未发布依赖状态仅为历史。TabBeacon0.9.0 已于2026-10-17正式发布。
 - 共享异步观察、快照、Standard/Vim/Custom 输入、焦点/鼠标几何及有界视口；保留
   分阶段编辑、所有权、合作写者条件提交、已观察漂移拒绝和有限恢复，不新增功能。
 - 双语 README 纳入正常包；更新 Owner Review、发行流程及官方081→090升级回滚文档。
@@ -57,7 +62,7 @@ All notable changes to TabBeacon will be documented here.
 - 原24字节重建 FAIL、700ms 历史失败和真人2 PASS/18 SKIP永久保留。光学 P95、
   实际终端恢复、DEC、真实 Provider、严格 OS stall仍 UNPROVEN，不把材料通过当作发布批准。
 - 任意外部写者强 CAS、跨文件崩溃原子性为本版明确不支持的非门禁；手工 Hook trust
-  和其他安全/资格门禁保持独立。未安装、未发布、未自动授予信任。
+  和其他安全/资格门禁保持独立。限定M3已获Owner接受，已披露P6缺口保留；不自动授予信任。
 
 ## [0.8.2] - Unreleased scoped candidate
 
