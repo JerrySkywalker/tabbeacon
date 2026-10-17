@@ -2299,6 +2299,14 @@ fn inspect_active_worker_identities_read_only(
 }
 
 fn inspect_sessions_read_only(state_root: &Path, now: u64) -> SessionsOverview {
+    inspect_sessions_read_only_controlled(state_root, now, None)
+}
+
+fn inspect_sessions_read_only_controlled(
+    state_root: &Path,
+    now: u64,
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> SessionsOverview {
     let directory = state_root.join(STATE_DIRECTORY);
     let entries = match fs::symlink_metadata(&directory) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
@@ -2313,9 +2321,9 @@ fn inspect_sessions_read_only(state_root: &Path, now: u64) -> SessionsOverview {
     };
     let mut overview = SessionsOverview::empty(ActivityLeaseHealth::Healthy);
     if let Some(entries) = entries {
-        inspect_worker_sessions(entries, now, &mut overview);
+        inspect_worker_sessions(entries, now, &mut overview, control);
     }
-    inspect_provider_sessions(state_root, now, &mut overview);
+    inspect_provider_sessions(state_root, now, &mut overview, control);
     overview.sessions.sort_by(|left, right| {
         left.workspace_alias
             .cmp(&right.workspace_alias)
@@ -2329,8 +2337,17 @@ fn inspect_sessions_read_only(state_root: &Path, now: u64) -> SessionsOverview {
     overview
 }
 
-fn inspect_worker_sessions(entries: fs::ReadDir, now: u64, overview: &mut SessionsOverview) {
+fn inspect_worker_sessions(
+    entries: fs::ReadDir,
+    now: u64,
+    overview: &mut SessionsOverview,
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) {
     for (index, entry) in entries.enumerate() {
+        if control.is_some_and(|c| c.check().is_err()) {
+            overview.health = ActivityLeaseHealth::Unavailable;
+            return;
+        }
         if index >= MAX_DIAGNOSTIC_LEASE_FILES {
             overview.invalid_leases = overview.invalid_leases.saturating_add(1);
             break;
@@ -2359,9 +2376,14 @@ fn inspect_worker_sessions(entries: fs::ReadDir, now: u64, overview: &mut Sessio
             overview.invalid_leases = overview.invalid_leases.saturating_add(1);
             continue;
         }
-        let lease = fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<WorkerLease>(&bytes).ok());
+        let lease = crate::provider_observation::read_observation_file(
+            &path,
+            usize::try_from(MAX_DIAGNOSTIC_LEASE_BYTES).expect("128 KiB fits supported usize"),
+            control,
+        )
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<WorkerLease>(&bytes).ok());
         let Some(lease) =
             lease.filter(|lease| lease.key_sha256 == key_digest && validate_lease(lease).is_ok())
         else {
@@ -2384,7 +2406,12 @@ fn inspect_worker_sessions(entries: fs::ReadDir, now: u64, overview: &mut Sessio
     }
 }
 
-fn inspect_provider_sessions(state_root: &Path, now: u64, overview: &mut SessionsOverview) {
+fn inspect_provider_sessions(
+    state_root: &Path,
+    now: u64,
+    overview: &mut SessionsOverview,
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) {
     let directory = state_root.join(PROVIDER_SESSION_DIRECTORY);
     let Ok(metadata) = fs::symlink_metadata(&directory) else {
         return;
@@ -2398,6 +2425,10 @@ fn inspect_provider_sessions(state_root: &Path, now: u64, overview: &mut Session
         return;
     };
     for (index, entry) in entries.enumerate() {
+        if control.is_some_and(|c| c.check().is_err()) {
+            overview.health = ActivityLeaseHealth::Unavailable;
+            return;
+        }
         if index >= MAX_DIAGNOSTIC_LEASE_FILES {
             overview.invalid_leases = overview.invalid_leases.saturating_add(1);
             break;
@@ -2422,7 +2453,16 @@ fn inspect_provider_sessions(state_root: &Path, now: u64, overview: &mut Session
                     && !metadata.file_type().is_symlink()
                     && metadata.len() <= MAX_DIAGNOSTIC_LEASE_BYTES
             })
-            .and_then(|_| fs::read(&path).ok())
+            .and_then(|_| {
+                crate::provider_observation::read_observation_file(
+                    &path,
+                    usize::try_from(MAX_DIAGNOSTIC_LEASE_BYTES)
+                        .expect("128 KiB fits supported usize"),
+                    control,
+                )
+                .ok()
+                .flatten()
+            })
             .and_then(|bytes| serde_json::from_slice::<ProviderSessionObservation>(&bytes).ok());
         let Some(observation) = observation.filter(|observation| {
             observation.session_sha256 == session_sha256
@@ -3178,6 +3218,25 @@ fn open_owned_console(probe_enabled: bool) -> io::Result<Box<dyn Write>> {
         Ok(console) => Ok(Box::new(console)),
         Err(error) => Err(error),
     }
+}
+
+/// Inspects bounded passive session files with per-entry cooperative control.
+#[must_use]
+pub fn inspect_system_sessions_controlled(
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> SessionsOverview {
+    let Ok(root) = crate::repo::StableAliasRegistry::default_state_root() else {
+        return SessionsOverview::empty(ActivityLeaseHealth::Unavailable);
+    };
+    inspect_sessions_read_only_controlled(&root, unix_ms(), control)
+}
+
+/// Projects cooperatively collected passive sessions into lease diagnostics.
+#[must_use]
+pub fn inspect_system_activity_leases_controlled(
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> ActivityLeaseDiagnostics {
+    inspect_system_sessions_controlled(control).diagnostics()
 }
 
 #[cfg(test)]

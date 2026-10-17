@@ -3,6 +3,10 @@ use std::{fmt, io, path::PathBuf};
 /// Failure from offline repository identity resolution.
 #[derive(Debug)]
 pub enum RepositoryIdentityError {
+    /// Read-only discovery was cooperatively cancelled; do not fall back.
+    Cancelled,
+    /// A read-only discovery task or owned Git command reached its deadline.
+    Timeout,
     /// The configured Git executable could not start or a local Git operation
     /// failed.
     Git {
@@ -41,6 +45,8 @@ pub enum RepositoryIdentityError {
 impl fmt::Display for RepositoryIdentityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled => formatter.write_str("repository observation cancelled"),
+            Self::Timeout => formatter.write_str("repository observation timed out"),
             Self::Git { operation, detail } => {
                 write!(
                     formatter,

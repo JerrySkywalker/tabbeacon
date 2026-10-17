@@ -688,29 +688,39 @@ impl ProviderRegistry {
     /// Builds the registered-provider view from an existing diagnostic pass.
     #[must_use]
     pub fn from_diagnostics(report: &OperationalDiagnostics, hooks: &HookInventory) -> Self {
-        let registry = Self::codex_observation(
+        let agy = AgyProductionSetup::from_environment()
+            .ok()
+            .map(|setup| setup.inspect());
+        let cursor = env::current_dir()
+            .and_then(|workspace| {
+                env::current_exe().and_then(|exe| {
+                    CursorHookIntegration::new(&workspace, &exe).and_then(|i| i.check())
+                })
+            })
+            .ok();
+        Self::from_observations(report, hooks, agy, cursor)
+    }
+
+    /// Pure projection from the current refresh's already-collected providers.
+    #[must_use]
+    pub fn from_observations(
+        report: &OperationalDiagnostics,
+        hooks: &HookInventory,
+        agy: Option<AgyReadinessProjection>,
+        cursor: Option<CursorHookState>,
+    ) -> Self {
+        let mut registry = Self::codex_observation(
             report.codex.version.as_deref(),
             report.codex.profile_supported,
             report.integration.installed,
             hooks.availability == HookInventoryAvailability::Available,
         );
-        let mut registry = AgyProductionSetup::from_environment()
-            .map_or(registry.clone(), |setup| {
-                registry.with_agy_readiness(setup.inspect())
-            });
-        let cursor_state = env::current_dir()
-            .and_then(|workspace| {
-                env::current_exe().and_then(|executable| {
-                    CursorHookIntegration::new(&workspace, &executable)
-                        .and_then(|integration| integration.check())
-                })
-            })
-            .ok();
+        if let Some(agy) = agy {
+            registry = registry.with_agy_readiness(agy);
+        }
         registry
             .providers
-            .push(ProviderIntegrationSnapshot::from_cursor_candidate(
-                cursor_state,
-            ));
+            .push(ProviderIntegrationSnapshot::from_cursor_candidate(cursor));
         registry
     }
 

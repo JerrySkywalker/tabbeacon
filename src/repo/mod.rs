@@ -33,8 +33,8 @@ pub use registry::{
     StableAliasRegistry,
 };
 pub use workspace::{
-    ResolvedWorkspaceIdentity, WorkspaceAliasError, WorkspaceAliasInspection,
-    WorkspaceIdentityClass, WorkspaceIdentityResolver, WorkspaceKind,
+    ResolvedWorkspaceIdentity, WorkspaceAliasBaseline, WorkspaceAliasError,
+    WorkspaceAliasInspection, WorkspaceIdentityClass, WorkspaceIdentityResolver, WorkspaceKind,
 };
 
 use std::path::Path;

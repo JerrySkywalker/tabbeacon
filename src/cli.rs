@@ -11,6 +11,14 @@ use clap_complete::Shell;
 
 use crate::interface_preferences::InterfaceLanguage;
 
+/// Session-only shared input profile.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum UiKeymap {
+    #[default]
+    Standard,
+    Vim,
+}
+
 /// Top-level `TabBeacon` command-line interface.
 #[derive(Debug, Parser)]
 #[command(
@@ -144,8 +152,15 @@ pub enum Command {
     Preview(PreviewArgs),
     /// Emit a shell-completion script to stdout.
     Completions { shell: Shell },
-    /// Reserve the Control Center command without entering a full-screen UI.
-    Ui,
+    /// Open the Control Center with an optional session-only keymap.
+    Ui {
+        /// Shared Standard or Vim profile; never changes saved settings.
+        #[arg(long, value_enum, default_value = "standard")]
+        keymap: UiKeymap,
+        /// Explicit user TOML keymap file; validated read-only, never auto-saved.
+        #[arg(long)]
+        keymap_file: Option<PathBuf>,
+    },
     /// Session-scoped internal activity worker.
     #[command(name = "__activity-worker-v1", hide = true)]
     ActivityWorker {
@@ -536,7 +551,7 @@ mod upgrade_preflight_tests {
 }
 
 /// Doctor-specific observational flags.
-#[derive(Clone, Copy, Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct DoctorArgs {
     #[command(flatten)]
     pub output: OutputArgs,
@@ -546,6 +561,15 @@ pub struct DoctorArgs {
     /// Execute one exact owned Hook declaration with isolated temporary state.
     #[arg(long)]
     pub probe_hook_runtime: bool,
+    /// Show provider/mode/capability evidence without changing runtime modes.
+    #[arg(long)]
+    pub matrix: bool,
+    /// Filter registered provider evidence (display only).
+    #[arg(long, requires = "matrix")]
+    pub provider: Option<String>,
+    /// Filter a queried topology; does not observe or select the running mode.
+    #[arg(long, requires = "matrix", value_enum)]
+    pub execution_mode: Option<crate::doctor_matrix::ExecutionMode>,
 }
 
 /// Arguments for the package-upgrade preflight.
@@ -576,9 +600,15 @@ pub enum UninstallProvider {
 pub enum TitlePolicyCommand {
     /// Inspect without mutating external settings.
     Inspect(JsonArgs),
-    /// Apply the existing explicit ownership-safe repair.
+    /// Apply an ownership-scoped repair; stop external edits.
+    ///
+    /// Observed drift is refused. External writer races and multi-file crash
+    /// atomicity are unsupported; ambiguous recovery retains evidence.
     Repair(JsonArgs),
-    /// Restore only an exact previously-owned repair.
+    /// Restore only an exact previously-owned repair; stop external edits.
+    ///
+    /// Ambiguous recovery refuses and retains evidence. External writer races
+    /// and multi-file crash atomicity are unsupported.
     Restore(JsonArgs),
 }
 
@@ -690,9 +720,15 @@ pub enum AliasCommand {
     Preview,
     /// Explain safe Adaptive Naming v2 inputs and scoring without creating state.
     Explain,
-    /// Persist one explicit device-local workspace alias.
+    /// Persist one explicit device-local alias; stop external edits.
+    ///
+    /// Observed drift is refused. External writer races and multi-file crash
+    /// atomicity are unsupported; recovery can require inspection.
     Set { alias: String },
-    /// Remove only this workspace's explicit device-local alias override.
+    /// Remove only this workspace's explicit alias; stop external edits.
+    ///
+    /// External writer races and multi-file crash atomicity are unsupported;
+    /// observed drift refuses the operation.
     Reset,
 }
 

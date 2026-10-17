@@ -87,6 +87,7 @@ pub struct ResolvedWorkspaceIdentity {
 /// accidentally disclosing local workspace internals.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceAliasInspection {
+    expected_baseline: Option<WorkspaceAliasBaseline>,
     workspace: RepositoryDisplayName,
     identity_class: WorkspaceIdentityClass,
     automatic_alias: RepositoryAlias,
@@ -98,7 +99,29 @@ pub struct WorkspaceAliasInspection {
     candidates: Vec<AliasCandidate>,
 }
 
+/// Product-owned exact Preview snapshot. It grants no write authority.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WorkspaceAliasBaseline {
+    identity: CanonicalRepositoryIdentity,
+    workspace_root: PathBuf,
+    registry: StableAliasRegistry,
+    registry_path: PathBuf,
+    preference_path: PathBuf,
+    preferences: super::WorkspacePreferencesSnapshot,
+    assignments: std::collections::BTreeMap<CanonicalRepositoryIdentity, super::RegistryAssignment>,
+}
+impl std::fmt::Debug for WorkspaceAliasBaseline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WorkspaceAliasBaseline(<opaque>)")
+    }
+}
 impl WorkspaceAliasInspection {
+    /// Baseline captured by the product's read-only inspection, never an authorization token.
+    #[must_use]
+    pub fn expected_baseline(&self) -> Option<&WorkspaceAliasBaseline> {
+        self.expected_baseline.as_ref()
+    }
+
     /// Sanitized display hint for the current workspace.
     #[must_use]
     pub fn workspace(&self) -> &RepositoryDisplayName {
@@ -420,8 +443,39 @@ impl WorkspaceIdentityResolver {
             .preferences
             .snapshot_read_only()
             .map_err(|_| WorkspaceAliasError::Unavailable)?;
-        self.inspect_from_snapshot(&facts, snapshot.preferences())
-            .map_err(|error| WorkspaceAliasError::from_repository_error(&error))
+        let mut inspection = self
+            .inspect_from_snapshot(&facts, snapshot.preferences())
+            .map_err(|error| WorkspaceAliasError::from_repository_error(&error))?;
+        inspection.expected_baseline = Some(self.alias_baseline(&facts, snapshot, None)?);
+        Ok(inspection)
+    }
+
+    /// Bounded cooperative observation; original transactional paths are retained.
+    ///
+    /// # Errors
+    /// Returns unavailable evidence on path, budget, cancellation or parse failure.
+    pub fn inspect_alias_controlled(
+        &self,
+        cwd: impl AsRef<Path>,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<WorkspaceAliasInspection, WorkspaceAliasError> {
+        let facts = self
+            .workspace_facts_controlled(cwd.as_ref(), control)
+            .map_err(|error| WorkspaceAliasError::from_repository_error(&error))?;
+        let snapshot = self
+            .preferences
+            .snapshot_read_only_controlled(control)
+            .map_err(|_| WorkspaceAliasError::Unavailable)?;
+        let mut inspection = self
+            .inspect_from_snapshot_controlled(&facts, snapshot.preferences(), control)
+            .map_err(|error| WorkspaceAliasError::from_repository_error(&error))?;
+        if let Some(control) = control {
+            control
+                .check()
+                .map_err(|_| WorkspaceAliasError::Unavailable)?;
+        }
+        inspection.expected_baseline = Some(self.alias_baseline(&facts, snapshot, control)?);
+        Ok(inspection)
     }
 
     /// Stores one explicit local alias only after a namespace collision check
@@ -437,13 +491,48 @@ impl WorkspaceIdentityResolver {
         cwd: impl AsRef<Path>,
         alias: impl AsRef<str>,
     ) -> Result<WorkspaceAliasInspection, WorkspaceAliasError> {
-        let alias = validate_custom_alias(alias.as_ref())?;
+        self.set_alias_override_with_baseline(cwd.as_ref(), alias.as_ref(), None)
+    }
+
+    /// Applies a confirmed alias against its original Preview baseline.
+    /// # Errors
+    /// Refuses identity/path/snapshot drift, unsafe aliases and namespace collisions.
+    pub fn set_alias_override_if_unchanged(
+        &self,
+        cwd: &Path,
+        alias: &str,
+        expected: &WorkspaceAliasBaseline,
+    ) -> Result<WorkspaceAliasInspection, WorkspaceAliasError> {
+        self.set_alias_override_with_baseline(cwd, alias, Some(expected))
+    }
+
+    fn set_alias_override_with_baseline(
+        &self,
+        cwd: &Path,
+        alias: &str,
+        expected: Option<&WorkspaceAliasBaseline>,
+    ) -> Result<WorkspaceAliasInspection, WorkspaceAliasError> {
+        let alias = validate_custom_alias(alias)?;
         let facts = self
             .workspace_facts(cwd.as_ref())
             .map_err(|error| WorkspaceAliasError::from_repository_error(&error))?;
         self.registry
             .with_exclusive_lock(|registry| {
-                let snapshot = self.preference_snapshot_as_repository_error()?;
+                let current = self.preference_snapshot_as_repository_error()?;
+                if let Some(expected) = expected
+                    && (expected.identity != facts.identity
+                        || expected.workspace_root != facts.workspace_root
+                        || expected.registry != self.registry
+                        || expected.registry_path
+                            != std::path::absolute(self.registry.root_path())?
+                        || expected.preference_path
+                            != std::path::absolute(self.preferences.path())?
+                        || expected.preferences != current
+                        || expected.assignments != registry.assignments_read_only()?)
+                {
+                    return Err(RepositoryIdentityError::PreferenceConflict);
+                }
+                let snapshot = expected.map_or(&current, |baseline| &baseline.preferences);
                 let reserved = snapshot.preferences().override_aliases();
                 let assignment = registry.resolve_assignment_locked(
                     &facts.identity,
@@ -469,7 +558,7 @@ impl WorkspaceIdentityResolver {
                 let saved_preferences = replacement.clone();
                 match self
                     .preferences
-                    .save_snapshot_if_unchanged(&snapshot, replacement)
+                    .save_snapshot_if_unchanged(snapshot, replacement)
                     .map_err(|error| preference_error_as_repository_error(&error))?
                 {
                     super::WorkspacePreferencesSnapshotSaveOutcome::Saved(_) => {}
@@ -493,12 +582,54 @@ impl WorkspaceIdentityResolver {
         &self,
         cwd: impl AsRef<Path>,
     ) -> Result<WorkspaceAliasInspection, WorkspaceAliasError> {
+        self.reset_alias_override_with_baseline(cwd.as_ref(), None)
+    }
+
+    /// Resets a confirmed alias against its original Preview baseline.
+    /// # Errors
+    /// Refuses identity/path/snapshot drift and generated alias collisions.
+    pub fn reset_alias_override_if_unchanged(
+        &self,
+        cwd: &Path,
+        expected: &WorkspaceAliasBaseline,
+    ) -> Result<WorkspaceAliasInspection, WorkspaceAliasError> {
+        self.reset_alias_override_with_baseline(cwd, Some(expected))
+    }
+
+    fn reset_alias_override_with_baseline(
+        &self,
+        cwd: &Path,
+        expected: Option<&WorkspaceAliasBaseline>,
+    ) -> Result<WorkspaceAliasInspection, WorkspaceAliasError> {
+        self.reset_alias_override_with_probe(cwd, expected, || {})
+    }
+
+    fn reset_alias_override_with_probe(
+        &self,
+        cwd: &Path,
+        expected: Option<&WorkspaceAliasBaseline>,
+        before_preferences: impl FnOnce(),
+    ) -> Result<WorkspaceAliasInspection, WorkspaceAliasError> {
         let facts = self
             .workspace_facts(cwd.as_ref())
             .map_err(|error| WorkspaceAliasError::from_repository_error(&error))?;
         self.registry
             .with_exclusive_lock(|registry| {
-                let snapshot = self.preference_snapshot_as_repository_error()?;
+                let current = self.preference_snapshot_as_repository_error()?;
+                if let Some(expected) = expected
+                    && (expected.identity != facts.identity
+                        || expected.workspace_root != facts.workspace_root
+                        || expected.registry != self.registry
+                        || expected.registry_path
+                            != std::path::absolute(self.registry.root_path())?
+                        || expected.preference_path
+                            != std::path::absolute(self.preferences.path())?
+                        || expected.preferences != current
+                        || expected.assignments != registry.assignments_read_only()?)
+                {
+                    return Err(RepositoryIdentityError::PreferenceConflict);
+                }
+                let snapshot = expected.map_or(&current, |baseline| &baseline.preferences);
                 let reserved = snapshot.preferences().override_aliases();
                 let assignment = registry.resolve_assignment_locked(
                     &facts.identity,
@@ -517,6 +648,7 @@ impl WorkspaceIdentityResolver {
                 if reset_collision {
                     return Err(RepositoryIdentityError::AliasConflict);
                 }
+                before_preferences();
                 let reset_preferences = if snapshot.preferences().has_override(&facts.identity) {
                     let replacement = snapshot
                         .preferences()
@@ -525,7 +657,7 @@ impl WorkspaceIdentityResolver {
                     let reset_preferences = replacement.clone();
                     match self
                         .preferences
-                        .save_snapshot_if_unchanged(&snapshot, replacement)
+                        .save_snapshot_if_unchanged(snapshot, replacement)
                         .map_err(|error| preference_error_as_repository_error(&error))?
                     {
                         super::WorkspacePreferencesSnapshotSaveOutcome::Saved(_) => {}
@@ -543,9 +675,26 @@ impl WorkspaceIdentityResolver {
     }
 
     fn workspace_facts(&self, cwd: &Path) -> Result<WorkspaceFacts, RepositoryIdentityError> {
-        match self.discovery.discover_without_root_commits_for_hook(cwd) {
+        self.workspace_facts_controlled(cwd, None)
+    }
+
+    fn workspace_facts_controlled(
+        &self,
+        cwd: &Path,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<WorkspaceFacts, RepositoryIdentityError> {
+        check_workspace_control(control)?;
+        let discovery = if control.is_some() {
+            self.discovery
+                .discover_without_root_commits_for_hook_controlled(cwd, control)
+        } else {
+            self.discovery.discover_without_root_commits_for_hook(cwd)
+        };
+        check_workspace_control(control)?;
+        match discovery {
             Ok(discovered) => {
                 let canonical = canonicalize_repository(&discovered)?;
+                check_workspace_control(control)?;
                 if canonical.identity.as_str().starts_with("remote:") {
                     return Ok(WorkspaceFacts {
                         identity_class: WorkspaceIdentityClass::GitRemote,
@@ -557,8 +706,11 @@ impl WorkspaceIdentityResolver {
                     });
                 }
                 let mut discovered = discovered;
-                discovered.root_commits = self.discovery.discover_root_commits(cwd)?;
+                discovered.root_commits = self
+                    .discovery
+                    .discover_root_commits_controlled(cwd, control)?;
                 let canonical = canonicalize_repository(&discovered)?;
+                check_workspace_control(control)?;
                 Ok(WorkspaceFacts {
                     identity_class: if canonical.identity.as_str().starts_with("remote:") {
                         WorkspaceIdentityClass::GitRemote
@@ -572,7 +724,12 @@ impl WorkspaceIdentityResolver {
                     kind: WorkspaceKind::Git,
                 })
             }
-            Err(RepositoryIdentityError::NotRepository(_)) => self.directory_facts(cwd),
+            Err(RepositoryIdentityError::NotRepository(_)) => {
+                check_workspace_control(control)?;
+                let facts = self.directory_facts(cwd)?;
+                check_workspace_control(control)?;
+                Ok(facts)
+            }
             Err(error) => Err(error),
         }
     }
@@ -597,6 +754,28 @@ impl WorkspaceIdentityResolver {
         })
     }
 
+    fn alias_baseline(
+        &self,
+        facts: &WorkspaceFacts,
+        preferences: super::WorkspacePreferencesSnapshot,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<WorkspaceAliasBaseline, WorkspaceAliasError> {
+        Ok(WorkspaceAliasBaseline {
+            identity: facts.identity.clone(),
+            workspace_root: facts.workspace_root.clone(),
+            registry: self.registry.clone(),
+            registry_path: std::path::absolute(self.registry.root_path())
+                .map_err(|_| WorkspaceAliasError::Unavailable)?,
+            preference_path: std::path::absolute(self.preferences.path())
+                .map_err(|_| WorkspaceAliasError::Unavailable)?,
+            preferences,
+            assignments: self
+                .registry
+                .assignments_read_only_controlled(control)
+                .map_err(|_| WorkspaceAliasError::Unavailable)?,
+        })
+    }
+
     fn preference_snapshot_as_repository_error(
         &self,
     ) -> Result<super::WorkspacePreferencesSnapshot, RepositoryIdentityError> {
@@ -612,6 +791,18 @@ impl WorkspaceIdentityResolver {
     ) -> Result<WorkspaceAliasInspection, RepositoryIdentityError> {
         let assignment = self.registry.lookup_assignment_read_only(&facts.identity)?;
         self.inspection_from_parts(facts, assignment, preferences)
+    }
+
+    fn inspect_from_snapshot_controlled(
+        &self,
+        facts: &WorkspaceFacts,
+        preferences: &WorkspacePreferences,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<WorkspaceAliasInspection, RepositoryIdentityError> {
+        let assignment = self
+            .registry
+            .lookup_assignment_read_only_controlled(&facts.identity, control)?;
+        self.inspection_from_parts_controlled(facts, assignment, preferences, control)
     }
 
     fn inspection_from_parts(
@@ -645,6 +836,53 @@ impl WorkspaceIdentityResolver {
             .clone()
             .unwrap_or_else(|| automatic_alias.clone());
         Ok(WorkspaceAliasInspection {
+            expected_baseline: None,
+            workspace: facts.display_name.clone(),
+            identity_class: facts.identity_class,
+            automatic_alias,
+            custom_alias,
+            effective_alias,
+            policy_version,
+            assigned,
+            analysis: AdaptiveNamingPolicy::analyze(&facts.display_name),
+            candidates,
+        })
+    }
+
+    fn inspection_from_parts_controlled(
+        &self,
+        facts: &WorkspaceFacts,
+        assignment: Option<super::RegistryAssignment>,
+        preferences: &WorkspacePreferences,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<WorkspaceAliasInspection, RepositoryIdentityError> {
+        let reserved = preferences.override_aliases();
+        let candidates = self.registry.preview_candidates_read_only_controlled(
+            &facts.identity,
+            &facts.display_name,
+            &reserved,
+            control,
+        )?;
+        let assigned = assignment.is_some();
+        let (automatic_alias, policy_version) = match assignment {
+            Some(assignment) => (
+                assignment.generated_alias().clone(),
+                assignment.policy_version().to_owned(),
+            ),
+            None => (
+                candidates
+                    .first()
+                    .map(|candidate| candidate.alias().clone())
+                    .ok_or(RepositoryIdentityError::AliasExhausted)?,
+                AdaptiveNamingPolicy::policy_id().to_owned(),
+            ),
+        };
+        let custom_alias = preferences.override_for(&facts.identity);
+        let effective_alias = custom_alias
+            .clone()
+            .unwrap_or_else(|| automatic_alias.clone());
+        Ok(WorkspaceAliasInspection {
+            expected_baseline: None,
             workspace: facts.display_name.clone(),
             identity_class: facts.identity_class,
             automatic_alias,
@@ -666,6 +904,20 @@ impl WorkspaceAliasError {
             _ => Self::Unavailable,
         }
     }
+}
+
+fn check_workspace_control(
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> Result<(), RepositoryIdentityError> {
+    if let Some(control) = control {
+        control.check().map_err(|error| match error {
+            terminal_ui_runtime::refresh::CollectError::Cancelled => {
+                RepositoryIdentityError::Cancelled
+            }
+            _ => RepositoryIdentityError::Timeout,
+        })?;
+    }
+    Ok(())
 }
 
 fn preference_error_as_repository_error(
@@ -796,6 +1048,184 @@ mod tests {
 
     use super::{WorkspaceIdentityResolver, WorkspaceKind};
     use crate::repo::RepositoryIdentityError;
+
+    fn pause_owned_alias(root: &std::path::Path, ticket: &str, stage: &str) {
+        use std::io::Write as _;
+        fs::write(root.join("stage.txt"), format!("{ticket}:{stage}")).unwrap();
+        println!("OWNED_ALIAS_STAGE={stage}");
+        std::io::stdout().flush().unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    #[ignore = "only the owning alias crash parent supplies an authenticated fixture root"]
+    fn owned_alias_crash_child() {
+        let root = std::path::PathBuf::from(env::var_os("TB_ALIAS_CHILD_ROOT").unwrap());
+        let ticket = env::var("TB_ALIAS_CHILD_TICKET").unwrap();
+        let stage = env::var("TB_ALIAS_CHILD_STAGE").unwrap();
+        assert_eq!(
+            fs::read_to_string(root.join("OWNED-TICKET")).unwrap(),
+            ticket
+        );
+        assert_eq!(
+            fs::canonicalize(&root).unwrap(),
+            std::path::PathBuf::from(env::var_os("TB_ALIAS_CHILD_CANONICAL").unwrap())
+        );
+        let resolver = WorkspaceIdentityResolver::with_preference_path(
+            root.join("registry"),
+            root.join("preferences.json"),
+            None,
+        );
+        let cwd = root.join("workspace");
+        let preview = resolver.inspect_alias(&cwd).unwrap();
+        if stage == "after_registry" {
+            resolver
+                .reset_alias_override_with_probe(&cwd, preview.expected_baseline(), || {
+                    pause_owned_alias(&root, &ticket, &stage);
+                })
+                .unwrap();
+        } else if stage == "after_preferences" {
+            resolver
+                .reset_alias_override_if_unchanged(&cwd, preview.expected_baseline().unwrap())
+                .unwrap();
+            pause_owned_alias(&root, &ticket, &stage);
+        } else {
+            panic!("unadmitted alias crash stage");
+        }
+    }
+
+    fn kill_owned_alias_child(root: &std::path::Path, ticket: &str, stage: &str) -> u32 {
+        use std::{
+            process::{Command, Stdio},
+            time::{Duration, Instant},
+        };
+        let mut child = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "repo::workspace::tests::owned_alias_crash_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("TB_ALIAS_CHILD_ROOT", root)
+            .env("TB_ALIAS_CHILD_CANONICAL", fs::canonicalize(root).unwrap())
+            .env("TB_ALIAS_CHILD_TICKET", ticket)
+            .env("TB_ALIAS_CHILD_STAGE", stage)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let owned_pid = child.id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let marker = format!("{ticket}:{stage}");
+        let reached = loop {
+            if fs::read_to_string(root.join("stage.txt")).is_ok_and(|value| value == marker) {
+                break true;
+            }
+            if child.try_wait().unwrap().is_some() || Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        };
+        if child.try_wait().unwrap().is_none() {
+            child.kill().unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
+        fs::write(root.join("process-result.json"), serde_json::to_vec_pretty(&serde_json::json!({
+            "executable": env::current_exe().unwrap(), "owned_pid": owned_pid, "stage": stage,
+            "exit_code": output.status.code(), "success": output.status.success(),
+            "stdout": String::from_utf8_lossy(&output.stdout), "stderr": String::from_utf8_lossy(&output.stderr),
+            "owned_handle_reaped": true,
+        })).unwrap()).unwrap();
+        assert!(
+            reached,
+            "stage not entered: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(&format!("OWNED_ALIAS_STAGE={stage}"))
+        );
+        assert!(!output.status.success());
+        owned_pid
+    }
+
+    #[test]
+    fn owned_alias_crashes_preserve_registry_history_and_require_fresh_preview() {
+        for stage in ["after_registry", "after_preferences"] {
+            let root = env::temp_dir().join(format!(
+                "tb-alias-crash-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(root.join("workspace")).unwrap();
+            let ticket = root.file_name().unwrap().to_string_lossy().into_owned();
+            fs::write(root.join("OWNED-TICKET"), &ticket).unwrap();
+            let resolver = WorkspaceIdentityResolver::with_preference_path(
+                root.join("registry"),
+                root.join("preferences.json"),
+                None,
+            );
+            let cwd = root.join("workspace");
+            let initial = resolver.inspect_alias(&cwd).unwrap();
+            // Seed the explicit preference through its real store while leaving the
+            // generated registry absent, so reset actually commits a new generation.
+            let preference = resolver.preferences.snapshot_read_only().unwrap();
+            let replacement = preference.preferences().clone().with_override(
+                initial.expected_baseline().unwrap().identity.clone(),
+                super::validate_custom_alias("CUSTOM").unwrap(),
+            );
+            resolver
+                .preferences
+                .save_snapshot_if_unchanged(&preference, replacement)
+                .unwrap();
+            let preview = resolver.inspect_alias(&cwd).unwrap();
+            let preference_before = fs::read(root.join("preferences.json")).unwrap();
+            let owned_pid = kill_owned_alias_child(&root, &ticket, stage);
+            let reopened = WorkspaceIdentityResolver::with_preference_path(
+                root.join("registry"),
+                root.join("preferences.json"),
+                None,
+            );
+            let actual = reopened.inspect_alias(&cwd).unwrap();
+            assert!(actual.is_assigned());
+            assert!(
+                reopened
+                    .reset_alias_override_if_unchanged(&cwd, preview.expected_baseline().unwrap())
+                    .is_err()
+            );
+            if stage == "after_registry" {
+                assert_eq!(
+                    fs::read(root.join("preferences.json")).unwrap(),
+                    preference_before
+                );
+                assert!(actual.custom_alias().is_some());
+            } else {
+                assert!(actual.custom_alias().is_none());
+            }
+            reopened
+                .reset_alias_override_if_unchanged(&cwd, actual.expected_baseline().unwrap())
+                .unwrap();
+            let retry = reopened.inspect_alias(&cwd).unwrap();
+            reopened
+                .reset_alias_override_if_unchanged(&cwd, retry.expected_baseline().unwrap())
+                .unwrap();
+            assert!(
+                reopened
+                    .inspect_alias(&cwd)
+                    .unwrap()
+                    .custom_alias()
+                    .is_none()
+            );
+            println!(
+                "ALIAS_CRASH_STAGE={stage} OWNED_PID={owned_pid} CHILD_REAPED=true ROOT={} REOPEN=VERIFIED CROSS_FILE_ATOMIC=false",
+                root.display()
+            );
+        }
+    }
 
     #[test]
     fn runtime_registry_wait_is_bounded_without_changing_ordinary_resolution() {

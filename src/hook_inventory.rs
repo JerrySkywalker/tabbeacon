@@ -211,6 +211,9 @@ pub struct HookInventoryEntry {
     pub fingerprint: String,
     /// Explicit command-redaction status.
     pub command_visibility: HookCommandVisibility,
+    /// Readable metadata only when exact manifest ownership proves it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readable_name: Option<String>,
 }
 
 impl HookInventoryEntry {
@@ -241,6 +244,7 @@ impl HookInventoryEntry {
             timeout,
             fingerprint: fingerprint.into(),
             command_visibility: HookCommandVisibility::Redacted,
+            readable_name: None,
         }
     }
 }
@@ -311,6 +315,9 @@ impl HookInventory {
                 entry.fingerprint,
                 entry.command_visibility.as_str(),
             ));
+            if let Some(name) = &entry.readable_name {
+                lines.push(format!("HOOK_NAME={}|{}", index + 1, name));
+            }
         }
         lines.push("ARBITRARY_COMMANDS_REDACTED=true".to_owned());
         lines.push("AUTO_HOOK_TRUST=false".to_owned());
@@ -318,6 +325,39 @@ impl HookInventory {
     }
 
     /// Renders a compact localized Human/TUI table without command content.
+    /// Readable names and trust stay above ownership details in narrow screens.
+    #[must_use]
+    pub fn tui_table(&self, locale: ResolvedLocale) -> String {
+        if self.availability == HookInventoryAvailability::Unavailable {
+            return self.human_table(locale);
+        }
+        let heading = match locale {
+            ResolvedLocale::EnUs => "Hooks · Read-only\nProvider / name · trust",
+            ResolvedLocale::ZhCn => "钩子 · 只读\n提供方 / 名称 · 信任",
+        };
+        let rows = self
+            .entries
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{} {}\n{} · {} · {} · {}",
+                    entry.provider,
+                    entry
+                        .readable_name
+                        .as_deref()
+                        .unwrap_or_else(|| event_label(&entry.event)),
+                    trust_label(locale, entry.trust_state),
+                    owner_label(locale, entry.owner),
+                    enabled_label(locale, entry.enabled),
+                    currentness_label(locale, entry.currentness),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        format!("{heading}\n{rows}")
+    }
+
+    /// Renders the detailed localized CLI table without command content.
     #[must_use]
     pub fn human_table(&self, locale: ResolvedLocale) -> String {
         let heading = match locale {
@@ -342,7 +382,10 @@ impl HookInventory {
                 ResolvedLocale::EnUs => format!(
                     "{}  {}\n  Owner: {} · Enabled: {}\n  Trust: {} · Current: {}",
                     entry.provider,
-                    event_label(&entry.event),
+                    entry
+                        .readable_name
+                        .as_deref()
+                        .unwrap_or_else(|| event_label(&entry.event)),
                     owner_label(locale, entry.owner),
                     enabled_label(locale, entry.enabled),
                     trust_label(locale, entry.trust_state),
@@ -351,7 +394,10 @@ impl HookInventory {
                 ResolvedLocale::ZhCn => format!(
                     "{}  {}\n  所有者: {} · 启用: {}\n  信任: {} · 当前状态: {}",
                     entry.provider,
-                    event_label(&entry.event),
+                    entry
+                        .readable_name
+                        .as_deref()
+                        .unwrap_or_else(|| event_label(&entry.event)),
                     owner_label(locale, entry.owner),
                     enabled_label(locale, entry.enabled),
                     trust_label(locale, entry.trust_state),
@@ -378,7 +424,7 @@ impl Default for HookInventory {
     }
 }
 
-fn event_label(event: &str) -> &str {
+pub(crate) fn event_label(event: &str) -> &str {
     match event {
         "pre_tool_use" => "PreToolUse",
         "permission_request" => "PermissionRequest",

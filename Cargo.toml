@@ -1,12 +1,13 @@
 [package]
 name = "tabbeacon"
-version = "0.8.1"
+version = "0.9.0"
 edition = "2024"
 rust-version = "1.97.1"
 license = "MIT"
 description = "Live identity and status beacons for coding-agent tabs in Windows Terminal."
 repository = "https://github.com/JerrySkywalker/tabbeacon"
 readme = "README.md"
+build = "build.rs"
 keywords = ["terminal", "cli", "windows-terminal", "codex", "developer-tools"]
 categories = ["command-line-utilities", "development-tools"]
 publish = ["crates-io"]
@@ -15,6 +16,8 @@ include = [
     "Cargo.lock",
     "LICENSE",
     "README.md",
+    "README.zh-CN.md",
+    "build.rs",
     "CHANGELOG.md",
     "rust-toolchain.toml",
     "rustfmt.toml",
@@ -28,6 +31,12 @@ include = [
     ".github/workflows/release-dangling-symlink.yml",
     "docs/codex-hooks.md",
     "docs/v0.8.1-codex-console-hotfix.md",
+    "docs/v0.8.2-release-notes.md",
+    "docs/v0.9.0-owner-review.md",
+    "docs/v0.9.0-upgrade.md",
+    "docs/development/release-process.md",
+    "docs/v0.9.0-support-contract.md",
+    "docs/engineering-closure.md",
     "docs/agy-setup.md",
     "docs/adr/0015-agy-1-1-19-production-profile.md",
     "docs/assets/brand/tabbeacon-logo.svg",
@@ -53,7 +62,6 @@ include = [
     "docs/coding-agent-support.md",
     "docs/cursor-setup.md",
     "docs/terminology.md",
-    "AGENTS.md",
     "dev_governance_files/ROADMAP.md",
     "dev_governance_files/QUALITY_GATES.md",
 ]
@@ -61,6 +69,7 @@ include = [
 [features]
 visual-fixture = []
 terminal-smoke-fixture = []
+engineering-fixture = []
 
 [lib]
 path = "src/lib.rs"
@@ -79,12 +88,25 @@ name = "tabbeacon-terminal-smoke-fixture"
 path = "src/bin/tabbeacon-terminal-smoke-fixture.rs"
 required-features = ["terminal-smoke-fixture"]
 
+[[bin]]
+name = "tabbeacon-engineering-fixture"
+path = "src/bin/tabbeacon-engineering-fixture.rs"
+required-features = ["engineering-fixture"]
+
+[[test]]
+name = "workspace_collection_control"
+path = "tests/workspace_collection_control.rs"
+# The same owned executable speaks the closed Git fixture protocol in its child.
+harness = false
+
 [dependencies]
 atomic-write-file = "0.3.1"
 clap = { version = "4.5.60", features = ["derive"] }
 clap_complete = "4.5.66"
 crossterm = "0.29.0"
-terminal-ui-contract = "=0.1.0"
+terminal-ui-contract = "=0.2.0"
+terminal-ui-runtime = "=0.1.0"
+terminal-ui-ratatui = "=0.1.0"
 dialoguer = "0.12.0"
 png = "0.18.1"
 serde = { version = "1.0.229", features = ["derive"] }

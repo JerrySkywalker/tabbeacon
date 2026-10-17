@@ -43,7 +43,6 @@ use super::agy::{
     AGY_PROVIDER_ID, AgyStateRecorder, AgyVersion, MAX_AGY_QUALIFICATION_INPUT_BYTES,
     parse_qualification_object,
 };
-use super::agy_qualification::probe_direct_agy_version;
 
 /// Daily Agy launch remains the provider's literal native command.
 pub const AGY_DAILY_COMMAND: &str = "agy";
@@ -1030,10 +1029,19 @@ impl AgyProductionSetup {
     /// Read-only current compatibility and ownership projection.
     #[must_use]
     pub fn inspect(&self) -> AgyReadinessProjection {
+        self.inspect_controlled(None)
+    }
+
+    /// Read-only readiness with cooperative deadline-aware own-child probing.
+    #[must_use]
+    pub fn inspect_controlled(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> AgyReadinessProjection {
         if self.validate_paths().is_err() {
             return readiness(AgyIntegrationReadiness::ConfigurationDrift, None, false);
         }
-        let Ok(version) = self.probe_version() else {
+        let Ok(version) = self.probe_version_controlled(control) else {
             return readiness(AgyIntegrationReadiness::KnownUnadmitted, None, false);
         };
         let version = version.as_string();
@@ -1044,14 +1052,25 @@ impl AgyProductionSetup {
                 false,
             );
         }
-        let manifest = self.read_manifest();
+        let manifest = self.read_manifest_controlled(control);
         match manifest {
             Ok(None) => readiness(
                 AgyIntegrationReadiness::SupportedNotConfigured,
                 Some(version),
                 false,
             ),
-            Ok(Some(manifest)) => match self.current_matches_owned(&manifest) {
+            Ok(Some(manifest)) => match crate::provider_observation::read_observation_file(
+                &self.config_path,
+                256 * 1024,
+                control,
+            )
+            .map_err(|_| AgyProductionSetupError::ConfigurationDrift)
+            .and_then(|v| v.ok_or(AgyProductionSetupError::ConfigurationDrift))
+            .and_then(|bytes| {
+                self.owned_current_without_title_controlled(&manifest, &bytes, true, control)
+            })
+            .map(|v| v.is_some())
+            {
                 Ok(true)
                     if manifest.schema == AGY_SETUP_MANIFEST_SCHEMA
                         && manifest.admitted_version == version =>
@@ -1264,21 +1283,30 @@ impl AgyProductionSetup {
     }
 
     fn probe_version(&self) -> Result<AgyVersion, AgyProductionSetupError> {
+        self.probe_version_controlled(None)
+    }
+
+    fn probe_version_controlled(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<AgyVersion, AgyProductionSetupError> {
         #[cfg(test)]
         if let Some(version) = self.version_override {
             return Ok(version);
         }
         if self.agy_program == Path::new(AGY_DAILY_COMMAND) {
-            return probe_direct_agy_version()
+            return super::agy_qualification::probe_direct_agy_version_controlled(control)
                 .version
                 .as_deref()
                 .and_then(AgyVersion::parse)
                 .ok_or(AgyProductionSetupError::ProbeUnavailable);
         }
-        let output = Command::new(&self.agy_program)
-            .arg("--version")
-            .output()
-            .map_err(|_| AgyProductionSetupError::ProbeUnavailable)?;
+        let output = crate::provider_observation::bounded_output(
+            Command::new(&self.agy_program).arg("--version"),
+            std::time::Duration::from_secs(2),
+            control,
+        )
+        .map_err(|_| AgyProductionSetupError::ProbeUnavailable)?;
         if !output.status.success() || output.stdout.len() > 128 {
             return Err(AgyProductionSetupError::ProbeUnavailable);
         }
@@ -1452,6 +1480,77 @@ impl AgyProductionSetup {
         Ok(Some(current_object))
     }
 
+    fn owned_current_without_title_controlled(
+        &self,
+        manifest: &AgySetupManifest,
+        current: &[u8],
+        require_current_executable: bool,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<Option<Map<String, Value>>, AgyProductionSetupError> {
+        if (manifest.schema != AGY_SETUP_MANIFEST_SCHEMA
+            && manifest.schema != AGY_SETUP_MANIFEST_SCHEMA_V1)
+            || title_contract_profile(&manifest.admitted_version).is_none()
+        {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
+        let backup = crate::provider_observation::read_observation_file(
+            &self.backup_path(),
+            256 * 1024,
+            control,
+        )
+        .and_then(|v| v.ok_or_else(|| std::io::Error::other("owned backup unavailable")))
+        .map_err(|_| AgyProductionSetupError::OwnershipStateInvalid)?;
+        if sha256_hex(&backup) != manifest.original_sha256 {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
+        if manifest.executable_sha256.len() != 64
+            || !manifest
+                .executable_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
+        if require_current_executable
+            && manifest.schema == AGY_SETUP_MANIFEST_SCHEMA
+            && crate::provider_observation::hash_observation_file(&self.executable, control)
+                .map_err(|_| AgyProductionSetupError::OwnershipStateInvalid)?
+                != manifest.executable_sha256
+        {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
+        let mut current_object = parse_qualification_object(current)
+            .ok_or(AgyProductionSetupError::MalformedConfiguration)?;
+        let expected_callback = self.callback_value_for_schema(&manifest.schema)?;
+        if current_object.remove("title") != Some(expected_callback.clone()) {
+            return Ok(None);
+        }
+        if sha256_hex(
+            &serde_json::to_vec(&expected_callback)
+                .map_err(|_| AgyProductionSetupError::MalformedConfiguration)?,
+        ) != manifest.callback_sha256
+        {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
+        let mut applied_object = if manifest.original_present {
+            parse_qualification_object(&backup)
+                .ok_or(AgyProductionSetupError::OwnershipStateInvalid)?
+        } else {
+            Map::new()
+        };
+        if applied_object.contains_key("title") {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
+        applied_object.insert("title".to_owned(), expected_callback);
+        let mut applied_bytes = serde_json::to_vec_pretty(&Value::Object(applied_object))
+            .map_err(|_| AgyProductionSetupError::OwnershipStateInvalid)?;
+        applied_bytes.push(b'\n');
+        if sha256_hex(&applied_bytes) != manifest.applied_sha256 {
+            return Err(AgyProductionSetupError::OwnershipStateInvalid);
+        }
+        Ok(Some(current_object))
+    }
+
     fn executable_matches_manifest(
         &self,
         manifest: &AgySetupManifest,
@@ -1489,6 +1588,24 @@ impl AgyProductionSetup {
 
     fn read_manifest(&self) -> Result<Option<AgySetupManifest>, AgyProductionSetupError> {
         let Some(bytes) = read_optional_bytes(&self.manifest_path())? else {
+            return Ok(None);
+        };
+        serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|_| AgyProductionSetupError::OwnershipStateInvalid)
+    }
+
+    fn read_manifest_controlled(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<Option<AgySetupManifest>, AgyProductionSetupError> {
+        let Some(bytes) = crate::provider_observation::read_observation_file(
+            &self.manifest_path(),
+            256 * 1024,
+            control,
+        )
+        .map_err(|_| AgyProductionSetupError::OwnershipStateInvalid)?
+        else {
             return Ok(None);
         };
         serde_json::from_slice(&bytes)

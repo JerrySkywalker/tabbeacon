@@ -6,6 +6,7 @@ use std::{
 };
 
 use super::error::{RepositoryIdentityError, sanitized_detail};
+use terminal_ui_runtime::refresh::{CollectError, CollectionControl};
 
 const LAYOUT_ARGS: &[&str] = &[
     "rev-parse",
@@ -22,7 +23,7 @@ const REMOTE_ARGS: &[&str] = &[
     "^remote\\..*\\.url$",
 ];
 const ROOT_COMMIT_ARGS: &[&str] = &["rev-list", "--max-parents=0", "--all"];
-const MAX_GIT_CONTROL_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_GIT_CONTROL_FILE_BYTES: usize = 1024 * 1024;
 
 /// One locally configured Git remote URL.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -113,9 +114,17 @@ impl RepositoryDiscovery {
         &self,
         cwd: impl AsRef<Path>,
     ) -> Result<DiscoveredRepository, RepositoryIdentityError> {
-        let cwd = cwd.as_ref();
+        self.discover_without_root_commits_controlled(cwd.as_ref(), None)
+    }
+
+    fn discover_without_root_commits_controlled(
+        &self,
+        cwd: &Path,
+        control: Option<&CollectionControl>,
+    ) -> Result<DiscoveredRepository, RepositoryIdentityError> {
+        check_control(control)?;
         let layout = self
-            .run(cwd, "layout", LAYOUT_ARGS, false)
+            .run(cwd, "layout", LAYOUT_ARGS, false, control)
             .map_err(|error| {
                 if matches!(error, RepositoryIdentityError::Git { .. }) {
                     RepositoryIdentityError::NotRepository(cwd.to_path_buf())
@@ -134,13 +143,15 @@ impl RepositoryDiscovery {
             ));
         }
 
-        let remote_output = self.run(cwd, "remotes", REMOTE_ARGS, true)?;
+        check_control(control)?;
+        let remote_output = self.run(cwd, "remotes", REMOTE_ARGS, true, control)?;
         let remotes = if remote_output.status.success() {
             parse_remotes(&remote_output.stdout)?
         } else {
             Vec::new()
         };
 
+        check_control(control)?;
         Ok(DiscoveredRepository {
             worktree_root,
             git_dir,
@@ -163,13 +174,23 @@ impl RepositoryDiscovery {
         &self,
         cwd: impl AsRef<Path>,
     ) -> Result<DiscoveredRepository, RepositoryIdentityError> {
-        let cwd = cwd.as_ref();
-        match discover_process_free(cwd) {
+        self.discover_without_root_commits_for_hook_controlled(cwd.as_ref(), None)
+    }
+
+    pub(super) fn discover_without_root_commits_for_hook_controlled(
+        &self,
+        cwd: &Path,
+        control: Option<&CollectionControl>,
+    ) -> Result<DiscoveredRepository, RepositoryIdentityError> {
+        check_control(control)?;
+        match discover_process_free(cwd, control)? {
             ProcessFreeDiscovery::Repository(discovered) => Ok(discovered),
             ProcessFreeDiscovery::NotRepository => {
                 Err(RepositoryIdentityError::NotRepository(cwd.to_path_buf()))
             }
-            ProcessFreeDiscovery::RequiresGit => self.discover_without_root_commits(cwd),
+            ProcessFreeDiscovery::RequiresGit => {
+                self.discover_without_root_commits_controlled(cwd, control)
+            }
         }
     }
 
@@ -184,8 +205,16 @@ impl RepositoryDiscovery {
         &self,
         cwd: impl AsRef<Path>,
     ) -> Result<Vec<String>, RepositoryIdentityError> {
-        let cwd = cwd.as_ref();
-        let roots_output = self.run(cwd, "root-commits", ROOT_COMMIT_ARGS, false)?;
+        self.discover_root_commits_controlled(cwd.as_ref(), None)
+    }
+
+    pub(super) fn discover_root_commits_controlled(
+        &self,
+        cwd: &Path,
+        control: Option<&CollectionControl>,
+    ) -> Result<Vec<String>, RepositoryIdentityError> {
+        check_control(control)?;
+        let roots_output = self.run(cwd, "root-commits", ROOT_COMMIT_ARGS, false, control)?;
         let roots = decode_utf8(roots_output.stdout, "root commits")?;
         let mut root_commits = roots
             .lines()
@@ -200,6 +229,7 @@ impl RepositoryDiscovery {
         }
         root_commits.sort_unstable();
         root_commits.dedup();
+        check_control(control)?;
         Ok(root_commits)
     }
 
@@ -209,18 +239,35 @@ impl RepositoryDiscovery {
         operation: &'static str,
         args: &[&str],
         allow_no_match: bool,
+        control: Option<&CollectionControl>,
     ) -> Result<Output, RepositoryIdentityError> {
-        let output = Command::new(&self.git_executable)
-            .arg("-C")
-            .arg(cwd)
-            .args(args)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GCM_INTERACTIVE", "Never")
-            .output()
-            .map_err(|error| RepositoryIdentityError::Git {
+        check_control(control)?;
+        let captured = crate::provider_observation::bounded_output(
+            Command::new(&self.git_executable)
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .env("GCM_INTERACTIVE", "Never"),
+            std::time::Duration::from_secs(2),
+            control,
+        )
+        .map_err(|error| match error {
+            crate::provider_observation::ProbeError::Cancelled => {
+                RepositoryIdentityError::Cancelled
+            }
+            crate::provider_observation::ProbeError::Timeout => RepositoryIdentityError::Timeout,
+            other => RepositoryIdentityError::Git {
                 operation,
-                detail: sanitized_detail(&error.to_string()),
-            })?;
+                detail: sanitized_detail(&format!("{other:?}")),
+            },
+        })?;
+        check_control(control)?;
+        let output = Output {
+            status: captured.status,
+            stdout: captured.stdout,
+            stderr: Vec::new(),
+        };
         if output.status.success() || (allow_no_match && output.status.code() == Some(1)) {
             Ok(output)
         } else {
@@ -244,51 +291,84 @@ struct ProcessFreeLayout {
     git_common_dir: PathBuf,
 }
 
-fn discover_process_free(cwd: &Path) -> ProcessFreeDiscovery {
-    let Some(layout) = process_free_layout(cwd) else {
-        return ProcessFreeDiscovery::NotRepository;
-    };
-    let Ok(layout) = layout else {
-        return ProcessFreeDiscovery::RequiresGit;
-    };
-    let Ok(remotes) = process_free_remotes(&layout) else {
-        return ProcessFreeDiscovery::RequiresGit;
-    };
-    ProcessFreeDiscovery::Repository(DiscoveredRepository {
-        worktree_root: layout.worktree_root,
-        git_dir: layout.git_dir,
-        git_common_dir: layout.git_common_dir,
-        remotes,
-        root_commits: Vec::new(),
-    })
+fn check_control(control: Option<&CollectionControl>) -> Result<(), RepositoryIdentityError> {
+    if let Some(control) = control {
+        control.check().map_err(|error| match error {
+            CollectError::Cancelled => RepositoryIdentityError::Cancelled,
+            _ => RepositoryIdentityError::Timeout,
+        })?;
+    }
+    Ok(())
 }
 
-fn process_free_layout(cwd: &Path) -> Option<Result<ProcessFreeLayout, ()>> {
+enum ProcessFreeError {
+    Metadata,
+    Control(RepositoryIdentityError),
+}
+
+impl From<RepositoryIdentityError> for ProcessFreeError {
+    fn from(error: RepositoryIdentityError) -> Self {
+        Self::Control(error)
+    }
+}
+
+fn discover_process_free(
+    cwd: &Path,
+    control: Option<&CollectionControl>,
+) -> Result<ProcessFreeDiscovery, RepositoryIdentityError> {
+    let result = (|| {
+        let Some(layout) = process_free_layout(cwd, control)? else {
+            return Ok(ProcessFreeDiscovery::NotRepository);
+        };
+        check_control(control)?;
+        let remotes = process_free_remotes(&layout, control)?;
+        check_control(control)?;
+        Ok(ProcessFreeDiscovery::Repository(DiscoveredRepository {
+            worktree_root: layout.worktree_root,
+            git_dir: layout.git_dir,
+            git_common_dir: layout.git_common_dir,
+            remotes,
+            root_commits: Vec::new(),
+        }))
+    })();
+    // A control failure must never become a Git or directory fallback.
+    check_control(control)?;
+    match result {
+        Ok(discovered) => Ok(discovered),
+        Err(ProcessFreeError::Metadata) => Ok(ProcessFreeDiscovery::RequiresGit),
+        Err(ProcessFreeError::Control(error)) => Err(error),
+    }
+}
+
+fn process_free_layout(
+    cwd: &Path,
+    control: Option<&CollectionControl>,
+) -> Result<Option<ProcessFreeLayout>, ProcessFreeError> {
+    check_control(control)?;
     let mut candidate = if cwd.is_absolute() {
         cwd.to_path_buf()
     } else {
         let Ok(current) = env::current_dir() else {
-            return Some(Err(()));
+            return Err(ProcessFreeError::Metadata);
         };
         current.join(cwd)
     };
     if !candidate.is_dir() {
-        return Some(Err(()));
+        return Err(ProcessFreeError::Metadata);
     }
 
     loop {
+        check_control(control)?;
         let marker = candidate.join(".git");
         match fs::symlink_metadata(&marker) {
             Ok(metadata) => {
                 if metadata.file_type().is_symlink() {
-                    return Some(Err(()));
+                    return Err(ProcessFreeError::Metadata);
                 }
                 let git_dir = if metadata.is_dir() {
                     marker
                 } else if metadata.is_file() {
-                    let Ok(contents) = read_bounded_utf8(&marker) else {
-                        return Some(Err(()));
-                    };
+                    let contents = read_bounded_utf8(&marker, control)?;
                     let mut lines = contents
                         .lines()
                         .map(str::trim)
@@ -298,10 +378,10 @@ fn process_free_layout(cwd: &Path) -> Option<Result<ProcessFreeLayout, ()>> {
                         .and_then(|line| strip_ascii_prefix(line, "gitdir:").map(str::trim))
                         .filter(|value| !value.is_empty())
                     else {
-                        return Some(Err(()));
+                        return Err(ProcessFreeError::Metadata);
                     };
                     if lines.next().is_some() {
-                        return Some(Err(()));
+                        return Err(ProcessFreeError::Metadata);
                     }
                     let path = PathBuf::from(git_dir_value);
                     if path.is_absolute() {
@@ -310,77 +390,101 @@ fn process_free_layout(cwd: &Path) -> Option<Result<ProcessFreeLayout, ()>> {
                         candidate.join(path)
                     }
                 } else {
-                    return Some(Err(()));
+                    return Err(ProcessFreeError::Metadata);
                 };
                 let Ok(git_dir) = fs::canonicalize(git_dir) else {
-                    return Some(Err(()));
+                    return Err(ProcessFreeError::Metadata);
                 };
+                check_control(control)?;
                 if !git_dir.is_dir() {
-                    return Some(Err(()));
+                    return Err(ProcessFreeError::Metadata);
                 }
-                let git_common_dir = match read_optional_bounded_utf8(&git_dir.join("commondir")) {
-                    Ok(Some(value)) => {
-                        let value = value.trim();
-                        if value.is_empty() || value.lines().count() != 1 {
-                            return Some(Err(()));
-                        }
-                        let path = PathBuf::from(value);
-                        let path = if path.is_absolute() {
+                let git_common_dir =
+                    match read_optional_bounded_utf8(&git_dir.join("commondir"), control)? {
+                        Some(value) => {
+                            let value = value.trim();
+                            if value.is_empty() || value.lines().count() != 1 {
+                                return Err(ProcessFreeError::Metadata);
+                            }
+                            let path = PathBuf::from(value);
+                            let path = if path.is_absolute() {
+                                path
+                            } else {
+                                git_dir.join(path)
+                            };
+                            let Ok(path) = fs::canonicalize(path) else {
+                                return Err(ProcessFreeError::Metadata);
+                            };
+                            check_control(control)?;
                             path
-                        } else {
-                            git_dir.join(path)
-                        };
-                        let Ok(path) = fs::canonicalize(path) else {
-                            return Some(Err(()));
-                        };
-                        path
-                    }
-                    Ok(None) => git_dir.clone(),
-                    Err(()) => return Some(Err(())),
-                };
+                        }
+                        None => git_dir.clone(),
+                    };
                 if !git_common_dir.is_dir() {
-                    return Some(Err(()));
+                    return Err(ProcessFreeError::Metadata);
                 }
-                return Some(Ok(ProcessFreeLayout {
+                check_control(control)?;
+                return Ok(Some(ProcessFreeLayout {
                     worktree_root: candidate,
                     git_dir,
                     git_common_dir,
                 }));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return Some(Err(())),
+            Err(_) => return Err(ProcessFreeError::Metadata),
         }
         if !candidate.pop() {
-            return None;
+            check_control(control)?;
+            return Ok(None);
         }
     }
 }
 
-fn process_free_remotes(layout: &ProcessFreeLayout) -> Result<Vec<RepositoryRemote>, ()> {
-    let Some(config) = read_optional_bounded_utf8(&layout.git_common_dir.join("config"))? else {
+fn process_free_remotes(
+    layout: &ProcessFreeLayout,
+    control: Option<&CollectionControl>,
+) -> Result<Vec<RepositoryRemote>, ProcessFreeError> {
+    let Some(config) = read_optional_bounded_utf8(&layout.git_common_dir.join("config"), control)?
+    else {
         return Ok(Vec::new());
     };
-    parse_process_free_remotes(&config)
+    check_control(control)?;
+    let remotes = parse_process_free_remotes(&config).map_err(|()| ProcessFreeError::Metadata)?;
+    check_control(control)?;
+    Ok(remotes)
 }
 
-fn read_bounded_utf8(path: &Path) -> Result<String, ()> {
-    let metadata = fs::metadata(path).map_err(|_| ())?;
-    if !metadata.is_file() || metadata.len() > MAX_GIT_CONTROL_FILE_BYTES {
-        return Err(());
-    }
-    fs::read_to_string(path).map_err(|_| ())
+fn read_bounded_utf8(
+    path: &Path,
+    control: Option<&CollectionControl>,
+) -> Result<String, ProcessFreeError> {
+    read_optional_bounded_utf8(path, control)?.ok_or(ProcessFreeError::Metadata)
 }
 
-fn read_optional_bounded_utf8(path: &Path) -> Result<Option<String>, ()> {
+fn read_optional_bounded_utf8(
+    path: &Path,
+    control: Option<&CollectionControl>,
+) -> Result<Option<String>, ProcessFreeError> {
+    check_control(control)?;
     match fs::metadata(path) {
         Ok(metadata) => {
-            if !metadata.is_file() || metadata.len() > MAX_GIT_CONTROL_FILE_BYTES {
-                return Err(());
+            check_control(control)?;
+            if !metadata.is_file() || metadata.len() > MAX_GIT_CONTROL_FILE_BYTES as u64 {
+                return Err(ProcessFreeError::Metadata);
             }
-            fs::read_to_string(path).map(Some).map_err(|_| ())
+            let bytes = crate::provider_observation::read_observation_file(
+                path,
+                MAX_GIT_CONTROL_FILE_BYTES,
+                control,
+            );
+            check_control(control)?;
+            bytes
+                .map_err(|_| ProcessFreeError::Metadata)?
+                .map(|bytes| String::from_utf8(bytes).map_err(|_| ProcessFreeError::Metadata))
+                .transpose()
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(()),
+        Err(_) => Err(ProcessFreeError::Metadata),
     }
 }
 
@@ -642,8 +746,9 @@ mod tests {
     };
 
     use super::{
-        LAYOUT_ARGS, ProcessFreeDiscovery, REMOTE_ARGS, ROOT_COMMIT_ARGS, RepositoryDiscovery,
-        discover_process_free, parse_process_free_remotes, parse_remotes,
+        LAYOUT_ARGS, MAX_GIT_CONTROL_FILE_BYTES, ProcessFreeDiscovery, ProcessFreeError,
+        REMOTE_ARGS, ROOT_COMMIT_ARGS, RepositoryDiscovery, discover_process_free,
+        parse_process_free_remotes, parse_remotes, read_bounded_utf8, read_optional_bounded_utf8,
     };
 
     fn test_root(label: &str) -> std::path::PathBuf {
@@ -679,6 +784,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn git_control_file_reads_are_capped_during_read_and_validate_utf8() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("config");
+        assert!(matches!(read_optional_bounded_utf8(&path, None), Ok(None)));
+        fs::write(&path, [0xff]).unwrap();
+        assert!(matches!(
+            read_bounded_utf8(&path, None),
+            Err(ProcessFreeError::Metadata)
+        ));
+        fs::write(&path, vec![b'x'; MAX_GIT_CONTROL_FILE_BYTES + 1]).unwrap();
+        assert!(matches!(
+            read_bounded_utf8(&path, None),
+            Err(ProcessFreeError::Metadata)
+        ));
+        fs::write(&path, "[core]\nrepositoryformatversion=0\n").unwrap();
+        assert_eq!(
+            read_bounded_utf8(&path, None).ok().unwrap(),
+            "[core]\nrepositoryformatversion=0\n"
+        );
     }
 
     #[test]
@@ -744,7 +871,8 @@ mod tests {
         )
         .expect("common config writes");
 
-        let ProcessFreeDiscovery::Repository(discovered) = discover_process_free(&nested) else {
+        let Ok(ProcessFreeDiscovery::Repository(discovered)) = discover_process_free(&nested, None)
+        else {
             panic!("complete linked-worktree metadata resolves without Git");
         };
         assert_eq!(discovered.worktree_root, worktree);

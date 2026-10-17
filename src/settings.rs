@@ -1317,6 +1317,24 @@ impl PresentationSettingsStore {
         Ok(self.snapshot_unlocked()?.settings())
     }
 
+    /// Cooperative bounded read-only snapshot; transactional writers retain their original reads.
+    ///
+    /// # Errors
+    /// Returns parse, path, cancellation or observation-budget failures.
+    pub fn snapshot_read_only_controlled(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<PresentationSettingsSnapshot, SettingsError> {
+        self.reject_symbolic_link()?;
+        let contents =
+            crate::provider_observation::read_observation_file(&self.path, 256 * 1024, control)?;
+        let settings = match contents.as_deref() {
+            Some(bytes) => parse_settings_bytes(bytes)?,
+            None => PresentationSettings::default(),
+        };
+        Ok(PresentationSettingsSnapshot { settings, contents })
+    }
+
     fn snapshot_unlocked(&self) -> Result<PresentationSettingsSnapshot, SettingsError> {
         self.reject_symbolic_link()?;
         let contents = read_optional_bytes(&self.path)?;

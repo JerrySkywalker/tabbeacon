@@ -1,3 +1,5 @@
+未发布的 v0.9.0 发行材料候选：[Owner Review](docs/v0.9.0-owner-review.md)、[有界支持合同（简体中文 / English）](docs/v0.9.0-support-contract.md)、[v0.8.1 → v0.9.0 升级回滚](docs/v0.9.0-upgrade.md)。Owner 已接受 `6fb27e3707aa859864873b2feadc81d383ca9749` 的有界工程基线；本材料候选仍待 Owner 审查和独立发布授权。真人验收保持 PARTIAL（2 PASS / 18 SKIP）；光学 P95、实际终端恢复、DEC 私有模式、当前真实 Provider 及严格 OS stall 退出仍 UNPROVEN。
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/JerrySkywalker/tabbeacon/9215500cb3b0a9ef183c9c096a4bdde1b749da5b/docs/assets/brand/tabbeacon-logo.svg" width="420" alt="TabBeacon" />
 </p>
@@ -15,7 +17,7 @@
 
 <p align="center"><a href="https://github.com/JerrySkywalker/tabbeacon/releases">发布版本</a> · <a href="https://crates.io/crates/tabbeacon">crates.io</a> · <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/docs/README.md">文档</a> · <a href="https://github.com/JerrySkywalker/tabbeacon/blob/main/LICENSE">MIT 许可证</a></p>
 
-中英产品用语：[TabBeacon 术语表](docs/terminology.md)。
+中英产品用语：[TabBeacon 术语表](docs/terminology.md)。正常 Cargo 包包含本中文文件及 [English README](README.md)；上方绝对语言链接同时供 crates.io 使用。
 
 <!-- tabbeacon:critical-invariants install=cargo-install-tabbeacon setup=tabbeacon-setup codex=codex agy=agy providers=codex-agy claude=deferred opencode=deferred trust=manual fail-open=true privacy=content-minimal -->
 
@@ -25,7 +27,7 @@
 
 <p align="center"><sub>由 TabBeacon 确定性展示夹具驱动的真实 Windows Terminal 渲染；不包含实时 Codex 或 Agy 模型对话。</sub></p>
 
-## v0.8.0 编码智能体范围
+## 编码智能体范围
 
 | 编码智能体 | 状态 | 日常命令 | 兼容性策略 |
 | --- | --- | --- | --- |
@@ -78,11 +80,9 @@ PTY 主机、终端替代品或后台守护进程。
 
 ## 快速开始
 
-v0.8.0 发布候选提供按 CLI 独立呈现、Cursor 严格仅颜色接入、
-已证明的 Codex 结构化状态和[中英文术语](docs/terminology.md)。精确能力与
-已知限制见 [v0.8.0 发布说明](docs/v0.8.0-release-notes.md)。
+截至 2026-10-15 已核验的最新正式版本为 [v0.8.1](https://github.com/JerrySkywalker/tabbeacon/releases/tag/v0.8.1)，v0.8.2 从未正式发布。Draft PR #123 准备 v0.9.0，精确使用公开 crates.io 的 `terminal-ui-contract =0.2.0`、`terminal-ui-runtime =0.1.0`、`terminal-ui-ratatui =0.1.0`。共享 API 已由 Owner 冻结于 `eb16cd91f924c145180b5befcf9f2cacc7a46d84`；包源码另为 `206325e2367cda90f8cbe5d418dc7761da5f81bb`。共享依赖公开不等于 TabBeacon v0.9.0 已发布或已安装。
 
-安装公开 CLI、运行引导式设置，然后按原样启动 Codex：
+当前公开 CLI 的普通用户路径仍为：
 
 ```powershell
 cargo install tabbeacon
@@ -90,63 +90,23 @@ tabbeacon setup
 codex
 ```
 
-当受支持的设置流程要求时，请手动审查提供商 Hook 信任。
-
-对于已准入的 Agy 配置，请配置其用户全局标题回调，并保持日常命令不变：
+这是用户操作说明，本材料验证列车没有执行这些命令。设置要求时仍须手动审查 Hook 信任。未来不固定版本的安装可能取得更新版本；精确发布验证应固定已接受版本：
 
 ```powershell
-tabbeacon setup agy
-agy
+cargo install tabbeacon --version 0.8.1 --locked
 ```
 
-精确发布验证与普通用户路径保持分离。v0.8.0 发布后，验证 crate 时请同时固定版本
-与锁文件：
+对于已准入的 Agy 配置，`tabbeacon setup agy` 配置用户全局标题回调，日常启动仍为 `agy`。`tabbeacon setup --quick` 仅处理缺失、过期或需要操作的设置工作；应用前审查变更。
 
-```powershell
-cargo install tabbeacon --version 0.8.0 --locked
-```
+## 升级与回滚
 
-> [!TIP]
-> `tabbeacon setup --quick` 只处理缺失、过期或需要操作的设置工作。应用前请审查
-> 所有建议的变更；它不会把 TabBeacon 变成启动器。
+使用正式的 [v0.8.1 → v0.9.0 升级和回滚指南](docs/v0.9.0-upgrade.md)。指南分别说明源码/包/Windows 哈希、归属明确的预检、精确获准安装、具名 Hook 协调、原生手工信任和实际恢复检查。不经过 v0.8.2。v0.9.0 安装命令仅供未来使用，须先接受精确发布对象、验证真实公开状态并另行取得授权。
 
-## 升级
+替换 EXE 不等于配置回滚。保留精确自有 before-image、无关设置和失败回执；归属或漂移有歧义即停止。不得把旧信任哈希复制到新 Hook。对任意外部写者的强 CAS 和跨文件崩溃时全有或全无明确不支持，不重新设为本版门禁。
 
-对于通过 Cargo 安装的 TabBeacon，最容易记的顺序是 **版本 → 预检 → 安装 →
-诊断**。v0.8.0 发布后使用：
+本候选的精确 Cargo 包、两次 Release 原始构建哈希、ZIP 和 CI 记录在 Owner 证据回执。软件 draw/build 成功不是光学延迟或真人终端验收；材料验证不证明真实 Provider、正式安装、Hook 信任或实际生产回滚。
 
-```powershell
-tabbeacon --version
-tabbeacon upgrade-preflight
-cargo install tabbeacon --version 0.8.0 --locked --force
-tabbeacon --version
-tabbeacon doctor
-```
-
-`upgrade-preflight` 是只读操作。如果它明确报告某个由 TabBeacon 精确证明所有权的
-工作器或 MCP 子进程阻止替换，只能通过 TabBeacon 自己的所有权感知路径进行 drain，
-然后重新预检：
-
-```powershell
-tabbeacon upgrade-preflight --drain
-tabbeacon upgrade-preflight
-```
-
-如果某个进程被报告为未证明所有权或存在歧义，请**不要**按进程名直接终止；让对应的
-编码智能体会话正常退出后再重新运行预检。
-
-升级到 v0.8.0 后，对现有受管 Codex 集成进行所有权感知协调：
-
-```powershell
-tabbeacon setup codex
-```
-
-之后仍需手动审查任何发生变化的 Hook 定义；TabBeacon 永远不会自动授予 Hook 信任。
-完整的所有权边界请参阅 [v0.8.0 升级指南](docs/v0.8.0-upgrade.md)。
-
-> [!NOTE]
-> 旧版 v0.7.3 锁文件可能提示 `chacha20 0.10.1` 被 yank；v0.8.0 使用不同的
-> 锁定依赖图。复现 v0.8.0 时仍须保留 `--locked`。
+历史背景：v0.8.0 发布候选引入按 CLI 独立呈现和 Cursor 仅颜色接入；其[发布说明](docs/v0.8.0-release-notes.md)保留历史范围，不代表当前发布状态。
 
 ## 兼容性
 

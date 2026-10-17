@@ -42,7 +42,31 @@ fn fixture_hook_inventory() -> Result<HookInventory, String> {
         .map_err(|_| "owned fixture Hook document could not be written".to_owned())?;
         let executable = env::current_exe()
             .map_err(|_| "fixture executable could not be resolved".to_owned())?;
-        let inventory = CodexIntegration::new(
+        #[cfg(not(test))]
+        let codex_program = executable.clone();
+        #[cfg(test)]
+        let codex_program = {
+            // A Rust unit-test runner cannot serve the fixture's protocol.
+            // Compile the existing isolated probe, never the Owner provider.
+            let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/codex_version_probe.rs");
+            let program = root.join(if cfg!(windows) {
+                "codex-probe.exe"
+            } else {
+                "codex-probe"
+            });
+            let output = std::process::Command::new("rustc")
+                .arg(source)
+                .arg("-o")
+                .arg(&program)
+                .output()
+                .map_err(|_| "isolated capability probe compilation failed".to_owned())?;
+            if !output.status.success() {
+                return Err("isolated capability probe compilation failed".to_owned());
+            }
+            program
+        };
+        let integration = CodexIntegration::new(
             root.join("codex-home"),
             root.join("state"),
             executable.clone(),
@@ -51,8 +75,20 @@ fn fixture_hook_inventory() -> Result<HookInventory, String> {
         // never probes an Owner Codex installation during visual acceptance;
         // a missing durable fixture receipt remains unproven rather than
         // authorizing external process termination.
-        .with_codex_program(executable)
-        .hook_inventory();
+        .with_codex_program(codex_program);
+        integration
+            .setup_with_title_ownership(false)
+            .map_err(|_| "isolated readable Hook setup failed".to_owned())?;
+        let inventory = integration.hook_inventory();
+        if inventory
+            .entries
+            .iter()
+            .filter(|entry| entry.readable_name.is_some())
+            .count()
+            != 11
+        {
+            return Err("isolated fixture did not prove eleven readable owned Hooks".to_owned());
+        }
         (inventory.availability == HookInventoryAvailability::Available)
             .then_some(inventory)
             .ok_or_else(|| "fixture provider Hook shape was not admitted".to_owned())
@@ -128,6 +164,7 @@ fn main() -> ExitCode {
     ));
     match run_terminal_smoke_fixture(app) {
         Ok(report) => {
+            println!("TUI_DOCTOR_MATRIX={}", report.doctor_matrix_exercised);
             if let Some(path) = std::env::var_os("TABBEACON_TUI_SMOKE_RESULT_PATH") {
                 let result = format!(
                     "TUI_LIVE_REFRESH={}\nTUI_WORKSPACE_SESSIONS={}\nTUI_HOOK_INVENTORY={}\nTUI_HOOK_PROVIDER_ADAPTER=true\nTUI_INTEGRATIONS={}\nTUI_PROVIDER_CAPABILITY_MATRIX={}\nTUI_PROVIDER_BADGE_STAGED={}\nTUI_HELP_OVERLAY={}\nTUI_TITLE_EXPLANATION={}\nTUI_LANGUAGE_LIVE_SWITCH={}\nTUI_INTERFACE_REVERT={}\nTUI_INTERFACE_STAGED_APPLY={}\nOWNER_MUTATIONS=none\n",
@@ -143,6 +180,12 @@ fn main() -> ExitCode {
                     report.interface_draft_reverted,
                     report.interface_apply_staged,
                 );
+                let result = format!(
+                    "{result}TUI_DOCTOR_MATRIX={}\nTUI_READABLE_HOOK_NAMES=true\nTUI_SHARED_INPUT_SCRIPTED={}\nSCREENS_VISITED={}\nINPUT_SOURCE=SYNTHETIC_NORMALIZED_EVENTS\nREAL_TERMINAL_ACCEPTANCE=UNPROVEN\nREAL_TUI_INPUT_TO_FRAME_P95=UNPROVEN\n",
+                    report.doctor_matrix_exercised,
+                    report.shared_input_scripted,
+                    report.screens_visited
+                );
                 if let Err(error) = std::fs::write(path, result) {
                     eprintln!("WINDOWS_TERMINAL_TUI_SMOKE=FAIL");
                     eprintln!("REASON=fixture result receipt could not be written: {error}");
@@ -151,6 +194,7 @@ fn main() -> ExitCode {
             }
             println!("WINDOWS_TERMINAL_TUI_SMOKE=PASS");
             println!("SCREENS_VISITED={}", report.screens_visited);
+            println!("TUI_SHARED_INPUT_SCRIPTED={}", report.shared_input_scripted);
             println!("TUI_LIVE_REFRESH={}", report.live_refresh_merged);
             println!(
                 "TUI_WORKSPACE_SESSIONS={}",

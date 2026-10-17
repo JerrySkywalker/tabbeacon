@@ -92,6 +92,9 @@ pub struct HealthIssue {
 /// A frontend-safe description of a requested change, not an executor.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ChangePlan {
+    /// Product-owned Preview baseline, excluded from all human/JSON projections.
+    #[serde(skip_serializing)]
+    pub expected_repair: Option<crate::windows_terminal_policy::TitleRepairBaseline>,
     /// Action that this plan explains.
     pub action_id: String,
     /// Action safety remains explicit when the plan is rendered separately.
@@ -255,6 +258,7 @@ impl ChangePlan {
             ),
         };
         Self {
+            expected_repair: None,
             action_id: action.id.clone(),
             safety: action.safety,
             proposed_changes,

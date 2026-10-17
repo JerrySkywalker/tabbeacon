@@ -111,7 +111,11 @@ fn main() -> ExitCode {
 #[allow(clippy::too_many_lines)]
 fn dispatch(cli: Cli) -> ExitCode {
     match cli.command {
-        None | Some(Command::Ui) => ui(),
+        None => ui(tabbeacon::cli::UiKeymap::Standard, None),
+        Some(Command::Ui {
+            keymap,
+            keymap_file,
+        }) => ui(keymap, keymap_file.as_deref()),
         Some(Command::ActivityWorker {
             key_digest,
             generation,
@@ -220,11 +224,17 @@ fn dispatch(cli: Cli) -> ExitCode {
             output,
             probe_title,
             probe_hook_runtime,
+            matrix,
+            provider,
+            execution_mode,
         })) => doctor(
             output.mode(),
             probe_title,
             probe_hook_runtime,
             output.language.preference(),
+            matrix,
+            provider.as_deref(),
+            execution_mode,
         ),
         Some(Command::Status(output)) => status(output.mode(), output.language.preference()),
         Some(Command::Sessions(output)) => sessions(output.mode(), output.language.preference()),
@@ -775,6 +785,18 @@ fn alias_command(
             language,
         );
     };
+    if output_mode == OutputMode::Human
+        && matches!(
+            command,
+            Some(AliasCommand::Set { .. } | AliasCommand::Reset)
+        )
+    {
+        eprint_human_text(
+            HumanTone::Attention,
+            &HumanText::message(HumanMessageKey::BoundedWriteRisk),
+            language,
+        );
+    }
     let result = match command.unwrap_or(AliasCommand::Show) {
         AliasCommand::Show | AliasCommand::Preview | AliasCommand::Explain => {
             resolver.inspect_alias(&cwd)
@@ -2022,6 +2044,9 @@ fn doctor(
     probe_title: bool,
     probe_hook_runtime: bool,
     language: Option<InterfaceLanguage>,
+    show_matrix: bool,
+    provider: Option<&str>,
+    execution_mode: Option<tabbeacon::doctor_matrix::ExecutionMode>,
 ) -> ExitCode {
     let report = match (probe_title, probe_hook_runtime) {
         (true, true) => collect_operational_diagnostics_with_title_and_hook_runtime_probe(true),
@@ -2030,10 +2055,28 @@ fn doctor(
         (false, false) => collect_operational_diagnostics(),
     };
     let integrations = provider_registry(&report);
+    if provider.is_some_and(|id| {
+        !integrations
+            .providers
+            .iter()
+            .any(|entry| entry.id.as_str() == id)
+    }) {
+        // Do not echo arbitrary user text into terminal output.
+        return management_error(
+            "DOCTOR",
+            &io::Error::new(io::ErrorKind::InvalidInput, "unknown registered provider"),
+        );
+    }
+    let matrix =
+        tabbeacon::doctor_matrix::DoctorMatrix::from_diagnostics(&report.doctor, &integrations)
+            .filtered(provider, execution_mode);
     if output_mode == OutputMode::Json {
         let mut value = serde_json::to_value(&report.doctor).unwrap_or_default();
         if let Some(object) = value.as_object_mut() {
             object.insert("providers".to_owned(), serde_json::json!(integrations));
+            if show_matrix {
+                object.insert("matrix".to_owned(), serde_json::json!(matrix));
+            }
         }
         return match serde_json::to_string(&value) {
             Ok(json) => {
@@ -2052,6 +2095,11 @@ fn doctor(
             println!("{line}");
         }
         print_provider_registry_plain(&integrations);
+        if show_matrix {
+            for line in matrix.plain_lines() {
+                println!("{line}");
+            }
+        }
     } else {
         let snapshot = ManagementSnapshot::from_diagnostics(&report);
         let presentation = human_runtime_presentation(language);
@@ -2065,6 +2113,16 @@ fn doctor(
             presentation.color,
         );
         print_provider_registry_human(&integrations);
+        if show_matrix {
+            print_human_lines(
+                tabbeacon::human_diagnostics::render_human_matrix(
+                    &matrix,
+                    presentation.locale,
+                    terminal_width(),
+                ),
+                presentation.color,
+            );
+        }
     }
     if report.doctor.is_failure() {
         ExitCode::FAILURE
@@ -3027,6 +3085,13 @@ fn title_policy_inspect(json: bool) -> ExitCode {
 
 /// Applies the explicit, profile-scoped Windows Terminal remediation.
 fn title_policy_repair(json: bool) -> ExitCode {
+    if !json {
+        eprint_human_text(
+            HumanTone::Attention,
+            &HumanText::message(HumanMessageKey::BoundedWriteRisk),
+            None,
+        );
+    }
     let store = WindowsTerminalPolicyStore::from_environment();
     let policy = store.inspect();
     match store.repair() {
@@ -3050,6 +3115,13 @@ fn title_policy_repair(json: bool) -> ExitCode {
 
 /// Restores only an exact previously-owned policy target.
 fn title_policy_restore(json: bool) -> ExitCode {
+    if !json {
+        eprint_human_text(
+            HumanTone::Attention,
+            &HumanText::message(HumanMessageKey::BoundedWriteRisk),
+            None,
+        );
+    }
     let store = WindowsTerminalPolicyStore::from_environment();
     let policy = store.inspect();
     match store.restore() {
@@ -5338,7 +5410,7 @@ fn completions(shell: clap_complete::Shell) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn ui() -> ExitCode {
+fn ui(keymap: tabbeacon::cli::UiKeymap, keymap_file: Option<&std::path::Path>) -> ExitCode {
     if !is_interactive_terminal() {
         println!("TABBEACON_UI=NON_INTERACTIVE");
         println!("NEXT_ACTION=use tabbeacon status --json or tabbeacon config commands");
@@ -5352,22 +5424,67 @@ fn ui() -> ExitCode {
         Ok(store) => store,
         Err(error) => return management_error("UI", &error),
     };
-    let refresh = match collect_control_center_refresh(&store, &interface_store, true) {
-        Ok(refresh) => refresh,
+    // Only local settings reads precede the first frame; providers run on worker.
+    let presentation = match store.snapshot_read_only() {
+        Ok(snapshot) => snapshot.settings(),
         Err(error) => return management_error("UI", &error),
     };
+    let interface = match interface_store.snapshot_read_only() {
+        Ok(snapshot) => snapshot.preferences(),
+        Err(error) => return management_error("UI", &error),
+    };
+    let collector_store = store.clone();
+    let collector_interface = interface_store.clone();
+    let mut app = tabbeacon::control_center::ControlCenterApp::new(
+        presentation,
+        ManagementSnapshot {
+            health: tabbeacon::management::ManagementHealth::Warning,
+            issues: vec![],
+            recommended_actions: vec![],
+            change_plans: vec![],
+        },
+        tabbeacon::management::ManagementOverview::default(),
+    )
+    .with_interface_preferences(interface)
+    .with_locale(resolve_runtime_locale(None, interface.language()).locale());
+    if let Err(error) = app.set_keymap_profile(match keymap {
+        tabbeacon::cli::UiKeymap::Standard => terminal_ui_contract::keymap::KeymapProfile::Standard,
+        tabbeacon::cli::UiKeymap::Vim => terminal_ui_contract::keymap::KeymapProfile::Vim,
+    }) {
+        return management_error("UI", &error);
+    }
+    if let Some(path) = keymap_file {
+        match std::fs::File::open(path).and_then(|file| {
+            use std::io::Read;
+            let mut bytes = Vec::new();
+            file.take(65537).read_to_end(&mut bytes)?;
+            if bytes.len() > 65536 {
+                return Err(io::Error::other("keymap file exceeds 64 KiB"));
+            }
+            String::from_utf8(bytes).map_err(io::Error::other)
+        }) {
+            Ok(text) => {
+                let _ = app.load_keymap_toml(&text);
+            }
+            Err(_) => {
+                let _ = app.load_keymap_toml("invalid keymap file");
+            }
+        }
+    }
     match tabbeacon::control_center::run(
-        tabbeacon::control_center::ControlCenterApp::new(
-            refresh.presentation,
-            refresh.snapshot.clone(),
-            refresh.overview.clone(),
-        )
-        .with_interface_preferences(refresh.interface)
-        .with_locale(resolve_runtime_locale(None, refresh.interface.language()).locale())
-        .with_refresh(refresh),
+        app,
         |before, after| apply_control_center_drafts(&store, &interface_store, before, after),
         apply_control_center_workspace_override,
-        || collect_control_center_refresh(&store, &interface_store, false),
+        tabbeacon::control_center::BoundedRefreshCollector(
+            move |control: &terminal_ui_runtime::refresh::CollectionControl| {
+                collect_control_center_refresh_controlled(
+                    &collector_store,
+                    &collector_interface,
+                    true,
+                    Some(control),
+                )
+            },
+        ),
         apply_control_center_repair,
         |provider, expected_global, before, after| {
             let snapshot = store.snapshot_read_only().map_err(io::Error::other)?;
@@ -5385,19 +5502,95 @@ fn ui() -> ExitCode {
     }
 }
 
+#[cfg(test)]
 fn collect_control_center_refresh(
     settings_store: &PresentationSettingsStore,
     interface_store: &InterfacePreferencesStore,
     include_workspace: bool,
 ) -> io::Result<tabbeacon::control_center::ControlCenterRefresh> {
+    collect_control_center_refresh_controlled(
+        settings_store,
+        interface_store,
+        include_workspace,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_lines)] // One read-only observation feeds all product projections before publication.
+fn collect_control_center_refresh_controlled(
+    settings_store: &PresentationSettingsStore,
+    interface_store: &InterfacePreferencesStore,
+    include_workspace: bool,
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> io::Result<tabbeacon::control_center::ControlCenterRefresh> {
     let settings_snapshot = settings_store
-        .snapshot_read_only()
+        .snapshot_read_only_controlled(control)
         .map_err(io::Error::other)?;
     let presentation = settings_snapshot.settings();
-    let provider_admission = [CliTarget::Codex, CliTarget::Agy, CliTarget::Cursor]
-        .into_iter()
-        .map(|provider| (provider, provider_presentation_admission(provider)))
-        .collect::<Vec<_>>();
+    if let Some(control) = control {
+        control.check().map_err(io::Error::other)?;
+    }
+    let (report, hooks) = match CodexIntegration::from_environment() {
+        Ok(integration) => {
+            let (doctor, hooks) = integration.observe_read_only(control);
+            (
+                tabbeacon::diagnostics::collect_operational_diagnostics_from_codex_controlled(
+                    &doctor, control,
+                ),
+                hooks,
+            )
+        }
+        Err(_) => (
+            tabbeacon::diagnostics::collect_operational_diagnostics_controlled(control),
+            tabbeacon::hook_inventory::HookInventory::default(),
+        ),
+    };
+    if let Some(control) = control {
+        control.check().map_err(io::Error::other)?;
+    }
+    let agy = AgyProductionSetup::from_environment()
+        .ok()
+        .map(|setup| setup.inspect_controlled(control));
+    let cursor = std::env::current_dir()
+        .and_then(|workspace| {
+            std::env::current_exe().and_then(|exe| {
+                CursorHookIntegration::new(&workspace, &exe)
+                    .and_then(|i| i.check_controlled(control))
+            })
+        })
+        .ok();
+    if let Some(control) = control {
+        control.check().map_err(io::Error::other)?;
+    }
+    let cursor_admission = match cursor {
+        Some(CursorHookState::Installed) => (
+            PresentationCapabilities::CURSOR_COLOR_ONLY,
+            ApplicationStatus::Unproven,
+        ),
+        Some(CursorHookState::NotInstalled) => (
+            PresentationCapabilities::NONE,
+            ApplicationStatus::NotInstalled,
+        ),
+        Some(CursorHookState::Partial | CursorHookState::Drift) => (
+            PresentationCapabilities::NONE,
+            ApplicationStatus::InstalledUntrusted,
+        ),
+        None => (PresentationCapabilities::NONE, ApplicationStatus::Unproven),
+    };
+    let provider_admission = vec![
+        (
+            CliTarget::Codex,
+            (PresentationCapabilities::CODEX, ApplicationStatus::Unproven),
+        ),
+        (
+            CliTarget::Agy,
+            agy.as_ref().map_or(
+                (PresentationCapabilities::NONE, ApplicationStatus::Unproven),
+                |o| agy_presentation_admission(o.state),
+            ),
+        ),
+        (CliTarget::Cursor, cursor_admission),
+    ];
     let provider_presentation = provider_admission
         .iter()
         .copied()
@@ -5412,24 +5605,23 @@ fn collect_control_center_refresh(
         })
         .collect::<io::Result<Vec<_>>>()?;
     let interface = interface_store
-        .snapshot_read_only()
+        .snapshot_read_only_controlled(control)
         .map_err(io::Error::other)?
         .preferences();
-    let report = collect_operational_diagnostics();
     let workspace = include_workspace
         .then(|| {
             std::env::current_dir().ok().and_then(|cwd| {
                 WorkspaceIdentityResolver::with_default_state_root()
                     .ok()
-                    .and_then(|resolver| resolver.inspect_alias(cwd).ok())
+                    .and_then(|resolver| resolver.inspect_alias_controlled(cwd, control).ok())
             })
         })
         .flatten();
-    let hooks = CodexIntegration::from_environment()
-        .map(|integration| integration.hook_inventory())
-        .unwrap_or_default();
-    let integrations = ProviderRegistry::from_diagnostics(&report, &hooks);
-    let sessions = inspect_system_sessions();
+    let integrations = ProviderRegistry::from_observations(&report, &hooks, agy, cursor);
+    if let Some(control) = control {
+        control.check().map_err(io::Error::other)?;
+    }
+    let sessions = tabbeacon::activity::inspect_system_sessions_controlled(control);
     let title_explanation = TitleExplanation::from_observation(
         &report,
         Some(presentation),
@@ -5445,11 +5637,28 @@ fn collect_control_center_refresh(
             .map(|(provider, (capabilities, _))| (provider, capabilities))
             .collect(),
         interface,
-        snapshot: ManagementSnapshot::from_diagnostics(&report),
+        snapshot: {
+            let mut snapshot = ManagementSnapshot::from_diagnostics(&report);
+            let policy = WindowsTerminalPolicyStore::from_environment();
+            for plan in &mut snapshot.change_plans {
+                if plan.action_id == "terminal.title_policy_repair"
+                    && plan.safety == tabbeacon::management::ActionSafety::PreviewableSafeRepair
+                {
+                    plan.expected_repair = policy
+                        .preview_repair_controlled(&plan.action_id, control)
+                        .ok();
+                }
+            }
+            snapshot
+        },
         overview: tabbeacon::management::ManagementOverview::from_diagnostics(&report),
         workspace,
         sessions,
         hooks,
+        doctor_matrix: tabbeacon::doctor_matrix::DoctorMatrix::from_diagnostics(
+            &report.doctor,
+            &integrations,
+        ),
         integrations,
         title_explanation,
     })
@@ -5556,21 +5765,28 @@ fn apply_control_center_drafts(
 fn apply_control_center_workspace_override(
     before: Option<String>,
     after: Option<String>,
+    expected: Option<tabbeacon::repo::WorkspaceAliasBaseline>,
 ) -> io::Result<()> {
     let resolver =
         WorkspaceIdentityResolver::with_default_state_root().map_err(io::Error::other)?;
     let cwd = std::env::current_dir().map_err(io::Error::other)?;
-    apply_control_center_workspace_override_with(&resolver, &cwd, before, after)
+    let expected = expected.ok_or_else(settings_conflict_error)?;
+    apply_control_center_workspace_override_with(&resolver, &cwd, before, after, &expected)
 }
 
-fn apply_control_center_repair(action_id: &str) -> io::Result<()> {
+fn apply_control_center_repair(
+    action_id: &str,
+    expected: Option<&tabbeacon::windows_terminal_policy::TitleRepairBaseline>,
+) -> io::Result<()> {
     let store = WindowsTerminalPolicyStore::from_environment();
-    apply_control_center_repair_with(&store, action_id)
+    let expected = expected.ok_or_else(settings_conflict_error)?;
+    apply_control_center_repair_with(&store, action_id, expected)
 }
 
 fn apply_control_center_repair_with(
     store: &WindowsTerminalPolicyStore,
     action_id: &str,
+    expected: &tabbeacon::windows_terminal_policy::TitleRepairBaseline,
 ) -> io::Result<()> {
     if action_id != "terminal.title_policy_repair" {
         return Err(io::Error::other(
@@ -5582,7 +5798,9 @@ fn apply_control_center_repair_with(
             "The previewed title-policy repair is no longer available; no change was made",
         ));
     }
-    let result = store.repair().map_err(io::Error::other)?;
+    let result = store
+        .repair_if_unchanged(expected)
+        .map_err(io::Error::other)?;
     if result.state != TitleRemediationState::Available
         || !result.document_modified
         || !result.user_config_preserved
@@ -5605,6 +5823,7 @@ fn apply_control_center_workspace_override_with(
     cwd: &std::path::Path,
     before: Option<String>,
     after: Option<String>,
+    expected: &tabbeacon::repo::WorkspaceAliasBaseline,
 ) -> io::Result<()> {
     let inspection = resolver.inspect_alias(cwd).map_err(io::Error::other)?;
     let observed = inspection
@@ -5615,10 +5834,10 @@ fn apply_control_center_workspace_override_with(
     }
     match after {
         Some(alias) => resolver
-            .set_alias_override(cwd, alias)
+            .set_alias_override_if_unchanged(cwd, &alias, expected)
             .map_err(io::Error::other)?,
         None => resolver
-            .reset_alias_override(cwd)
+            .reset_alias_override_if_unchanged(cwd, expected)
             .map_err(io::Error::other)?,
     };
     Ok(())
@@ -6009,6 +6228,11 @@ mod tests {
                 &first,
                 None,
                 Some("TAKEN".to_owned()),
+                resolver
+                    .inspect_alias(&first)
+                    .unwrap()
+                    .expected_baseline()
+                    .unwrap(),
             )
             .is_err()
         );
@@ -6051,12 +6275,60 @@ mod tests {
             Some("{11111111-1111-1111-1111-111111111111}".to_owned()),
         );
 
-        assert!(apply_control_center_repair_with(&store, "hooks.review_in_codex").is_err());
+        let expected = store
+            .preview_repair("terminal.title_policy_repair")
+            .unwrap();
+        let mut app = tabbeacon::control_center::ControlCenterApp::new(
+            PresentationSettings::default(),
+            ManagementSnapshot {
+                health: tabbeacon::management::ManagementHealth::Warning,
+                issues: vec![],
+                recommended_actions: vec![],
+                change_plans: vec![tabbeacon::management::ChangePlan {
+                    expected_repair: Some(expected.clone()),
+                    action_id: "terminal.title_policy_repair".into(),
+                    safety: tabbeacon::management::ActionSafety::PreviewableSafeRepair,
+                    proposed_changes: vec!["active profile only".into()],
+                    protected_state: vec!["unrelated bytes".into()],
+                    manual_follow_up: vec![],
+                }],
+            },
+            tabbeacon::management::ManagementOverview::default(),
+        );
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| tabbeacon::control_center::render(frame, &app))
+            .unwrap();
+        for _ in 0..6 {
+            app.handle_key(crossterm::event::KeyCode::Down);
+        }
+        assert_eq!(app.screen(), tabbeacon::control_center::Screen::Diagnostics);
+        app.handle_key(crossterm::event::KeyCode::Char('p'));
+        let original = fs::read(&path).unwrap();
+        let mut drifted = original.clone();
+        drifted.push(b'\n');
+        fs::write(&path, &drifted).unwrap();
+        let tabbeacon::control_center::ControlCenterCommand::ApplyRepair {
+            action_id,
+            expected: Some(confirmed),
+        } = app.handle_key(crossterm::event::KeyCode::Char('a'))
+        else {
+            panic!("Confirm did not carry its original Preview baseline")
+        };
+        assert_eq!(confirmed, expected);
+        assert!(apply_control_center_repair_with(&store, &action_id, &confirmed).is_err());
+        assert_eq!(fs::read(&path).unwrap(), drifted);
+        fs::write(&path, original).unwrap();
+        assert!(
+            apply_control_center_repair_with(&store, "hooks.review_in_codex", &expected).is_err()
+        );
         assert_eq!(
             store.inspect().remediation,
             TitleRemediationState::Available
         );
-        apply_control_center_repair_with(&store, "terminal.title_policy_repair").unwrap();
+        apply_control_center_repair_with(&store, "terminal.title_policy_repair", &expected)
+            .unwrap();
         assert_eq!(
             store.inspect().remediation,
             TitleRemediationState::AlreadyOwned

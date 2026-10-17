@@ -481,6 +481,27 @@ impl InterfacePreferencesStore {
         result
     }
 
+    /// Cooperative bounded read-only snapshot; transactional writers retain their original reads.
+    ///
+    /// # Errors
+    /// Returns parse, path, cancellation or observation-budget failures.
+    pub fn snapshot_read_only_controlled(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<InterfacePreferencesSnapshot, InterfacePreferencesError> {
+        self.reject_symbolic_link()?;
+        let contents =
+            crate::provider_observation::read_observation_file(&self.path, 256 * 1024, control)?;
+        let preferences = match contents.as_deref() {
+            Some(bytes) => preferences_from_bytes(bytes)?,
+            None => InterfacePreferences::default(),
+        };
+        Ok(InterfacePreferencesSnapshot {
+            preferences,
+            contents,
+        })
+    }
+
     fn snapshot_unlocked(&self) -> Result<InterfacePreferencesSnapshot, InterfacePreferencesError> {
         self.reject_symbolic_link()?;
         let contents = read_optional_bytes(&self.path)?;

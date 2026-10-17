@@ -128,9 +128,11 @@ impl WorkspacePreferences {
 }
 
 /// Opaque exact-byte snapshot used for optimistic write and restore checks.
+#[derive(Clone, Eq, PartialEq)]
 pub struct WorkspacePreferencesSnapshot {
     preferences: WorkspacePreferences,
     contents: Option<Vec<u8>>,
+    file_identity: Option<crate::file_identity::FileIdentity>,
 }
 
 impl WorkspacePreferencesSnapshot {
@@ -150,18 +152,20 @@ impl WorkspacePreferencesSnapshot {
     }
 
     fn matches(&self, other: &Self) -> bool {
-        self.contents == other.contents
+        self.contents == other.contents && self.file_identity == other.file_identity
     }
 }
 
 /// Opaque receipt binding a conditional restoration to one exact write.
 pub struct WorkspacePreferencesWriteReceipt {
     contents: Vec<u8>,
+    file_identity: Option<crate::file_identity::FileIdentity>,
 }
 
 impl WorkspacePreferencesWriteReceipt {
     fn matches(&self, snapshot: &WorkspacePreferencesSnapshot) -> bool {
         snapshot.contents.as_deref() == Some(self.contents.as_slice())
+            && snapshot.file_identity == self.file_identity
     }
 }
 
@@ -276,7 +280,9 @@ impl WorkspacePreferenceStore {
         &self,
         expected: &WorkspacePreferencesSnapshot,
     ) -> Result<bool, WorkspacePreferenceError> {
-        Ok(self.snapshot_read_only()?.matches(expected))
+        // Rollback verifies restored bytes: our own atomic restore intentionally
+        // creates a new identity. Conditional commits use matches instead.
+        Ok(self.snapshot_read_only()?.contents == expected.contents)
     }
 
     /// Returns whether a guided write receipt is still byte-exactly current.
@@ -387,16 +393,51 @@ impl WorkspacePreferenceStore {
         result
     }
 
+    /// Cooperative bounded read-only snapshot; transactional writers retain their original reads.
+    ///
+    /// # Errors
+    /// Returns parse, path, cancellation or observation-budget failures.
+    pub fn snapshot_read_only_controlled(
+        &self,
+        control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+    ) -> Result<WorkspacePreferencesSnapshot, WorkspacePreferenceError> {
+        self.reject_symbolic_link()?;
+        let file_identity = crate::file_identity::FileIdentity::optional(&self.path)?;
+        let contents =
+            crate::provider_observation::read_observation_file(&self.path, 256 * 1024, control)?;
+        let preferences = match contents.as_deref() {
+            Some(bytes) => preferences_from_bytes(bytes)?,
+            None => WorkspacePreferences::default(),
+        };
+        if crate::file_identity::FileIdentity::optional(&self.path)? != file_identity {
+            return Err(WorkspacePreferenceError::Io(io::Error::other(
+                "preference identity changed during observation",
+            )));
+        }
+        Ok(WorkspacePreferencesSnapshot {
+            preferences,
+            contents,
+            file_identity,
+        })
+    }
+
     fn snapshot_unlocked(&self) -> Result<WorkspacePreferencesSnapshot, WorkspacePreferenceError> {
         self.reject_symbolic_link()?;
+        let file_identity = crate::file_identity::FileIdentity::optional(&self.path)?;
         let contents = read_optional_bytes(&self.path)?;
         let preferences = match contents.as_deref() {
             Some(bytes) => preferences_from_bytes(bytes)?,
             None => WorkspacePreferences::default(),
         };
+        if crate::file_identity::FileIdentity::optional(&self.path)? != file_identity {
+            return Err(WorkspacePreferenceError::Io(io::Error::other(
+                "preference identity changed during observation",
+            )));
+        }
         Ok(WorkspacePreferencesSnapshot {
             preferences,
             contents,
+            file_identity,
         })
     }
 
@@ -406,7 +447,10 @@ impl WorkspacePreferenceStore {
     ) -> Result<WorkspacePreferencesWriteReceipt, WorkspacePreferenceError> {
         let contents = Self::render_replacement_bytes(preferences)?;
         atomic_write(&self.path, &contents)?;
-        Ok(WorkspacePreferencesWriteReceipt { contents })
+        Ok(WorkspacePreferencesWriteReceipt {
+            contents,
+            file_identity: crate::file_identity::FileIdentity::optional(&self.path)?,
+        })
     }
 
     fn restore_snapshot_unlocked(

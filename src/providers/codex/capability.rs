@@ -7,8 +7,9 @@
 
 use std::{
     fs,
+    io::{BufReader, Read},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
     sync::mpsc,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -177,12 +178,21 @@ pub(crate) fn probe(
     state_root: &Path,
     persist_cache: bool,
 ) -> CodexCapabilityProbe {
-    let version = probe_version(codex_program);
+    probe_controlled(codex_program, state_root, persist_cache, None)
+}
+
+pub(crate) fn probe_controlled(
+    codex_program: Option<&Path>,
+    state_root: &Path,
+    persist_cache: bool,
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> CodexCapabilityProbe {
+    let version = probe_version(codex_program, control);
     // The feature flag can change in user configuration while the executable
     // remains byte-identical. A cache entry never overrides current evidence
     // that Hooks are disabled or unavailable.
-    let hook_feature = probe_hook_feature(codex_program);
-    let executable_identity = executable_identity(codex_program);
+    let hook_feature = probe_hook_feature(codex_program, control);
+    let executable_identity = executable_identity_controlled(codex_program, control);
     let cache_path = state_root.join(CACHE_FILE);
     if let Some(identity) = executable_identity.as_deref()
         && let Some(record) = read_cache(&cache_path)
@@ -215,7 +225,7 @@ pub(crate) fn probe(
         CodexHookProfile::command_v1()
     };
     let (state, schema_fingerprint) = match hook_feature {
-        HookFeature::Enabled => match probe_schema(codex_program) {
+        HookFeature::Enabled => match probe_schema(codex_program, control) {
             Some(schema) => (
                 // A generated schema is diagnostic-only. In particular, an
                 // unrelated `mcp_tool` string does not positively establish
@@ -260,8 +270,15 @@ enum HookFeature {
     Unproven,
 }
 
-fn probe_hook_feature(codex_program: Option<&Path>) -> HookFeature {
-    let Ok(output) = command(codex_program).args(["features", "list"]).output() else {
+fn probe_hook_feature(
+    codex_program: Option<&Path>,
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> HookFeature {
+    let Ok(output) = crate::provider_observation::bounded_output(
+        command(codex_program).args(["features", "list"]),
+        Duration::from_secs(2),
+        control,
+    ) else {
         return HookFeature::Unproven;
     };
     if !output.status.success() {
@@ -294,18 +311,23 @@ struct SchemaEvidence {
     fingerprint: String,
 }
 
-fn probe_schema(codex_program: Option<&Path>) -> Option<SchemaEvidence> {
+fn probe_schema(
+    codex_program: Option<&Path>,
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> Option<SchemaEvidence> {
     let root = temporary_schema_root()?;
-    let status = command(codex_program)
-        .args(["app-server", "generate-json-schema", "--out"])
-        .arg(&root)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .ok();
+    let status = crate::provider_observation::bounded_output(
+        command(codex_program)
+            .args(["app-server", "generate-json-schema", "--out"])
+            .arg(&root),
+        Duration::from_secs(3),
+        control,
+    )
+    .ok()
+    .map(|o| o.status);
     let fingerprint = status
         .filter(std::process::ExitStatus::success)
-        .and_then(|_| directory_fingerprint(&root));
+        .and_then(|_| directory_fingerprint_controlled(&root, control));
     let _ = fs::remove_dir_all(&root);
     fingerprint.map(|fingerprint| SchemaEvidence { fingerprint })
 }
@@ -323,48 +345,109 @@ fn temporary_schema_root() -> Option<PathBuf> {
     Some(root)
 }
 
-fn directory_fingerprint(root: &Path) -> Option<String> {
+fn directory_fingerprint_controlled(
+    root: &Path,
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> Option<String> {
     let mut files = Vec::new();
-    collect_files(root, root, &mut files)?;
+    collect_files(root, root, &mut files, 0, &mut 0, control)?;
     files.sort();
     if files.is_empty() {
         return None;
     }
     let mut digest = Sha256::new();
+    let mut remaining: usize = 16 * 1024 * 1024;
     for file in files {
+        if let Some(control) = control {
+            control.check().ok()?;
+        }
         digest.update(file.to_string_lossy().as_bytes());
-        digest.update(fs::read(root.join(file)).ok()?);
+        let mut reader = BufReader::new(fs::File::open(root.join(file)).ok()?);
+        let mut bytes = vec![0; 64 * 1024];
+        loop {
+            if let Some(control) = control {
+                control.check().ok()?;
+            }
+            let count = reader.read(&mut bytes).ok()?;
+            if count == 0 {
+                break;
+            }
+            remaining = remaining.checked_sub(count)?;
+            digest.update(&bytes[..count]);
+        }
     }
     Some(format!("sha256:{:x}", digest.finalize()))
 }
 
-fn collect_files(root: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Option<()> {
+fn collect_files(
+    root: &Path,
+    current: &Path,
+    files: &mut Vec<PathBuf>,
+    depth: usize,
+    visited: &mut usize,
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> Option<()> {
+    if depth > 32 {
+        return None;
+    }
     for entry in fs::read_dir(current).ok()?.filter_map(Result::ok) {
+        if let Some(control) = control {
+            control.check().ok()?;
+        }
+        *visited += 1;
+        if *visited > 4096 {
+            return None;
+        }
         let kind = entry.file_type().ok()?;
+        if kind.is_symlink() {
+            return None;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if fs::symlink_metadata(entry.path()).ok()?.file_attributes() & 0x400 != 0 {
+                return None;
+            }
+        }
         if kind.is_file() {
             files.push(entry.path().strip_prefix(root).ok()?.to_path_buf());
         } else if kind.is_dir() {
-            collect_files(root, &entry.path(), files)?;
+            collect_files(root, &entry.path(), files, depth + 1, visited, control)?;
         }
     }
     Some(())
 }
 
-fn probe_version(codex_program: Option<&Path>) -> Option<String> {
-    let output = command(codex_program).arg("--version").output().ok()?;
+fn probe_version(
+    codex_program: Option<&Path>,
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> Option<String> {
+    let output = crate::provider_observation::bounded_output(
+        command(codex_program).arg("--version"),
+        Duration::from_secs(2),
+        control,
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
     let stdout = String::from_utf8(output.stdout).ok()?;
     stdout
         .split_whitespace()
-        .find(|value| {
-            value
-                .chars()
-                .next()
-                .is_some_and(|character| character.is_ascii_digit())
-        })
+        .find(|value| safe_version_token(value))
         .map(str::to_owned)
+}
+
+fn safe_version_token(value: &str) -> bool {
+    // Only normalized numeric version facts enter documents. Malformed output
+    // stays unknown; version ordering never grants compatibility or Interrupt.
+    value.len() <= 32
+        && value.split('.').count() == 3
+        && value.split('.').all(|part| {
+            !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && part.parse::<u32>().is_ok()
+        })
 }
 
 fn command(codex_program: Option<&Path>) -> Command {
@@ -377,13 +460,36 @@ fn command(codex_program: Option<&Path>) -> Command {
 }
 
 fn executable_identity(codex_program: Option<&Path>) -> Option<String> {
+    executable_identity_controlled(codex_program, None)
+}
+fn executable_identity_controlled(
+    codex_program: Option<&Path>,
+    control: Option<&terminal_ui_runtime::refresh::CollectionControl>,
+) -> Option<String> {
     let path = codex_program
         .map(Path::to_path_buf)
         .or_else(resolve_default_program)?
         .canonicalize()
         .ok()?;
-    let bytes = fs::read(path).ok()?;
-    Some(format!("sha256:{:x}", Sha256::digest(bytes)))
+    let mut reader = BufReader::new(fs::File::open(path).ok()?);
+    if reader.get_ref().metadata().ok()?.len() > 512 * 1024 * 1024 {
+        return None;
+    }
+    let mut digest = Sha256::new();
+    let mut remaining: usize = 512 * 1024 * 1024;
+    let mut bytes = vec![0; 64 * 1024];
+    loop {
+        if let Some(control) = control {
+            control.check().ok()?;
+        }
+        let count = reader.read(&mut bytes).ok()?;
+        if count == 0 {
+            break;
+        }
+        remaining = remaining.checked_sub(count)?;
+        digest.update(&bytes[..count]);
+    }
+    Some(format!("sha256:{:x}", digest.finalize()))
 }
 
 /// Resolves only the executable that normal `Command::new("codex")` would use
@@ -436,10 +542,37 @@ pub(super) fn native_console_program() -> Option<PathBuf> {
 }
 
 fn read_cache(path: &Path) -> Option<CapabilityCacheRecord> {
-    serde_json::from_slice(&fs::read(path).ok()?).ok()
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .ok()?
+        .take(65537)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > 65536 {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
 }
 
 fn write_cache(path: &Path, record: &CapabilityCacheRecord) -> Result<(), ()> {
     let bytes = serde_json::to_vec(record).map_err(|_| ())?;
     fs::write(path, bytes).map_err(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn provider_payload_cannot_masquerade_as_a_numeric_version_fact() {
+        assert!(super::safe_version_token("0.157.1"));
+        assert!(super::safe_version_token("99.100.101"));
+        for value in [
+            "0.157.1-private-payload",
+            "0.157.1\u{1b}[31m",
+            "1-secret",
+            "1.2",
+            "999999999999999.1.2",
+        ] {
+            assert!(!super::safe_version_token(value));
+        }
+    }
 }

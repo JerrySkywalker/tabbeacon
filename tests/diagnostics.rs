@@ -134,6 +134,106 @@ fn json_output(output: &Output) -> Value {
 }
 
 #[test]
+fn matrix_cli_filters_share_json_plain_human_and_preserve_legacy_exit_codes() {
+    let root = TestRoot::new("v082-matrix");
+    let codex = fake_codex_directory(&root, "0.162.0");
+    let legacy = run_cli(&root, &["doctor", "--json"], Some(&codex), None);
+    let legacy_json = json_output(&legacy);
+    assert!(legacy_json.get("matrix").is_none());
+    let args = [
+        "doctor",
+        "--matrix",
+        "--provider",
+        "codex",
+        "--execution-mode",
+        "shared_daemon",
+    ];
+    let mut json_args = args.to_vec();
+    json_args.push("--json");
+    let json = run_cli(&root, &json_args, Some(&codex), None);
+    assert_eq!(json.status.code(), legacy.status.code());
+    let value = json_output(&json);
+    assert_eq!(value["schema_version"], legacy_json["schema_version"]);
+    assert_eq!(value["overall"], legacy_json["overall"]);
+    assert_eq!(value["checks"], legacy_json["checks"]);
+    let matrix = &value["matrix"];
+    assert_eq!(matrix["rows"].as_array().unwrap().len(), 1);
+    assert_eq!(matrix["rows"][0]["observed_execution_mode"], "unknown");
+    assert!(matrix["historical_evidence"].as_array().unwrap().is_empty());
+    assert!(
+        matrix["rows"][0]["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|fact| fact["capability"] == "terminal_binding"
+                && fact["verdict"] == "blocked_upstream")
+    );
+    let mut plain_args = args.to_vec();
+    plain_args.push("--plain");
+    let plain = run_cli(&root, &plain_args, Some(&codex), None);
+    let text = String::from_utf8(plain.stdout).unwrap();
+    assert_eq!(plain.status.code(), legacy.status.code());
+    assert!(text.contains("MATRIX=codex|shared_daemon|terminal_binding|blocked_upstream"));
+    assert!(!text.contains("MATRIX=agy|"));
+    let mut human_args = args.to_vec();
+    human_args.extend(["--lang", "en-US"]);
+    let human = run_cli(&root, &human_args, Some(&codex), None);
+    assert_eq!(human.status.code(), legacy.status.code());
+    let text = String::from_utf8(human.stdout).unwrap();
+    assert!(text.contains("blocked_upstream"));
+    assert!(text.contains("current-view"));
+    assert!(text.contains("read-only"));
+    let chinese = run_cli(
+        &root,
+        &[
+            "doctor",
+            "--matrix",
+            "--provider",
+            "codex",
+            "--execution-mode",
+            "shared_daemon",
+            "--lang",
+            "zh-CN",
+        ],
+        Some(&codex),
+        None,
+    );
+    assert!(
+        String::from_utf8(chinese.stdout)
+            .unwrap()
+            .contains("当前视图")
+    );
+    let filtered_agy = run_cli(
+        &root,
+        &[
+            "doctor",
+            "--matrix",
+            "--provider",
+            "agy",
+            "--execution-mode",
+            "unknown",
+            "--json",
+        ],
+        Some(&codex),
+        None,
+    );
+    assert_eq!(filtered_agy.status.code(), legacy.status.code());
+    assert_eq!(
+        json_output(&filtered_agy)["matrix"]["rows"][0]["provider"],
+        "agy"
+    );
+    let missing_matrix = run_cli(
+        &root,
+        &["doctor", "--provider", "codex"],
+        Some(&codex),
+        None,
+    );
+    assert_eq!(missing_matrix.status.code(), Some(2));
+    assert!(!root.child("codex-home").exists());
+    assert!(!root.child("local-appdata").exists());
+}
+
+#[test]
 fn status_json_is_structured_private_and_read_only_for_isolated_state() {
     let root = TestRoot::new("status");
     let fake_codex = fake_codex_directory(&root, "0.147.0");

@@ -8,6 +8,42 @@ codex
 
 There is no TabBeacon launcher wrapper.
 
+### v0.8.2 candidate names and mode evidence
+
+The eleven existing handlers receive `statusMessage = TabBeacon · <Event>`:
+PreToolUse, PermissionRequest, PostToolUse, PreCompact, PostCompact, SessionStart,
+SessionEnd, UserPromptSubmit, SubagentStart, SubagentStop, Stop. No Interrupt is
+added to obtain this count. Runtime commands, Windows command selection, matcher,
+timeout, async and MCP binding retain their contracts. Only complete exact owned
+unnamed predecessor sets may migrate; foreign hooks, their positions, original
+backups and prior title baseline remain preserved. Old trust hashes stay unchanged
+and become stale: the Owner must review all changed handlers normally in native
+`/hooks`. Setup never transfers approval to a new hash.
+
+`doctor --matrix --provider codex --execution-mode shared_daemon --json` reports
+mode-scoped evidence without starting a provider or changing configuration.
+`embedded` (also `no-daemon`), `shared_daemon`, `direct`, and `unknown` are query
+values, not evidence of the current execution mode. Existing `doctor --json`,
+`status --json`, `hooks --json`, runtime probes and exit behavior remain compatible;
+matrix warnings or optional unknown modes do not add global failure checks.
+`--plain` and default Human output use the same matrix. Matrix JSON is an additive
+field only when requested. Hook inventory names are exposed only after exact
+manifest ownership proves the built-in metadata; arbitrary names and commands
+remain redacted.
+
+Static installation/trust health cannot prove delivery, terminal binding or visual
+effect. Codex `--no-daemon` has explicitly historical Owner-attended 0.162.0 proof;
+it does not qualify the current unknown-mode session or new trust hashes. Shared
+daemon binding/presentation is `blocked_upstream` at pinned upstream
+`c1382380de69521303b416720a52f42d51af6248`; real delivery and the live failure
+subbranch remain `unproven`. The Owner's default-launch visual failure is retained
+as a separate report whose actual mode was not observed. No environment/PID or
+version/default heuristic is used to grant current-view authority.
+
+In the existing Diagnostics page, use `1`/`2`/`3` for Codex/Agy/Cursor and `m`
+to cycle the execution-mode query. Integrations keeps its existing presentation
+preference keys; execution-mode queries never stage a configuration change.
+
 ## Setup
 
 Build or install `tabbeacon`, then run the guided first-run or reconfiguration
