@@ -3855,22 +3855,71 @@ fn print_setup_change_plan(plan: &GuidedSetupPlan, language: Option<InterfaceLan
     );
 }
 
-struct DialoguerInput {
+struct CliclackInput {
     locale: ResolvedLocale,
+    color: HumanColor,
 }
 
-impl GuidedInput for DialoguerInput {
+#[cfg(test)]
+mod cliclack_adapter_tests {
+    use super::{CliclackInput, GuidedInput, HumanColor, ResolvedLocale};
+    use std::io::IsTerminal;
+
+    #[test]
+    fn redirected_input_refuses_without_submitting_a_setup_choice() {
+        if std::io::stdin().is_terminal() && std::io::stderr().is_terminal() {
+            eprintln!(
+                "SKIP: this guard test requires redirected input; real terminal UX is separate"
+            );
+            return;
+        }
+        let mut input = CliclackInput {
+            locale: ResolvedLocale::ZhCn,
+            color: HumanColor::Never,
+        };
+        assert_eq!(
+            input.select("Language / 语言", &["中文", "English"], 0),
+            Err("guided setup requires interactive terminal input".to_owned())
+        );
+    }
+}
+
+impl GuidedInput for CliclackInput {
     fn select(&mut self, prompt: &str, items: &[&str], default: usize) -> Result<usize, String> {
+        use terminal_ui_cliclack::{
+            Choice, ColorLevel, Locale, PromptOutcome, PromptSession, PromptTheme,
+        };
         let localized_items = items
             .iter()
             .map(|item| localize_setup_choice(self.locale, item))
             .collect::<Vec<_>>();
-        Select::new()
-            .with_prompt(localize_setup_choice(self.locale, prompt))
-            .items(&localized_items)
-            .default(default)
-            .interact()
-            .map_err(|_| "guided setup selection was interrupted".to_owned())
+        let choices = localized_items
+            .iter()
+            .enumerate()
+            .map(|(index, label)| Choice::new(index, *label, ""))
+            .collect::<Vec<_>>();
+        let theme = PromptTheme {
+            locale: match self.locale {
+                ResolvedLocale::EnUs => Locale::EnUs,
+                ResolvedLocale::ZhCn => Locale::ZhCn,
+            },
+            color_level: if self.color == HumanColor::Never {
+                ColorLevel::None
+            } else {
+                ColorLevel::Ansi16
+            },
+        };
+        let mut session = PromptSession::new(theme)
+            .map_err(|_| "guided setup requires interactive terminal input".to_owned())?;
+        match session.select(
+            localize_setup_choice(self.locale, prompt),
+            &choices,
+            &default,
+        ) {
+            PromptOutcome::Submitted(index) => Ok(index),
+            PromptOutcome::Cancelled => Err("guided setup selection was interrupted".to_owned()),
+            PromptOutcome::Error(_) => Err("guided setup selection failed".to_owned()),
+        }
     }
 }
 
@@ -3878,8 +3927,10 @@ fn prompt_setup_draft_v3(
     current: PresentationSettings,
     language: Option<InterfaceLanguage>,
 ) -> Result<Option<PresentationSettings>, String> {
-    let mut input = DialoguerInput {
-        locale: human_runtime_presentation(language).locale,
+    let runtime = human_runtime_presentation(language);
+    let mut input = CliclackInput {
+        locale: runtime.locale,
+        color: runtime.color,
     };
     choose_presentation(&mut input, current)
 }
@@ -3899,15 +3950,18 @@ fn prompt_setup_interface_draft(
     revisit: bool,
     auto_locale: ResolvedLocale,
 ) -> Result<Option<InterfacePreferences>, String> {
-    let mut input = DialoguerInput {
+    let mut input = CliclackInput {
         locale: auto_locale,
+        color: current.color(),
     };
     choose_interface_preferences(&mut input, current, revisit, auto_locale)
 }
 
 fn prompt_setup_decision_v3(language: Option<InterfaceLanguage>) -> Result<SetupDecision, String> {
-    let mut input = DialoguerInput {
-        locale: human_runtime_presentation(language).locale,
+    let runtime = human_runtime_presentation(language);
+    let mut input = CliclackInput {
+        locale: runtime.locale,
+        color: runtime.color,
     };
     match input.select("Apply staged setup", &["Apply", "Cancel"], 1)? {
         0 => Ok(SetupDecision::Apply),
