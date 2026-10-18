@@ -1877,11 +1877,12 @@ dependencies = [
 [[package]]
 name = "terminal-ui-cliclack"
 version = "0.1.0"
-source = "git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=ef8cbe331f796db7a21722c1de60d9f707d93252#ef8cbe331f796db7a21722c1de60d9f707d93252"
+source = "git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=a175d97151a9b82d7defa65afe5a9fb5bc56e46e#a175d97151a9b82d7defa65afe5a9fb5bc56e46e"
 dependencies = [
  "cliclack",
  "console",
- "terminal-ui-contract 0.2.0 (git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=ef8cbe331f796db7a21722c1de60d9f707d93252)",
+ "crossterm",
+ "terminal-ui-contract 0.2.0 (git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=a175d97151a9b82d7defa65afe5a9fb5bc56e46e)",
 ]
 
 [[package]]
@@ -1899,7 +1900,7 @@ dependencies = [
 [[package]]
 name = "terminal-ui-contract"
 version = "0.2.0"
-source = "git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=ef8cbe331f796db7a21722c1de60d9f707d93252#ef8cbe331f796db7a21722c1de60d9f707d93252"
+source = "git+https://github.com/JerrySkywalker/terminal-ui-contract?rev=a175d97151a9b82d7defa65afe5a9fb5bc56e46e#a175d97151a9b82d7defa65afe5a9fb5bc56e46e"
 dependencies = [
  "serde",
  "toml",
